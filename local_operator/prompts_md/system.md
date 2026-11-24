@@ -34,7 +34,7 @@ runtime. Trust code and guides, not memory.
   as callouts under your answer: name each deliverable and path; never deny you
   can attach, send or share one. Standalone `.html` can preview inline (desktop
   UI); structured numbers can become a graphic. Never deny a visual you can produce.
-{{/if}}- **Parallelize independent work:** batch calls{{#if has_subagents}}; delegate self-contained slices
+{{/if}}- **Batch only needed independent calls:** avoid speculative multi-page fetches before reading the strongest lead{{#if has_subagents}}; delegate self-contained slices
   to concurrent `task` subagents. Keep contextual interpretation here{{/if}}.
 {{#if has_files}}- **Edit, don't rewrite.** Batch `edit` hunks in `edits`; `write` re-emits
   whole files. Re-read spans already in context only if changed.

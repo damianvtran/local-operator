@@ -438,5 +438,79 @@
     "tone": "Sentence case (capital first letter). No final full stop.",
     "maxCells": 34,
     "note": "Owned relay SPA asks copy. Shown beside 'Other' after the reader closed the Other row with text in it: the text is kept in the card but is not part of the answer. Same wording as the native app's mobile.asks.other_kept."
+  },
+  "relay.asks.id.copy_label": {
+    "role": "accessible name of the copy control beside an ask id at the foot of a card or row",
+    "tone": "Sentence case (capital first letter). No final full stop: this is a control label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA asks copy. {id} is the ask's own id exactly as the runtime wrote it (a- and four lower-case hex digits, e.g. a-e53b); never translate or reformat it. The button it names is the quiet id line on an ask card or a settled ask row."
+  },
+  "relay.asks.id.copied": {
+    "role": "the copy control's confirmation mark after a successful copy",
+    "tone": "Sentence case (capital first letter). One word; no final full stop.",
+    "maxCells": 12,
+    "note": "Owned relay SPA asks copy. Replaces the copy glyph beside the id for two seconds. It is aria-hidden; the screen-reader sentence is relay.asks.id.copied_named."
+  },
+  "relay.asks.id.copied_named": {
+    "role": "screen-reader announcement after an ask id was copied",
+    "tone": "Sentence case (capital first letter). No final full stop, matching the native app's toast.",
+    "maxCells": 24,
+    "note": "Owned relay SPA asks copy. {id} is the ask id verbatim (e.g. a-e53b). Says WHICH id was copied because a screen can hold several ask ids."
+  },
+  "relay.asks.id.copy_failed": {
+    "role": "the copy control's failure note when the clipboard is unavailable",
+    "tone": "Sentence case (capital first letter). Preserve the em dash. No final full stop.",
+    "maxCells": 72,
+    "note": "Owned relay SPA asks copy. The relay can be served over plain HTTP on a LAN address, where the clipboard API does not exist; the id is then selected so the platform's own copy works. Same shape as relay.asks.card.command.copy_failed."
+  },
+  "relay.asks.chip.open": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"open\"."
+  },
+  "relay.asks.chip.answered": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"answered\"."
+  },
+  "relay.asks.chip.declined": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"declined\"."
+  },
+  "relay.asks.chip.timed_out": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"timed out\"."
+  },
+  "relay.asks.chip.late": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"late\"."
+  },
+  "relay.asks.chip.dismissed": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"dismissed\"."
+  },
+  "relay.asks.chip.withdrawn": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"withdrawn\"."
+  },
+  "relay.asks.chip.expired": {
+    "role": "status",
+    "maxCells": 16,
+    "note": "One-word state of an ask, shown after its id in a chip inside the agent's prose (states: open, answered, declined, timed out, late, dismissed, withdrawn, expired). Lower case, no final full stop; it labels a status, not a sentence. {id} is the ask's id such as a-745e and is never translated. This one is the word for \"expired\"."
+  },
+  "relay.asks.chip.label": {
+    "role": "help",
+    "maxCells": 120,
+    "note": "Accessible name of an ask-id chip in the agent's prose when this session knows the ask. {id} is the id such as a-745e (never translated); {state} is the one-word state already translated; {question} is the first question's own text, copied verbatim. Ends with an instruction to activate the chip, which opens the asks sheet at that ask."
+  },
+  "relay.asks.chip.label_bare": {
+    "role": "help",
+    "maxCells": 64,
+    "note": "Same accessible name as the chip label, for an ask this session knows but whose question text it does not hold. {id} is the ask id, {state} the one-word state. Ends with an instruction to activate the chip."
   }
 }

@@ -2093,6 +2093,21 @@ _GIT_CLONE_VALUE_FLAGS = frozenset(
 _GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--orphan"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: ``find`` tests allowed before ``-print0`` in a ``find | xargs rm`` pipe
+#: (``_add_found_stdin``): each takes one value and only narrows the walk.
+_FIND_PIPE_VALUED = frozenset(
+    {"-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth"}
+)
+#: Value-less words allowed there: pruning and boolean structure only.
+_FIND_PIPE_BARE = frozenset(
+    {"-prune", "-o", "-or", "-a", "-and", "!", "-not", "(", ")", "\\(", "\\)", "-empty"}
+)
+#: ``xargs`` options allowed in that pipe: NUL input and skip-if-empty only.
+_XARGS_PIPE_FLAGS = frozenset({"-0", "--null", "-r", "--no-run-if-empty"})
+#: ``rm`` flags allowed there: they change confirmation/recursion, never targets.
+_RM_PIPE_FLAGS = frozenset(
+    {"-r", "-R", "-f", "-rf", "-fr", "-Rf", "-fR", "--recursive", "--force", "-d", "-v"}
+)
 #: find predicates that select a SUBSET of the walk (R6).
 _FIND_SELECTING = frozenset(
     {
@@ -5105,7 +5120,9 @@ class _Walker:
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
-            if stdin_fed:
+            if stdin_fed and not self._add_found_stdin(
+                name, feed, unpeeled, operands, _flags, redirects
+            ):
                 self._add_stdin(name)
             for w in operands:
                 self._add(w, "delete", name)
@@ -7176,6 +7193,101 @@ class _Walker:
                 landed = os.path.join(path, name)
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
+
+    def _add_found_stdin(
+        self,
+        program: str,
+        feed: _Feed | None,
+        unpeeled: list[Expanded],
+        operands: list[Expanded],
+        flags: list[str],
+        redirects: list[tuple[str, _RawWord]],
+    ) -> bool:
+        """``find <roots> <tests> -print0 | xargs -0 rm -rf``: rank as find.
+
+        WHY (PR #4493, disk-reclamation field report 2026-11-23, session
+        ed88c11e4952): ``find . -name __pycache__ -type d -prune -print0 |
+        xargs -0 rm -rf`` inside a worktree was refused as an opaque delete of
+        the whole tree, while ``find . -name __pycache__ -exec rm -rf {} +``
+        already ranks LOW (S2-3). The two delete the same set ONLY when what
+        ``rm`` receives is exactly ``find``'s own NUL-separated path list.
+
+        So this is an ALLOWLIST on both stages (review SEC-R2-B1); anything
+        else returns ``False`` and the caller keeps the opaque stdin target:
+
+        * the delete stage is literally ``xargs [-0|--null] [-r] rm|unlink
+          [rm flags]`` with no operands of its own, no ``-I``/``-i``/``-a``
+          or any other xargs option, and no redirection (``< file``);
+        * the upstream stage is the IMMEDIATE previous one, a plain ``find``
+          (no grouping, no ``;``/``&&`` list) with at least one literal root,
+          then only :data:`_FIND_PIPE_VALUED` tests (each with its value)
+          and :data:`_FIND_PIPE_BARE` words, and exactly one ``-print0`` as
+          the last word. No ``-H/-L/-P``,
+          ``-printf``/``-fprint*``/``-ls``/``-exec``/``-delete``/
+          ``-files0-from``: each can make the printed text differ from the
+          walked paths;
+        * no heredoc/herestring feeds the pipe and no word is opaque.
+        """
+        if feed is None or not feed.stages or feed.bodies:
+            return False
+        if any(op.startswith("<") for op, _ in redirects):
+            return False
+        xargs_words = [w.text for w in unpeeled]
+        if not xargs_words or os.path.basename(xargs_words[0]) != "xargs":
+            return False
+        k = 1
+        while k < len(xargs_words) and xargs_words[k] in _XARGS_PIPE_FLAGS:
+            k += 1
+        if k >= len(xargs_words) or os.path.basename(xargs_words[k]) != program:
+            return False
+        if "-0" not in xargs_words[1:k] and "--null" not in xargs_words[1:k]:
+            return False
+        if operands or any(f not in _RM_PIPE_FLAGS for f in flags):
+            return False
+        # A grouped stage (``(printf …; find …) | xargs -0 rm``) runs other
+        # commands whose output reaches rm too (review SEC-R3-B1): only a bare
+        # ``find`` stage is find's list.
+        stage = feed.stages[-1].strip()
+        if _strip_grouping(stage) != stage:
+            return False
+        raw_words, stage_redirects = scan(stage)
+        if stage_redirects:
+            return False
+        st = self.state
+        words: list[Expanded] = []
+        for raw in raw_words:
+            words.extend(expand_all(raw, st.env, st.home))
+        if not words or any(w.opaque or w.substitutions for w in words):
+            return False
+        if os.path.basename(words[0].text) not in ("find", "gfind"):
+            return False
+        args = words[1:]
+        roots: list[Expanded] = []
+        i = 0
+        while i < len(args) and not (
+            args[i].text.startswith("-") or args[i].text in ("(", "!", "\\(")
+        ):
+            roots.append(args[i])
+            i += 1
+        texts = [w.text for w in args[i:]]
+        if not roots or not texts or texts[-1] != "-print0" or texts.count("-print0") != 1:
+            return False
+        j = 0
+        selected = False
+        while j < len(texts) - 1:
+            t = texts[j]
+            if t in _FIND_PIPE_VALUED:
+                if j + 1 >= len(texts) - 1:
+                    return False
+                selected = selected or t in _FIND_SELECTING
+                j += 2
+                continue
+            if t not in _FIND_PIPE_BARE:
+                return False
+            j += 1
+        for w in roots:
+            self._add(w, "delete", f"find | xargs {program}", selected=selected)
+        return True
 
     def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(

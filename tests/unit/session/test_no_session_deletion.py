@@ -2661,6 +2661,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "compaction temp FILE -> transcript.jsonl inside the same session directory",
     ),
     (
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
+        "os.replace",
+        "fold-on-open temp FILE (transcript.jsonl.fold) -> transcript.jsonl inside "
+        "the same session directory",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
+        "<path>.unlink",
+        "removes its own fold-on-open temp FILE (transcript.jsonl.fold), never a directory",
+    ),
+    (
         "local_operator/session_lease.py::acquire_session_lease",
         "os.replace",
         "stale lease FILE -> tombstone FILE inside the same session directory",
@@ -5296,6 +5307,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # cannot rename a session directory.
         "local_operator/session_factory.py::_write_store_maintenance_stamp",
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
+        # fold-on-open tmp FILE -> transcript.jsonl in the same session directory
+        "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
         # The handoff journal: a tmp FILE -> ``<config>/network/pending-move.json``.
         # Its receiver is that file, and the move's own reader turns a missing one

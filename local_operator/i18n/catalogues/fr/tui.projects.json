@@ -94,6 +94,7 @@
   "tui.projects.start.filter_placeholder": "tapez pour filtrer",
   "tui.projects.start.legend": "filtrer · ↑↓ déplacer · ↵ choisir · esc fermer",
   "tui.projects.start.more": "+{count} de plus",
+  "tui.projects.start.team_detail": "{manager} · {count, plural, one {{shown} rôle} many {{shown} de rôles} other {{shown} rôles}}",
   "tui.projects.notice_read_only": "Lecture seule : le runtime de cette conversation est sur un autre appareil, les modifications de projet ne sont donc pas disponibles ici.",
   "tui.projects.refusal_done_gate": "impossible de marquer terminé tant que ces jalons sont ouverts : {names}"
 }

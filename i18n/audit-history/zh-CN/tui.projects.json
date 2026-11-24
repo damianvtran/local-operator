@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.projects",
+  "history_sha256": "29fde791eaaedad22604f45e69788bba4326b6a4c1ee728004c11d517d10b971",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects",
+      "source_sha256": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+      "context_sha256": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0",
+      "target_sha256": "368b7a6c8a733ed36061e28f5982bb6114b030e2a0f9bad93f8e95547aaf9324",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), not the translator; did not edit values",
+        "session": "c9af56dcefc3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr1: independent i18n-auditor c9af56dcefc3 (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 964df3d91ac1f132da3e67c1e24234d410d872670a38dac2ded3bb3cb2a55766: clean for tui.projects (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Record i18n/audits/evidence/zh-CN/tui.projects/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/zh-CN/tui.projects/tr1/record.json",
+      "round": "tr1"
+    }
+  ]
+}

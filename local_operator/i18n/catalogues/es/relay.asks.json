@@ -85,5 +85,19 @@
   "relay.asks.card.progress_tally": "{answered} de {total} preguntas respondidas u omitidas",
   "relay.asks.card.progress_pick_or_type": "Elige una opción o escribe tu propia respuesta para enviar.",
   "relay.asks.card.progress_type": "Escribe una respuesta u omite la pregunta para enviar.",
-  "relay.asks.card.other_kept": "Tu texto se conserva, no se envía"
+  "relay.asks.card.other_kept": "Tu texto se conserva, no se envía",
+  "relay.asks.id.copy_label": "Copiar el id de la pregunta {id}",
+  "relay.asks.id.copied": "Copiado",
+  "relay.asks.id.copied_named": "Copiado {id}",
+  "relay.asks.id.copy_failed": "No se pudo copiar — el id está seleccionado; cópialo desde ahí",
+  "relay.asks.chip.open": "abierta",
+  "relay.asks.chip.answered": "respondida",
+  "relay.asks.chip.declined": "rechazada",
+  "relay.asks.chip.timed_out": "plazo agotado",
+  "relay.asks.chip.late": "con retraso",
+  "relay.asks.chip.dismissed": "descartada",
+  "relay.asks.chip.withdrawn": "retirada",
+  "relay.asks.chip.expired": "caducada",
+  "relay.asks.chip.label": "Pregunta {id}, {state}: {question}. Activa para mostrarla.",
+  "relay.asks.chip.label_bare": "Pregunta {id}, {state}. Activa para mostrarla."
 }

@@ -2977,7 +2977,13 @@ green. A red gate blocks the merge, and that is the point: no red pipeline
 reaches `main`. A push **after** the gate revokes that green — the check belongs
 to the SHA it ran on, so the new head sits in "Expected" — and
 `make merge-gate PR=<n>` re-arms it (remove + re-add the label, then print the
-triggered run and `gh run watch`/`gh pr checks`). Before changing labels, the
+triggered run and `gh run watch`/`gh pr checks`). A **red** gate on the
+**unchanged** head is cheaper: the same command runs `gh run rerun <id> --failed`
+on that run (failed and fail-fast-cancelled shards, coverage and the aggregate
+re-run; passing shards are kept; same head, same gate base), prints
+`path: RERUN-FAILED`, and goes green only when every shard of that run is green.
+A new head, a green/active run, a refused rerun, or `MERGE_GATE_FRESH=1` takes
+the fresh label arm (`path: FRESH`). Before either, the
 ritual refuses an existing live gate on that head; see
 [gate ownership, duplicate-arm override, and stale-failure semantics](docs/ci-merge-gate.md).
 Never test the label's NAME in

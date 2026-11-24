@@ -694,16 +694,19 @@ def _git_bearing(path: str) -> bool:
 _ASK_SETTLED_STATES = frozenset({"clean", "dirty"})
 
 
-def _ask_settles_git_root(path: str, session_id: str) -> str | None:
+def _ask_settles_git_root(
+    path: str, session_id: str, *, require_known_forge: bool = False
+) -> str | None:
     """Facts when a trusted exact-path answer may settle deleting this git root, else ``None``.
 
     The #3700 exclusions, read live: ``None`` for anything inside a ``.git``,
     a primary checkout (standing constraint: repository primary checkouts stay
     as they are), a tree that is busy/locked/unreadable, a branch with an OPEN
     PR/MR, or another running owner. An unknown PR state (forge unreachable,
-    node-2) does not block: the operator named the exact tree, and a KNOWN
-    open PR is still refused here and CRITICAL in ``classify._rank``. Any
-    error is ``None`` (the judge decides, as before).
+    node-2) does not block the pre-existing ask settlement, but the ignored
+    payload waiver opts into a stricter, positive forge and owner proof. A
+    Git-only merged fallback cannot prove that no open PR exists. Any error
+    is ``None`` (the caller decides how to fail closed).
     """
     from local_operator.guardrails import provenance as prov
 
@@ -713,11 +716,29 @@ def _ask_settles_git_root(path: str, session_id: str) -> str | None:
         real = os.path.realpath(path)
         if prov.is_primary_checkout(real):
             return None
-        state = prov.worktree_state(real, session_id=session_id)
+        state = prov.worktree_state(real, session_id=session_id, hidden_blocks=require_known_forge)
         if state not in _ASK_SETTLED_STATES:
             return None
+        if require_known_forge:
+            # worktree_state's ordinary scan may reuse a cached miss. This
+            # waiver needs a new inventory on every check, including after an
+            # awaited judge, and cannot ignore an unreadable process cwd.
+            holders = prov.cwd_holders(real, session_id, hidden_blocks=True)
+            if holders is None or holders:
+                return None
         activity = prov.worktree_activity(real, session_id)
-        if activity.pr_state == "open" or activity.owners_running:
+        if (
+            activity.pr_state == "open"
+            or activity.owners_running
+            or (
+                require_known_forge
+                and (
+                    activity.pr_state != "none"
+                    or activity.git_merged
+                    or prov._running_owners(real, session_id, strict=True, allow_unattributed=True)
+                )
+            )
+        ):
             return None
         return f"linked worktree state: {state}; {activity.facts()}"
     except Exception:  # noqa: BLE001 — unreadable facts keep the judge
@@ -976,6 +997,8 @@ class DeleteCase:
     #: operator row names it. ``_dangerous_delete`` refuses these before any
     #: judge runs (incident 2026-11-14, ask a-20fc).
     lapsed_only: Mapping[str, str] = field(default_factory=dict)
+    #: An outstanding contrary ask must not be bypassed by creation evidence.
+    ask_blocked: frozenset[str] = frozenset()
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -1005,7 +1028,7 @@ class DeleteCase:
         )
         return hit if hit is not None else (None, "")
 
-    def evidence_basis(self) -> str:
+    def evidence_basis(self, cleanup_approved: frozenset[str] = frozenset()) -> str:
         """The basis when re-verified creation evidence ALONE covers every target.
 
         WHY THIS SKIPS THE JUDGE. Live incident 2026-11-08 (session
@@ -1026,7 +1049,7 @@ class DeleteCase:
         made, no foreign ``.git`` below it); any unverifiable target (opaque, unresolved, an empty
         glob) or operator-only target (an overridden CRITICAL) keeps the judge.
         """
-        if self.unverifiable or self.operator_only or not self.paths:
+        if self.unverifiable or self.operator_only or self.ask_blocked or not self.paths:
             return ""
         listed = list(getattr(self.evidence, "listed", {}) or {})
         # ``alone``: resolver-pinned coverage only, and no git repository
@@ -1042,6 +1065,9 @@ class DeleteCase:
             )
         basis: list[str] = []
         for path in self.paths:
+            if path in cleanup_approved:
+                basis.append(f"{path} named by a verified exact deletion approval")
+                continue
             if path in by_evidence:
                 basis.append(f"{path} created by {by_evidence[path]}")
                 continue
@@ -1228,6 +1254,325 @@ _MAX_FACTS = 64
 _ASKED_OPS = frozenset({"delete", "move", "clean", "unprotect"})
 
 
+#: Words that make a yes something other than an unconditional delete of every
+#: path the question names: preservation, exception, negation, condition.
+#: Deliberately NOT timing words (before/after/once): see ``_exact_firm_ask``.
+_APPROVAL_VETO = re.compile(
+    r"(?i)\b(?:keep\w*|kept|preserv\w*|retain\w*|sav(?:e|es|ed|ing)"
+    r"|back(?:s|ed|ing)?\s*(?:it\s+|them\s+)?up|backup\w*"
+    r"|instead|unless|except\w*|exclud\w*|without|not|never|don'?t|do\s+not|if|but"
+    r"|when|whenever|once|until|safe|safely"
+    r"|restor\w*|recover\w*|cop(?:y|ies|ied|ying)|archiv\w*|spar(?:e|es|ed|ing)"
+    r"|avoid\w*|pending|provided)\b"
+)
+#: Quantity-zero and timing words, vetoed on the PICK only (SEC-R2-B2/m1).
+#: "Remove none" / "Delete nothing" approve no path; "Delete after it is
+#: safe" / "next week" is a deferred, conditional yes. In the question
+#: the same words are often the agent's own description of a check it already
+#: ran ("re-verified for 0 live holders before removal"), which the waiver's
+#: live holder/PR re-read covers whatever the prose says.
+_PICK_TIMING_VETO = re.compile(
+    r"(?i)\b(?:none|nothing|neither|nor|no|zero"
+    r"|after|before|later|first|then|tomorrow|next|tonight|eventually|soon"
+    r"|week|month|day|hour)s?\b"
+)
+#: A pick that itself says delete/remove ("Approve removing all 33 ...").
+_DELETE_PICK = re.compile(
+    r"(?i)^(?:(?:yes|approve[ds]?|confirm)\s*[,:]?\s*)?"
+    r"(?:force[- ])?(?:delete|remove|deletion|removal|deleting|removing)\b"
+)
+#: Words a path-less delete pick may carry after its verb (SEC-R3-B2): which
+#: of the question's paths it means, said only with quantifiers, neutral
+#: nouns and the set descriptions agents write in cleanup asks. Anything else
+#: fails closed. Only a SIZE in parentheses ("(~17.3 GiB)") is dropped first
+#: (SEC-R4-M1): "Delete them (only x)" keeps "only" and fails closed.
+_PICK_PLURAL = frozenset({"all", "both", "every", "each", "everything", "them", "these", "those"})
+_PICK_NEUTRAL = frozenset(
+    {
+        "the", "of", "and", "it", "this", "that", "listed", "above", "named",
+        "worktree", "worktrees", "tree", "trees", "checkout", "checkouts",
+        "clone", "clones", "folder", "folders", "dir", "dirs", "directory",
+        "directories", "repo", "repos", "file", "files",
+    }
+)  # fmt: skip
+#: Descriptors NARROW the list ("all clean worktrees" when the question marks
+#: one "(dirty)"; "all caches"), so a pick carrying one covers the whole list
+#: only when it also states a count of at least the number of listed paths
+#: ("all 33 clean merged/closed worktrees"), review SEC-R4-B1.
+_PICK_DESCRIPTORS = frozenset(
+    {
+        "clean", "dirty", "merged", "closed", "finished", "old", "stale", "detached",
+        "qa", "bench", "build", "builds", "output", "outputs", "cache", "caches",
+        "ignored",
+    }
+)  # fmt: skip
+_PICK_SET_WORDS = _PICK_PLURAL | _PICK_NEUTRAL | _PICK_DESCRIPTORS
+_PICK_SIZE = re.compile(r"(?i)\(\s*~?\s*[\d.,]+\s*(?:[kmgt]i?b|bytes?|b)\s*\)")
+
+
+#: A bare yes; only consent with an imperative delete question.
+_BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
+_DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
+
+
+def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
+    """Verify a trusted deletion proposition and its literal path in the same question.
+
+    A generic yes to keeping or backing up a path is not authority to delete it.
+    Read the folded question/pick pair, not the concatenated text of all answers:
+    a deletion pick for one question cannot authorize another question's paths.
+    Qualified wording fails closed (``_APPROVAL_VETO``); brace expansion still
+    names concrete leaves, never globs or parents.
+    """
+    from local_operator.asks import store
+    from local_operator.guardrails import provenance as prov
+    from local_operator.paths import config_dir
+
+    if ask.answer is None:
+        return False
+    try:
+        records = store.fold(
+            store.read_events(store.session_dir(config_dir(), ask.session_id)), store.now_ms()
+        )
+        record = next(r for r in records if str(r.get("ask_id")) == ask.ask_id)
+        current = prov._ask_words(record, ask.session_id)
+        if current is None or current != ask.answer:
+            return False
+        if int(record.get("revised_at") or record.get("answered_at") or 0) != ask.answered_at:
+            return False
+        answers = record.get("answers") or {}
+        for q in record.get("questions") or []:
+            if not isinstance(q, Mapping):
+                continue
+            chosen = prov._kept_answer(q, answers)
+            if not chosen or len(chosen) != 1:
+                continue
+            label = chosen[0].strip()
+            question = str(q.get("question") or "").strip()
+            # WHY a rule on the pick, not a parse of the question (security
+            # review SEC-R1-B1, PR #4493): a yes to "Keep <path> instead of
+            # deleting it?" names the path but authorises keeping it. The
+            # operator's authority is the OPTION they picked, so the pick must
+            # itself say delete/remove; a bare yes counts only when the
+            # question is an imperative "Delete/Remove ...". Either way, any
+            # preservation, exception, negation or condition word in the pick
+            # or the question fails closed: the guard cannot tell which named
+            # path a qualifier spares ("... excluding ~/x"), so it trusts
+            # none of them. Plain timing words (before/after) are NOT vetoed;
+            # they describe when, not what, and holder/PR state is re-read
+            # live by the waiver's own safety check regardless of the prose.
+            if (
+                _APPROVAL_VETO.search(label)
+                or _APPROVAL_VETO.search(question)
+                or _PICK_TIMING_VETO.search(label)
+            ):
+                continue
+            # A typed free-text answer is not a picked option: it may echo
+            # "yes" to a question the operator read differently, and the
+            # store's firm rendering does not vouch for it naming a path.
+            option_labels = {
+                str(o.get("label") or "").strip()
+                for o in (q.get("options") or [])
+                if isinstance(o, Mapping)
+            }
+            if label not in option_labels:
+                continue
+            label_delete = _DELETE_PICK.match(label)
+            bare = _BARE_YES.fullmatch(label)
+            if not (label_delete or (bare and _DELETE_QUESTION.match(question))):
+                continue
+            # The store's approval rendering excludes unpicked labels,
+            # descriptions and qualified typed answers.
+            one = {**record, "questions": [q]}
+            words = prov._ask_words(one, ask.session_id)
+            if words is None:
+                continue
+
+            def names(text: str) -> bool:
+                for word, _ in prov._path_readings(text):
+                    if prov._GLOBISH.search(word) or "{" in word or "}" in word:
+                        continue
+                    if any(part in (".", "..") for part in word.split("/")):
+                        continue
+                    if prov._expand_word(word, home, cwd) == path:
+                        return True
+                return False
+
+            # SEC-R2-B2: an option the operator did NOT pick that names this
+            # path means the choice was between paths; the pick did not choose
+            # this one, whatever the question listed.
+            unpicked = [
+                f"{o.get('label') or ''}\n{o.get('description') or ''}"
+                for o in (q.get("options") or [])
+                if isinstance(o, Mapping) and str(o.get("label") or "").strip() != label
+            ]
+            if any(names(text) for text in unpicked):
+                continue
+            # A pick that names paths authorises exactly those. Only a pick
+            # that names none ("Approve removing all 33 ...", "Remove them",
+            # a bare yes) refers back to the paths its question lists.
+            if names(words.firm):
+                return True
+            # A pick that carries ANY stand-alone path word other than this
+            # path narrowed the question ("only <repo>/.worktrees/*/node_modules",
+            # "Delete ~/other/x"), so the question's list is not what it chose:
+            # fail closed (review SEC-R2-B2, QA Q-R3-1), globs and non-existent
+            # paths included. A path this pick names itself was accepted just
+            # above. Ignored: the tail of prose the path reader splits
+            # ("merged/closed" reads as "/closed"; not stand-alone) and words
+            # that do not expand to a path at all ("~17.3 GiB": ``None``).
+            pick_text = prov._expand_prose_braces(label)
+            pick_words = [
+                m.group(1).rstrip("/.:?!,")
+                for m in prov._PATHISH.finditer(pick_text)
+                if m.start(1) == 0 or not pick_text[m.start(1) - 1].isalnum()
+            ]
+            if any(word and prov._expand_word(word, home, cwd) is not None for word in pick_words):
+                continue
+            # Review SEC-R3-B2: a pick that names no path must still say WHICH
+            # of the listed paths it means. Its words after the verb must come
+            # from a closed vocabulary of quantifiers and set descriptors (an
+            # unanchored "x", "other/x", "$HOME/…" or "the second one" is not
+            # in it), and it covers the question's whole list only through a
+            # plural quantifier ("all 33 …", "them", "both") or a bare yes to
+            # an imperative "Delete …?"; otherwise only a single-path question.
+            # One entry per listed path: the as-written and prose readings of
+            # "…/build?" are the same path (review SEC-R4-m1).
+            listed = {
+                t.rstrip("?!")
+                for word, _ in prov._path_readings(question)
+                if (t := prov._expand_word(word, home, cwd)) is not None
+            }
+            if label_delete:
+                rest = _PICK_SIZE.sub(" ", label[label_delete.end() :])
+                rest_words = [w.lower() for w in re.findall(r"[A-Za-z]+", rest.replace("/", " "))]
+                if any(w not in _PICK_SET_WORDS for w in rest_words):
+                    continue
+                plural = any(w in _PICK_PLURAL for w in rest_words)
+                if plural and any(w in _PICK_DESCRIPTORS for w in rest_words):
+                    counts = [int(n) for n in re.findall(r"\b\d+\b", rest)]
+                    # Exactly ONE count: "(1 of 2)" or "1 … of the 2" states a
+                    # subset whose largest number covers the list (SEC-R5-M1).
+                    plural = len(counts) == 1 and counts[0] >= len(listed)
+            else:
+                plural = True  # a bare yes to "Delete <list>?" takes the list
+            if (plural or len(listed) == 1) and names(question):
+                return True
+    except Exception:  # noqa: BLE001 — unreadable or malformed ask is never consent
+        logger.debug("guardrail: deletion approval unreadable", exc_info=True)
+    return False
+
+
+def cleanup_consent_safe(verdict: Verdict, ctx: CallContext) -> bool:
+    """Require a fresh owner/holder check even when creation evidence exists."""
+    return all(
+        not r.cleanup_consent
+        or _ask_settles_git_root(r.target.path or "", ctx.session_id, require_known_forge=True)
+        is not None
+        for r in verdict.targets
+    )
+
+
+def apply_cleanup_consent(verdict: Verdict, ctx: CallContext) -> Verdict:
+    """Lift only ignored-only holds, per pinned target and trusted literal pick.
+
+    This changes neither rank nor critical/credential precedence. In particular,
+    an answer cannot waive unreadable status, protected trees or real changes.
+    """
+    import dataclasses
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import _protected
+
+    if not ctx.session_id or not any(r.cleanup_hold for r in verdict.targets):
+        return verdict
+    home = ctx.env.get("HOME") or os.path.expanduser("~")
+    prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
+    stop = tuple(sorted({*prot.homes, *prot.state_roots, *prot.install_roots, "/"}))
+    asks = prov.unanswered_asks(ctx.session_id)
+    lineage = set(prov.session_lineage(ctx.session_id)[0])
+    targets = []
+    for ranked in verdict.targets:
+        t = ranked.target
+        path = t.path
+        if not path:
+            targets.append(ranked)
+            continue
+        eligible = (
+            ranked.cleanup_hold
+            and ranked.hold_conditions == (HOLD_IGNORED_UNVERIFIED,)
+            and t.op == "delete"
+            and t.worktree_remove
+            and path
+            and not t.pattern
+            and not t.opaque
+            and not t.unknown_cwd
+            and not t.climbs
+            and not t.dotdot
+            and not t.empty
+            and not t.credential_derived
+            and not t.unpinned
+            and not t.landings
+            and os.path.abspath(t.raw_path or path) == os.path.realpath(t.raw_path or path)
+        )
+        approved = (
+            [
+                a
+                for a in asks
+                if a.session_id in lineage
+                and a.answered_at
+                and _exact_firm_ask(a, path, home=home, cwd=ctx.cwd)
+            ]
+            if eligible
+            else []
+        )
+        latest = max((a.answered_at for a in approved), default=0)
+        # A newer preservation/ambiguous yes is not erased by an older delete
+        # approval, even though the general ask policy treats its paths as firm.
+        contrary = (
+            any(
+                a.answer is not None
+                and a.answered_at >= latest
+                and a not in approved
+                and prov.ask_reach(a.text, path, home=home, cwd=ctx.cwd, protected=stop) is not None
+                for a in asks
+            )
+            if latest
+            else False
+        )
+        if (
+            eligible
+            and approved
+            and not contrary
+            and _ask_settles_git_root(path, ctx.session_id, require_known_forge=True) is not None
+            and _ask_block(
+                asks,
+                path,
+                home=home,
+                cwd=ctx.cwd,
+                stop=stop,
+                escalating=False,
+                session_id=ctx.session_id,
+                env=ctx.env,
+            )
+            is None
+        ):
+            ranked = dataclasses.replace(ranked, cleanup_hold=False, cleanup_consent=True)
+        targets.append(ranked)
+    return dataclasses.replace(verdict, targets=targets)
+
+
+def cleanup_consent_fresh(before: Verdict, verdict: Verdict, ctx: CallContext) -> bool:
+    """Re-read both authority and safety; a prior waiver is not a capability."""
+    if not any(r.cleanup_consent for r in verdict.targets):
+        return True
+    refreshed = apply_cleanup_consent(before, ctx)
+    return cleanup_consent_safe(verdict, ctx) and all(
+        not old.cleanup_consent or new.cleanup_consent
+        for old, new in zip(verdict.targets, refreshed.targets, strict=True)
+    )
+
+
 def _ask_block(
     lapsed: Sequence[Any],
     path: str,
@@ -1272,8 +1617,29 @@ def _ask_block(
         return hit is not None and hit[0] in ("exact", "under")
 
     now = int(time.time() * 1000)
+    # Family asks are refusal evidence, but only this session's lineage can
+    # authorize a supersession: a sibling's decision belongs to its own task.
+    lineage = set(prov.session_lineage(session_id)[0]) if session_id else set()
+    superseding = [
+        a
+        for a in lapsed
+        if a.session_id in lineage
+        and a.answered_at
+        and _exact_firm_ask(a, path, home=home, cwd=cwd)
+    ]
     judge_only = None
     for a in lapsed:
+        # Expired can also contain a late answer: only genuine silence is
+        # displaced, and only by an independently verified later answer.
+        if (
+            a.status in ("timed_out", "expired")
+            and not a.has_answer
+            and a.expires_at
+            and any(
+                b.created_at > a.expires_at and b.answered_at >= b.created_at for b in superseding
+            )
+        ):
+            continue
         if escalating and a.created_at and now - a.created_at > prov.ASK_ESCALATION_MAX_AGE_MS:
             continue
         reach = prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop)
@@ -1649,7 +2015,9 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     # decline, lapse or withdrawal is what actually refuses; list untrusted
     # yeses last (stable sort, store order otherwise kept) so it is named.
     lapsed = sorted(lapsed, key=lambda a: bool(getattr(a, "untrusted_yes", False)))
+    asked_at = {a.ask_id: a.created_at for a in lapsed}
     lapsed_only: dict[str, str] = {}
+    ask_blocked: set[str] = set()
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
@@ -1681,6 +2049,8 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             env=ctx.env,
         )
         not_consent = _not_consent_fact(fact_hit[0]) if fact_hit is not None else ""
+        if fact_hit is not None and path in destroying:
+            ask_blocked.add(path)
         refusing = (
             _ask_block(
                 lapsed,
@@ -1703,7 +2073,35 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if refusing is None or record is None
             else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots), family=False)
         )
-        if refusing is not None and refusing[1] and not ids and own_record is None and not named:
+        # An older affirmative cannot erase a later pending ask or veto, so an
+        # ask answer that names the path counts only when its ask is NEWER
+        # than the refusing one. A typed operator turn carries no timestamp
+        # here and keeps the judge (guide://guardrails exception 2: the judge
+        # reads that turn); before #4493 any naming row did.
+        # An ask answer must also be a deletion approval (``_exact_firm_ask``):
+        # a yes to "Keep <path> instead of deleting it?" names the path but
+        # is a veto, not a reason to reopen the judge (SEC-R1-B1).
+        named_after = refusing is not None and any(
+            prov.names_path(w.text, path, home=home, cwd=ctx.cwd, protected=stop)
+            and (
+                not w.ask_id
+                or (
+                    asked_at.get(w.ask_id, 0) > refusing[0].created_at
+                    and any(
+                        a.ask_id == w.ask_id and _exact_firm_ask(a, path, home=home, cwd=ctx.cwd)
+                        for a in lapsed
+                    )
+                )
+            )
+            for w in operator.words
+        )
+        if (
+            refusing is not None
+            and refusing[1]
+            and not ids
+            and own_record is None
+            and not named_after
+        ):
             lapsed_only[path] = _not_consent_fact(refusing[0])
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
@@ -1781,6 +2179,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         home=home,
         cwd=ctx.cwd,
         lapsed_only=lapsed_only,
+        ask_blocked=frozenset(ask_blocked),
     )
 
 
@@ -1924,6 +2323,8 @@ async def _dangerous_delete(
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=ctx.session_id
     )
     verdict = escalate_asked_targets(verdict, ctx)
+    before_consent = verdict
+    verdict = apply_cleanup_consent(verdict, ctx)
     branch = builtin_branch(verdict, critical_override=settings.critical_override)
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
@@ -1982,9 +2383,31 @@ async def _dangerous_delete(
         )
     case = build_delete_case(verdict, ctx)
     risk_name = "critical-overridden" if risk is Risk.CRITICAL else "high"
-    # Provable creation settles the call without a model (see
-    # ``DeleteCase.evidence_basis``): the judge could only agree or refuse falsely.
-    proven = case.evidence_basis()
+    # Both the ask and safety facts must still hold, even when creation
+    # evidence would independently settle this call. In particular a newer
+    # contrary answer cannot ride on an earlier ignored-payload waiver.
+    if not cleanup_consent_fresh(before_consent, verdict, ctx):
+        _journal(DANGEROUS_DELETE_RULE, risk_name, "block", 0.0, targets, "cleanup not verified")
+        return GuardOutcome(
+            blocked=True,
+            text=cleanup_hold_text(verdict),
+            rule=DANGEROUS_DELETE_RULE,
+            risk="high",
+            destructive=True,
+        )
+    consent_paths = frozenset(
+        r.target.path for r in verdict.targets if r.cleanup_consent and r.target.path
+    )
+    proven = case.evidence_basis(consent_paths) if consent_paths else case.evidence_basis()
+    if proven and not cleanup_consent_fresh(before_consent, verdict, ctx):
+        _journal(DANGEROUS_DELETE_RULE, risk_name, "block", 0.0, targets, "cleanup not verified")
+        return GuardOutcome(
+            blocked=True,
+            text=cleanup_hold_text(verdict),
+            rule=DANGEROUS_DELETE_RULE,
+            risk="high",
+            destructive=True,
+        )
     if proven:
         _journal(DANGEROUS_DELETE_RULE, risk_name, "allow", 0.0, targets, proven)
         outcome = GuardOutcome(
@@ -2040,7 +2463,11 @@ async def _dangerous_delete(
     )
     basis = ""
     reason = result.reason
-    if result.allowed:
+    if result.allowed and not cleanup_consent_fresh(before_consent, verdict, ctx):
+        # Neither a judge nor a stale answer can waive a new holder, unknown
+        # safety state, revision or contrary ask during its deliberation.
+        reason = "worktree cleanup safety or approval could not be verified"
+    elif result.allowed:
         # The judge's ALLOW is a CLAIM; the checkpoint verifies what it cited
         # (see ``guardrails/evidence.py``). A forked judge read the whole
         # session, injected text included, so an uncited or unverifiable
