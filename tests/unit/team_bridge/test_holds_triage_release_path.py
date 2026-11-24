@@ -16,6 +16,7 @@ screening hold to the person who can release it:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import math
 import sqlite3
@@ -281,6 +282,117 @@ def test_a_tightened_policy_keeps_the_hold_instead_of_reviving_the_old_allow(
         )
         is None
     )
+
+
+def test_a_kept_conflict_hold_is_scheduled_a_day_out_and_named(
+    rig,  # noqa: F811 — imported fixture
+    caplog,
+) -> None:
+    """2026-11-24 (PR-1 of the write-once fix): the kept conflict is persisted
+    with a day-long ``retry_at`` — not NULL, which is due on the very next pass
+    — and the refusal logs the NAMES of the replay fields that differ. The hold
+    stays a hold; nothing about the verdict changes."""
+
+    config_dir, store, owner = rig
+    assert _screen(config_dir, owner, Runner(DELIVER)).disposition == "deliver"
+    _republish(store, owner, revision="rev-2-tightened")
+    tightened = Policy()
+    tightened.admission_revision = "rev-2-tightened"
+    before = time.time()
+    with caplog.at_level(logging.INFO, logger="local_operator.team_bridge.store"):
+        out = _screen(config_dir, owner, Runner(PRYING), policy=tightened)
+    assert out.disposition == "hold" and out.hold_code == "write_once_conflict"
+    row = store.screening_hold(owner, MESSAGE_ID)
+    assert row is not None and row["hold_code"] == "write_once_conflict"
+    assert before + screening.WRITE_ONCE_CONFLICT_RETRY_S <= row["retry_at"]
+    assert row["retry_at"] <= time.time() + screening.WRITE_ONCE_CONFLICT_RETRY_S
+    # Not due an hour (the old cap) from now, nor 23 hours from now.
+    assert store.due_screening_holds(owner, now=time.time() + 23 * 3600, limit=8) == []
+    lines = [r.getMessage() for r in caplog.records if "write_once_conflict:" in r.getMessage()]
+    assert len(lines) == 1
+    assert "differing=verdict,categories" in lines[0]
+    assert "revision_moved=yes" in lines[0]
+    assert MESSAGE_ID not in lines[0] and "personal_info_request" not in lines[0]
+
+
+def test_other_screening_holds_keep_their_own_schedule(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """Only ``write_once_conflict`` gets the day: any other code keeps the time
+    its caller passed (NULL = due next pass), and an explicit time is kept."""
+
+    _config_dir, store, owner = rig
+    screening._persist_hold(store, owner, "bcmsg_other", "retry_later")
+    other = store.screening_hold(owner, "bcmsg_other")
+    assert other is not None and other["retry_at"] is None
+    screening._persist_hold(store, owner, "bcmsg_named", "write_once_conflict", 123.0)
+    named = store.screening_hold(owner, "bcmsg_named")
+    assert named is not None and named["retry_at"] == 123.0
+
+
+def test_the_conflict_diagnostic_names_fields_and_never_values(caplog) -> None:
+    """Injection-shaped values in every compared field: the line carries the
+    closed field names only — no value, digest, category or message id, and no
+    value can forge a second ``key=`` or line."""
+
+    from local_operator.team_bridge.store import _log_write_once_conflict
+
+    evil = "x\nrow_ref=forged differing=none revision_moved=no SECRET-BODY"
+    existing = {
+        "verdict": "allow",
+        "model": "anthropic/claude-sonnet-5.5" + evil,
+        "prompt_version": "v-old" + evil,
+        "template_sha256": "a" * 64,
+        "body_sha256": "b" * 64,
+        "categories": "[]",
+        "envelope_digest": "c" * 64,
+        "admission_revision": "rev-old" + evil,
+    }
+    receipt = screening.ScreeningReceipt(
+        verdict="reject",
+        model="claude-sonnet-5-5" + evil,
+        prompt_version="v-new" + evil,
+        template_sha256="d" * 64,
+        body_sha256="e" * 64,
+        categories=("personal_info_request",),
+    )
+    message_id = "bcmsg_" + evil
+    with caplog.at_level(logging.INFO, logger="local_operator.team_bridge.store"):
+        _log_write_once_conflict(
+            message_id,
+            existing,
+            receipt,
+            envelope_digest="f" * 64,
+            admission_revision="rev-new" + evil,
+        )
+    (line,) = [r.getMessage() for r in caplog.records if "write_once_conflict:" in r.getMessage()]
+    assert line == (
+        "team bridge write_once_conflict: row_ref=%s differing=verdict,model,prompt_version,"
+        "template,body_sha256,categories,envelope_digest revision_moved=yes"
+        % hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:12]
+    )
+    for leaked in ("SECRET-BODY", "forged", "\n", "a" * 12, "f" * 12, "personal_info_request"):
+        assert leaked not in line
+    # Only the model differs (a served-model failover) -> exactly that name.
+    caplog.clear()
+    same = dict(existing, model="m1", categories='["personal_info_request"]', verdict="reject")
+    same.update(
+        prompt_version=receipt.prompt_version,
+        template_sha256=receipt.template_sha256,
+        body_sha256=receipt.body_sha256,
+        envelope_digest="f" * 64,
+        admission_revision="rev-new" + evil,
+    )
+    with caplog.at_level(logging.INFO, logger="local_operator.team_bridge.store"):
+        _log_write_once_conflict(
+            message_id,
+            same,
+            dataclasses.replace(receipt, model="m2"),
+            envelope_digest="f" * 64,
+            admission_revision="rev-new" + evil,
+        )
+    (line,) = [r.getMessage() for r in caplog.records if "write_once_conflict:" in r.getMessage()]
+    assert line.endswith("differing=model revision_moved=no")
 
 
 def test_the_conflict_is_kept_when_the_committed_verdict_cannot_stand(
