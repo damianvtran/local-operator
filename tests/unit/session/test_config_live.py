@@ -1215,6 +1215,17 @@ HOST_OWNED_LIVE_SECTIONS = {
     # in ``tests/unit/test_capacity_recovery.py`` (the off switch and keep margin
     # rewritten between updates in one process take effect on the next one).
     "updates",
+    # ``runtime_memory_guard`` is host-owned in the ``memory_guard`` shape: its keys
+    # (``session.runtime_memory.enabled`` / ``limit_mb``) bound what the WAKE
+    # SUPERVISOR's memory sweep may end, not what a session does. The sweep
+    # (``_MachineMemorySweep.sweep_runtimes`` -> ``runtime_memory_pass`` with no
+    # ``settings``) re-reads config.yml every pass, so an edit applies on the next
+    # pass with no restart; no ``Session`` holds it, so a probe here could watch
+    # nothing move. The live half is proven in
+    # ``tests/unit/session/runtime/test_runtime_memory.py::test_live_*`` (``enabled``
+    # and ``limit_mb`` rewritten between two passes on one tracker take effect on
+    # the next pass, each with a no-edit negative control).
+    "runtime_memory_guard",
     # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
     # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
     # nothing in ``Session`` reads the ``console`` block, so a probe in this file

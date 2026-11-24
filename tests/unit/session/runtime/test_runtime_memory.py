@@ -236,6 +236,90 @@ def test_a_ceiling_below_the_floor_is_invalid_and_the_default_applies(
         assert runtime_memory.read_settings(tmp_path).limit_mb == valid
 
 
+# --- LIVE: a config.yml edit applies on the NEXT pass, no restart ------------------
+#
+# ``runtime_memory_guard`` is labelled LIVE in the settings registry, but no
+# ``Session`` reads it — the wake supervisor's sweep does
+# (``_MachineMemorySweep.sweep_runtimes`` passes no ``settings``, so every pass
+# re-reads ``config.yml``). ``tests/unit/session/test_config_live.py`` therefore
+# lists it in ``HOST_OWNED_LIVE_SECTIONS`` and points here for the live half.
+# These cells drive the real pass with ``settings`` omitted, exactly as the
+# supervisor calls it, and rewrite ``config.yml`` between passes on ONE tracker.
+
+
+def _live_passes(
+    root: Path,
+    footprint: int,
+    configs: list[str | None],
+) -> tuple[_Recorder, list[Any]]:
+    """One pass per entry; a string entry is written to ``config.yml`` BEFORE that
+    pass (``None`` leaves the file as it is), so a mid-run edit is one list item."""
+    rec = _record()
+    end = _Recorder()
+    tracker = RuntimeGuardTracker()
+    reports = []
+    t0 = 1_800_000_000.0
+    for index, text in enumerate(configs):
+        if text is not None:
+            (root / "config.yml").write_text(text)
+        reports.append(
+            runtime_memory_pass(
+                root,
+                tracker,
+                records=lambda _root: [rec],
+                footprint_mb=lambda _pid: footprint,
+                root_proof=lambda _r, _root: True,
+                end=end,
+                notify=lambda _root, _act: "spooled",
+                now=t0 + index * 60.0,
+            )
+        )
+    return end, reports
+
+
+_ON = "values:\n  session:\n    runtime_memory:\n      enabled: true\n"
+_OFF = "values:\n  session:\n    runtime_memory:\n      enabled: false\n"
+
+
+def _limit(mb: int) -> str:
+    return f"values:\n  session:\n    runtime_memory:\n      limit_mb: {mb}\n"
+
+
+def test_live_turning_the_guard_off_applies_on_the_next_pass(tmp_path: Path) -> None:
+    """Over the default ceiling and streaking; ``enabled: false`` written between
+    passes → the very next pass is ``off`` and the streak is dropped."""
+    end, reports = _live_passes(tmp_path, 9000, [_ON, _OFF, None])
+    assert reports[0].state != "off" and [n for _p, _mb, n in reports[0].over] == [1]
+    assert [r.state for r in reports[1:]] == ["off", "off"]
+    assert end.calls == []
+
+
+def test_live_negative_control_without_the_edit_the_streak_matures(tmp_path: Path) -> None:
+    """Same load, same passes, no edit → the run streaks and is ended, so the
+    ``off`` above is the edit's doing, not something the pass does anyway."""
+    end, reports = _live_passes(tmp_path, 9000, [_ON, None, None])
+    assert [n for r in reports for _p, _mb, n in r.over] == [1, 2, 3]
+    assert reports[-1].state == "acted"
+    assert [limit for _rec, _mb, limit in end.calls] == [8192]
+
+
+def test_live_a_lowered_ceiling_applies_on_the_next_pass(tmp_path: Path) -> None:
+    """3000 MiB is under a 4096 ceiling; lowering ``limit_mb`` to 2048 between
+    passes makes the next pass count it, and the act carries the NEW ceiling."""
+    end, reports = _live_passes(tmp_path, 3000, [_limit(4096), _limit(2048), None, None])
+    assert not reports[0].over
+    assert [n for r in reports[1:] for _p, _mb, n in r.over] == [1, 2, 3]
+    assert reports[-1].state == "acted"
+    assert [limit for _rec, _mb, limit in end.calls] == [2048]
+
+
+def test_live_negative_control_an_unchanged_ceiling_never_counts(tmp_path: Path) -> None:
+    """Same load under the unchanged 4096 ceiling → never over, never ended."""
+    end, reports = _live_passes(tmp_path, 3000, [_limit(4096), None, None, None])
+    assert not any(r.over for r in reports)
+    assert end.calls == []
+
+
 # --- the operator's TUI is never ended (R5) --------------------------------------
 
 
