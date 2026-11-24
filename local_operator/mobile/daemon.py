@@ -48,7 +48,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -246,6 +246,27 @@ SSE_KEEPALIVE_S = 15.0
 # it is NOT a session deadline. A real SSE subscriber holds its own viewer.
 SESSION_START_TIMEOUT_S = 30.0
 PHONE_HANDOFF_S = 60.0
+
+#: How long a phone PROMPT WAKE may take to reach a runtime before it counts as
+#: a real failure. Measured, not guessed: the wake supervisor's engagements
+#: (the same ``engage_runtime`` path, its "took" log lines, Nov 21-23 2026) gave
+#: n=2845, p50 10.1 s, p90 39.1 s, p99 106.8 s, max 169.6 s, and 34% exceeded
+#: the 15 s ``ACK_TIMEOUT_S`` this path used to share with the ack. 180 s sits
+#: above that observed max and matches ``wakes.supervisor.WAKE_DEADLINE_S``, the
+#: bound already in production for the same boot.
+PROMPT_WAKE_DEADLINE_S = 180.0
+
+#: How long ``/command`` holds a cold prompt open before answering "waking" when
+#: it has seen neither an outcome nor a construction. Equal to the pre-change
+#: ``ACK_TIMEOUT_S`` so no request waits longer than it did before; the common
+#: cold case answers far sooner, the moment ``engage_runtime`` reports a runtime
+#: constructing (``on_constructing``).
+PROMPT_WAKE_ACK_WINDOW_S = 15.0
+
+#: The ``detail`` of a "waking" acknowledgement. Not "prompt admitted": the
+#: prompt is not admitted yet, and the receipt must not claim otherwise (see
+#: ``engage_session_client``'s note on receipts). Clients key on ``waking``.
+PROMPT_WAKE_DETAIL = "session is waking"
 
 #: How long a conversation stays VIEWED after its last phone stream closes.
 #:
@@ -3923,6 +3944,134 @@ async def _engage_and_publish(
     return detail
 
 
+@dataclass
+class _PromptWake:
+    """One in-flight phone prompt wake, keyed by ``(session_id, command_id)``."""
+
+    constructing: asyncio.Event
+    #: Assigned right after construction, so ``run`` can name its own record
+    #: even under an eager task factory that starts the coroutine inside
+    #: ``create_task``.
+    task: "asyncio.Task[str]" = field(init=False)
+    #: Set once ``/command`` answered "waking" for this wake, i.e. once the
+    #: phone was told the outcome will arrive later. Only then does a failure
+    #: owe the stream a terminal frame (a synchronous failure is answered on
+    #: the request itself, as before).
+    acknowledged: bool = False
+
+
+async def _prompt_wake(
+    daemon: "MobileDaemon",
+    session_id: str,
+    command_id: str,
+    deliver: "Callable[[Callable[[], None]], Awaitable[str]]",
+) -> tuple[str, bool]:
+    """Run (or join) a cold prompt wake; answer ``(detail, waking)``.
+
+    WHY THE WAKE OUTLIVES THE REQUEST. A cold boot under load takes longer
+    than any HTTP ack should be held (see ``PROMPT_WAKE_DEADLINE_S``): with the
+    wake inside the request, 34% of phone wakes answered 504 "session did not
+    answer" while the runtime kept booting, the provisional active mark was
+    dropped, and the prompt only landed if the phone retried. Now the delivery
+    runs as a daemon-owned task, and the request returns as soon as EITHER the
+    delivery finished (same answer as before, error or detail) OR a runtime is
+    known to be constructing (``waking=True``, a 2xx).
+
+    EXACTLY ONCE. A retry carrying the same ``command_id`` while the wake is in
+    flight JOINS this task instead of starting a second engage, so a phone that
+    resends after a dropped connection cannot double-deliver. After the task
+    finishes the runtime's own ``command_id`` dedupe answers any later retry.
+
+    A FAILURE AFTER "WAKING" is still reported: ``_engage_and_publish`` retracts
+    the active claim (the list moves the row back), and the session's stream
+    subscribers get the terminal ``ended`` frame the scan's settle path sends,
+    so the phone shows the conversation as not running with its resume
+    affordance rather than waiting on a reply nobody will produce.
+
+    ``deliver`` receives the ``on_constructing`` callback to hand to the engage.
+    """
+    key = (session_id, command_id)
+    wake = daemon._prompt_wakes.get(key)
+    if wake is None:
+        constructing = asyncio.Event()
+        started = time.monotonic()
+
+        async def run() -> str:
+            try:
+                detail = await _engage_and_publish(
+                    daemon, session_id, lambda: deliver(constructing.set)
+                )
+            except BaseException as exc:
+                # INFO, not DEBUG: phone wake latency was unmeasurable before
+                # (mobile.log carried only warnings), and these two lines are
+                # what settles it next time.
+                logger.info(
+                    "phone wake %s: failed after %.1fs (%s)",
+                    session_id,
+                    time.monotonic() - started,
+                    type(exc).__name__,
+                )
+                if this.acknowledged and not isinstance(exc, asyncio.CancelledError):
+                    await _publish_failed_wake(daemon, session_id)
+                raise
+            finally:
+                if daemon._prompt_wakes.get(key) is this:
+                    daemon._prompt_wakes.pop(key, None)
+            logger.info(
+                "phone wake %s: admitted after %.1fs", session_id, time.monotonic() - started
+            )
+            return detail
+
+        this = _PromptWake(constructing=constructing)
+        this.task = asyncio.create_task(run())
+        # A failure nobody awaits (the request already answered "waking") must
+        # not surface as "Task exception was never retrieved"; it was logged.
+        this.task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        daemon._prompt_wakes[key] = this
+        wake = this
+    waiter = asyncio.create_task(wake.constructing.wait())
+    try:
+        await asyncio.wait(
+            {wake.task, waiter},
+            timeout=PROMPT_WAKE_ACK_WINDOW_S,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        # The phone hung up mid-wait: the wake carries on (that is the point)
+        # and its outcome is now owed to the stream, not to this request.
+        wake.acknowledged = True
+        raise
+    finally:
+        waiter.cancel()
+    if wake.task.done():
+        # The engage's own answer, success or error, exactly as before.
+        return wake.task.result(), False
+    wake.acknowledged = True
+    return PROMPT_WAKE_DETAIL, True
+
+
+async def _publish_failed_wake(daemon: "MobileDaemon", session_id: str) -> None:
+    """Tell a session's stream that an acknowledged wake did not produce a runtime."""
+    if _entry_for_session(daemon, session_id) is not None:
+        # A runtime is registered after all (another surface woke it); its live
+        # frames are the truth, and an ended frame would contradict them.
+        return
+    try:
+        projection = await daemon._capture_durable_projection(
+            session_id, terminal=True, ended=True
+        )
+    except Exception:  # noqa: BLE001 - best effort; the list retraction already landed
+        logger.debug("phone wake %s: failure frame unavailable", session_id, exc_info=True)
+        return
+    if projection is None:
+        return
+    for queue in daemon.table.session_subscribers.get(session_id, set()):
+        try:
+            queue.put_nowait(_projection_frame(projection))
+        except asyncio.QueueFull:
+            pass
+
+
 def _journal_page(
     directory: Path,
     state: Any,
@@ -4696,6 +4845,11 @@ class MobileDaemon:
         # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+        # In-flight phone prompt wakes by (session_id, command_id): the strong
+        # reference that keeps each delivery alive past its HTTP request, and
+        # the join point that makes a same-id retry wait on it instead of
+        # engaging twice (see ``_prompt_wake``).
+        self._prompt_wakes: dict[tuple[str, str], _PromptWake] = {}
         #: The tag marker this daemon last PUBLISHED to the list stream (or
         #: adopted on its first scan pass). Deliberately separate from the
         #: table's ``_tags_token``, which any read path may advance by
@@ -7463,6 +7617,15 @@ def build_app(daemon: MobileDaemon):
                 # RELAY capability like ``session_tags``: an older daemon lacks
                 # the key, and the phone then stays on its bundled built-ins.
                 "notification_sounds": {"available": True},
+                # BACKGROUND PROMPT WAKE. A cold ``prompt`` may answer 2xx with
+                # ``waking: true`` once a runtime is booting, instead of holding
+                # the request for the boot (or 504ing at 15 s). The reply then
+                # streams; a wake that fails later retracts the active claim and
+                # sends the stream its ``ended`` frame; a resend with the same
+                # ``command_id`` joins the in-flight wake rather than delivering
+                # twice. An older app ignores both this key and ``waking`` and
+                # reads an ordinary ``ok`` ack, which is what it gets anyway.
+                "prompt_wake": {"available": True, "background": True, "version": 1},
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -9872,18 +10035,36 @@ def build_app(daemon: MobileDaemon):
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
 
-                async def _deliver_prompt() -> str:
+                async def _deliver_prompt(on_constructing: Callable[[], None]) -> str:
                     # ADR 0009: a phone prompt that wakes a cold conversation
                     # keeps the phone's origin (``PromptErrand.origin``).
-                    client, detail = await continue_command(config_dir(), command, origin="mobile")
+                    client, detail = await continue_command(
+                        config_dir(),
+                        command,
+                        origin="mobile",
+                        # The BOOT deadline, decoupled from the 15 s ack: the
+                        # request no longer waits on it (see ``_prompt_wake``).
+                        deadline_s=PROMPT_WAKE_DEADLINE_S,
+                        on_constructing=on_constructing,
+                    )
                     client.close()
                     return detail
 
                 # Publish the accepted wake intent before process discovery (see
-                # ``_engage_and_publish``), so even a 50 ms worker is observable
-                # in list SSE and a failed engage retracts the claim.
-                detail = await _engage_and_publish(daemon, session_id, _deliver_prompt)
-                return JSONResponse(receipt(detail))
+                # ``_engage_and_publish``, which ``_prompt_wake`` runs), so even
+                # a 50 ms worker is observable in list SSE and a failed engage
+                # retracts the claim.
+                detail, waking = await _prompt_wake(
+                    daemon, session_id, command.command_id, _deliver_prompt
+                )
+                answer = receipt(detail)
+                if waking:
+                    # ADDITIVE (capability ``prompt_wake``): a 2xx that means
+                    # "accepted, a runtime is booting, the reply streams". An
+                    # app that ignores the key reads an ordinary ``ok`` ack,
+                    # which is what it already does once a wake succeeds.
+                    answer["waking"] = True
+                return JSONResponse(answer)
             if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
                 # THE COLD ANSWER (design §2.4). A queued ask is
                 # durable precisely so the agent can move on, so answering one

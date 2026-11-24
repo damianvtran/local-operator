@@ -3225,8 +3225,14 @@ async def engage_session_client(
     on_projection: Callable[[SessionProjection], None] | None = None,
     locality: str = "local",
     origin: str = "",
+    on_constructing: Callable[[], None] | None = None,
 ) -> tuple[AttachClient, str]:
     """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    ``on_constructing`` is forwarded to ``engage_runtime`` unchanged: it fires
+    once when a runtime is known to be booting for this session, which is the
+    moment the phone relay's prompt wake may answer "waking" (see
+    ``engage_runtime``'s docstring).
 
     ``origin`` is ADR 0009's auth tag: the phone daemon passes ``"mobile"`` so a
     cold answer or a cold-wake prompt routes its completion back to the phone
@@ -3264,6 +3270,7 @@ async def engage_session_client(
         work,
         config_dir=config_dir,
         deadline_s=deadline_s,
+        on_constructing=on_constructing,
     )
     # The errand was admitted; what remains is the caller's live view of the work
     # it started. A record must exist now (engage_runtime only returns once one
@@ -3301,6 +3308,7 @@ async def continue_command(
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
     origin: str = "",
+    on_constructing: Callable[[], None] | None = None,
 ) -> tuple[AttachClient, str]:
     """Deliver one retained command to whichever host wins the session lease.
 
@@ -3334,4 +3342,5 @@ async def continue_command(
         deadline_s=deadline_s,
         on_projection=on_projection,
         origin=origin,
+        on_constructing=on_constructing,
     )

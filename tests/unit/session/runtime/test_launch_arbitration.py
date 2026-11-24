@@ -399,6 +399,58 @@ async def test_engaging_during_construction_waits_instead_of_spawning(
 
 
 @pytest.mark.asyncio
+async def test_on_constructing_fires_once_while_a_runtime_boots(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The phone wake's "waking" signal: once, before the outcome, never on a warm engage.
+
+    The relay answers a cold phone prompt at this moment instead of holding the
+    request for the whole boot, so it must fire while construction is in flight
+    (not after), exactly once however long the boot polls, and not at all when
+    a runtime is already serving. A raising observer must not fail the engage.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions").mkdir(parents=True, exist_ok=True)
+    instance = FakeRuntimeFleet(tmp_path, construction_delay_s=0.5)
+    instance.loop = asyncio.get_running_loop()
+    monkeypatch.setattr(
+        "local_operator.session.runtime.launch._spawn_runtime",
+        lambda session_id, cwd, *, defer_materialise, **seed: instance.spawn(
+            session_id, cwd, defer_materialise=defer_materialise
+        ),
+    )
+    fired: list[bool] = []
+
+    def observe() -> None:
+        # Recorded as "was the runtime still unpublished when we were told?"
+        fired.append(instance.winners == 1 and not instance.delivered)
+        raise ValueError("a buggy observer")
+
+    try:
+        outcome = await engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            PeerMessageErrand(text="cold", sender={}),
+            config_dir=tmp_path,
+            on_constructing=observe,
+        )
+        assert outcome.spawned is True
+        assert fired == [True], "the boot signal must fire once, during construction"
+
+        warm: list[int] = []
+        await engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            PeerMessageErrand(text="warm", sender={}),
+            config_dir=tmp_path,
+            on_constructing=lambda: warm.append(1),
+        )
+        assert warm == [], "a serving runtime is not booting"
+    finally:
+        instance.close()
+
+
+@pytest.mark.asyncio
 async def test_a_claim_held_by_a_zombie_is_recovered_not_waited_on(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
