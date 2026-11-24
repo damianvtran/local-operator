@@ -4539,6 +4539,27 @@ class AgentLoop:
         return bool(reader())
 
     @staticmethod
+    def _host_system_stable_head_blocks(config: LoopConfig) -> int:
+        """Leading session-agnostic system blocks the host reports (0 = none)."""
+        reader = config.get_system_stable_head_blocks
+        if reader is None:
+            return 0
+        return max(0, int(reader()))
+
+    @classmethod
+    def _host_system_cache_layout(cls, config: LoopConfig) -> dict[str, Any]:
+        """The ``ChatRequest`` system marker-placement fields, read per call.
+
+        One splat at the request site rather than one kwarg per field: the
+        request builder already sits at pyright's flow-analysis complexity
+        limit, and each extra call expression there tipped it over.
+        """
+        return {
+            "system_blocks_frozen": cls._host_system_blocks_frozen(config),
+            "system_stable_head_blocks": cls._host_system_stable_head_blocks(config),
+        }
+
+    @staticmethod
     def _host_context_tokens_hint(config: LoopConfig) -> int | None:
         """The host's cross-turn context-size seed, or ``None`` when it has
         none — a zero is treated as "nothing reported" because a provider
@@ -4949,7 +4970,7 @@ class AgentLoop:
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
-                system_blocks_frozen=self._host_system_blocks_frozen(config),
+                **self._host_system_cache_layout(config),
                 messages=list(converted),
                 tools=(
                     list(config.get_tools())

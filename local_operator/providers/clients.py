@@ -5551,7 +5551,12 @@ class AnthropicClient:
 
     @classmethod
     def _system_blocks(
-        cls, blocks: Sequence[str], *, ttl: str | None = None, frozen: bool = False
+        cls,
+        blocks: Sequence[str],
+        *,
+        ttl: str | None = None,
+        frozen: bool = False,
+        stable_head: int = 0,
     ) -> list[dict[str, Any]]:
         """System blocks → Anthropic ``system`` array with cache breakpoints.
 
@@ -5568,6 +5573,18 @@ class AnthropicClient:
         last two gets an ephemeral breakpoint, CAPPED at
         ``MAX_CACHE_BREAKPOINTS`` (Anthropic rejects >4 markers).
 
+        ``stable_head`` (frozen only) counts the leading blocks that are
+        identical across sessions — the OAuth identity block, persona and tool
+        inventory, ending right before the env block (date, cwd). When it ends
+        strictly before ``rendered[-1]`` a SECOND marker goes on
+        ``rendered[stable_head - 1]``. WHY: the tail marker alone caches a
+        prefix that includes the env block, so a new session or subagent in
+        another cwd or on another day could never read the tools+persona bytes
+        another session just wrote; with the head marker it reads them. The
+        tail marker is kept: it still caches the whole frozen system for this
+        session's later turns. The head marker is the first system marker
+        ``_message_cache_breakpoints`` sheds when the 4-marker cap binds.
+
         ``ttl`` is the request-wide TTL from ``_cache_ttl_for``; every marker
         placed here carries it, because a 1h marker may not follow a 5m one.
         """
@@ -5575,6 +5592,8 @@ class AnthropicClient:
         if frozen:
             for block in blocks:
                 rendered.append({"type": "text", "text": block})
+            if 0 < stable_head < len(rendered):
+                rendered[stable_head - 1]["cache_control"] = cls._cache_control(ttl)
             if rendered:
                 rendered[-1]["cache_control"] = cls._cache_control(ttl)
             return rendered
@@ -5719,6 +5738,7 @@ class AnthropicClient:
         frozen_block: dict[str, Any] | None = None,
         static_prefix_block: dict[str, Any] | None = None,
         ephemeral_indices: Collection[int] | None = None,
+        system_head_marker: int | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -5761,9 +5781,24 @@ class AnthropicClient:
         epochs are byte-stable until the chain advances, so a marker there is a
         cache entry the next turn reads in full. System markers and the budget
         are unchanged.
+
+        ``system_head_marker`` is the index of the cross-session head marker
+        ``_system_blocks`` placed before the env block (frozen epochs only).
+        It is the LOWEST-priority marker in the request and is dropped before
+        any other system or message marker when the cap binds: within one
+        session the tail marker already covers the whole frozen system, so
+        losing the head costs only cross-session reuse on that one request,
+        whereas losing the tail or a message marker re-bills this session's
+        own prefix.
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
+        if system_head_marker is not None and system_head_marker in system_markers:
+            # Keep-priority order: the head marker moves to the end so the
+            # budget trim below sheds it first; the rest keep their
+            # historical earliest-first priority.
+            system_markers.remove(system_head_marker)
+            system_markers.append(system_head_marker)
         ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
         # 1. Persistent rolling tail: skip trailing ephemeral frames so the
@@ -5831,8 +5866,9 @@ class AnthropicClient:
         if not message_targets:
             return
         budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(message_targets))
-        # Drop the lowest-value system breakpoints (the last stable blocks)
-        # until system + message markers fit the cap.
+        # Drop the lowest-value system breakpoints (the cross-session head
+        # marker first, then the last stable blocks) until system + message
+        # markers fit the cap.
         for index in system_markers[budget:]:
             system[index].pop("cache_control", None)
         for block in message_targets:
@@ -6017,9 +6053,22 @@ class AnthropicClient:
             if request.cache_markers == "system" and isinstance(system_rows, list) and system_rows:
                 system_rows[-1]["cache_control"] = self._cache_control(ttl)
         else:
+            # The OAuth identity block is a constant prepended to EVERY OAuth
+            # request, so it belongs to the session-agnostic head too.
+            stable_head = request.system_stable_head_blocks
+            if stable_head and oauth:
+                stable_head += 1
+            head_marker = (
+                stable_head - 1
+                if request.system_blocks_frozen and 0 < stable_head < len(blocks)
+                else None
+            )
             if blocks:
                 body["system"] = self._system_blocks(
-                    blocks, ttl=ttl, frozen=request.system_blocks_frozen
+                    blocks,
+                    ttl=ttl,
+                    frozen=request.system_blocks_frozen,
+                    stable_head=stable_head,
                 )
             # System-only breakpoints stop the cached prefix before the first
             # message: the entire growing conversation would be re-processed at
@@ -6036,6 +6085,7 @@ class AnthropicClient:
                 frozen_block=epoch_block,
                 static_prefix_block=static_prefix_block,
                 ephemeral_indices=ephemeral_indices,
+                system_head_marker=head_marker,
             )
         # An ephemeral frame belongs beyond all original cache points. Keep a
         # preceding user/tool-result row byte-identical, including block order.

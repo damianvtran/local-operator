@@ -735,6 +735,8 @@ _CLONE_GUARD_FIELDS = frozenset(
         # Frozen-system marker policy (``system_blocks_frozen``): controls only
         # where cache_control lands on system blocks, never prompt bytes.
         "system_blocks_frozen",
+        # Where the session-agnostic system head ends (marker placement only).
+        "system_stable_head_blocks",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
@@ -4239,6 +4241,10 @@ class LoopConfig(BaseModel):
     # ``get_system_blocks`` runs so turn 1 reports ``True`` as soon as the
     # epoch freezes; ``None`` defaults to ``False`` for standalone callers.
     get_system_blocks_frozen: Callable[[], bool] | None = Field(default=None, exclude=True)
+    # How many leading system blocks are session-agnostic (see
+    # ``ChatRequest.system_stable_head_blocks``); read per call next to
+    # ``get_system_blocks_frozen``. ``None`` means 0: no head marker.
+    get_system_stable_head_blocks: Callable[[], int] | None = Field(default=None, exclude=True)
 
     # The tools array to send NOW, re-read immediately before every provider
     # call. Supplying this does NOT re-read ``LoopContext.tools`` per call — it
@@ -5197,6 +5203,15 @@ class ChatRequest(BaseModel):
     #: ``system[-1]`` instead of guessing from block count. Transport metadata,
     #: never wire content.
     system_blocks_frozen: bool = Field(default=False, exclude=True, repr=False)
+    #: How many LEADING ``system_blocks`` are identical across sessions with the
+    #: same tools (persona + tool inventory; ``prompts_api.STABLE_HEAD_BLOCK_COUNT``),
+    #: i.e. where the first volatile block (env: date, cwd) begins. ``0`` means
+    #: unknown, and the wire places no head marker. Only meaningful with
+    #: ``system_blocks_frozen``: ``AnthropicClient`` then adds a second system
+    #: breakpoint after the head so a new session or subagent in another cwd,
+    #: or on another day, reads tools+persona from cache instead of rewriting it.
+    #: Transport metadata, never wire content.
+    system_stable_head_blocks: int = Field(default=0, exclude=True, repr=False)
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own

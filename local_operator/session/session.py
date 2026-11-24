@@ -7867,6 +7867,21 @@ class Session:
             and getattr(self, "_frozen_system_blocks", None) is not None
         )
 
+    def _system_stable_head_blocks(self) -> int:
+        """Leading frozen system blocks that are identical across sessions.
+
+        The provider declares the count (``stable_head_blocks``, stamped by
+        ``session_factory`` / the subagent builder from
+        ``prompts_api.STABLE_HEAD_BLOCK_COUNT``) because only the builder knows
+        where its volatile env block starts. Reported only while the epoch is
+        frozen: an unfrozen or host-supplied provider promises no byte-stable
+        head, so it gets 0 and the wire keeps its historical marker layout.
+        """
+        if not self._system_blocks_are_frozen():
+            return 0
+        count = getattr(self._system_blocks_provider, "stable_head_blocks", 0)
+        return count if isinstance(count, int) and count > 0 else 0
+
     def _system_state_delta(
         self, desired: list[str]
     ) -> tuple[dict[str, dict[str, str]], str | None]:
@@ -24341,6 +24356,7 @@ class Session:
                 # evaluated per call after ``_prepare_system_blocks`` so turn 1
                 # already marks the single trailing frozen system block.
                 get_system_blocks_frozen=self._system_blocks_are_frozen,
+                get_system_stable_head_blocks=self._system_stable_head_blocks,
                 # The tools array, re-read per provider step and latched to one
                 # publish per turn; see ``_wire_tools``. The loop's tool
                 # RESOLUTION deliberately keeps reading the live
@@ -34217,6 +34233,7 @@ class Session:
             purpose="aside",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
@@ -34354,6 +34371,7 @@ class Session:
             purpose="clearance",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): the same cache-prefix rule the aside states
             # at length — the tools block leads the prefix, so an empty array
@@ -34506,6 +34524,7 @@ class Session:
             purpose="compaction_advisor",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Same array as the running turn (not []): the tools block is the
             # FRONT of the provider cache prefix, so sending [] would change
