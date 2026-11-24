@@ -89,7 +89,6 @@ describe("a chip's jump into the asks sheet", () => {
 		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
 			asks: [ask({ ask_id: "a-745e", status: "withdrawn" }), card],
 		});
-		const rect = Element.prototype.getBoundingClientRect;
 		vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
 			// The card sits 200 px below the scroller's top edge.
 			if (this.getAttribute("data-ask-id") === "a-745e") return { top: 200 } as DOMRect;
