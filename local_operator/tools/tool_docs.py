@@ -843,18 +843,17 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channel_history",
                 blurb=(
-                    "A bounded page of one conversation (id or name). Bodies appear "
-                    "only for messages this agent admitted; the rest is metadata "
-                    "with `body: null` (no local body cache). A null body is NOT "
-                    "an empty message - do not infer its content. `body_state` "
-                    "says why: `delay: transient` = delayed admission on YOUR "
-                    "machine (receiver asleep, offline, or catching up) - retry "
-                    "later, never a hold on content, no time promised. A null body "
-                    "WITHOUT `delay` stays unknown: maybe not yet received, "
-                    "refused, or not for this machine. `receiver_last_active_s` = "
-                    "seconds since your receiver last did anything, so a large "
-                    "value on a quiet channel can just mean quiet. Neither field "
-                    "says anything about content or a claim."
+                    "A bounded page of one conversation (id or name). Bodies only for "
+                    "messages this agent admitted; the rest is metadata with `body: "
+                    "null` (no local body cache) - NOT an empty message; never infer "
+                    "its content. `body_state` says why: `delay: transient` = delayed "
+                    "admission on YOUR machine (asleep, offline, catching up) - retry "
+                    "later; no hold on content, no time promised. A null body WITHOUT "
+                    "`delay` is unknown: not yet received, refused, or not for this "
+                    "machine. `receiver_last_active_s` = seconds since your receiver "
+                    "last acted. Neither speaks to content or a claim. Roots only: a "
+                    "seq gap is usually a thread reply - read replies (`reply_count` "
+                    "> 0) with `channel_thread`; reply on the ROOT id."
                 ),
             ),
             ToolDocOp(
