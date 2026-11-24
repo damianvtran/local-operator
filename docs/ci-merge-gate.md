@@ -128,6 +128,55 @@ allow **one running plus one concurrency-pending run** per group by default:
   manufacture green or cancel a running gate, and it does not promise one run
   total. At most one running plus one pending duplicate remains.
 
+## Red gate on the same head: rerun only the failed shards (GH #4074, cut 2)
+
+Measured 2026-11-17..23: 190 of 539 gate runs failed, and every red gate was
+re-armed with a whole new full run (both e2e OSes, six shards, coverage), even
+when one shard failed. `make merge-gate PR=<n>` now reads the newest
+`full-suite.yml` `pull_request` run for the PR's **current** head SHA, after the
+fast-CI pre-check and the duplicate-arm advisory above (both unchanged):
+
+| Newest run on this head | Path printed | Action |
+|---|---|---|
+| completed `failure` / `cancelled` / `timed_out` | `path: RERUN-FAILED` | `gh run rerun <id> --failed`; no label change |
+| none (new head), `success`, `startup_failure`, still active | `path: FRESH: ...` | remove + re-add `ready-to-merge` (unchanged) |
+| rerun refused by GitHub (e.g. older than its 30-day rerun window) | `path: FRESH (fallback)` | label arm |
+| any, with `MERGE_GATE_FRESH=1` | `path: FRESH: MERGE_GATE_FRESH=1` | label arm |
+
+A rerun that GitHub accepts but whose attempt does not advance within 60 s exits
+non-zero with no label write, rather than also starting a full run.
+
+**Why the verdict stays "every shard green on this head".** A failed-only rerun
+is a new *attempt* of the same run: same `head_sha`, same event payload, and the
+carried `changes`/`precondition` outputs, so the re-run shards rebuild the same
+`gate_base` merge tree as the kept ones. GitHub re-runs failed **and cancelled**
+jobs plus their dependents. Read from the API for run
+[45325871121](https://github.com/damianvtran/local-operator/actions/runs/45325871121)
+(PR #4508, `attempts/1/jobs` vs `attempts/2/jobs`): attempt 1 had shard 3
+`failure` and shards 0/2/4 `cancelled` (fail-fast); attempt 2 re-ran exactly
+those four plus `coverage-report` and the aggregate, and listed shards 1/5,
+both `tui-e2e` legs, `changes` and `precondition` as carried `success` jobs with
+their original start/finish times. The aggregate's `needs` therefore covers the
+whole matrix of that run, and its existing allowlist (every need `success`, or
+`skipped` for path-filtered jobs; `precondition` only `success`) is unchanged:
+a shard that fails again keeps `needs.test.result` at `failure`. No job from
+another run or head can enter `needs`, so no extra API cross-check was added.
+
+**Base freshness.** The rerun keeps the original run's `gate_base` (the main tip
+`changes` resolved when the gate armed). That matches the existing rule above:
+the gate is evidence about the PR's head, the branch is not forced up to date,
+and `main`'s own full-suite run is the backstop for a semantic conflict with a
+moved base. An owner who wants today's main tip uses `MERGE_GATE_FRESH=1`.
+
+**Artifacts across attempts.** Artifacts are run-scoped and immutable, so:
+`coverage-data-<py>-<shard>` stays unsuffixed (coverage-report's
+`coverage-data-<py>-*` pattern must find the carried shards' attempt-1 uploads;
+run 45325871121 attempt 2 combined them) and uploads with `overwrite: true` for
+the race where a shard is cancelled after uploading; every `always()` upload a
+failed job can leave behind carries `-attempt-<n>` (the e2e junit did not, and
+would have 409'd on its own rerun); `scripts/gen_test_durations.py` accepts a
+carried shard's earlier-attempt junit, bound to the job's execution interval.
+
 ## Owner-reserved queue convention
 
 **The owning lane is `lane-<PR number>` for a PR, or `lane-<ref name>` otherwise;
