@@ -2,23 +2,23 @@
 
 When a hub channel is renamed (``aws-ai-build-day`` -> ``pergamon``) agents keep
 addressing it by the old name. The hub deliberately keeps no rename history, so
-this machine remembers (tenant, id, name) sightings from conversation listings
-and admitted inbound display names, and ``_resolve_channel_name`` consults them
-ONLY after a live exact match failed, always re-checking the aliased id against
-the live list. These tests pin that order and its refusals at the tool boundary
-(only the wire is faked; the store is the real SQLite file under the cwd).
+this machine remembers (tenant, id, name) sightings from TENANT-VISIBLE
+conversation listings only, and ``_resolve_channel_name`` consults them ONLY
+after a live exact match failed on an untruncated listing, always re-checking
+the aliased id against the live list. A post addressed by an old name is
+refused (``channel_renamed``) rather than sent. These tests pin that order and
+its refusals at the tool boundary (only the wire is faked; the store is the
+real SQLite file under the cwd).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from local_operator.team_bridge import tool as tb_tool
-from local_operator.team_bridge.connector import conversation as tb_conversation
 from local_operator.team_bridge.store import Store
 from local_operator.team_bridge.tool import execute_bridge
 from tests.unit.team_bridge.test_channel_names import (  # noqa: F401 - open_gates is a fixture
@@ -70,6 +70,8 @@ async def test_an_old_name_resolves_through_the_alias_with_the_new_name() -> Non
     assert outcome["channel_name"] == NEW
     assert outcome["renamed_at"] == "1970-01-01T00:33:20Z"
     assert f"use '{NEW}'" in outcome["alias_note"]
+    # Q2: the note names the old room without the caller's ``#`` sigil.
+    assert outcome["alias_note"].startswith(f"'{OLD}' was renamed to '{NEW}'")
     reads = [c["conversation_id"] for c in hub.calls if c["method"] == "conversation_messages"]
     assert reads == [ROOM]
 
@@ -203,22 +205,6 @@ async def test_not_found_suggests_near_matches_and_keeps_the_truncation_caveat()
     assert "in the first 500 conversations" in missed["error"]
 
 
-async def test_inbound_display_names_feed_only_channel_aliases() -> None:
-    owner = SimpleNamespace(tenant_id="tnt_1")
-
-    def meta(cid: str, kind: str | None, label: str) -> Any:
-        return SimpleNamespace(
-            conversation_id=cid, conversation_kind=kind, conversation_label=label
-        )
-
-    tb_conversation._remember_channel_name(Path("."), owner, meta(ROOM, "channel", NEW))
-    tb_conversation._remember_channel_name(Path("."), owner, meta(OTHER, "dm", "Alice"))
-    tb_conversation._remember_channel_name(Path("."), owner, meta(THIRD, None, "legacy"))
-
-    rows = _store().channel_alias_rows_readonly("tnt_1")
-    assert [(r["conversation_id"], r["display_name"]) for r in rows] == [(ROOM, NEW)]
-
-
 async def test_an_unwritable_alias_store_never_fails_the_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -229,3 +215,112 @@ async def test_an_unwritable_alias_store_never_fails_the_lookup(
     outcome = await _history(FakeHub([_channel(ROOM, NEW)]), NEW)
     assert outcome["ok"] is True and outcome["resolved_channel_id"] == ROOM
     assert tb_tool._channel_alias_rows(_gated_runtime(FakeHub())) == []
+
+
+def _sends(hub: FakeHub) -> list[Any]:
+    return [c for c in hub.calls if c["method"] == "conversation_send"]
+
+
+async def test_channel_post_by_an_old_name_is_refused_and_sends_nothing() -> None:
+    """S-1: squat a name, rename away, then a post by that name must not land.
+
+    Reproduces the security probe: one ordinary lookup records the attacker's
+    room under the squatted name, the room is renamed, and a later
+    ``channel_post channel_id=finance`` used to SEND to it through the alias.
+    """
+
+    evil = "bcv_e0000000000000000000000000000009"
+    squat = FakeHub([_channel(evil, "finance")])
+    assert (await _history(squat, "finance"))["resolved_channel_id"] == evil
+    renamed = FakeHub([_channel(evil, "lunch")])
+    runtime = _gated_runtime(renamed)
+
+    outcome = await execute_bridge(
+        runtime,
+        {"op": "channel_post", "channel_id": "finance", "body": "Q4 numbers", "new_post": True},
+    )
+
+    assert outcome["ok"] is False and outcome["code"] == "channel_renamed", outcome
+    assert outcome["conversation_id"] == evil
+    assert outcome["current_name"] == "lunch"
+    assert outcome["renamed_at"]
+    assert "re-send" in outcome["error"] and f"channel_id={evil}" in outcome["error"]
+    assert _sends(renamed) == []
+    # A READ by the old name still resolves (it sends nothing anywhere).
+    read = await _history(renamed, "finance")
+    assert read["ok"] is True and read["resolved_via_alias"] is True
+
+
+@pytest.mark.parametrize(
+    "closed_at",
+    [50.0, 0.5],
+    ids=["closed-holder-is-newer", "closed-holder-is-older"],
+)
+async def test_an_alias_once_held_by_a_closed_room_never_redirects(closed_at: float) -> None:
+    """R1-1: the room most recently called ``standup`` closed; never redirect.
+
+    ROOM was ``standup`` then ``daily``; OTHER also held ``standup`` and is now
+    closed. Whichever held it last, the caller cannot be told which room it
+    meant, so the lookup refuses without naming ROOM or ``daily``.
+    """
+
+    _seen("tnt_1", ROOM, "standup", 1.0)
+    _seen("tnt_1", ROOM, "daily", 2.0)
+    _seen("tnt_1", OTHER, "standup", closed_at)
+    hub = FakeHub([_channel(ROOM, "daily")])
+
+    outcome = await _history(hub, "standup")
+
+    assert outcome["ok"] is False and outcome["code"] == "channel_not_found", outcome
+    assert "was renamed or closed" in outcome["error"]
+    assert ROOM not in outcome["error"] and "daily" not in outcome["error"]
+    assert all(c["method"] != "conversation_messages" for c in hub.calls)
+
+
+async def test_a_truncated_listing_never_resolves_through_an_alias() -> None:
+    """S-3: the live exact holder may sit past the page bound; do not guess."""
+
+    _seen("tnt_1", ROOM, OLD, 1.0)
+    _seen("tnt_1", ROOM, NEW, 2.0)
+    filler = [_channel(f"bcv_f{i:031x}", f"room-{i}") for i in range(30)]
+    # ROOM is on the first page; the room that now holds OLD is past the cut.
+    hub = FakeHub([_channel(ROOM, NEW), *filler, _channel(THIRD, OLD)], page_size=5)
+
+    outcome = await _history(hub, OLD)
+
+    assert outcome["ok"] is False and outcome["code"] == "channel_not_found", outcome
+    assert "in the first 500 conversations" in outcome["error"]
+    # The aliased room may be live past the cut too: no "renamed or closed" claim.
+    assert "renamed" not in outcome["error"]
+    assert all(c["method"] != "conversation_messages" for c in hub.calls)
+
+
+async def test_renamed_at_is_the_return_to_the_current_name() -> None:
+    """R1-2: b -> a -> b stamps the SECOND sighting of b, after a was last seen."""
+
+    _seen("tnt_1", ROOM, "b", 1.0)
+    _seen("tnt_1", ROOM, "a", 100.0)
+    _seen("tnt_1", ROOM, "b", 200.0)
+    # A plain refresh of the current name keeps the stamp of the return.
+    _seen("tnt_1", ROOM, "b", 300.0)
+    hub = FakeHub([_channel(ROOM, "b")])
+
+    outcome = await _history(hub, "a")
+
+    assert outcome["ok"] is True and outcome["resolved_via_alias"] is True, outcome
+    assert outcome["renamed_at"] == "1970-01-01T00:03:20Z"
+
+
+async def test_an_old_alias_row_beyond_the_scan_bound_still_resolves() -> None:
+    """R1-4: an old name is the OLDEST row by last_seen; a lookup must still see it."""
+
+    _seen("tnt_1", ROOM, OLD, 1.0)
+    _seen("tnt_1", ROOM, NEW, 2.0)
+    filler = [(f"bcv_f{i:031x}", f"room-{i}") for i in range(Store.CHANNEL_ALIAS_SCAN_MAX + 50)]
+    _store().record_channel_names("tnt_1", filler, now=10.0)
+    hub = FakeHub([_channel(ROOM, NEW)])
+
+    outcome = await _history(hub, OLD)
+
+    assert outcome["ok"] is True and outcome["resolved_channel_id"] == ROOM, outcome
+    assert outcome["resolved_via_alias"] is True

@@ -10870,7 +10870,10 @@ class Store:
     # hub deliberately keeps NO rename history and no names in its audit, so
     # the only place an old name can be remembered is here, on the client,
     # from what this machine has already been shown: the tenant's open
-    # conversation list and an admitted message's ``conversation_name``.
+    # conversation list, and only its TENANT-VISIBLE channels. (An inbound
+    # message's display name is deliberately NOT a writer: the body read
+    # carries no visibility, so it would make a private room's name durable
+    # and turn the "renamed or closed" refusal into an existence oracle.)
     #
     # CONSTRAINTS.
     # * NAMES AND IDS ONLY. No body, sender, label or message id ever lands
@@ -10924,7 +10927,7 @@ class Store:
         """Remember ``(conversation_id, display_name)`` sightings of channels.
 
         The key is :func:`channel_name_key` of the name, computed HERE so the
-        writers (tool listing, inbound connector) and the reader
+        writer (the tool's tenant-visible listing) and the reader
         (``tool._room_name_key``) cannot drift apart.
 
         An existing (tenant, id, key) row only moves ``last_seen`` (and keeps
@@ -10951,13 +10954,41 @@ class Store:
                 "VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT (tenant_id, conversation_id, name_key) DO UPDATE SET "
                 "display_name = excluded.display_name, "
+                # A RETURN to an earlier name (b -> a -> b): another name of
+                # this id was seen after this row's last sighting, so the
+                # current run under this name starts now. Without the reset
+                # ``first_seen`` would keep the FIRST run's stamp and the
+                # rename would be dated before the old name was ever seen.
+                # (SQLite evaluates every SET term against the OLD row.)
+                "first_seen = CASE WHEN EXISTS (SELECT 1 FROM channel_aliases AS other "
+                "WHERE other.tenant_id = excluded.tenant_id "
+                "AND other.conversation_id = excluded.conversation_id "
+                "AND other.name_key <> excluded.name_key "
+                "AND other.last_seen > channel_aliases.last_seen) "
+                "THEN excluded.first_seen ELSE first_seen END, "
                 "last_seen = MAX(last_seen, excluded.last_seen)",
                 [(*row, stamp, stamp) for row in rows],
             )
         return len(rows)
 
-    def channel_alias_rows_readonly(self, tenant_id: str) -> list[dict[str, Any]]:
-        """Every alias row of ONE tenant (bounded), read-only; [] when none.
+    def channel_alias_rows_readonly(
+        self,
+        tenant_id: str,
+        *,
+        name_key: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Alias rows of ONE tenant, read-only, newest ``last_seen`` first.
+
+        ``name_key`` narrows to every row of every id that EVER held that name
+        (the holders plus their other names, which the resolver needs to tell
+        the most recent holder and date the rename), through the
+        ``(tenant_id, name_key)`` index. That is the resolver's query on
+        purpose: an old name stops being seen at the rename, so it is the
+        OLDEST row by ``last_seen`` and the first a tenant-wide newest-first
+        scan would drop past :data:`CHANNEL_ALIAS_SCAN_MAX`.
+        ``conversation_id`` narrows to one id (the primary key's prefix).
+        Neither: the bounded tenant-wide scan, for near-match suggestions only.
 
         Read-only on purpose: a name lookup must not create a store or the
         table. An absent file or table is "no aliases known", not an error.
@@ -10971,11 +11002,21 @@ class Store:
             ).fetchone()
             if present is None:
                 return []
+            where, args = "tenant_id = ?", [tenant_id]
+            if name_key is not None:
+                where += (
+                    " AND conversation_id IN (SELECT conversation_id FROM channel_aliases "
+                    "WHERE tenant_id = ? AND name_key = ?)"
+                )
+                args += [tenant_id, name_key]
+            if conversation_id is not None:
+                where += " AND conversation_id = ?"
+                args.append(conversation_id)
             rows = conn.execute(
                 "SELECT conversation_id, name_key, display_name, first_seen, last_seen "
-                "FROM channel_aliases WHERE tenant_id = ? "
+                f"FROM channel_aliases WHERE {where} "
                 "ORDER BY last_seen DESC LIMIT ?",
-                (tenant_id, self.CHANNEL_ALIAS_SCAN_MAX),
+                (*args, self.CHANNEL_ALIAS_SCAN_MAX),
             ).fetchall()
             return [dict(row) for row in rows]
 

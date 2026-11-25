@@ -2844,13 +2844,25 @@ def _remember_channel_names(runtime: BridgeRuntime, rows: Sequence[Any]) -> None
         logger.debug("channel alias record skipped: %s", type(failure).__name__)
 
 
-def _channel_alias_rows(runtime: BridgeRuntime) -> list[dict[str, Any]]:
-    """This tenant's remembered (id, name) rows; [] when unknown or unreadable."""
+def _channel_alias_rows(
+    runtime: BridgeRuntime,
+    *,
+    name_key: str | None = None,
+    conversation_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """This tenant's remembered (id, name) rows; [] when unknown or unreadable.
+
+    ``name_key`` / ``conversation_id`` narrow the read through the table's
+    indexes (see ``Store.channel_alias_rows_readonly``); rows come newest
+    ``last_seen`` first.
+    """
 
     from .store import Store
 
     try:
-        return Store(Path(runtime.config_dir)).channel_alias_rows_readonly(runtime.tenant_id)
+        return Store(Path(runtime.config_dir)).channel_alias_rows_readonly(
+            runtime.tenant_id, name_key=name_key, conversation_id=conversation_id
+        )
     except Exception as failure:  # noqa: BLE001 - an unreadable table is "no aliases"
         logger.debug("channel alias read skipped: %s", type(failure).__name__)
         return []
@@ -2864,7 +2876,7 @@ def _last_known_channel_name(runtime: BridgeRuntime, conversation_id: str) -> st
     a rename made since; a name-addressed call reports the live name instead.
     """
 
-    for row in _channel_alias_rows(runtime):  # ordered by last_seen DESC
+    for row in _channel_alias_rows(runtime, conversation_id=conversation_id):  # newest first
         if row.get("conversation_id") == conversation_id:
             name = row.get("display_name")
             return name if isinstance(name, str) and name else None
@@ -2878,10 +2890,40 @@ class ChannelResolution:
     conversation_id: str
     #: The room's CURRENT name, from the live list that confirmed it.
     channel_name: str
-    #: The old name the caller used, when the match came through the alias table.
+    #: The old name the caller used (sigil stripped), when the match came
+    #: through the alias table.
     alias: str = ""
-    #: ISO-8601 UTC time this machine first saw ``channel_name`` (≈ the rename).
+    #: ISO-8601 UTC time this machine first saw ``channel_name`` after the old
+    #: name's last sighting (≈ the rename; a b -> a -> b return dates the second b).
     renamed_at: str = ""
+
+    def renamed_refusal(self, op: str) -> dict[str, Any]:
+        """The typed refusal a WRITE addressed by an old name gets instead of sending.
+
+        WHY a write never follows an alias (security round 1, S-1): anyone in
+        the tenant can name a visible channel after a room the caller cannot
+        see (``finance``), let one lookup record it, then rename it away; the
+        alias would then quietly route every later ``finance`` post to that
+        room, and the advisory note arrives only after the body is delivered.
+        A read sends nothing, so ``channel_history`` may still follow the
+        alias; a post must be re-issued with the CURRENT name or the id, which
+        makes the redirect an explicit choice the agent can see first.
+        """
+
+        stamp = f" (seen {self.renamed_at})" if self.renamed_at else ""
+        return {
+            "ok": False,
+            "code": "channel_renamed",
+            "conversation_id": self.conversation_id,
+            "current_name": self.channel_name,
+            "renamed_at": self.renamed_at,
+            "error": (
+                f"'{self.alias}' is an old name: that channel is now '{self.channel_name}'"
+                f"{stamp}. Nothing was posted; {op} only sends to a channel's current "
+                f"name — re-send with channel_id={self.conversation_id} (or "
+                f"'{self.channel_name}') if that is the room you meant"
+            ),
+        }
 
     def result_keys(self, asked: str) -> dict[str, Any]:
         keys: dict[str, Any] = {
@@ -2967,8 +3009,14 @@ async def _resolve_channel_name(
        and each is RE-CHECKED against the live rows just read — only an id
        still open and tenant-visible resolves (``resolved_via_alias``);
     3. one alias -> several live ids is ``channel_ambiguous``, never a guess;
-    4. an alias whose room is no longer open/visible is a not-found that says
-       so — never a silent redirect, and never that room's id or new name.
+    4. an alias any of whose holders is no longer open/visible is a not-found
+       that says so — never a silent redirect (even to another, still-live
+       holder: the caller may have meant the closed one), and never that
+       room's id or new name;
+    5. a TRUNCATED listing never resolves through an alias: the room that
+       holds the name now may sit past the page bound (rule 1 would lose);
+    6. the CALLER refuses a post that came through an alias
+       (``ChannelResolution.renamed_refusal``); only reads follow it.
     Aliases are read for THIS tenant only.
     """
 
@@ -3012,34 +3060,49 @@ async def _resolve_channel_name(
             code="channel_ambiguous",
         )
 
-    aliases = _channel_alias_rows(runtime)
-    # Ids that once carried this name, oldest knowledge first, excluding a row
-    # that is merely the room's CURRENT name (that case was the exact match).
+    alias = name.strip()
+    if alias.startswith("#"):
+        alias = alias[1:].strip()
+    # Every row of every id that ever held this name, newest sighting first
+    # (an indexed read, so an old name is never lost past a scan bound).
+    held = [] if truncated else _channel_alias_rows(runtime, name_key=key)
     alias_ids: list[str] = []
-    for row in aliases:
+    for row in held:
         cid = row.get("conversation_id")
         if row.get("name_key") == key and isinstance(cid, str) and cid not in alias_ids:
             alias_ids.append(cid)
     live_alias_ids = [cid for cid in alias_ids if cid in live]
-    if len(live_alias_ids) == 1:
+    # Resolve only when EVERY id that held the name is still live and there is
+    # exactly one: a closed or now-invisible holder (newer or older) means the
+    # caller may have meant that room, so redirecting to the live one would be
+    # a guess (code review round 1, R1-1).
+    if len(live_alias_ids) == 1 and len(alias_ids) == 1:
         cid = live_alias_ids[0]
         current_key = _room_name_key(live[cid], allow_hash=False)
-        seen_current = [
-            row.get("first_seen")
-            for row in aliases
-            if row.get("conversation_id") == cid and row.get("name_key") == current_key
-        ]
-        logger.debug("channel name resolved through a rename alias")
-        return (
-            ChannelResolution(
-                cid,
-                live[cid],
-                alias=name.strip(),
-                renamed_at=_iso_utc(seen_current[0]) if seen_current else "",
+        alias_last = max(
+            (
+                float(row["last_seen"])
+                for row in held
+                if row.get("conversation_id") == cid
+                and row.get("name_key") == key
+                and isinstance(row.get("last_seen"), (int, float))
             ),
-            None,
+            default=0.0,
         )
-    if len(live_alias_ids) > 1:
+        seen_current = [
+            float(row["first_seen"])
+            for row in held
+            if row.get("conversation_id") == cid
+            and row.get("name_key") == current_key
+            and isinstance(row.get("first_seen"), (int, float))
+        ]
+        # The store restarts ``first_seen`` when a name RETURNS after another
+        # (b -> a -> b); the clamp keeps the stamp from ever predating the old
+        # name's last sighting even on a table written before that rule.
+        renamed_at = _iso_utc(max(seen_current[0], alias_last)) if seen_current else ""
+        logger.debug("channel name resolved through a rename alias")
+        return ChannelResolution(cid, live[cid], alias=alias, renamed_at=renamed_at), None
+    if len(live_alias_ids) > 1 and len(live_alias_ids) == len(alias_ids):
         candidates = ", ".join(f"{cid} (now '{live[cid]}')" for cid in live_alias_ids)
         return None, _error(
             f"'{name.strip()}' is an old name of more than one open channel ({candidates}); "
@@ -3060,10 +3123,13 @@ async def _resolve_channel_name(
         # caller already knew (that the name once existed).
         f" A channel this machine knew as '{name.strip()}' was renamed or closed and "
         "is no longer open and visible to you."
+        # Only names a tenant-visible listing recorded can reach ``alias_ids``
+        # (the one writer), and never on a truncated read (``held`` is empty),
+        # where the room may simply sit past the cut.
         if alias_ids
         else ""
     )
-    near = _near_channel_names(key, live, aliases)
+    near = _near_channel_names(key, live, _channel_alias_rows(runtime))
     hint = f" Did you mean: {', '.join(repr(n) for n in near)}?" if near else ""
     return None, _error(
         f"no tenant-visible channel named '{name.strip()}' was found{where}.{renamed}{hint} "
@@ -3091,7 +3157,11 @@ def _near_channel_names(
     for row in aliases:
         cid = row.get("conversation_id")
         old_key = row.get("name_key")
-        if isinstance(cid, str) and cid in live and isinstance(old_key, str):
+        # The asked name itself is excluded: reaching here means the resolver
+        # REFUSED to follow that exact alias (a closed co-holder, a truncated
+        # read), and suggesting its room's current name would be the same
+        # redirect by another door, naming the room the refusal withheld.
+        if isinstance(cid, str) and cid in live and isinstance(old_key, str) and old_key != key:
             by_key.setdefault(old_key, live[cid])
     out: list[str] = []
     for match in difflib.get_close_matches(key, list(by_key), n=len(by_key) or 1, cutoff=0.6):
@@ -3727,6 +3797,9 @@ async def execute_bridge(
             )
             if refused is not None or resolution is None:
                 return refused or _error("channel_post could not resolve that channel name")
+            if resolution.alias:
+                # A post never follows an old name (S-1): see renamed_refusal.
+                return resolution.renamed_refusal("channel_post")
             channel_id = resolution.conversation_id
             # Same contract as a named recipient: from here on ``args`` carries
             # the resolved id, so every later reader of ``args["channel_id"]``
