@@ -17859,6 +17859,7 @@ def _owning_document(op: str) -> str:
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
         "net_file_get": "mesh-file-transfer.md (S1)",
+        "net_mentioned_file": "mesh-account-binding.md (§5, P3 serving)",
         "net_session_files": "remote-files-parity.md (§2)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",

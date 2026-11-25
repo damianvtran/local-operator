@@ -389,6 +389,16 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "notification-authority.json": "operator notification grant applies only on the issuing device",
     ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
     ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
+    # THE P3 SEALED SNAPSHOTS (``network/mentioned_file_read``): a byte copy of a
+    # transcript-named file that may live OUTSIDE the scratchpad. Its only
+    # authorised reader is ``net_mentioned_file``, which re-checks the P1 account
+    # binding and P2 proof and writes an audit row before every byte. As a
+    # content tree it would be served by ``net_sync`` (``view`` only, no P1, no
+    # audit) and pushed to replicas, so it never travels; a deleting move deletes
+    # it with the source, and the destination re-establishes on its next stat.
+    "mentioned-file-versions": (
+        "owner-local sealed snapshots; bytes only through the P1/P2/audited op"
+    ),
     "profile-backups": "origin-local before-images; never portable approval or action authority",
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is

@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -521,8 +522,223 @@ def test_enabled_registers_the_op_with_the_slow_deadline(tmp_path):
 
 
 def test_the_op_is_a_closed_slice_peer_op_with_a_capability_row():
-    from local_operator.network import relay, types as mesh_types
+    from local_operator.network import relay
+    from local_operator.network import types as mesh_types
 
     assert "net_mentioned_file" in mesh_types.NET_OPS
     assert mesh_types.OP_CAPABILITY["net_mentioned_file"] == "view"
     assert "net_mentioned_file" in relay.SLICE_PEER_OPS
+
+
+# --- PR #4563 round-1 remediation regressions -------------------------------
+
+
+def _version_dirs(lane):
+    base = lane.rig.root / "sessions" / lane.read.session_id / M._DIRECTORY
+    return sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+
+
+def _held_count(serving):
+    held = serving.serve._versions.get(serving.lane.rig.link.link_id)
+    return 0 if held is None else len(held[1])
+
+
+@pytest.mark.parametrize("purpose", ["replica", "move"])
+def test_snapshots_never_reach_a_view_members_net_sync(serving, monkeypatch, purpose):
+    """S1-1: the sealed snapshot is not net_sync content (plan, fetch, copy set)."""
+    from local_operator.network import sync
+
+    _call(serving)
+    lane = serving.lane
+    nonce = _version_dirs(lane)[0]
+    # The registered net_sync handler, driven by a link double holding only
+    # ``view``: the replica watcher thread is not what this test exercises.
+    monkeypatch.setattr(sync, "ensure_watcher", lambda server: None)
+    handler = sync.make_handler(lane.rig.server)
+    viewer = SimpleNamespace(device_id=lane.rig.link.device_id, capabilities=["view"])
+    sid = lane.read.session_id
+    plan = handler(
+        viewer, {"op": "net_sync", "phase": "plan", "session_id": sid, "purpose": purpose}
+    )
+    assert not [m for m in plan["members"] if m.startswith(M._DIRECTORY)], plan["members"]
+    assert not [
+        n
+        for n in sync.tree_entry_names(sync.session_dir(lane.rig.root, sid))
+        if n.startswith(M._DIRECTORY)
+    ]
+    for leaf in ("snapshot", "seal.json"):
+        with pytest.raises(MeshRefusal) as refused:
+            handler(
+                viewer,
+                {
+                    "op": "net_sync",
+                    "phase": "fetch",
+                    "session_id": sid,
+                    "plan_id": plan.get("plan_id", ""),
+                    "name": f"{M._DIRECTORY}/{nonce}/{leaf}",
+                    "offset": 0,
+                },
+            )
+        assert _code(refused) == "unknown_item"
+    assert M._DIRECTORY in sync.NEVER_COPIED
+    assert sync.unlisted_entries(sync.session_dir(lane.rig.root, sid)) == []
+
+
+def test_establish_runs_off_the_shared_page_loop(serving, monkeypatch):
+    """R1-1: a slow establishment never occupies the relay's page loop."""
+    threads: list[str] = []
+    real_span = files._read_span
+
+    def slow_span(*args, **kwargs):
+        threads.append(threading.current_thread().name)
+        time.sleep(0.4)
+        return real_span(*args, **kwargs)
+
+    monkeypatch.setattr(files, "_read_span", slow_span)
+    server = serving.server
+    with server._page_loop_lock:
+        loop = server._page_loop_locked()
+    result: dict[str, Any] = {}
+    worker = threading.Thread(target=lambda: result.update(stat=_call(serving)))
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not threads and time.monotonic() < deadline:
+        time.sleep(0.01)
+    latencies = []
+    while worker.is_alive() and len(latencies) < 5:
+        started = time.monotonic()
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=10)
+        latencies.append(time.monotonic() - started)
+        time.sleep(0.1)
+    worker.join(timeout=30)
+    assert "stat" in result
+    assert threads and "mesh-page-loop" not in threads, threads
+    assert latencies and max(latencies) < 0.2, latencies
+
+
+def test_timeout_answers_typed_and_strands_nothing(serving, monkeypatch):
+    """R1-3/R1-4: typed timeout reaches the peer; the late work closes cleanly."""
+    serve_module = _serve_module()
+    assert serve_module.MENTIONED_FILE_OP_TIMEOUT_S < files.FILE_OP_DEADLINE_S
+    monkeypatch.setattr(serve_module, "MENTIONED_FILE_OP_TIMEOUT_S", 0.3)
+    real_span = files._read_span
+    monkeypatch.setattr(
+        files, "_read_span", lambda *a, **kw: (time.sleep(0.6), real_span(*a, **kw))[1]
+    )
+    errors: list[BaseException] = []
+    finished = threading.Event()
+    real_establish = M.OwnerMentionedFileReader.establish
+
+    async def recording(self, initial):
+        try:
+            return await real_establish(self, initial)
+        except BaseException as error:
+            errors.append(error)
+            raise
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(M.OwnerMentionedFileReader, "establish", recording)
+    started = time.monotonic()
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving)
+    assert _code(refused) == "mentioned_file_owner_timeout"
+    assert time.monotonic() - started < 2
+    assert finished.wait(30)
+    deadline = time.monotonic() + 10
+    while _version_dirs(serving.lane) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert [type(e).__name__ for e in errors] == []
+    assert _version_dirs(serving.lane) == []
+    assert _held_count(serving) == 0
+
+
+def test_restat_reuses_one_version_and_link_close_removes_it(serving):
+    """R1-2/S1-3: three stats hold one version and one directory."""
+    stats = [_call(serving) for _ in range(3)]
+    assert stats[0] == stats[1] == stats[2]
+    assert len(_version_dirs(serving.lane)) == 1
+    assert _held_count(serving) == 1
+    serving.serve.forget_link(serving.lane.rig.link, "closed")
+    assert _version_dirs(serving.lane) == []
+
+
+def test_a_version_that_no_longer_prepares_is_superseded_and_removed(serving, monkeypatch):
+    first = _call(serving)
+    old = _version_dirs(serving.lane)
+    real_prepare = M.OwnerMentionedFileReader.prepare
+
+    async def stale_once(self, version, read):
+        if version.commitment == first["version"]:
+            M._refuse()
+        return await real_prepare(self, version, read)
+
+    monkeypatch.setattr(M.OwnerMentionedFileReader, "prepare", stale_once)
+    second = _call(serving)
+    assert second["version"] != first["version"]
+    now = _version_dirs(serving.lane)
+    assert len(now) == 1 and now != old
+    assert _held_count(serving) == 1
+
+
+def test_a_refusal_after_sealing_leaves_no_snapshot_directory(serving, monkeypatch):
+    """S1-4/R1-3: a stat refused after establishment does not strand its copy."""
+    real = P.lookup_proof
+
+    def gone_after_seal(root, session, opaque):
+        if any(serving.lane.rig.root.glob(f"sessions/*/{M._DIRECTORY}/*/seal.json")):
+            return None
+        return real(root, session, opaque)
+
+    monkeypatch.setattr(P, "lookup_proof", gone_after_seal)
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving)
+    assert _code(refused) == "mentioned_file_unavailable"
+    assert _version_dirs(serving.lane) == []
+
+
+@pytest.mark.parametrize("condition", ["ambiguous", "unknown"])
+def test_owner_account_state_is_generic_before_p1(serving, monkeypatch, condition):
+    """S1-2: before P1, the peer cannot learn the owner's login inventory."""
+    if condition == "ambiguous":
+        _login_b(serving.lane.rig)
+    else:
+        monkeypatch.setattr(AuthStore, "native_oauth_inventory", staticmethod(lambda path: None))
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving)
+    assert _code(refused) == "mentioned_file_unavailable"
+    assert refused.value.sentence == "the owner cannot prepare this file"
+
+
+def test_relogin_between_stat_and_fetch_is_named_relogin(serving):
+    """Q1-2: the version carries the incarnation it was sealed under."""
+    stat = _call(serving)
+    rig = serving.lane.rig
+    rig.auth._conn.execute(
+        "UPDATE auth_credentials SET login_incarnation = 'relogged' WHERE id = ?", (rig.row.id,)
+    )
+    rig.auth._conn.commit()
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving, phase="fetch", file_version=stat["version"], length=4)
+    assert _code(refused) == "mentioned_file_owner_relogin"
+
+
+def test_verify_accepts_net_file_get_prefix_bytes(serving):
+    """R1-6: ``prefix_bytes`` is an alias of ``length``; two values are refused."""
+    content = serving.lane.target.read_bytes()
+    stat = _call(serving)
+    good = "sha256:" + hashlib.sha256(content[:12]).hexdigest()
+    frame = dict(phase="verify", file_version=stat["version"], length=None, prefix_digest=good)
+    assert _call(serving, prefix_bytes=12, **frame) == {"match": True}
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving, prefix_bytes=12, **{**frame, "length": 11})
+    assert _code(refused) == "mentioned_file_bad_request"
+
+
+def test_the_op_names_its_owning_design_document():
+    """R1-5: the default-off refusal names where P3 serving is specified."""
+    from local_operator.network.relay import _owning_document
+
+    owner = _owning_document("net_mentioned_file")
+    assert owner.startswith("mesh-account-binding.md")
+    assert (ROOT / "docs" / "design" / owner.split()[0]).is_file()
