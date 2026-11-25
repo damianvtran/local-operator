@@ -31645,7 +31645,94 @@ async def execute_browser(
     state = getattr(context, "browser", None)
     if state is None:
         return result
+    result = await _reopen_handoff_if_gone(tool_call_id, args, result, signal, on_update, context)
     return _child_browser_fate_note(state, args, result, before)
+
+
+#: Actions that mean "continue in my tab" — the ones a vanished handoff tab
+#: turns into "no browser surface open". `open`/`goto`/`close` choose a page or
+#: an end themselves; `tabs` and the access/ownership verbs never need a page.
+_REOPEN_EXEMPT_ACTIONS = frozenset(
+    {
+        "open",
+        "goto",
+        "close",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "retain",
+        "release",
+    }
+)
+
+
+async def _reopen_handoff_if_gone(
+    tool_call_id: str,
+    args: dict[str, Any],
+    result: ToolResult,
+    signal: AbortSignal | None,
+    on_update: Callable[[AgentToolUpdate], None] | None,
+    context: ToolContext | None,
+) -> ToolResult:
+    """The reopen floor: put a vanished handoff tab back, then do what was asked.
+
+    Runs AFTER the owned lane released its lock (a reopen is an ordinary `open`
+    through that same lane, so ownership, site approval and the tab cap all
+    apply unchanged) and only when this session has no live tab and its
+    record holds a reference for an ask that is still open or just answered
+    (``BrowserResource.reopenable_handoff``). The tab is a NEW one owned by
+    this session, opened in the background on the host the original used; no
+    other session's tab is ever looked up. The result says it is a reopened
+    handoff, so the agent continues instead of starting over.
+    """
+    action = str(args.get("action", "")).strip().lower()
+    state = getattr(context, "browser", None)
+    resource = getattr(state, "resource", None)
+    if action in _REOPEN_EXEMPT_ACTIONS or resource is None or getattr(state, "surface_id", ""):
+        return result
+    try:
+        ref = resource.reopenable_handoff()
+    except Exception:  # noqa: BLE001 - the floor must never break the action it serves
+        logger.warning("handoff reopen check failed", exc_info=True)
+        return result
+    if not ref:
+        return result
+    backend = {"bridge": "extension", "ui": "ui"}.get(str(ref.get("host", "")), "")
+    open_args: dict[str, Any] = {"action": "open", "url": ref["url"]}
+    if backend:
+        open_args["backend"] = backend
+    reopened = await _execute_browser_owned(
+        f"{tool_call_id}:reopen", open_args, signal, on_update, context
+    )
+    label = f"ask {ref['ask_id']} ({ref.get('ask_status')})"
+    if reopened.is_error:
+        return _append_result_text(
+            result,
+            f"The tab for {label} was closed when an earlier runtime ended; reopening "
+            f"{redacted_url_for_copy(ref['url'])} failed: {reopened.text}",
+        )
+    note = (
+        f"Reopened handoff: the tab for {label} was closed when an earlier runtime ended, "
+        f"so {redacted_url_for_copy(ref['url'])} was reopened in a new background tab of "
+        "this session. Continue there; this is not a fresh start."
+    )
+    if action == "recover":
+        return _append_result_text(reopened, note)
+    retried = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
+    details = dict(retried.details or {})
+    details["reopened_handoff"] = str(ref["ask_id"])
+    # What the host actually navigated to, from the reopen's own result.
+    details["reopened_url"] = (reopened.details or {}).get("url", "")
+    retried = retried.model_copy(update={"details": details})
+    return _append_result_text(retried, note)
+
+
+def redacted_url_for_copy(url: str) -> str:
+    """The reopened page as the model reads it: no query or fragment."""
+    from local_operator.browser_bridge.resources import redacted_url
+
+    return redacted_url(url) or url
 
 
 async def _browser_handed_close(
@@ -32057,6 +32144,13 @@ async def _execute_browser_owned(
                 # bound to that origin (resources.SURFACE_ORIGIN_FIELD), so a tab
                 # the agent has since driven to another site is not held for it.
                 observed_url = (result.details or {}).get("url")
+            if action in ("open", "goto", "close") and not result.is_error:
+                # The agent chose a page (or chose to close): any reopen
+                # reference for a vanished handoff tab is spent.
+                try:
+                    resource.consume_handoff_refs()
+                except (BrowserOwnershipError, OSError, ValueError):
+                    logger.warning("handoff references not cleared", exc_info=True)
             if action == "close" and not result.is_error:
                 # The owner's explicit close always wins over a pending-ask hold.
                 # Best-effort: the tab is already closed, and a hold that could
@@ -38691,7 +38785,29 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(questions, params.timeout, tool_call_id=tool_call_id)
+        # THE REOPEN FLOOR (resources.HANDOFF_REFS_FIELD): with or without
+        # `browser_handoff`, an ask queued while this session holds a live tab
+        # records which page it showed, so a later turn can reopen it if the tab
+        # is gone. A redacted copy rides the ask's own row; no retention.
+        browser_now = getattr(context, "browser", None) if context is not None else None
+        ref_resource: Any = getattr(browser_now, "resource", None)
+        browser_ref: dict[str, Any] | None = None
+        if ref_resource is not None and str(getattr(browser_now, "surface_id", "") or ""):
+            try:
+                ref_resource.initialize()
+                browser_ref = ref_resource.handoff_reference()
+            except Exception:  # noqa: BLE001 - a reference must never cost the ask
+                logger.warning("ask handoff reference not computed", exc_info=True)
+        outcome: Any = (
+            enqueue(questions, params.timeout, tool_call_id=tool_call_id, browser_ref=browser_ref)
+            if browser_ref
+            else enqueue(questions, params.timeout, tool_call_id=tool_call_id)
+        )
+        if outcome.get("ok") and browser_ref:
+            try:
+                ref_resource.record_handoff_ref(str((outcome.get("details") or {}).get("ask_id")))
+            except Exception:  # noqa: BLE001
+                logger.warning("ask handoff reference not recorded", exc_info=True)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,

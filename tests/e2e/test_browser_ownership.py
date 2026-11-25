@@ -1304,3 +1304,112 @@ async def test_explicit_release_stays_released_through_disposal(
     finally:
         await session.dispose()
     assert _control(protocol_peer)["tabs"] == 0
+
+
+# -- the reopen floor: no flag, the tab closes, the next run reopens it -------
+#
+# The incident's agent had `retain` and did not use it; a flag the model must
+# remember cannot be the only thing standing between a user and a lost
+# sign-in. These run WITHOUT `browser_handoff`.
+
+SIGNIN_URL = "https://signin.example.test/login?next=%2Fapps"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ask_state", ["open", "answered"])
+async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, ask_state: str
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        first_surface = session._browser.surface_id
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    # Ordinary cleanup, exactly as before: no flag, no hold, the tab is closed.
+    assert _control(protocol_peer)["tabs"] == 0
+    from local_operator.asks import store
+
+    queued = [
+        e
+        for e in store.read_events(session._browser.resource.directory)
+        if e.get("kind") == "queued" and e.get("ask_id") == ask_id
+    ]
+    # The ask's own row carries the REDACTED reference only.
+    assert queued[0]["browser_ref"]["url"] == "https://signin.example.test/login"
+    # The public tab label (`host:tab`), never the capability handle's nonce.
+    assert first_surface not in json.dumps(queued[0]["browser_ref"])
+    assert first_surface.startswith(queued[0]["browser_ref"]["surface"])
+
+    if ask_state == "answered":
+        # The answer arriving is the other trigger: the agent continues there.
+        _settle_ask(session._browser.resource.directory, ask_id)
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+        assert snap.details["reopened_handoff"] == ask_id
+        assert "Reopened handoff" in snap.text and "not a fresh start" in snap.text
+        assert snap.details.get("reopened_url") == SIGNIN_URL
+        assert successor._browser.surface_id and successor._browser.surface_id != first_surface
+        assert _control(protocol_peer)["tabs"] == 1
+        # Spent: a second action does not reopen again.
+        again = await _tool(successor, "synthetic-snapshot-2", "browser", {"action": "snapshot"})
+        assert "reopened_handoff" not in (again.details or {})
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["withdrawn", "agent_moved_on"])
+async def test_no_reopen_for_a_withdrawn_ask_or_after_the_agent_chose_a_page(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, settle: str
+) -> None:
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        ask_id = await _ask(session, handoff=False)
+        if settle == "withdrawn":
+            _settle_ask(directory, ask_id, "withdrawn")
+        else:
+            await _tool(session, "synthetic-close", "browser", {"action": "close"})
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_another_session_never_reopens_this_sessions_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    other_dir = headless_tui_env / "sessions" / "synthetic-other"
+    lease = acquire_session_lease(other_dir)
+    other = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda _r, _s: _never_streams(_r, _s),
+        tools=[],
+        transcript=Transcript(other_dir),
+        system_blocks_provider=lambda: [],
+    )
+    other.add_dispose_hook(lease.release)
+    try:
+        snap = await _tool(other, "synthetic-foreign-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await other.dispose()

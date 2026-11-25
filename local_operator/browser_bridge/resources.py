@@ -103,6 +103,38 @@ ASK_HOLD_EXPIRES_FIELD = "retention_expires_at"
 ASK_HANDOFFS_FIELD = "ask_handoffs"
 SURFACE_ORIGIN_FIELD = "surface_origin"
 
+#: THE REOPEN FLOOR (the part that does not depend on the model). Pinning
+#: (``browser_handoff=true``) is an optimisation a model must remember to ask
+#: for; the incident's agent had ``retain`` available and did not use it. So
+#: whenever an ask is queued while the session holds a live tab, a reference
+#: to the page it showed is recorded regardless of any flag, with NO
+#: retention: ordinary cleanup still closes the tab. When a later browser
+#: action finds no live tab and that ask is still open (or was just answered),
+#: the tool reopens the recorded URL in a fresh tab OF THIS SESSION — never
+#: another session's, never focused — and reports it as a reopened handoff.
+#:
+#: Two copies, on purpose. The ask's own row (``asks.jsonl``, which travels
+#: with a moved session and is read by remote surfaces) carries only a
+#: REDACTED reference: origin, the URL without query/fragment, and the public
+#: tab label — never the capability handle, and never a query string that may
+#: hold a one-time code. The full URL stays in this private, device-local
+#: record (``HANDOFF_REFS_FIELD``), which is what the reopen uses.
+SURFACE_URL_FIELD = "surface_url"
+HANDOFF_REFS_FIELD = "handoff_refs"
+#: Ask states in which a missing tab is still worth reopening: the user is
+#: being asked to act in it, or has just answered and the agent continues.
+_REOPENABLE_ASK_STATES = frozenset({"open", "answered"})
+
+
+def redacted_url(url: Any) -> str:
+    """``scheme://host[:port]/path`` of ``url``: no query, no fragment."""
+    from urllib.parse import urlsplit
+
+    origin = url_origin(url)
+    if not origin:
+        return ""
+    return origin + (urlsplit(str(url)).path or "/")
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -1717,16 +1749,102 @@ class BrowserResource:
         return binding
 
     def note_surface_origin(self, url: Any) -> None:
-        """Remember the origin the agent last saw its live tab on (or forget it)."""
-        origin = url_origin(url) if self.record.get("surface_id") else ""
-        if origin == self.record.get(SURFACE_ORIGIN_FIELD, ""):
+        """Remember the page the agent last saw its live tab on (or forget it).
+
+        Private, like ``surface_id``: the full URL is the reopen target.
+        """
+        live = bool(self.record.get("surface_id"))
+        origin = url_origin(url) if live else ""
+        full = str(url) if origin else ""
+        if origin == self.record.get(SURFACE_ORIGIN_FIELD, "") and full == self.record.get(
+            SURFACE_URL_FIELD, ""
+        ):
             return
         self.assert_current()
-        if origin:
-            self.record[SURFACE_ORIGIN_FIELD] = origin
-        else:
-            self.record.pop(SURFACE_ORIGIN_FIELD, None)
+        for field, value in ((SURFACE_ORIGIN_FIELD, origin), (SURFACE_URL_FIELD, full)):
+            if value:
+                self.record[field] = value
+            else:
+                self.record.pop(field, None)
         self._save()
+
+    def handoff_reference(self) -> dict[str, Any] | None:
+        """The REDACTED reference for an ask queued now, or ``None`` (no live tab).
+
+        Safe for the ask row: no capability handle, no query or fragment.
+        """
+        from local_operator.browser_bridge.handoff import public_surface_label
+
+        surface = str(self.record.get("surface_id", ""))
+        url = str(self.record.get(SURFACE_URL_FIELD, ""))
+        if not surface or not url_origin(url):
+            return None
+        return {
+            "origin": url_origin(url),
+            "url": redacted_url(url),
+            "surface": public_surface_label(surface),
+        }
+
+    def record_handoff_ref(self, ask_id: str) -> None:
+        """Keep the private reopen target for ``ask_id`` (full URL, host lane)."""
+        surface = str(self.record.get("surface_id", ""))
+        url = str(self.record.get(SURFACE_URL_FIELD, ""))
+        if not ask_id or not surface or not url_origin(url):
+            return
+        self.assert_current()
+        refs = [
+            r
+            for r in self.record.get(HANDOFF_REFS_FIELD, [])
+            if isinstance(r, dict) and r.get("ask_id") != ask_id
+        ]
+        refs.append(
+            {
+                "ask_id": str(ask_id),
+                "url": url,
+                "origin": url_origin(url),
+                "host": str(self.record.get("host", "") or surface_host(surface)),
+            }
+        )
+        # Bounded: the open-ask cap already bounds live asks; keep a short tail.
+        self.record[HANDOFF_REFS_FIELD] = refs[-8:]
+        self._save()
+
+    def reopenable_handoff(self) -> dict[str, Any] | None:
+        """The newest reference whose tab is gone and whose ask still wants it.
+
+        ``None`` while a tab is live (nothing to reopen), when no reference
+        exists, or when the ask log cannot be read STRICTLY (a read failure
+        must not open a page on a guess).
+        """
+        if self.record.get("surface_id"):
+            return None
+        refs = [r for r in self.record.get(HANDOFF_REFS_FIELD, []) if isinstance(r, dict)]
+        if not refs:
+            return None
+        from local_operator.asks import store as ask_store
+
+        try:
+            records = ask_store.fold(ask_store.read_events(self.directory, strict=True), _now_ms())
+        except (OSError, ValueError):
+            return None
+        status = {str(r.get("ask_id", "")): str(r.get("status", "")) for r in records}
+        for ref in reversed(refs):
+            if status.get(str(ref.get("ask_id", ""))) in _REOPENABLE_ASK_STATES and url_origin(
+                ref.get("url")
+            ):
+                return {**ref, "ask_status": status[str(ref["ask_id"])]}
+        return None
+
+    def consume_handoff_refs(self) -> None:
+        """The agent opened or closed a tab itself: no reference is owed any more.
+
+        A reopen is a floor for a tab that vanished UNDER the agent; once the
+        agent chose a page (or chose to close), reopening the old one would
+        override that choice.
+        """
+        if self.record.pop(HANDOFF_REFS_FIELD, None) is not None:
+            self.assert_current()
+            self._save()
 
     def _live_handoffs(self, open_ids: set[str] | None) -> list[dict[str, Any]]:
         """Bindings that still hold. ``open_ids=None`` means the ask log could not

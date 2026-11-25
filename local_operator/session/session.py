@@ -14808,8 +14808,13 @@ class Session:
         timeout: Any = None,
         tool_call_id: str = "",
         relay: str | None = None,
+        browser_ref: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Queue one ask and return the tool's receipt (or a refusal).
+
+        ``browser_ref`` is the REDACTED handoff reference the ask tool computed
+        from this session's live tab (``BrowserResource.handoff_reference``); it
+        rides the ask's own row so the page it was about stays on record.
 
         Thin by design: the caps, the log write, the index and the deadline row
         all live in ``AskQueue.enqueue``, and the tool layer never learns about
@@ -14824,7 +14829,9 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(
+            questions, timeout, tool_call_id=tool_call_id, browser_ref=browser_ref
+        )
         # The mirror of the notify door's check (``asks/dedupe.py``): a
         # same-topic update raised just before this question leaves Unread and
         # rides the ask. Not on the relay arm: those questions are another

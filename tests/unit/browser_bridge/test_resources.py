@@ -1043,3 +1043,41 @@ async def test_an_unreadable_ask_log_never_reads_as_no_open_asks(
     with pytest.raises(OSError):
         resources.open_ask_ids(tmp_path)
     assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+
+
+# -- reopen floor references -------------------------------------------------
+
+
+def test_handoff_reference_is_redacted_and_the_private_ref_keeps_the_url(
+    tmp_path: Path,
+) -> None:
+    resource = _owned_tab(tmp_path, "https://signin.example.test/login?code=SECRET#frag")
+    ref = resource.handoff_reference()
+    assert ref == {
+        "origin": "https://signin.example.test",
+        "url": "https://signin.example.test/login",
+        "surface": "bridge:100",
+    }
+    resource.record_handoff_ref("a-1")
+    assert resource.record[resources.HANDOFF_REFS_FIELD][0]["url"].endswith("?code=SECRET#frag")
+
+
+def test_reopen_is_offered_only_with_no_live_tab_and_a_wanting_ask(tmp_path: Path) -> None:
+    from local_operator.asks import store
+
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-1")
+    resource.record_handoff_ref("a-1")
+    assert resource.reopenable_handoff() is None  # the tab is still live
+    resource.remember("")
+    assert resource.reopenable_handoff()["ask_id"] == "a-1"
+    # A read failure never opens a page on a guess.
+    log = store.asks_log_path(tmp_path)
+    saved = log.read_bytes()
+    log.unlink()
+    log.mkdir()
+    assert resource.reopenable_handoff() is None
+    log.rmdir()
+    log.write_bytes(saved)
+    _settle_ask(tmp_path, "a-1", "withdrawn")
+    assert resource.reopenable_handoff() is None
