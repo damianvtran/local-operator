@@ -772,7 +772,17 @@ async def _build_session(
     # ``deliver`` sessions run in a runtime process and keep the normal rules.
     from local_operator.providers.anthropic_cache_ttl import mark_automation_session
 
-    if not spec.workstream and team is None:
+    #
+    # A ``SessionSpec(resume=…)`` carries no ``team``, but the constructor's
+    # attachment restore has already re-attached the session's stored team
+    # (or recorded it as ``_unresolved_team`` until its definition lands), so
+    # the live session is checked too (agent review round 2, MAJOR-1).
+    if (
+        not spec.workstream
+        and team is None
+        and getattr(session, "active_team", None) is None
+        and not getattr(session, "_unresolved_team", "")
+    ):
         mark_automation_session(session)
     if team is not None:
         session.attach_team(team)

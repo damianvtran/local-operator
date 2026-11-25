@@ -245,6 +245,27 @@ async def test_open_session_marks_only_solo_sessions_as_cache_automation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("team", "marked"), [("lopdev", False), (None, True)])
+async def test_a_resumed_session_is_marked_only_when_it_restores_no_team(
+    scratch: SessionRoots, team: str | None, marked: bool
+) -> None:
+    """``SessionSpec(resume=…)`` names no team, yet the constructor's
+    attachment restore re-attaches the stored one, so the gate must read the
+    live session (agent review round 2, MAJOR-1: resumed team jobs netted
+    -3.89M base-equivalent when marked). A resumed solo session stays marked."""
+    _seed_lopdev(scratch)
+    async with sdk.open_session(_mock_spec(team=team), roots=scratch) as first:
+        first = cast(Any, first)
+        # One mock turn: the transcript (what ``resume`` looks up) is lazy.
+        await first.prompt("seed")
+        session_id = first.session_id
+    async with sdk.open_session(_mock_spec(resume=session_id), roots=scratch) as resumed:
+        resumed = cast(Any, resumed)
+        assert (resumed.active_team is not None) is (team is not None)
+        assert resumed._stream_fn._automation is marked
+
+
+@pytest.mark.asyncio
 async def test_open_session_refuses_a_team_this_root_does_not_hold(scratch: SessionRoots) -> None:
     """A missing team is refused by name — the other silent-drop half of Q-MAJOR-3."""
     with pytest.raises(SessionSpecError, match="No team named"):

@@ -106,7 +106,20 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     # exec-jobs ledger (agent review round 1, MAJOR-1), team-led exec runs
     # netted -1.66M base-equivalent under 5m-until-the-gap (57 jobs, median
     # first long gap 638 s) while solo runs were roughly neutral to positive.
-    if not getattr(args, "workstream", False) and team is None:
+    #
+    # The team may be the SESSION'S, not the argument's: ``Session.__init__``
+    # -> ``_restore_attachment`` re-attaches a stored team on resume, and
+    # ``exec --resume <id>`` without ``--team`` (how the ``sessions`` tool
+    # resumes) passes ``team=None``. A restore waiting on its definition
+    # (``_unresolved_team``) attaches on the next turn, so it counts as a team
+    # too. Replayed (agent review round 2): resumed team-restored jobs netted
+    # -3.89M base-equivalent when marked (594 jobs); resumed solo +2.69M (128).
+    if (
+        not getattr(args, "workstream", False)
+        and team is None
+        and getattr(session, "active_team", None) is None
+        and not getattr(session, "_unresolved_team", "")
+    ):
         mark_automation_session(session)
     control = None
     try:

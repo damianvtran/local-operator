@@ -750,7 +750,18 @@ def test_mark_automation_session_tolerates_sessions_without_a_stream() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("workstream", "team", "marked"),
-    [(False, None, True), (True, None, False), (False, "team", False), (True, "team", False)],
+    [
+        (False, None, True),
+        (True, None, False),
+        (False, "team", False),
+        (True, "team", False),
+        # ``exec --resume <id>`` with no ``--team`` (the ``sessions`` tool's
+        # resume): the argument is None but the constructor's restore already
+        # attached the stored team, or recorded it as pending (agent review
+        # round 2, MAJOR-1). A resumed solo session is the first row.
+        (False, "restored", False),
+        (False, "unresolved", False),
+    ],
 )
 async def test_exec_run_session_marks_automation_except_for_workstreams_and_teams(
     monkeypatch, workstream: bool, team: Any, marked: bool
@@ -775,6 +786,8 @@ async def test_exec_run_session_marks_automation_except_for_workstreams_and_team
 
     class _Session:
         _stream_fn = stream
+        active_team = object() if team == "restored" else None
+        _unresolved_team = "lopdev" if team == "unresolved" else ""
 
         async def dispose(self) -> None:
             return None
@@ -785,7 +798,7 @@ async def test_exec_run_session_marks_automation_except_for_workstreams_and_team
                 _Session(),
                 "p",
                 types.SimpleNamespace(workstream=workstream),
-                object() if team else None,
+                object() if team == "team" else None,
             )
         assert stream._automation is marked
     finally:

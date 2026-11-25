@@ -5213,8 +5213,9 @@ class ChatRequest(BaseModel):
     #: SDK session), marked on its ``SessionStreamFn`` by the entry point. Read
     #: only by the cache-TTL policy, which keeps such a main thread at 5m until
     #: a long gap: in the measured solo runs its next call followed within
-    #: seconds and the run ended at the turn's end. Team-led and workstream runs
-    #: are never marked. Transport policy, never wire content.
+    #: seconds and the run ended at the turn's end. The entry points leave it
+    #: unset for workstream runs and for any session with a team, passed in or
+    #: restored on resume. Transport policy, never wire content.
     cache_automation: bool = Field(default=False, exclude=True, repr=False)
     #: Two of this conversation's turn requests were already at least
     #: ``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S`` apart, start
