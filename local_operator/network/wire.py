@@ -239,6 +239,9 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # The operator's device presents its signed onboarding decision; see
     # OPERATOR_BINDING_V1 below.
     "operator-binding-v1",
+    # A one-session catalogue lookup (``net_catalog`` + ``session_id``); see
+    # REMOTE_CATALOG_SESSION_ID_V1 below.
+    "remote-catalog-session-id-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
@@ -249,6 +252,17 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_catalog`` honours an optional ``session_id`` and answers only that
+#: session's row (0 or 1, byte-identical to its row in the full listing) instead
+#: of every row. Why: a viewer's ``peer_session_facts`` asks about ONE session —
+#: the remote pilot's ``RemoteOwner.locate`` before every bind — yet answered it
+#: from a full mesh-wide catalogue fan-out; measured 2026-11-25, 232 rows took
+#: 11.56 s of the 12 s ``LISTING_PROBE_BUDGET_S``, and one overrun made a LIVE
+#: session read as unowned ("could not start a runtime"). A viewer sends the
+#: field only on a link advertising this, so an older owner keeps receiving the
+#: exact frame it always did (and answers with its full rows, which the viewer
+#: then filters itself). Additive: no new op, no grant.
+REMOTE_CATALOG_SESSION_ID_V1 = "remote-catalog-session-id-v1"
 #: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
 #: presents the onboarding decision the operator already signed, so a node can
 #: forward asks/notices of sessions STARTED on it to that device. A peer without
