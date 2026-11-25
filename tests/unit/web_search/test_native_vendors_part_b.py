@@ -14,6 +14,7 @@ vendors in place).
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -35,7 +36,7 @@ from tests.unit.web_search.test_native_vendors import (
 PART_B = ("google", "kimi", "zai", "mistral", "openrouter")
 
 
-def _body(request: httpx.Request) -> dict:
+def _body(request: httpx.Request) -> dict[str, Any]:
     return json.loads(request.content)
 
 
@@ -69,7 +70,9 @@ async def test_openrouter_records_the_billed_cost_and_its_search_item(monkeypatc
     ]
     assert len(response.sources) >= 3
     # The count comes from usage.server_tool_use_details, not a guessed item type.
+    assert response.usage is not None
     assert response.usage.server_searches == 1
+    assert response.cost is not None
     assert response.cost.usd == pytest.approx(0.007238)
     assert response.cost.basis == openrouter.BASIS_BILLED and response.cost.priced_from_usage
     assert response.request_id == "gen-REDACTED"
@@ -81,7 +84,9 @@ async def test_openrouter_without_billed_cost_falls_back_to_the_estimate(monkeyp
     payload = _fixture("openrouter_responses_live.json")
     payload["usage"].pop("cost")
     response, _seen = await _run("openrouter", lambda _r: httpx.Response(200, json=payload))
+    assert response.cost is not None
     assert response.cost.basis != openrouter.BASIS_BILLED
+    assert response.cost.usd is not None
     assert response.cost.usd >= openrouter.FEE_USD
 
 
@@ -116,9 +121,12 @@ async def test_google_grounding_sends_the_key_in_a_header_and_prices_fee_plus_to
     assert [s.title for s in response.sources] == ["python.org", "blog.python.org"]
     assert response.sources[0].snippet == "Python 3.15.2 is the latest stable release."
     # Tool-use prompt tokens are input; thinking tokens are output.
+    assert response.usage is not None
     assert response.usage.input_tokens == 912 and response.usage.output_tokens == 100
     assert response.usage.server_searches == 1
+    assert response.cost is not None
     assert response.cost.priced_from_usage
+    assert response.cost.usd is not None
     assert response.cost.usd > google.FEE_USD
     assert google.BASIS_NOTE in response.cost.basis
 
@@ -148,6 +156,7 @@ async def test_kimi_key_leg_is_a_search_api_priced_per_call(monkeypatch) -> None
     }
     assert response.auth_mode == "api-key" and response.answer is None
     assert response.sources[0].published_date == "2026-10-25"
+    assert response.cost is not None
     assert response.cost.usd == pytest.approx(0.002)
 
 
@@ -191,6 +200,7 @@ async def test_kimi_code_plan_leg_sends_the_grant_and_device_headers(monkeypatch
     assert str(seen[0].url) == kimi.PLAN_SEARCH_URL
     assert seen[0].headers["authorization"] == "Bearer test-grant"
     assert seen[0].headers["x-msh-platform"] == "kimi_cli"
+    assert response.cost is not None
     assert response.auth_mode == "plan" and response.cost.usd is None
 
 
@@ -221,6 +231,7 @@ async def test_zai_calls_web_search_prime_with_the_grant_first(monkeypatch) -> N
         "https://www.python.org/downloads/",
         "https://www.python.org/downloads/release/python-3152/",
     ]
+    assert response.cost is not None
     assert response.cost.usd is None and "GLM Coding Plan" in response.cost.basis
 
 
@@ -249,9 +260,11 @@ async def test_mistral_reads_tool_references_and_counts_connector_tokens(monkeyp
         "Download Python",
     ]
     assert response.answer == "Python 3.15.2 is the latest stable release."
+    assert response.usage is not None
     assert response.usage.input_tokens == 188 + 7112
     assert response.usage.server_searches == 1
     # The -latest alias is not in the price registry: fee only, stated as a floor.
+    assert response.cost is not None
     assert response.cost.usd == pytest.approx(0.03) and "floor" in response.cost.basis
 
 

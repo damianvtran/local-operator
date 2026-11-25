@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -36,7 +37,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "native"
 QUERY = "latest stable Python release"
 
 
-def _fixture(name: str) -> dict:
+def _fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text())
 
 
@@ -76,7 +77,7 @@ async def _run(provider, handler, *, mode=None, settings=None):
     return response, seen
 
 
-def _sse(payload: dict) -> str:
+def _sse(payload: dict[str, Any]) -> str:
     events = [{"type": "response.output_item.done", "item": item} for item in payload["output"]] + [
         {"type": "response.completed", "response": {**payload, "output": []}}
     ]
@@ -127,10 +128,13 @@ async def test_openai_key_leg_posts_responses_and_prices_fee_plus_tokens(monkeyp
         "https://www.python.org/downloads/",
     ]
     # 6,000 fresh + 2,000 cached input, 120 output at gpt-4.1-mini list price.
+    assert response.usage is not None
     expected = pricing.native_cost(
         fee_usd=0.01, usage=response.usage, hosting="openai", model="gpt-4.1-mini", cache="inside"
     )
+    assert response.cost is not None
     assert response.cost == expected and response.cost.priced_from_usage
+    assert response.cost.usd is not None
     assert response.cost.usd > 0.01
 
 
@@ -160,6 +164,7 @@ async def test_openai_plan_leg_streams_the_codex_backend(monkeypatch) -> None:
     assert request.headers["openai-beta"] == "responses=experimental"
     assert body["stream"] is True and body["store"] is False
     assert response.auth_mode == "plan" and len(response.sources) == 2
+    assert response.cost is not None
     assert response.cost.usd is None and response.cost.basis == "included in ChatGPT plan"
 
 
@@ -209,7 +214,9 @@ async def test_anthropic_key_leg_sends_x_api_key_and_no_claude_code_identity(mon
     assert "system" not in body
     assert body["tools"][0] == {"type": "web_search_20250305", "name": "web_search", "max_uses": 1}
     assert response.auth_mode == "api-key" and len(response.sources) == 5
+    assert response.usage is not None
     assert response.usage.server_searches == 1
+    assert response.cost is not None
     assert "Claude extra usage" not in response.cost.basis
 
 
@@ -245,6 +252,7 @@ async def test_claude_subscription_leg_sends_the_oauth_shape(monkeypatch) -> Non
     assert "x-api-key" not in request.headers
     assert body["system"][0]["text"] == anthropic.CLAUDE_CODE_IDENTITY
     assert response.auth_mode == "subscription"
+    assert response.cost is not None
     assert response.cost.basis.endswith("API equivalent; drawn from Claude extra usage")
     # Live usage: 13,501 in / 669 out at claude-haiku-5-5 + one $0.01 search.
     assert response.cost.usd == pytest.approx(0.01 + 13_501 * 0.1e-6 + 669 * 0.5e-6, abs=1e-6)
@@ -278,8 +286,10 @@ async def test_xai_reads_citations_and_bills_every_reported_search(monkeypatch) 
         "https://www.python.org/downloads/release/python-3150/",
         "https://www.python.org/downloads/",
     ]
+    assert response.usage is not None
     assert response.usage.server_searches == 2
     tokens = 6_000 * 1.25e-6 + 2_000 * 0.2e-6 + 120 * 2.5e-6
+    assert response.cost is not None
     assert response.cost.usd == pytest.approx(2 * 0.005 + tokens)
 
 
@@ -289,6 +299,7 @@ async def test_xai_grant_serves_when_no_key_is_stored(monkeypatch) -> None:
     payload = _fixture("xai_responses_documented.json")
     response, seen = await _run("xai", lambda _r: httpx.Response(200, json=payload), mode="oauth")
     assert seen[0].headers["authorization"] == "Bearer test-grant"
+    assert response.cost is not None
     assert "unpublished" in response.cost.basis
 
 
@@ -300,7 +311,9 @@ async def test_alibaba_uses_billed_count_and_reports_an_unpriced_model_as_a_floo
     payload = _fixture("alibaba_responses_documented.json")
     response, seen = await _run("alibaba", lambda _r: httpx.Response(200, json=payload))
     assert str(seen[0].url) == alibaba.RESPONSES_URL
+    assert response.usage is not None
     assert response.usage.server_searches == 3
+    assert response.cost is not None
     assert response.cost.usd == pytest.approx(0.03)
     assert response.cost.priced_from_usage is False and "floor" in response.cost.basis
 
@@ -445,12 +458,18 @@ async def test_row27_thirteen_real_legs_fail_and_every_one_is_named(tmp_path, mo
     )
     monkeypatch.setattr(openai_vendor, "PLAN_LEG_PROBED", True)
     _creds(monkeypatch, keys={"anthropic", "xai", "alibaba"}, oauth={"openai"})
-    legs = [leg.label for leg in service.candidate_legs()]
+    candidates = service.candidate_legs()
+    legs = [leg.label for leg in candidates]
     assert len(legs) == 13, legs
+    # The header counts PROVIDERS, not legs (PR #4553 R1-7): tavily and exa are
+    # walked twice (free leg, then key), so 13 legs are 11 providers. The tried
+    # list below must still name all 13 legs.
+    providers = {leg.provider for leg in candidates}
+    assert len(providers) == 11, providers
     with pytest.raises(RuntimeError) as caught:
         await service.search("q")
     message = str(caught.value)
-    assert message.startswith("13/13 providers failed: ")
+    assert message.startswith("11/11 providers failed: ")
     for label in legs:
         assert f"{label}: " in message
     assert cell_len(message) <= service_module.REASON_MAX_CELLS

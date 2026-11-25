@@ -20,10 +20,14 @@ from local_operator.web_search.models import (
     WebSearchSettings,
 )
 from local_operator.web_search.native import anthropic_wire, pricing, responses_wire
-from local_operator.web_search.native.base import NativeSearchVendor, leg_mode
+from local_operator.web_search.native.base import (
+    NativeClass,
+    NativeSearchVendor,
+    leg_mode,
+)
 
 
-def _responses_payload() -> dict:
+def _responses_payload() -> dict[str, typing.Any]:
     return {
         "output": [
             {
@@ -223,13 +227,14 @@ def test_native_class_literal_matches_the_band_code() -> None:
 def test_leg_mode_serves_the_walked_leg_and_refuses_a_vanished_one() -> None:
     from local_operator.web_search.providers import LEG_MODE
 
-    modes = [("plan", "plan"), ("api-key", "key")]
+    modes: list[tuple[str, NativeClass]] = [("plan", "plan"), ("api-key", "key")]
     assert leg_mode("OpenAI", modes) == "plan"  # outside a walk: strongest first
+    plan_only: list[tuple[str, NativeClass]] = [("plan", "plan")]
     token = LEG_MODE.set("api-key")
     try:
         assert leg_mode("OpenAI", modes) == "api-key"
         with pytest.raises(RuntimeError, match="OpenAI search has no usable credential"):
-            leg_mode("OpenAI", [("plan", "plan")])
+            leg_mode("OpenAI", plan_only)
     finally:
         LEG_MODE.reset(token)
 
