@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "session.attachment",
+  "history_sha256": "a2d2d5bd162476f4c8f1b6217e1ab5645a79ba3431c65e88cd8300f640fcfaed",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "d27dccd77c08130d09a00075d196c907bb7c4e53d741438e7edfa9474dfd70d4",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #1; session a29a2e0a6911)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #1 of 2 (safety copy; a second independent audit follows — this row is not final sign-off). Read all 5 keys against en + context sidecar. Verified in bytes: key set/order, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format controls; NFC. Safety meaning preserved: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). Clean: आप register, अटैच/कंपोज़र/रीस्टोर/सत्र consistent with existing hi catalogues; danda full stops.",
+      "head": "a404fc67087ce5c59f3f42cb6cc3878913a2b46e",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    }
+  ]
+}

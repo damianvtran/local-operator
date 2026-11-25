@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "session.attachment",
+  "history_sha256": "129d30d5c9c524264600e8ef03942d40bf34c976a13adaf7b1b4387f2c278050",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "aa67905ac06b760d2812a2925fd62aa8a33fa830800ca8f054aa09d66bce0300",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #1; session a29a2e0a6911)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #1 of 2 (safety copy; a second independent audit follows — this row is not final sign-off). Read all 5 keys against en + context sidecar. Verified in bytes: key set/order, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format controls; NFC. Safety meaning preserved: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). Clean: вы register, подключить/поле ввода/полномочия consistent with existing ru catalogues.",
+      "head": "a404fc67087ce5c59f3f42cb6cc3878913a2b46e",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    }
+  ]
+}
