@@ -626,12 +626,32 @@ async def test_ignored_cleanup_approval_at_real_checkpoint(
         _run_recorded(home, f"git -C {repo} worktree add -qb consent {wt}")
     else:
         _git("worktree", "add", "-qb", "consent", ".worktrees/consent", cwd=repo)
+    # One unpushed commit: this test is about the CONSENT route for ignored
+    # data Git would delete. A merged, finished tree now sheds every ignored
+    # entry without asking (2026-11-24, ``_merged_tree_sheds``), so the tree
+    # must be unfinished for the ask to be the only way through.
+    (wt / "wip.py").write_text("wip = 1\n")
+    _git("add", "wip.py", cwd=wt)
+    _git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "wip", cwd=wt)
     (wt / "local-data").mkdir()
     (wt / "local-data" / "payload").write_text("preserve")
     if mode == "dirty":
         (wt / "untracked").write_text("work")
     if mode.startswith("compound") or mode in ("field-brace", "mixed-question"):
         _git("worktree", "add", "-qb", "other", ".worktrees/other", cwd=repo)
+        # Unfinished too (see the unpushed commit above).
+        (wt.parent / "other" / "wip.py").write_text("wip = 1\n")
+        _git("add", "wip.py", cwd=wt.parent / "other")
+        _git(
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "wip",
+            cwd=wt.parent / "other",
+        )
         (wt.parent / "other" / "local-data").mkdir()
         (wt.parent / "other" / "local-data" / "payload").write_text("preserve")
     if mode == "busy":

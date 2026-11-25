@@ -1650,25 +1650,56 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
     own (#4240); the caller pairs it with :func:`finished_foreign_worktree`'s
     proof (clean, merged on origin, no open PR, no running owner, no live cwd).
 
-    Yes when the entry is an ignored symlink (Git removes the link), a regular
-    OS-metadata file, or when the entry or ANY ancestor component inside the
-    tree has a :data:`_REGENERABLE` name (``.cache/typecheck``) and it holds no
-    nested repository. Everything else (``.env*``, keys, logs, test outputs)
-    stays held. Unreadable is no."""
+    Widened 2026-11-24 (guard 0.113.0, disk at 4 GiB free). Operator
+    directive: "A directory your git worktree list proves is yours and merged
+    should be removable whatever its ignored build output contains." Three
+    merged ``local-operator-ui`` trees were still held for a real
+    ``node_modules`` DIRECTORY, an untagged ``.cache/typecheck``, ``out/`` and
+    ``scripts/_shared-composer-*.mjs``: names no list will ever finish
+    enumerating. So with the finished-tree proof EVERY ignored entry goes,
+    except:
+
+    - a nested repository anywhere below it (``.git`` file or directory, or a
+      bare layout; full-depth :func:`_no_repository_below`), since its commits
+      may exist nowhere else and cannot be regenerated;
+    - a symlink whose target is or holds one (Git unlinks only the entry, but
+      a link into a repository is not build output; held, not judged);
+    - anything the walk cannot read or finish (fail closed).
+
+    WHY this is safe: the only thing this widens is the PAYLOAD allowance. The
+    caller must still hold :func:`finished_foreign_worktree`'s proof
+    (registered linked worktree of this repo, HEAD merged on origin, no open
+    PR/MR, no running owner, no live cwd), and plain ``git worktree remove``
+    still refuses any tracked or untracked change itself. Ignored files in a
+    merged tree are by construction outside the work the merge shipped.
+    ``--force`` never reaches this function."""
     physical = os.path.join(real, entry.rstrip("/"))
     try:
         st = os.lstat(physical)
     except OSError:
         return False
     if stat.S_ISLNK(st.st_mode):
-        return True
+        try:
+            target = os.path.realpath(physical)
+            if not os.path.isdir(target):
+                return True
+        except (OSError, ValueError):
+            return False
+        return os.path.basename(target) != ".git" and _no_repository_below(target)
     name = os.path.basename(physical)
+    if name == ".git":
+        return False
     if name in _OS_METADATA_FILES or name.startswith("._"):
         return stat.S_ISREG(st.st_mode)
-    parts = [p for p in entry.rstrip("/").split("/") if p]
-    if not any(_regenerable(p) for p in parts):
-        return False
-    return _no_repository_below(physical) if stat.S_ISDIR(st.st_mode) else True
+    # #4561 security review R1-MAJOR-1 kept by the #4565 rebase: a name whose
+    # witness is TYPE-bound (Next's stub is a regular file) is held when it
+    # has another type, even here; otherwise this branch would quietly undo
+    # that review for every finished tree. (A link was already judged above.)
+    if name == "next-env.d.ts":
+        return stat.S_ISREG(st.st_mode)
+    if stat.S_ISDIR(st.st_mode):
+        return _no_repository_below(physical)
+    return stat.S_ISREG(st.st_mode)
 
 
 #: Bound on :func:`_no_repository_below` (a real ``node_modules`` runs to tens
@@ -1676,10 +1707,17 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
 _MERGED_WALK_ENTRIES = 300_000
 
 
+#: Entries that together make a directory a bare repository (``git init
+#: --bare``, or a ``.git`` directory moved/renamed): no ``.git`` name at all.
+_BARE_REPO_MARKERS = frozenset({"HEAD", "objects", "refs"})
+
+
 def _no_repository_below(physical: str) -> bool:
-    """Full-depth walk: ``False`` on any ``.git``, unreadable directory or
-    overflow. Stricter than :func:`_holds_git` (depth 4, skips unlistable
-    directories), because name-only shedding reaches other sessions' trees."""
+    """Full-depth walk: ``False`` on any ``.git``, a bare-repository layout
+    (``HEAD`` + ``objects`` + ``refs`` in one directory, the directory itself
+    included), an unreadable directory or overflow. Stricter than
+    :func:`_holds_git` (depth 4, skips unlistable directories), because
+    this shedding reaches other sessions' trees."""
     seen = 0
     stack = [physical]
     while stack:
@@ -1690,6 +1728,8 @@ def _no_repository_below(physical: str) -> bool:
             return False
         seen += len(entries)
         if seen > _MERGED_WALK_ENTRIES:
+            return False
+        if _BARE_REPO_MARKERS <= {child.name for child in entries}:
             return False
         for child in entries:
             if child.name == ".git":
@@ -2338,8 +2378,17 @@ def worktree_state(
     facts: dict[str, bool] | None = None,
     hidden_blocks: bool = False,
     interrupted_cleanup: bool = False,
+    ignored_payload_verified: bool = False,
 ) -> str:
     """The removal-relevant state of a worktree path.
+
+    ``ignored_payload_verified`` (2026-11-24, guard 0.113.0 field cases): the
+    plain-removal caller already ran :func:`_merged_tree_sheds` over EVERY
+    ignored entry (each holds no nested repository, full-depth walk) and is
+    asking :func:`finished_foreign_worktree` for the rest of the proof. Then an
+    off-list ignored name (``out/``, ``scripts/_shared-*.mjs``) no longer reads
+    ``dirty`` here; tracked/untracked changes, a lock, a live cwd and a nested
+    repository still do. Only that caller passes it.
 
     ``interrupted_cleanup`` is the stricter payload inventory for an exact
     removal with separate commit-preservation proof. It accepts deletions of
@@ -2524,6 +2573,10 @@ def worktree_state(
             not own
             and not linked
             and not next_env
+            # #4565: the finished-tree caller already walked every ignored
+            # entry with ``_merged_tree_sheds``; the nested-repository check
+            # below still runs for it.
+            and not ignored_payload_verified
             and not _regenerable(name)
             and not _only_regenerable(os.path.join(real, entry))
         ):
@@ -4164,8 +4217,14 @@ def finished_foreign_worktree(
     # ranks ``--force`` and ``rm -rf`` LOW, and neither refuses untracked
     # content the way a plain ``git worktree remove`` does.
     states = ("clean", "deletions-only") if interrupted_cleanup else ("clean",)
+    # Keyword only when set, so existing callers' test doubles keep the call.
+    # ``dict[str, Any]``: a ``dict[str, bool]`` splat reads to pyright as a
+    # bool for every keyword (``session_id`` included).
+    payload: dict[str, Any] = (
+        {"ignored_payload_verified": True} if ignored_verified and not interrupted_cleanup else {}
+    )
     state = worktree_state(
-        real, facts=facts, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup
+        real, facts=facts, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup, **payload
     )
     if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
         return no(f"state-{state}", state)
@@ -4300,8 +4359,10 @@ def finished_foreign_worktree(
     global _cwd_inventory_cache
     _cwd_inventory_cache = None
     again: dict[str, bool] = {}
+    # Same payload allowance as the first read, or the re-check would call
+    # the very ignored entries the caller verified "dirty".
     if worktree_state(
-        real, facts=again, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup
+        real, facts=again, hidden_blocks=True, interrupted_cleanup=interrupted_cleanup, **payload
     ) not in states or (
         not interrupted_cleanup
         and again.get("ignored", True)
