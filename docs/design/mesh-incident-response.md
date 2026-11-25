@@ -783,7 +783,8 @@ it is a stated invariant with a test (§6.6).
 
 ```python
 class AuditWriter:
-    """Append-only, batched, fsync-bounded. The only writer of audit.jsonl."""
+    """Append-only, batched, fsync-bounded. Several writers append to audit.jsonl
+    (relay, approvals, CLI write_event); audit.jsonl.lock serializes them."""
 
     BUFFER_BYTES = 16_384
     TICK_S = 1.0

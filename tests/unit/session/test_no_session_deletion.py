@@ -1484,16 +1484,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "`uninstall --purge`: invite FILEs, parked pending/decision FILEs, the network "
         "record and .secrets.json FILEs, audit.jsonl plus its .<n>.gz generations, and "
         "the network-scoped catalog.json — every path built by this module's own "
-        "helpers under <config>/network/ (design §12's blast radius, identity kept)",
-        8,
+        "helpers under <config>/network/ (design §12's blast radius, identity kept); "
+        "the ninth is the audit writers' audit.jsonl.lock FILE (is_file, not a symlink)",
+        9,
     ),
     (
         "local_operator/network/store.py::purge_network_artifacts",
         "shutil.rmtree",
         "The two outbox queue DIRECTORIES: <config>/network/outbox/<device_id>/ for each "
         "member of a purged network, and every remaining queue when the purge covers "
-        "every network. Both are children of network/outbox/, a sibling of sessions/",
-        2,
+        "every network. Both are children of network/outbox/, a sibling of sessions/; "
+        "the third is the literal <config>/network/audit.jsonl.pending/ DIRECTORY of "
+        "parked audit rows (is_dir, not a symlink), also a sibling of sessions/",
+        3,
     ),
     (
         "local_operator/network/credentials/placement.py::forget_network",
@@ -1565,6 +1568,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops an aged or over-count audit.jsonl.<n>.gz generation FILE in "
         "<config>/network/, oldest first, and logs each deletion in the surviving log",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._spill_pending",
+        "os.replace",
+        "Publishes this call's own <stem>.tmp FILE as <stem>.jsonl inside the lstat-checked "
+        "<config>/network/audit.jsonl.pending/ directory; never a sessions/ path",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._claim_and_append",
+        "os.replace",
+        "Renames one parked spill FILE to its .draining claim, and back when nothing was "
+        "appended, both inside <config>/network/audit.jsonl.pending/",
+        2,
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._discard_resolved",
+        "<path>.unlink",
+        "Removes one drained spill/claim FILE from <config>/network/audit.jsonl.pending/ "
+        "only once its rows are durably in audit.jsonl",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._set_aside",
+        "os.replace",
+        "Renames one unreadable parked entry to <name>.rejected in the same "
+        "<config>/network/audit.jsonl.pending/ directory (kept, never deleted)",
     ),
     (
         "local_operator/network/approvals.py::_sweep_namespace",

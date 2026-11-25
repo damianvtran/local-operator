@@ -250,7 +250,8 @@ CATALOG_CACHE_S = 2.0
 #: frame on the reference fixture.
 FRAME_MEMO_ENTRIES = 8
 
-#: The audit log has one writer, and it is this process. The heartbeat reuses the
+#: The audit log's long-lived writer is this process (other writers append under
+#: ``audit.jsonl.lock``; see ``network/audit.py``). The heartbeat reuses the
 #: session runtime's interval so a reader needs ONE freshness rule for every record
 #: in the tree rather than one per namespace.
 HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
