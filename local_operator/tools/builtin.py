@@ -31766,8 +31766,6 @@ async def _reopen_handoff_if_gone(
 def _origin_only_text(text: str) -> str:
     """``text`` with every URL in it cut down to its origin (no userinfo, path,
     query or fragment): a failed reopen's host error may echo the page it tried."""
-    import re
-
     return re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", lambda m: url_origin_for_copy(m.group(0)), text)
 
 

@@ -1567,7 +1567,10 @@ async def test_release_clears_references_on_disk_even_when_the_rpc_fails(
 ) -> None:
     """Review M3-2: the cleared references were only in memory until a later save."""
     from local_operator.browser_bridge import backend
-    from local_operator.browser_bridge.resources import HANDOFF_REFS_FIELD, RESOURCE_NAME
+    from local_operator.browser_bridge.resources import (
+        HANDOFF_REFS_FIELD,
+        RESOURCE_NAME,
+    )
 
     session = _asking_session(headless_tui_env)
     directory = session._browser.resource.directory
