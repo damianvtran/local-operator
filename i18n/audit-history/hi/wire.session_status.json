@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.session_status",
-  "history_sha256": "59606e4b3431486c81c3e5df30fa49d7edd74a5a302b3e9dcdcb6ae0a38a5fb0",
+  "history_sha256": "66271d375ac9c1093fb6e7829d1c5b971a6294dbd1f85b650d77cb630a0025ed",
   "entries": [
     {
       "locale": "hi",
@@ -216,6 +216,32 @@
       "note": "Independent audit of the duration-unit slice of wire.session_status (4 new keys duration_seconds/minutes/hours_minutes/days_hours plus the wedged_heartbeat {duration} integration and its edited context note), source commit 74b05c6a2aee; unchanged entries verified against the prior passed rows. Auditor 85d0fab713d3 (openai/gpt-6.1-sol) verdict clean-with-findings: 0 blocker, 0 major, 1 minor, 0 nit (HI-DUR-1; rendered-fit/wording advisories, no wording change requested, deferred in the PR thread). context_sha256 measured by the integrator at append time from the committed en context sidecar (74b05c6a2aee); the auditor's receipt does not record a context hash. Record: i18n/audits/evidence/hi/wire.session_status/ld1/record.json. Native-speaker review and rendered-frame certification not claimed.",
       "evidence": "i18n/audits/evidence/hi/wire.session_status/ld1/record.json",
       "round": "ld1"
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.session_status",
+      "source_sha256": "04b93429441ed83943734f72d73adc2ba1611a76be69ed36c96283f5890d02c3",
+      "context_sha256": "10032725fdd853010cf80c4c0e0f03bffa81102c8372a4a3247f35959fbdc952",
+      "target_sha256": "4b677f5f170651e27492a1c7f641b2c1fa43aeeb45521d5c2736464420ebf4a9",
+      "translator": {
+        "agent": "coder (acting as LLM translator; subagent 161f8a9b3356)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent; session 43e1981d81db)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit of the 2 new remote boot-state status cells (wire.session_status.booting, booting_not_answering) at head 9be8a958dc3f705c6ae8ae751903c7be611a3777. Auditor i18n-auditor session 43e1981d81db (served anthropic/claude-opus-5-5) verdict: passed, 0 blocker, 0 major. Consistency: \"not answering\" half matches the locale's existing wedged key; \"starting\" half matches tui.info.state.starting; no glossary row for either term. Mechanical checks by the auditor (regex over catalogue bytes, not the repo validator): exactly one {duration}, \" · \" separator kept, no bidi/spacing/combining controls, no trailing period, lowercase where the script has case; no overflow expected (STATE column sizes to cells). Findings: HI-1 (nit): the Hindi drops है, unlike the existing \"starting\" label `शुरू हो रहा है`. It matches this namespace's own terse \"not answering\" wording, so it needs no change. Recording provenance: the auditor's own run had no write/bash approvals and could not write, so this receipt was recorded by a coder subagent from the auditor's transcript (sessions/43e1981d81db/transcript.jsonl, final assistant message). Native-speaker review and rendered-frame certification not claimed.",
+      "head": "9be8a958dc3f705c6ae8ae751903c7be611a3777",
+      "keys_reviewed": [
+        "wire.session_status.booting",
+        "wire.session_status.booting_not_answering"
+      ]
     }
   ]
 }
