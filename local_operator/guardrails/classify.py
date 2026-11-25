@@ -2734,6 +2734,8 @@ def _exact_linked_cleanup(
     if activity.owners_running:
         return hold(f"another session still holds it; {activity.facts()}")
     if state == "dirty":
+        if merged := _merged_force_payload(target, path, session_id, foreign, activity, identity):
+            return merged
         return hold(
             "preservation check failed; stash or commit changes and preserve unverified "
             "files separately, including ignored output"
@@ -2801,6 +2803,92 @@ def _exact_linked_cleanup(
     ):
         return hold(changed)
     return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
+
+
+def _merged_force_payload(
+    target: Target,
+    path: str,
+    session_id: str,
+    foreign: ForeignCreations | None,
+    activity: WorktreeActivity,
+    identity: object,
+) -> RankedTarget | None:
+    """LOW for an exact ``git worktree remove --force`` of a MERGED tree whose
+    only "dirt" is ignored payload (#4565); ``None`` keeps the hold.
+
+    Why (Aida's live matrix, 2026-11-25): eight finished ``.worktrees/*``
+    checkouts, git-clean with HEAD an ancestor of origin/main, ranked LOW for
+    plain removal but HIGH ("preservation check failed") for the ``--force``
+    spelling agents actually type, because the interrupted-cleanup inventory
+    counts every ignored ``__pycache__``/``.DS_Store``/``node_modules`` as
+    unpreserved data. A merged tree's ignored payload is outside the work
+    the merge shipped, exactly as for plain removal.
+
+    Constraints — every condition the plain route needs, nothing less:
+    ``--force`` also deletes tracked and untracked changes, so the strict
+    inventory must report ZERO of them (``changes == 0``); every ignored
+    entry must pass :func:`provenance._merged_tree_sheds` (a nested
+    repository, an unwalkable entry, a non-regular ``next-env.d.ts`` hold);
+    and :func:`provenance.finished_foreign_worktree` (merged on origin, no
+    open PR, no running owner, no live cwd, not locked) must hold with the
+    verified-payload allowance, downgraded by any third-party ledger row
+    inside. The registration identity and the inventory are re-read after
+    the forge I/O so a tree changed in between is held. ``-f -f`` and locks
+    are not widened here.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    inventory = prov.plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+    if inventory is None or inventory.changes or inventory.unverified_ignored:
+        return None
+    ref = getattr(identity, "ref", None)
+    head = getattr(identity, "head", None)
+    if ref is None and head:
+        # Detached HEAD (five of Aida's nine: ``git worktree add --detach``
+        # review/QA trees). ``finished_foreign_worktree`` is branch-based and
+        # says "detached"; for no branch there is no PR to be open, so the
+        # proof is: HEAD is contained in origin's advertised default tip (live
+        # ``ls-remote``, never a stale local ref), no strictly-read running
+        # owner, and no third session's ledger row inside. Busy and locked
+        # were already excluded: ``worktree_state`` checks both before it
+        # reads the payload that made this tree "dirty".
+        try:
+            # Same Q-R2-1 waiver the branch route takes with
+            # ``ignored_verified`` (see ``finished_foreign_worktree``): a
+            # drifted ctime leaves no creator row, so the owner left to find
+            # is a live session, which the strict registry scan still finds.
+            # HEAD is on origin, so an absent creator loses at most a rebuild.
+            if prov._running_owners(path, session_id, strict=True, allow_unattributed=True):
+                return None
+            fresh = prov.ForeignCreations(session_id)
+            try:
+                if fresh.foreign_under(path, strict=True) is not None:
+                    return None
+            finally:
+                fresh.close()
+        except Exception:  # noqa: BLE001 — unknown owner facts hold, never pass
+            return None
+        if activity.pr_state != "none" or not prov.pushed_worktree_head(path, head, None):
+            return None
+    else:
+        proof = _no_ledger_inside(
+            foreign,
+            path,
+            prov.finished_foreign_worktree(
+                path, session_id, activity=activity, ignored_verified=True
+            ),
+        )
+        if not proof.safe:
+            return None
+    again = prov.plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+    if again != inventory or prov.cleanup_identity(path) != identity:
+        return None
+    return RankedTarget(
+        target,
+        Risk.LOW,
+        "a finished, merged linked git worktree; verified removal payload "
+        "(ignored build output only)",
+    )
 
 
 def _finished_route_barred(root: str, prot: _Protected) -> bool:

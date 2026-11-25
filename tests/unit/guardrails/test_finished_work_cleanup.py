@@ -318,7 +318,14 @@ def test_finder_witness_is_plain_only_force_keeps_base_hold(
         if not deletion:
             assert forced.risk is Risk.LOW, forced.reasons
         return
-    # #4503's pin, for a tree another session made: --force keeps base's hold.
+    if not deletion:
+        # #4565 (operator directive, Aida's 2026-11-25 matrix) supersedes
+        # #4503's pin for a CLEAN merged foreign tree: ``--force`` sheds
+        # ignored payload exactly as plain removal does
+        # (``_merged_force_payload``).
+        assert forced.risk is Risk.LOW, forced.reasons
+        return
+    # A tracked deletion is real work ``--force`` would discard: still held.
     assert forced.risk is Risk.HIGH and forced.targets[0].cleanup_hold, forced.reasons
     assert "preservation check failed" in forced.targets[0].reason
 

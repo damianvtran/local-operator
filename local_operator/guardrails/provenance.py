@@ -1691,6 +1691,12 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
         return False
     if name in _OS_METADATA_FILES or name.startswith("._"):
         return stat.S_ISREG(st.st_mode)
+    # #4561 security review R1-MAJOR-1 kept by the #4565 rebase: a name whose
+    # witness is TYPE-bound (Next's stub is a regular file) is held when it
+    # has another type, even here; otherwise this branch would quietly undo
+    # that review for every finished tree. (A link was already judged above.)
+    if name == "next-env.d.ts":
+        return stat.S_ISREG(st.st_mode)
     if stat.S_ISDIR(st.st_mode):
         return _no_repository_below(physical)
     return stat.S_ISREG(st.st_mode)
@@ -4212,7 +4218,9 @@ def finished_foreign_worktree(
     # content the way a plain ``git worktree remove`` does.
     states = ("clean", "deletions-only") if interrupted_cleanup else ("clean",)
     # Keyword only when set, so existing callers' test doubles keep the call.
-    payload = (
+    # ``dict[str, Any]``: a ``dict[str, bool]`` splat reads to pyright as a
+    # bool for every keyword (``session_id`` included).
+    payload: dict[str, Any] = (
         {"ignored_payload_verified": True} if ignored_verified and not interrupted_cleanup else {}
     )
     state = worktree_state(

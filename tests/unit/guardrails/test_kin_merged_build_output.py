@@ -206,12 +206,16 @@ async def test_a_field_case_is_low_with_no_judge_call(home: Path, repo: Path) ->
     assert _wt(repo).exists()  # classification never removed anything
 
 
-def test_b_ignored_env_beside_target_is_held(home: Path, repo: Path) -> None:
+def test_b_ignored_env_beside_target_sheds_but_nested_repo_holds(home: Path, repo: Path) -> None:
+    """#4565 (operator directive 2026-11-24): a merged, finished tree sheds
+    ANY ignored entry, an ignored ``.env`` included; only a nested repository
+    (or an unwalkable entry) still holds. Was "``.env`` is held" before."""
     (_wt(repo) / ".env").write_text("TOKEN=synthetic\n")
     for command in _spellings(repo):
-        v = _rank(home, repo, command)
-        assert v.risk is not Risk.LOW
-        assert "cannot prove regenerable" in v.targets[0].reason
+        assert _rank(home, repo, command).risk is Risk.LOW
+    _git("init", "-q", str(_wt(repo) / "vendored"), cwd=home)
+    for command in _spellings(repo):
+        assert _rank(home, repo, command).risk is not Risk.LOW
 
 
 def test_c_running_creator_is_not_low(home: Path, repo: Path, running: dict[str, str]) -> None:
@@ -237,7 +241,11 @@ def test_d_foreign_caller_gets_main_finished_tree_policy(home: Path, repo: Path)
     v = _rank(home, repo, _spellings(repo)[1], sid=F)
     assert v.risk is Risk.LOW, v.targets[0].reason
     assert "created by" not in v.targets[0].reason  # not an ownership grant
+    # #4565: an ignored ``.env`` no longer holds a merged tree; a nested
+    # repository still does.
     (_wt(repo) / ".env").write_text("TOKEN=local-only-fixture")
+    assert _rank(home, repo, _spellings(repo)[1], sid=F).risk is Risk.LOW
+    _git("init", "-q", str(_wt(repo) / "vendored"), cwd=home)
     assert _rank(home, repo, _spellings(repo)[1], sid=F).risk is not Risk.LOW
 
 

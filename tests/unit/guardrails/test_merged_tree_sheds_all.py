@@ -250,11 +250,82 @@ def test_open_pr_stays_critical(home: Path, repo: Path, monkeypatch: pytest.Monk
     assert ranked.risk is Risk.CRITICAL, ranked.reasons
 
 
-def test_force_is_unchanged(home: Path, repo: Path) -> None:
-    """(e) ``--force`` keeps base's payload rule: no shedding of off-list data."""
-    wt = _tree(home, repo, "forced")
-    ranked = _rank(home, f"git -C {repo} worktree remove --force -- {wt}")
+def _detached(home: Path, repo: Path, name: str, *, merged: bool = True) -> Path:
+    """A ``git worktree add --detach`` review/QA tree (five of Aida's nine)."""
+    wt = _tree(home, repo, f"{name}-src", merged=merged)
+    head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    out = repo / ".worktrees" / name
+    _git("worktree", "add", "-q", "--detach", str(out), head, cwd=repo)
+    _field_payload(out)
+    # Ignored, as in the field repos' .gitignore (else it reads untracked).
+    with open(repo / ".git" / "info" / "exclude", "a") as fh:
+        fh.write("__pycache__/\n")
+    (out / "__pycache__").mkdir()
+    (out / "__pycache__" / "m.cpython-314.pyc").write_bytes(b"\x00pyc")
+    return out
+
+
+def _force(repo: Path, wt: Path) -> str:
+    # The operator's exact spelling from the 2026-11-25 matrix.
+    return f"git -C {repo} worktree remove --force -- {wt}"
+
+
+@pytest.mark.parametrize("shape", ["branch", "detached"])
+def test_force_on_merged_tree_with_ignored_payload_is_low(
+    home: Path, repo: Path, shape: str
+) -> None:
+    """(e) Aida's live matrix (2026-11-25): nine git-clean ``.worktrees/*``
+    trees, HEAD an ancestor of origin/main, ranked HIGH ("preservation check
+    failed") for ``--force`` only because of ignored ``__pycache__``,
+    ``.DS_Store``, ``node_modules``. Branch and detached shapes both go LOW."""
+    wt = _tree(home, repo, "forced") if shape == "branch" else _detached(home, repo, "forced-d")
+    ranked = _rank(home, _force(repo, wt))
+    assert ranked.risk is Risk.LOW, ranked.reasons
+    assert "verified removal payload" in ranked.targets[0].reason
+
+
+@pytest.mark.parametrize("shape", ["branch", "detached"])
+@pytest.mark.parametrize("control", ["untracked", "tracked-edit", "nested-repo", "next-env-dir"])
+def test_force_on_merged_tree_still_holds_real_data(
+    home: Path, repo: Path, shape: str, control: str
+) -> None:
+    """(e) ``--force`` also deletes tracked/untracked work: those, a nested
+    repository and #4561's non-regular ``next-env.d.ts`` keep the hold."""
+    wt = _tree(home, repo, "held") if shape == "branch" else _detached(home, repo, "held-d")
+    if control == "untracked":
+        (wt / "untracked.txt").write_text("work\n")
+    elif control == "tracked-edit":
+        (wt / "scripts" / "build.mjs").write_text("edited\n")
+    elif control == "nested-repo":
+        subprocess.run(["git", "init", "-q", str(wt / "node_modules" / "react" / "x")], check=True)
+    else:
+        with open(repo / ".git" / "info" / "exclude", "a") as fh:
+            fh.write("next-env.d.ts\n")
+        (wt / "next-env.d.ts").mkdir()
+        (wt / "next-env.d.ts" / "data.txt").write_text("not Next's\n")
+    ranked = _rank(home, _force(repo, wt))
     assert ranked.risk is not Risk.LOW, ranked.reasons
+
+
+def test_force_on_unmerged_trees_holds(home: Path, repo: Path) -> None:
+    """(e) Unmerged branch and a detached HEAD origin lacks both hold."""
+    for wt in (
+        _tree(home, repo, "unmerged-f", merged=False),
+        _detached(home, repo, "unmerged-d", merged=False),
+    ):
+        ranked = _rank(home, _force(repo, wt))
+        assert ranked.risk is not Risk.LOW, (wt, ranked.reasons)
+
+
+def test_force_on_merged_tree_with_live_owner_holds(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(e) A running owner keeps the hold on both shapes."""
+    trees = (_tree(home, repo, "owned"), _detached(home, repo, "owned-d"))
+    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False, **_: (LIVE,))
+    for wt in trees:
+        ranked = _rank(home, _force(repo, wt))
+        assert ranked.risk is not Risk.LOW, (wt, ranked.reasons)
 
 
 def test_unrelated_dirty_tree_is_unchanged(home: Path, repo: Path) -> None:
