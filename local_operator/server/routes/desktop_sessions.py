@@ -160,12 +160,14 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.index_prewarm import start_session_warm
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.row_clip import (
     ROW_RANGE_MAX_BYTES,
     RowRangeUnsatisfiable,
     wire_json,
 )
+from local_operator.session.runtime.inline_ui_egress import without_desktop_inline_ui
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -1403,6 +1405,7 @@ class FileRef(Input):
 
 class Prompt(Input):
     request_id: RequestID
+    inline_ui: Annotated[bool, Field(strict=True)] = False
     text: str = Field(max_length=200_000)
     images: list[PromptImage] = Field(default_factory=list, max_length=8)
     # Documents ride as REFERENCES: the upload route stored the bytes, and the
@@ -1453,14 +1456,25 @@ class Prompt(Input):
     @model_serializer(mode="wrap")
     def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
         # The receipt journal fingerprints ``model_dump()`` bytes, so a
-        # same-id retry claimed BEFORE the delivery field existed must not
-        # read as a changed body after an upgrade. ``None`` is the absent
-        # reading, so it leaves the dump exactly as the pre-field build
-        # wrote it (the wrap-serializer pattern ``PromptImage.
-        # _omit_absent_origin`` already uses for the same reason).
+        # same-id retry claimed BEFORE a field existed must not read as a
+        # changed body after an upgrade. Each optional field's absent reading
+        # therefore leaves the dump exactly as the pre-field build wrote it
+        # (the wrap-serializer pattern ``PromptImage._omit_absent_origin``
+        # already uses for the same reason):
+        #
+        # * ``delivery``: ``None`` is absent.
+        # * ``inline_ui``: ``False`` is absent. The flag is the viewer's
+        #   per-send capability claim for inline UI widgets; a client that
+        #   predates it never sends it, and every reader downstream treats a
+        #   missing key as ``False`` (``frame.get("inline_ui") is True``), so
+        #   omitting the default changes no behaviour. ``True`` stays in the
+        #   dump: it is part of the retry identity, like ``input_mode``.
         data = handler(self)
-        if isinstance(data, dict) and data.get("delivery") is None:
-            data.pop("delivery", None)
+        if isinstance(data, dict):
+            if data.get("delivery") is None:
+                data.pop("delivery", None)
+            if data.get("inline_ui") is False:
+                data.pop("inline_ui", None)
         return data
 
     @model_validator(mode="after")
@@ -2232,7 +2246,7 @@ async def _queue_or_refuse(
         raise error
     line = InboxLine(
         text=body.text,
-        sender={},
+        sender={"input_surface": "desktop"},
         mode="steer" if body.mode == "steer" else "mailbox",
         written_at=time.time(),
         # ``wake`` + ``SOURCE_USER`` is what makes ``append_for_successor``
@@ -2242,6 +2256,7 @@ async def _queue_or_refuse(
         wake=True,
         source=SOURCE_USER,
         command_id=body.request_id,
+        inline_ui=body.inline_ui,
     )
     try:
         written = await await_spool_write(
@@ -3834,6 +3849,7 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -3886,6 +3902,7 @@ async def snapshot(
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         frame = await bridge.snapshot(
+            **inline_ui_opt_in(inline_ui),
             entry_times=bool(entry_ts),
             open_frame=bool(open_frame),
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
@@ -3964,6 +3981,7 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -4012,6 +4030,7 @@ async def history(
     ):
         return reply(
             await bridge.history(
+                **inline_ui_opt_in(inline_ui),
                 before_id=before_id,
                 around_id=around_id,
                 before=before,
@@ -4958,7 +4977,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
             try:
                 async with host(request).session(session_id) as bridge:
 
-                    async def admit():
+                    async def admit(inline_ui: bool):
                         nonlocal admitted
                         assert bridge.remote is not None
                         # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
@@ -5001,6 +5020,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # legacy-sender frame stays byte-identical and an owner
                             # from before the modes never sees the key.
                             delivery=body.delivery,
+                            **inline_ui_opt_in(inline_ui),
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -5015,11 +5035,10 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         }
 
                     return reply(
-                        await receipts(request).run(
+                        await receipts(request).run_prompt(
                             session_id + ":" + body.request_id,
                             body.model_dump(),
                             admit,
-                            retry_safe=True,
                         )
                     )
             except ConnectionError as error:
@@ -5033,11 +5052,20 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 # when queueing is honest and why it is at-most-once.
                 if not _owner_busy(error):
                     raise
-                queued = await receipts(request).run(
-                    session_id + ":" + body.request_id,
-                    body.model_dump(),
-                    functools.partial(_queue_or_refuse, request, session_id, body, error),
-                    retry_safe=True,
+                # The receipt callback must not close over the exception target
+                # Python clears at the end of an except block.
+                busy_error = error
+
+                async def spool(inline_ui: bool) -> dict[str, Any]:
+                    return await _queue_or_refuse(
+                        request,
+                        session_id,
+                        body.model_copy(update={"inline_ui": inline_ui}),
+                        busy_error,
+                    )
+
+                queued = await receipts(request).run_prompt(
+                    session_id + ":" + body.request_id, body.model_dump(), spool
                 )
                 # A queued message is the owner's from here, exactly like an
                 # admitted one: publishing ``admission.failed`` would tell every
@@ -7240,6 +7268,7 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -7376,11 +7405,14 @@ async def events(
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    **inline_ui_opt_in(inline_ui),
                     peer_journal_source=bool(peer_journal_source),
                 )
             ) as frames:
                 try:
                     async for frame in frames:
+                        if not inline_ui:
+                            frame = without_desktop_inline_ui(frame)
                         ser_at = time.monotonic() if open_trace.enabled() else 0.0
                         if isinstance(frame, dict) and frame.get("type") == "snapshot":
                             # The one frame proportional to the session (bounded

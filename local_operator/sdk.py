@@ -763,6 +763,27 @@ async def _build_session(
             )
         return session
 
+    # A programmatically driven session: same TTL reasoning as exec
+    # (``exec_session.run_session``). A caller that idles between deliveries
+    # trips the long-gap rule once and is back on the main-thread 1h. A
+    # ``workstream`` spec, and a session with a team attached (its manager idles
+    # while subagents work), are excluded for the same measured reasons as
+    # exec's. Only this in-process owner is marked: ``spawn_session`` /
+    # ``deliver`` sessions run in a runtime process and keep the normal rules.
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
+
+    #
+    # A ``SessionSpec(resume=…)`` carries no ``team``, but the constructor's
+    # attachment restore has already re-attached the session's stored team
+    # (or recorded it as ``_unresolved_team`` until its definition lands), so
+    # the live session is checked too (agent review round 2, MAJOR-1).
+    if (
+        not spec.workstream
+        and team is None
+        and getattr(session, "active_team", None) is None
+        and not getattr(session, "_unresolved_team", "")
+    ):
+        mark_automation_session(session)
     if team is not None:
         session.attach_team(team)
     if spec.profile:

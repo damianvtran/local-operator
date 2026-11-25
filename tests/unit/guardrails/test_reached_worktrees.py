@@ -589,19 +589,25 @@ def test_exhausted_walk_is_not_reported_as_a_nested_repo(
     """R2-MAJOR-1: a large ignored cache with NO ``.git`` stays dirty (the walk
     could not rule one out: fail closed) but the brief must not claim a
     nested repository exists. The walk bound is scaled down (the real one is
-    20k entries, e.g. an ``.expo/cache``) so the fixture stays small."""
+    20k entries) so the fixture stays small.
+
+    PR #4560: the name here is deliberately NOT on ``_REGENERABLE``. A listed
+    build-output name now gets the deeper walk (``_no_repository_below``), so
+    exhaustion no longer decides it; a name off the list keeps this
+    fail-closed rule unchanged.
+    """
     monkeypatch.setattr(prov, "_WALK_ENTRIES", 50)
     wt = mobile / ".worktrees" / "keyboard-bound"
     with (mobile / ".git" / "info" / "exclude").open("a") as fh:
-        fh.write(".expo/\n")
-    cache = wt / ".expo" / "cache"
+        fh.write("blob-cache/\n")
+    cache = wt / "blob-cache" / "cache"
     cache.mkdir(parents=True)
     for i in range(80):
         (cache / f"c{i}").write_text("")
     assert prov.worktree_state(str(wt), own=True) == "dirty"
     phrase = prov.describe_changes(str(wt))
     assert "nested repository (ignored" not in phrase, phrase
-    assert "too large to rule out a nested repository" in phrase and ".expo" in phrase, phrase
+    assert "too large to rule out a nested repository" in phrase and "blob-cache" in phrase, phrase
     v = _rank(home, f"rm -rf {WT}/keyboard-bound", S)
     assert v.risk is Risk.HIGH
     assert "its commits may exist nowhere else" not in v.targets[0].reason, v.targets[0].reason

@@ -592,6 +592,10 @@ _AMBIENT_VARS = (
     "SERPAPI_API_KEY",
     "TAVILY_API_KEY",
     "FAL_API_KEY",
+    # FAL's own SDK env name, honoured by the FAL image rung after FAL_API_KEY:
+    # an inherited one would light the FAL rung in every cell that asserts
+    # which rungs exist.
+    "FAL_KEY",
     # The audio rungs' BYOK probes fall back to an exported key (the image
     # lane's FAL/OpenAI rule), so an inherited one would light the ElevenLabs
     # rung in every cell that asserts which rungs exist.

@@ -47,6 +47,7 @@ from local_operator.guardrails.classify import (
     HOLD_CHANGES,
     HOLD_IGNORED_UNREADABLE,
     HOLD_IGNORED_UNVERIFIED,
+    REMNANT_REASON,
     Risk,
     Verdict,
     classify_bash,
@@ -1770,11 +1771,21 @@ def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
         # used to decide alone, so an earlier remote "Remove all" hid a later
         # desktop "Keep them" or a timed-out ask). A declined, timed-out,
         # withdrawn or open ask always escalates.
-        blocking = (
-            [a for a in lapsed if not a.untrusted_yes]
-            if _finished_low(targets[i].reason)
-            else lapsed
-        )
+        if targets[i].reason.startswith(REMNANT_REASON):
+            # Lossless by content (``classify.REMNANT_REASON``): silence has
+            # nothing left to protect, so a timed-out, expired, withdrawn or
+            # dismissed ask, or an untrusted yes, does not lift it. The
+            # operator's own "keep it" (a decline or a non-approving answer)
+            # and a still-OPEN ask keep escalating (#4545 R1-M1, R1-m1):
+            # recovering a dropped tree's blobs needs a ref, and gc removes
+            # them otherwise.
+            blocking = [
+                a for a in lapsed if a.status == "open" or not (a.never_answered or a.untrusted_yes)
+            ]
+        elif _finished_low(targets[i].reason):
+            blocking = [a for a in lapsed if not a.untrusted_yes]
+        else:
+            blocking = lapsed
         hit = next(
             (
                 found

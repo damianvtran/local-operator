@@ -78,6 +78,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.macos_disclaim import spawn_disclaimed
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,9 @@ class PromptErrand:
     #: as a local terminal, and the completion of a conversation woken from the
     #: phone must route back to the phone. Empty keeps every other producer.
     origin: str = ""
+    # Preserve viewer intent until the authenticated winner is known; its
+    # advertised capability controls whether the client can send the field.
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +176,7 @@ class SteerErrand:
     command_id: str = ""
     input_mode: str = ""
     input_path: str = ""
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1263,6 +1268,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         lambda _reason: None,
         # ADR 0009: the cold-wake prompt keeps the phone's origin.
         origin=work.origin if isinstance(work, PromptErrand) else "",
+        **inline_ui_opt_in(work.inline_ui),
     )
     try:
         await client.connect(record, session_id)
@@ -1296,6 +1302,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             images=work.images,
             command_id=work.command_id,
             **annotation,
+            **inline_ui_opt_in(work.inline_ui),
         )
     finally:
         client.close()

@@ -77,7 +77,10 @@ from local_operator.model.speed import (
     FastModeSupport,
     fast_mode_support,
 )
-from local_operator.providers.account_affinity import set_wire_hint
+from local_operator.providers.account_affinity import (
+    record_inline_ui_wire_receipt,
+    set_wire_hint,
+)
 from local_operator.providers.context import bind_native_context
 from local_operator.providers.documents import (
     DocumentBudget,
@@ -276,6 +279,24 @@ def _stream_id(value: Any) -> str | None:
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _native_stream_start(
+    request: ChatRequest,
+    response_id: str,
+    *,
+    cache_miss_type: str | None = None,
+    cache_missed_tokens: int = 0,
+) -> StreamStartEvent:
+    event = StreamStartEvent(
+        response_id=response_id,
+        cache_miss_type=cache_miss_type,
+        cache_missed_tokens=cache_missed_tokens,
+    )
+    # Failover may change the wire selector without changing the display
+    # model. Do not put a native response ID in that display model's namespace.
+    event._native_selector = (request.model.provider, request.model.model_id)
+    return event
 
 
 #: Longest provider display name we will carry back as a cache pin.
@@ -970,7 +991,100 @@ def _openrouter_no_route(status: int | None, message: str) -> bool:
     return any(marker in lowered for marker in _OPENROUTER_NO_ROUTE_MARKERS)
 
 
-def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
+# A code-less error from the upstream HTTP/2 body reader, not the generic
+# “Stream error” heading (which can also carry a provider's refusal).
+_H2_BODY_READ_STREAM_ERROR = "Stream error: h2 protocol error: error reading a body from connection"
+
+
+def _has_explicit_error_disposition(fields: Mapping[str, Any]) -> bool:
+    # OpenRouter's Chat Completions SSE schema also carries the normalized
+    # error type and original provider code in metadata. A status-less
+    # classification must not override either, wherever the gateway put it.
+    metadata = fields.get("metadata")
+    return any(key in fields for key in ("code", "status", "type", "error_type")) or (
+        isinstance(metadata, Mapping)
+        and any(key in metadata for key in ("error_type", "provider_code"))
+    )
+
+
+def _is_simple_h2_body_read_frame(chunk: Mapping[str, Any], data: str) -> bool:
+    # Only the synthetic simple frame qualifies without an authoritative code.
+    # An extra field may carry a disposition hidden by message rendering (for
+    # example metadata.raw). Leave unknown shapes on the ordinary error path;
+    # coded relay failures have their own classifier in failover.
+    if chunk.keys() != {"error", "id", "object", "created", "model", "choices"}:
+        return False
+    error, choices = chunk["error"], chunk["choices"]
+    if not isinstance(error, Mapping) or error != {"message": _H2_BODY_READ_STREAM_ERROR}:
+        return False
+    response_id, model, created = chunk["id"], chunk["model"], chunk["created"]
+    if not (
+        chunk["object"] == "chat.completion.chunk"
+        and isinstance(response_id, str)
+        and response_id.strip()
+        and isinstance(model, str)
+        and model.strip()
+        and type(created) is int
+        and created >= 0
+        and isinstance(choices, list)
+        and len(choices) == 1
+    ):
+        return False
+    choice = choices[0]
+    # JSON booleans and floats compare equal to Python integers. They aren't
+    # valid index framing and must not qualify by equality alone.
+    if not (
+        isinstance(choice, Mapping)
+        and type(choice.get("index")) is int
+        and choice == {"index": 0, "delta": {}, "finish_reason": "error"}
+    ):
+        return False
+
+    # The normal JSON decoder is last-wins. Recheck only a recovery candidate
+    # so a duplicate key cannot erase a verdict, without changing other SSE
+    # handling (including coded relays).
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        fields = dict(pairs)
+        if len(fields) != len(pairs):
+            raise ValueError("duplicate SSE object key")
+        return fields
+
+    try:
+        json.loads(data, object_pairs_hook=unique_object)
+    except ValueError:
+        return False
+    return True
+
+
+def _has_competing_stream_choice(chunk: Mapping[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        # `error` only marks the SSE terminator. Any other explicit finish
+        # (e.g. content_filter), or dedicated refusal payload, is independent
+        # evidence. Check all choices before the error short-circuits parsing.
+        if (
+            _has_explicit_error_disposition(choice)
+            or isinstance(choice.get("error"), (Mapping, str))
+            or any(
+                choice.get(key) not in (None, "", "error")
+                for key in ("finish_reason", "native_finish_reason")
+            )
+        ):
+            return True
+        for key in ("delta", "message"):
+            content = choice.get(key)
+            if isinstance(content, Mapping) and content.get("refusal"):
+                return True
+    return False
+
+
+def _compat_stream_error(
+    chunk: Mapping[str, Any], *, prior_disposition: bool = False, wire_data: str | None = None
+) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
     Once a gateway has committed HTTP 200 it can no longer signal an upstream
@@ -1027,12 +1141,18 @@ def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
         message = error_type or "provider ended the stream with an error"
     elif error_type and error_type not in message:
         message = f"{error_type}: {message}"
-    return ProviderError(
+    failure = ProviderError(
         status,
         _capped(message),
         retryable=(relayed_upstream or status is None or status == 429 or status >= 500),
         auth_error=status in (401, 403),
     )
+    failure.in_band_h2_body_read_failure = (
+        not prior_disposition
+        and wire_data is not None
+        and _is_simple_h2_body_read_frame(chunk, wire_data)
+    )
+    return failure
 
 
 #: Ceiling on any advertised wait. A ``Retry-After`` is provider-supplied and
@@ -1922,6 +2042,13 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
     visible = local + prefix
     native = request.native_context_tokens
     return int(visible * _estimate_slope(request.model)) + native, visible + native
+
+
+def _inline_ui_suffix_tokens(request: ChatRequest) -> int:
+    # Only serializers that send the suffix count it. It contributes to this
+    # request's admission, but is not part of the stored conversation measure.
+    hint = request.inline_ui_hint
+    return (len(hint) + 3) // 4 if hint is not None else 0
 
 
 def _reasoning_effort(request: ChatRequest) -> str | None:
@@ -3109,6 +3236,29 @@ class OpenAICompatClient:
     # (Radient, OpenRouter) enforce Anthropic's 4-breakpoint limit per request.
     MAX_CACHE_BREAKPOINTS = 4
 
+    #: Whether this wire's request bodies must grow APPEND-ONLY: each body the
+    #: Session sends has to extend the previous one byte for byte. That is the
+    #: Session's own persisted-prefix protocol (``append_only_state``, opted into
+    #: by every production system-block provider in ``session_factory``), and a
+    #: wire that honours it — Muse, whose shipped stability tests assert the
+    #: byte prefix — cannot carry a per-turn suffix. The suffix is fine where an
+    #: uncached tail is tolerated: it costs those tokens once per request. On a
+    #: prefix-stable wire it is worse than that: on the next request the suffix
+    #: sits MID-conversation (transcript, then suffix, then the new turn), so the
+    #: earlier body is no longer a prefix and every request pays to re-send from
+    #: the divergence. Wires that declare this therefore pin the inline discovery
+    #: hint at the HEAD of ``input``, where it is byte-identical on every request
+    #: and rides the cached prefix.
+    #:
+    #: Trade-off (review round 13, m1): the hint is present or absent per input
+    #: surface and re-resolved on every request, so a surface switch costs ONE
+    #: cold request whose prefix shares nothing with the previous one. That is
+    #: still strictly better than the tail placement, which costs a divergence on
+    #: every turn for as long as the hint is on. Ordering caveat (n2): a future
+    #: subclass that also takes the developer-instructions path inserts the hint
+    #: ahead of the standing instructions, since both are developer messages.
+    inline_ui_hint_rides_head = False
+
     def __init__(
         self,
         base_url: str,
@@ -3405,9 +3555,8 @@ class OpenAICompatClient:
             "openai-chat",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=(
-                echo_turns * reasoning_echo_placeholder_tokens() + google_boundary_tokens
-            ),
+            extra_native_tokens=echo_turns * reasoning_echo_placeholder_tokens()
+            + google_boundary_tokens,
         )
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
@@ -3424,6 +3573,10 @@ class OpenAICompatClient:
                 frozen_entry=epoch_entry,
                 ephemeral_indices=ephemeral_indices,
             )
+        # Chat Completions is a wire format, not a downstream template
+        # contract. A suffix row can violate strict role alternation; changing
+        # an existing row can rewrite the cached prefix or a tool pair. Keep
+        # this entire route transparent and leave discovery to native inputs.
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3814,6 +3967,7 @@ class OpenAICompatClient:
             "openai-responses",
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         wire_messages = request.wire_messages()
         body: dict[str, Any] = {
@@ -3843,6 +3997,21 @@ class OpenAICompatClient:
                 )
             else:
                 body["instructions"] = instructions
+        if request.inline_ui_hint is not None:
+            # A real user item would move the Responses turn boundary, discard
+            # encrypted tool-round reasoning and reposition top-level instructions.
+            hint_item = {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": request.inline_ui_hint}],
+            }
+            if self.inline_ui_hint_rides_head:
+                # Prefix-stable wire: a tail item would break the append-only body
+                # contract this wire declares (see the class attribute), so pin it
+                # before the transcript where it stays byte-identical.
+                body["input"].insert(0, hint_item)
+            else:
+                body["input"].append(hint_item)
         if request.tools:
             body["tools"] = _tools_to_openai_responses(request.tools)
             body["tool_choice"] = {"auto": "auto", "none": "none", "required": "required"}.get(
@@ -3968,6 +4137,7 @@ class OpenAICompatClient:
         replay_text: list[str] = []
         replay_calls: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        prior_disposition = False
         usage: Usage | None = None
         provider_payload: dict[str, Any] | None = None
         # Refusal prose arrives in its own delta slot (``delta.refusal``), not
@@ -4066,7 +4236,13 @@ class OpenAICompatClient:
                         # 200, so this chunk is the only channel the failure has.
                         # Raise it NAMED; swallowing it left turns dying as
                         # wordless interruptions (see _compat_stream_error).
-                        raise _compat_stream_error(chunk)
+                        raise _compat_stream_error(
+                            chunk, prior_disposition=prior_disposition, wire_data=data
+                        )
+                    if not prior_disposition:
+                        # A refusal/finish can arrive in a separate SSE frame.
+                        # Retain it for the narrow H2 recovery decision only.
+                        prior_disposition = _has_competing_stream_choice(chunk)
                     if not started:
                         # First decoded chunk: the request is on the wire and the
                         # provider is generating. Announce the boundary HERE rather
@@ -4422,6 +4598,7 @@ class OpenAICompatClient:
         tool_call_count = 0
         terminal_stop: str | None = None
         terminal_error: str | None = None
+        announced_id: str | None = None
         #: The model the upstream says actually answered (``response.model``), read
         #: off frames this loop already parses. Same contract as the chat wire's
         #: capture: the last carrier wins and a refused value leaves the previous
@@ -4547,6 +4724,7 @@ class OpenAICompatClient:
             if turn_state is not None and turn_generation is not None:
                 turn_state.receive(turn_generation, response.headers.get("x-codex-turn-state"))
             self._observe_responses_headers(response.headers)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
                     break
@@ -4565,15 +4743,14 @@ class OpenAICompatClient:
                         raise _openai_response_error(payload)
                     continue
                 if event_type == "response.created":
-                    # The Responses API names the turn as soon as it opens it.
-                    # Capture the boundary HERE, not at ``response.completed``:
-                    # a supervisor keying no-replay proof on completion would
-                    # learn the turn was accepted only after it had already
-                    # produced its whole answer, which defeats the purpose.
-                    yield StreamStartEvent(
-                        response_id=_stream_id((payload.get("response") or {}).get("id"))
-                    )
-                    created_model = _served_model_slug((payload.get("response") or {}).get("model"))
+                    created = payload.get("response") or {}
+                    # Output and terminal IDs are not acceptance proof. If a
+                    # gateway delays the native opener, keep it in wire order.
+                    if announced_id is None:
+                        announced_id = _stream_id(created.get("id"))
+                        if announced_id is not None:
+                            yield _native_stream_start(request, announced_id)
+                    created_model = _served_model_slug(created.get("model"))
                     if created_model:
                         served_model = created_model
                 # Reasoning remains invisible here, but plaintext deltas still
@@ -5476,11 +5653,18 @@ class AnthropicClient:
             subagent_min_context_tokens=self._subagent_cache_ttl_1h_min_context_tokens,
             context_size=size,
             after_long_call=request.cache_after_long_call,
+            automation=request.cache_automation,
+            after_long_gap=request.cache_after_long_gap,
         )
 
     @classmethod
     def _system_blocks(
-        cls, blocks: Sequence[str], *, ttl: str | None = None, frozen: bool = False
+        cls,
+        blocks: Sequence[str],
+        *,
+        ttl: str | None = None,
+        frozen: bool = False,
+        stable_head: int = 0,
     ) -> list[dict[str, Any]]:
         """System blocks → Anthropic ``system`` array with cache breakpoints.
 
@@ -5497,6 +5681,18 @@ class AnthropicClient:
         last two gets an ephemeral breakpoint, CAPPED at
         ``MAX_CACHE_BREAKPOINTS`` (Anthropic rejects >4 markers).
 
+        ``stable_head`` (frozen only) counts the leading blocks that are
+        identical across sessions — the OAuth identity block, persona and tool
+        inventory, ending right before the env block (date, cwd). When it ends
+        strictly before ``rendered[-1]`` a SECOND marker goes on
+        ``rendered[stable_head - 1]``. WHY: the tail marker alone caches a
+        prefix that includes the env block, so a new session or subagent in
+        another cwd or on another day could never read the tools+persona bytes
+        another session just wrote; with the head marker it reads them. The
+        tail marker is kept: it still caches the whole frozen system for this
+        session's later turns. The head marker is the first system marker
+        ``_message_cache_breakpoints`` sheds when the 4-marker cap binds.
+
         ``ttl`` is the request-wide TTL from ``_cache_ttl_for``; every marker
         placed here carries it, because a 1h marker may not follow a 5m one.
         """
@@ -5504,6 +5700,8 @@ class AnthropicClient:
         if frozen:
             for block in blocks:
                 rendered.append({"type": "text", "text": block})
+            if 0 < stable_head < len(rendered):
+                rendered[stable_head - 1]["cache_control"] = cls._cache_control(ttl)
             if rendered:
                 rendered[-1]["cache_control"] = cls._cache_control(ttl)
             return rendered
@@ -5648,6 +5846,7 @@ class AnthropicClient:
         frozen_block: dict[str, Any] | None = None,
         static_prefix_block: dict[str, Any] | None = None,
         ephemeral_indices: Collection[int] | None = None,
+        system_head_marker: int | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -5690,9 +5889,28 @@ class AnthropicClient:
         epochs are byte-stable until the chain advances, so a marker there is a
         cache entry the next turn reads in full. System markers and the budget
         are unchanged.
+
+        ``system_head_marker`` is the index of the cross-session head marker
+        ``_system_blocks`` placed before the env block (frozen epochs only).
+        It is the LOWEST-priority marker in the request and is dropped before
+        any other system or message marker when the cap binds: within one
+        session the tail marker already covers the whole frozen system, so
+        losing the head costs only cross-session reuse on that one request,
+        whereas losing the tail or a message marker re-bills this session's
+        own prefix.
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
+        if system_head_marker is not None and system_head_marker in system_markers:
+            # Keep-priority order: the head marker moves to the end so the
+            # budget trim below sheds it first; the rest keep their
+            # historical earliest-first priority. Rebuilt rather than
+            # mutated in place: ``test_no_session_deletion`` flags any
+            # ``.remove(x)`` on a non-literal receiver as a possible disk
+            # removal, and an in-memory index list must not need an exemption.
+            system_markers = [i for i in system_markers if i != system_head_marker] + [
+                system_head_marker
+            ]
         ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
         # 1. Persistent rolling tail: skip trailing ephemeral frames so the
@@ -5760,8 +5978,9 @@ class AnthropicClient:
         if not message_targets:
             return
         budget = max(0, self.MAX_CACHE_BREAKPOINTS - len(message_targets))
-        # Drop the lowest-value system breakpoints (the last stable blocks)
-        # until system + message markers fit the cap.
+        # Drop the lowest-value system breakpoints (the cross-session head
+        # marker first, then the last stable blocks) until system + message
+        # markers fit the cap.
         for index in system_markers[budget:]:
             system[index].pop("cache_control", None)
         for block in message_targets:
@@ -5905,6 +6124,7 @@ class AnthropicClient:
             _ANTHROPIC_NATIVE_PROTOCOL,
             scope,
             _estimate_slope(request.model),
+            extra_native_tokens=_inline_ui_suffix_tokens(request),
         )
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -5945,9 +6165,22 @@ class AnthropicClient:
             if request.cache_markers == "system" and isinstance(system_rows, list) and system_rows:
                 system_rows[-1]["cache_control"] = self._cache_control(ttl)
         else:
+            # The OAuth identity block is a constant prepended to EVERY OAuth
+            # request, so it belongs to the session-agnostic head too.
+            stable_head = request.system_stable_head_blocks
+            if stable_head and oauth:
+                stable_head += 1
+            head_marker = (
+                stable_head - 1
+                if request.system_blocks_frozen and 0 < stable_head < len(blocks)
+                else None
+            )
             if blocks:
                 body["system"] = self._system_blocks(
-                    blocks, ttl=ttl, frozen=request.system_blocks_frozen
+                    blocks,
+                    ttl=ttl,
+                    frozen=request.system_blocks_frozen,
+                    stable_head=stable_head,
                 )
             # System-only breakpoints stop the cached prefix before the first
             # message: the entire growing conversation would be re-processed at
@@ -5964,6 +6197,13 @@ class AnthropicClient:
                 frozen_block=epoch_block,
                 static_prefix_block=static_prefix_block,
                 ephemeral_indices=ephemeral_indices,
+                system_head_marker=head_marker,
+            )
+        # An ephemeral frame belongs beyond all original cache points. Keep a
+        # preceding user/tool-result row byte-identical, including block order.
+        if request.inline_ui_hint is not None:
+            messages.append(
+                {"role": "user", "content": [{"type": "text", "text": request.inline_ui_hint}]}
             )
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
@@ -6225,6 +6465,7 @@ class AnthropicClient:
         native_blocks: dict[int, dict[str, Any]] = {}
         tool_json: dict[int, list[str]] = {}
         visible_text: list[str] = []
+        announced_id: str | None = None
         #: The model the API says served this turn (``message.model`` on
         #: ``message_start``). Captured for the per-call ledger record because the
         #: request names the ROUTE the harness asked for, never the checkpoint
@@ -6267,6 +6508,7 @@ class AnthropicClient:
             if response.status_code >= 400:
                 await response.aread()
                 self._raise_for_status(response)
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             async for event in self._iter_events(response):
                 event_type = event.get("type")
                 if event_type == USAGE_FILL_EVENT:
@@ -6291,31 +6533,26 @@ class AnthropicClient:
                         usage.output_tokens = int(fill["output_tokens"])
                     continue
                 if event_type == "message_start":
-                    # Anthropic names the turn on its own ``message_start``,
-                    # which is the moment it began generating for this request.
-                    # The id was previously read past for usage alone, leaving
-                    # an Anthropic-pinned run with NO native turn identity on
-                    # any event — and therefore no way for an external runtime
-                    # to commit no-replay proof.
-                    # ``diagnostics`` rides the same frame (streaming puts it
-                    # on ``message_start``, nowhere else). Read only when THIS
-                    # request opted in — the retry below may have dropped the
-                    # key — so an undiagnosed call reports ``None``, never a
-                    # fabricated "baseline".
-                    miss_type, missed_tokens = (
-                        _anthropic_cache_diagnosis(
-                            event.get("message") or {},
-                            previous_id=request.cache_diagnostics_previous_id,
-                        )
-                        if "diagnostics" in body
-                        else (None, 0)
-                    )
-                    yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id")),
-                        cache_miss_type=miss_type,
-                        cache_missed_tokens=missed_tokens,
-                    )
-                    start_model = _served_model_slug((event.get("message") or {}).get("model"))
+                    message = event.get("message") or {}
+                    if announced_id is None:
+                        announced_id = _stream_id(message.get("id"))
+                        if announced_id is not None:
+                            # Only this opener can name the turn and carry cache
+                            # diagnostics for a request that opted in.
+                            miss_type, missed_tokens = (
+                                _anthropic_cache_diagnosis(
+                                    message, previous_id=request.cache_diagnostics_previous_id
+                                )
+                                if "diagnostics" in body
+                                else (None, 0)
+                            )
+                            yield _native_stream_start(
+                                request,
+                                announced_id,
+                                cache_miss_type=miss_type,
+                                cache_missed_tokens=missed_tokens,
+                            )
+                    start_model = _served_model_slug(message.get("model"))
                     if start_model:
                         served_model = start_model
                     raw_usage = (event.get("message") or {}).get("usage") or {}
@@ -6565,8 +6802,15 @@ def _google_digest(value: Any) -> bytes:
     return hashlib.sha256(encoded).digest()
 
 
-def _google_prefix_snapshot(body: Mapping[str, Any]) -> _GooglePrefixSnapshot:
+def _google_prefix_snapshot(
+    body: Mapping[str, Any], *, has_inline_ui_suffix: bool = False
+) -> _GooglePrefixSnapshot:
     contents = body.get("contents") or []
+    # This classifier attributes changes to the durable history. The builder's
+    # own final discovery row moves after new messages, without rewriting any
+    # of them. Do not alter the actual POST or the provider's token receipts.
+    if has_inline_ui_suffix:
+        contents = contents[:-1]
     return _GooglePrefixSnapshot(
         system_hash=_google_digest(body.get("systemInstruction")),
         tools_hash=_google_digest(body.get("tools")),
@@ -6603,7 +6847,8 @@ def _google_cache_diagnosis(
         a != b for a, b in zip(current.contents_hashes, prev_contents)
     ):
         return "messages_changed", shortfall
-    # The whole previous prompt is a byte-identical prefix of this one.
+    # The durable prompt is a matching prefix. Shortfall still comes from
+    # the provider's exact wire token counts, including any transient tail.
     if cached_tokens <= 0:
         if previous.prompt_tokens >= _GOOGLE_IMPLICIT_CACHE_MIN_TOKENS:
             return "evicted_or_rerouted", previous.prompt_tokens
@@ -6821,8 +7066,10 @@ class GoogleClient:
             "google-content",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=boundary_tokens,
+            extra_native_tokens=boundary_tokens + _inline_ui_suffix_tokens(request),
         )
+        if request.inline_ui_hint is not None:
+            contents.append({"role": "user", "parts": [{"text": request.inline_ui_hint}]})
         body: dict[str, Any] = {"contents": contents}
         if request.system_blocks:
             # Gemini's dedicated system slot (not folded into a user turn).
@@ -7140,11 +7387,14 @@ class GoogleClient:
             # Silent telemetry must never fail a turn: a hashing bug only
             # loses this call's diagnosis (no snapshot, so nothing recorded).
             try:
-                prefix = _google_prefix_snapshot(body)
+                prefix = _google_prefix_snapshot(
+                    body, has_inline_ui_suffix=request.inline_ui_hint is not None
+                )
             except Exception:  # noqa: BLE001 — telemetry is best-effort
                 logger.debug("google cache snapshot failed", exc_info=True)
         prompt_tokens = 0
         async with self._open_content_stream(request, url, body, headers) as response:
+            record_inline_ui_wire_receipt(1 if request.inline_ui_hint is not None else None)
             started = False
             async for data in _iter_sse_lines(response):
                 try:

@@ -46,6 +46,11 @@ _DECLARING_MODULES = (
 #: safe to drop. An entry here is a claim about the mesh, so it has to be
 #: falsifiable: the test below refuses an excuse for a name no client declares.
 _NOT_FORWARDED: dict[str, str] = {
+    "inline_ui": (
+        "Rich output requires negotiated support from a direct local attachment. "
+        "Mesh does not transport inline UI, so an attach client's declaration "
+        "must not enable model instructions or rich output through a relay."
+    ),
     "operator_nonce": (
         "Operator authority is LOCAL-ONLY, and the runtime says so at the point it "
         "matters: a connection with no nonce is one of 'a follower, or a RELAY', and "

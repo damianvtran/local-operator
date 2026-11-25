@@ -1784,7 +1784,50 @@ def build_system_blocks(
     if not has_resources:
         tail = tail.removeprefix("\n\n") or "<skills/>"
 
+    # Order is load-bearing; see ``STABLE_HEAD_BLOCK_COUNT`` for why the env
+    # block stays at index 2 rather than moving after the tail.
     return [instructions, inventory, env_block, tail]
+
+
+#: How many LEADING blocks of :func:`build_system_blocks` carry no date or
+#: working directory: the persona/standing instructions (0) and the tool
+#: inventory (1). Block 2, the env block, carries ``Today is <date>`` and the
+#: working directory, so it differs between any two sessions started in
+#: another cwd or on another day.
+#:
+#: "Session-agnostic" is narrower than it sounds. Block 0 also folds in the
+#: per-cwd repo guidance (AGENTS.md), the operator's custom instructions, the
+#: preferred-language line and the configured identity name, and block 1 is
+#: rendered from the session's tool set. So the head is shared only between
+#: sessions with the same tools AND the same guidance, instructions, language
+#: and identity — e.g. two sessions in one repo, not sessions in two repos
+#: with different AGENTS.md files. Subagents get a different tool set from
+#: their parent (``wake``/``monitor`` are pruned, see ``subagent.py``), so
+#: subagents share a head with each other but not with the parent session.
+#:
+#: WHY IT EXISTS: the Anthropic wire caches ``tools + system`` only up to a
+#: ``cache_control`` marker, and the frozen-epoch policy used to place its one
+#: system marker on the LAST block — after the env block — so no new session
+#: or subagent could reuse the identical tools+persona prefix another session
+#: had just written (a zero-spend wire capture read 0 cached tokens on every
+#: first call, where Claude Code reads its shared head). Providers stamp this
+#: count onto themselves (``stable_head_blocks``) so ``Session`` can tell the
+#: wire where the volatile boundary is STRUCTURALLY, rather than the client
+#: sniffing for "Today is".
+#:
+#: WHY THE ENV BLOCK IS NOT MOVED after the tail instead (which would let one
+#: marker cover the guides too): the block indices are a persisted protocol.
+#: ``split_system_block_sections`` / ``_BLOCK_SECTION_ORDER`` address blocks
+#: by index (1 inventory, 2 env, 3 tail) and every transcript's
+#: ``system_prefix`` record stores the four-block list in this order, so a
+#: resumed session would diff a reordered render index-by-index against its
+#: old epoch and journal bogus deltas. The tail also carries per-session state
+#: (goal, team/agent brief, interactivity) that is rarely identical across
+#: sessions, so it would add little shared prefix for that risk.
+#:
+#: CONSTRAINT: blocks ``[:STABLE_HEAD_BLOCK_COUNT]`` must never gain per-session
+#: or per-day content; anything volatile belongs in the env block or the tail.
+STABLE_HEAD_BLOCK_COUNT = 2
 
 
 # ---------------------------------------------------------------------------

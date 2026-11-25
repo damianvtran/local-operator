@@ -58,7 +58,7 @@ afterEach(async () => {
 async function publishProjection(conversationName = "Ready conversation") {
 	const stream = await waitFor(() => {
 		const source = Stream.instances.find((candidate) =>
-			candidate.url === `/api/sessions/${sessionId}/events?steer_journal_order=1`);
+			candidate.url === `/api/sessions/${sessionId}/events?steer_journal_order=1&inline_ui=1`);
 		expect(source).toBeTruthy();
 		return source!;
 	});

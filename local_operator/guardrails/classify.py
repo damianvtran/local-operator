@@ -1322,6 +1322,35 @@ _REMNANT_FILE_LIMIT = 50_000
 _REMNANT_OS_METADATA = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
 
 
+def _tsbuildinfo_file(full: str) -> bool:
+    """A TypeScript ``--incremental`` state file, proven by CONTENT, not name.
+
+    Field case 2026-11-24 (disk recovery, guard 0.112.10): three UI worktree
+    leftovers held every tracked file as a committed blob plus one
+    ``.cache/typecheck/node.tsbuildinfo``, which ``tsc -b`` rewrites on every
+    build and Git never holds, so the remnant check refused them. The file
+    is JSON whose top-level object carries tsc's ``"version"`` and
+    ``"program"`` keys (TS 5.x writes ``{"fileNames":[...],..."version":...}``
+    or ``{"root":[...],"version":...}``). Anything else under the name, an
+    unreadable file, or one over 64 MiB stays held (fail closed).
+    """
+    import json
+
+    try:
+        if os.path.getsize(full) > 64 * 1024 * 1024:
+            return False
+        with open(full, "rb") as fh:
+            data = json.loads(fh.read())
+    except (OSError, ValueError, RecursionError, MemoryError):
+        # #4550 R1-m2: deeply nested JSON raises RecursionError; hold, quietly.
+        return False
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("version"), str)
+        and any(k in data for k in ("program", "root", "fileNames"))
+    )
+
+
 def _git_env() -> dict[str, str]:
     """Environment for the guard's own read-only git calls: no inherited
     repository overrides, no prompts, no optional locks (#4536 R1 m4)."""
@@ -1332,6 +1361,16 @@ def _git_env() -> dict[str, str]:
     }
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     return env
+
+
+#: Reason for a LOW whose deletion loses nothing Git does not already hold
+#: (:func:`_removed_worktree_remnant`). ``check`` keys on this prefix: an
+#: ask about such a path that timed out, was withdrawn, or was answered from
+#: an unverified surface does not lift it out of LOW (field case 2026-11-24,
+#: disk recovery: a-58df timed out, so the very session that asked could not
+#: finish deleting two leftovers every other session could). An ask protects
+#: the operator's data; here there is none left to protect.
+REMNANT_REASON = "a dropped worktree's leftovers, every byte already in Git"
 
 
 def _former_worktree_repo(real: str) -> str | None:
@@ -1404,6 +1443,17 @@ def _former_worktree_repo(real: str) -> str | None:
     return os.path.dirname(common)
 
 
+#: Proven-lossless fingerprints, ``realpath -> (fingerprint, monotonic time)``
+#: (#4545 R1-m2, field case 2026-11-24): one guard checkpoint asks up to
+#: three times, and under load each ask hashed ~12k files for minutes, so
+#: the third timed out and held a lossless folder. The fingerprint is every
+#: remaining file's (path, size, mtime_ns, inode), read by the walk that runs
+#: on EVERY ask; only the slow hashing is skipped, and only when nothing
+#: changed since a TRUE answer within ``_REMNANT_MEMO_TTL_S``.
+_REMNANT_MEMO: dict[str, tuple[int, float]] = {}
+_REMNANT_MEMO_TTL_S = 120.0
+
+
 def _removed_worktree_remnant(path: str) -> bool:
     """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
     nothing when deleted?
@@ -1470,21 +1520,46 @@ def _removed_worktree_remnant(path: str) -> bool:
                     return False
                 if name in _REMNANT_OS_METADATA:
                     continue
+                if name.endswith(".tsbuildinfo") and _tsbuildinfo_file(full):
+                    continue
                 files.append(full)
                 if len(files) > _REMNANT_FILE_LIMIT:
                     return False
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):
         return False
     if not files:
         return True
+    try:
+        stamps = []
+        for f in files:
+            st = os.lstat(f)
+            # ctime too (#4550 R1-m1): a rewrite can restore mtime, not ctime.
+            stamps.append((f, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino))
+    except OSError:
+        return False
+    fingerprint = hash(tuple(sorted(stamps)))
+    memo = _REMNANT_MEMO.get(real)
+    if (
+        memo is not None
+        and memo[0] == fingerprint
+        and time.monotonic() - memo[1] < _REMNANT_MEMO_TTL_S
+    ):
+        return True
+    _REMNANT_MEMO.pop(real, None)
     env = _git_env()
+    # Field case 2026-11-24 (UI leftovers, load 33-54 during disk recovery):
+    # hashing 11,941 committed files took 28.8 s of I/O wait, so a flat 30 s
+    # timed out and three lossless leftovers stayed held. Scale with the file
+    # count (30 ms each over a 30 s floor, capped at 15 min); a timeout still
+    # holds the folder (fail closed).
+    budget = min(900.0, 30.0 + len(files) * 0.03)
     try:
         hashed = subprocess.run(
             ["git", "-C", repo, "hash-object", "--no-filters", "--stdin-paths"],
             input="\n".join(files) + "\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=budget,
             env=env,
         )
         oids = hashed.stdout.split()
@@ -1495,13 +1570,16 @@ def _removed_worktree_remnant(path: str) -> bool:
             input="\n".join(oids) + "\n",
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=budget,
             env=env,
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     kinds = checked.stdout.split()
-    return checked.returncode == 0 and len(kinds) == len(oids) and set(kinds) == {"blob"}
+    lossless = checked.returncode == 0 and len(kinds) == len(oids) and set(kinds) == {"blob"}
+    if lossless:
+        _REMNANT_MEMO[real] = (fingerprint, time.monotonic())
+    return lossless
 
 
 #: Programs that remove a symlink operand's ENTRY without following it. Not
@@ -2111,6 +2189,11 @@ def _rank(
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
+    if target.op in _DESTROYING_OPS and os.path.isdir(path) and _removed_worktree_remnant(path):
+        # Named, so ``check`` can tell a LOSSLESS LOW from an ordinary one:
+        # an unanswered ask about this path protects nothing (see
+        # ``REMNANT_REASON``).
+        return RankedTarget(target, Risk.LOW, REMNANT_REASON)
     return RankedTarget(target, Risk.LOW, "ordinary path")
 
 

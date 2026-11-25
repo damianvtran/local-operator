@@ -46,6 +46,7 @@ from local_operator.harness.types import (
     ModelSpec,
     OneTurnSecretScopeError,
     RenderedStreamError,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
@@ -838,6 +839,10 @@ class ProviderError(RenderedStreamError):
     #: name a CONTENT verdict (PR #4212, S-7/S-12), read before ``message`` is
     #: capped. Declared here so the stamp is a typed attribute, not a monkey-patch.
     content_verdict_seen: bool = False
+
+    #: Stamped only by the SSE parser for the code-less HTTP/2 body-read report.
+    #: This is evidence from the gateway, not a local socket error (`transport`).
+    in_band_h2_body_read_failure: bool = False
 
     def __init__(
         self,
@@ -1970,8 +1975,10 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
     The status gate keeps every REFUSAL terminal. A 4xx is the gateway
     answering about OUR request — a bad model slug, a bad field, auth, quota,
     moderation — and it is deterministic in its bytes, so re-asking earns the
-    same answer while spending the turn's continuation budget. Only a 5xx is a
-    statement about the gateway's own side of the hop.
+    same answer while spending the turn's continuation budget. The only
+    status-less exception is Radient's relayed HTTP/2 body-read failure: the
+    SSE parser must positively identify it before non-HTTP codes and other
+    wire fields are lost.
 
     A 5xx qualifies on EITHER of two kinds of evidence, and the second exists
     because the first cannot cover the incident's whole class:
@@ -2006,7 +2013,9 @@ def is_aggregator_upstream_stream_failure(error: BaseException, provider: str | 
 
     if provider not in AGGREGATOR_PROVIDERS:
         return False
-    if error.status is None or error.status < 500:
+    if error.status is None:
+        return provider in {"radient", "radient-key"} and error.in_band_h2_body_read_failure
+    if error.status < 500:
         return False
     # Imported at call time for the same reason as `registry` above: `clients`
     # imports THIS module at module scope for `ProviderError`, so the reverse
@@ -2045,10 +2054,8 @@ def _mark_mid_stream_connectivity(error: ProviderError, *, provider: str | None 
       passed in by the driver because the predicate needs the identity and this
       helper cannot recover it from the error. Only the forwarded-any
       ``ProviderError`` arm passes it: that is the arm an aggregator's IN-BAND
-      report arrives on. The transport arm deliberately calls this bare —
-      ``wrap_transport_error``'s result is status-less by construction, so the
-      aggregator predicate cannot fire there and passing a provider would only
-      suggest it could.
+      report arrives on. The transport arm calls this bare: a local transport
+      exception is not an in-band gateway report.
 
     Never clears the flag — a pre-connect connectivity loss that somehow
     surfaces here is still one. Only ever an upgrade.
@@ -4931,6 +4938,7 @@ async def _stream_with_failover_events(
             )
 
             attempt_hint = WireHintCapture()
+            receipt_pending = request.inline_ui_hint is not None
             sent_at_ms = int(time.time() * 1000)
             sent_monotonic = time.monotonic()
             successful_terminal = False
@@ -4952,6 +4960,20 @@ async def _stream_with_failover_events(
                 async for event in capture_wire_stream(
                     client.stream(current_request, key, oauth_access=access), attempt_hint
                 ):
+                    if receipt_pending:
+                        # The encoder has run, even when its wire has no native
+                        # opener. For an unsupported adapter this fresh capture
+                        # stays None, clearing any failed primary before output.
+                        # Do not count the receipt as forwarded output or flush
+                        # it from a replayable attempt we will discard.
+                        receipt_pending = False
+                        receipt = StreamAttemptReceipt(
+                            inline_ui_source_version=attempt_hint.inline_ui_source_version
+                        )
+                        if buffered is None:
+                            yield receipt
+                        else:
+                            buffered.append(receipt)
                     if isinstance(event, StreamEndEvent):
                         successful_terminal = (
                             event.stop_reason in ("stop", "length", "toolUse") and not event.error

@@ -49,7 +49,7 @@ function Probe({ id }: { id: string }) {
 
 function stubEventsFetch(status: number, body: unknown) {
 	const fetch = vi.fn(async (url: string, init?: RequestInit) =>
-		url.endsWith("/events?steer_journal_order=1") && url.startsWith("/api/sessions/")
+		url.endsWith("/events?steer_journal_order=1&inline_ui=1") && url.startsWith("/api/sessions/")
 			? new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 			: new Stream(url, init?.signal).response);
 	vi.stubGlobal("fetch", fetch);

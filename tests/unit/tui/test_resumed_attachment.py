@@ -227,10 +227,17 @@ async def test_a_name_only_team_is_not_painted_and_says_why(tmp_path) -> None:
     """The complement of the bound case above: the same legacy sidecar with NO
     binding record names a team, but a name is not authority. The band must stay
     blank (painting it would claim a manager the prompt does not carry) and the
-    refusal must reach the screen rather than downgrade silently."""
+    refusal must reach the screen rather than downgrade silently.
+
+    The mesh stamp without team identity marks the session as having ARRIVED
+    name-only: an unmarked local journal is grandfathered instead (the legacy
+    test below), so the arrival marker is what makes this the refused shape."""
+    from local_operator.session.placement import MeshStamp, write_stamp_into
+
     agents, teams = _registries(tmp_path)
     _session(tmp_path, agents, teams)  # creates tmp_path/sess, nothing bound
     write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
+    write_stamp_into(tmp_path / "sess", MeshStamp(session_id="sess", origin={}))
 
     resumed = _session(tmp_path, agents, teams)
 
@@ -247,6 +254,33 @@ async def test_a_name_only_team_is_not_painted_and_says_why(tmp_path) -> None:
             "lopdev: recorded authority is unavailable; re-attach via /team"
         )
         assert _restore_notice(app, resumed) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_local_team_is_painted(tmp_path) -> None:
+    """The grandfathered sibling of the name-only refusal: the same legacy
+    sidecar with no binding AND no arrival marker is a pre-binding session
+    created on this machine, so it restores, is stamped, and paints the team's
+    manager with no downgrade notice."""
+    from local_operator.network.move_team import LOCAL_BINDING_NAME
+
+    agents, teams = _registries(tmp_path)
+    _session(tmp_path, agents, teams)  # creates tmp_path/sess, nothing bound
+    write_session_attachment(tmp_path / "sess", team="lopdev", agent="auditor", goal="")
+
+    resumed = _session(tmp_path, agents, teams)
+
+    async def factory() -> Session:
+        return resumed
+
+    app = OperatorApp(factory)
+    async with app.run_test(size=(120, 24)) as pilot:
+        await _adopted(app, pilot, resumed)
+        assert app._status is not None
+        assert app._status._team == "lopdev"
+        assert app._status._agent_profile == "manager"
+        assert resumed.attachment_restore_notice == ""
+    assert (tmp_path / "sess" / LOCAL_BINDING_NAME).exists()
 
 
 @pytest.mark.asyncio

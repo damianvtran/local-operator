@@ -190,3 +190,174 @@ def test_pointerless_folder_outside_worktrees_is_not_a_remnant(repo: Path, tmp_p
     moved = tmp_path / "loose"
     wt.rename(moved)
     assert not _removed_worktree_remnant(str(moved))
+
+
+def test_remnant_rank_carries_the_lossless_reason(repo: Path) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk, classify_bash
+
+    gone = _committed_tree(repo, "lossless")
+    shutil.rmtree(repo / ".git" / "worktrees" / "lossless")
+    v = classify_bash(
+        f"rm -rf {gone}",
+        cwd=str(repo),
+        env={"HOME": str(repo.parent)},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    )
+    assert v.risk is Risk.LOW and v.targets[0].reason == REMNANT_REASON, v.reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lossless", "status", "held"),
+    [
+        (True, "timed_out", False),
+        (False, "timed_out", True),
+        (True, "declined", True),
+        (True, "open", True),
+    ],
+    ids=["remnant", "uncommitted", "declined-remnant", "open-remnant"],
+)
+async def test_timed_out_ask_does_not_hold_a_lossless_remnant(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, lossless: bool, status: str, held: bool
+) -> None:
+    """Field case 2026-11-24 (disk recovery, a-58df): the session that ASKED
+    about two leftovers could not delete them after the ask timed out, though
+    any other session could. An unanswered ask protects the operator's data;
+    a remnant whose every byte Git holds has none. An uncommitted file in the
+    same folder keeps the ordinary ask hold."""
+    from types import SimpleNamespace
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.check import (
+        CallContext,
+        GuardSettings,
+        check_tool_call,
+    )
+
+    name = f"asked-{lossless}-{status}"
+    gone = _committed_tree(repo, name)
+    if not lossless:
+        (gone / "notes.md").write_text("never committed\n")
+    shutil.rmtree(repo / ".git" / "worktrees" / name)
+    real = os.path.realpath(gone)
+    asked = SimpleNamespace(
+        ask_id="a-58df",
+        session_id="aaaaaaaaaaa1",
+        # A decline is an answer that approves nothing (#4545 R1-M1).
+        status=status,
+        label={"timed_out": "TIMED OUT with no answer", "open": "still open, not yet answered"}.get(
+            status, "declined"
+        ),
+        text=f"May I delete {real}?",
+        approved="",
+        created_at=0,
+        never_answered=status != "declined",
+        answer=None,
+        untrusted_yes=False,
+        answered_at=0,
+        has_answer=status == "declined",
+        expires_at=0,
+    )
+    monkeypatch.setattr(prov, "unanswered_asks", lambda sid, *a, **k: [asked])
+    calls: list[str] = []
+
+    async def judge(system: str, prompt: str) -> str:
+        calls.append(prompt)
+        return "BLOCK: judged"
+
+    ctx = CallContext(
+        cwd=str(repo),
+        env={"HOME": str(repo.parent), "PATH": os.environ.get("PATH", "")},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    )
+    out = await check_tool_call(
+        "bash", {"command": f"rm -rf {real}"}, ctx, settings=GuardSettings(), judge=judge
+    )
+    if held:
+        assert out is not None and out.blocked, out
+    else:
+        assert out is None or not out.blocked, out
+        assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("payload", "remnant"),
+    [
+        ('{"version":"7.0.2","root":[1],"fileNames":["a.ts"]}', True),
+        ('{"version":"5.4.5","program":{"fileNames":[]}}', True),
+        ("my notes, not tsc state\n", False),
+        ('{"version":"5.4.5"}', False),
+        ('["version", "root"]', False),
+    ],
+    ids=["tsc7-root", "tsc5-program", "text", "json-no-program", "json-list"],
+)
+def test_tsbuildinfo_is_shed_only_by_content(repo: Path, payload: str, remnant: bool) -> None:
+    """Field case 2026-11-24 (UI leftovers, guard 0.112.10): a remnant holding
+    only committed blobs plus ``.cache/typecheck/node.tsbuildinfo``. The file
+    is lossless only when its CONTENT is tsc incremental state."""
+    from local_operator.guardrails.classify import _removed_worktree_remnant
+
+    wt = _committed_tree(repo, f"tsb-{remnant}-{abs(hash(payload))}")
+    (wt / ".cache" / "typecheck").mkdir(parents=True)
+    (wt / ".cache" / "typecheck" / "node.tsbuildinfo").write_text(payload)
+    shutil.rmtree(repo / ".git" / "worktrees" / wt.name)
+    assert _removed_worktree_remnant(str(wt)) is remnant
+
+
+def test_remnant_memo_skips_only_unchanged_hashing(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4545 R1-m2: a large lossless leftover is hashed once per checkpoint,
+    and ANY change to its files (new, edited) forces a fresh hash."""
+    import subprocess as sp
+
+    from local_operator.guardrails import classify as c
+
+    monkeypatch.setattr(c, "_REMNANT_MEMO", {})
+    gone = _committed_tree(repo, "memo")
+    shutil.rmtree(repo / ".git" / "worktrees" / "memo")
+    hashes: list[int] = []
+    real_run = sp.run
+
+    def counted(cmd, *a, **k):
+        if "hash-object" in cmd:
+            hashes.append(1)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(c.subprocess, "run", counted)
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert len(hashes) == 1  # unchanged: reused
+    (gone / "draft.md").write_text("uncommitted\n")
+    assert c._removed_worktree_remnant(str(gone)) is False
+    assert len(hashes) == 2  # new file: re-hashed, and held
+    (gone / "draft.md").unlink()
+    assert c._removed_worktree_remnant(str(gone)) is True
+    monkeypatch.setattr(c, "_REMNANT_MEMO_TTL_S", 0.0)
+    assert c._removed_worktree_remnant(str(gone)) is True
+    assert len(hashes) == 4  # expired: re-hashed
+
+
+def test_remnant_review_minors(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4550 R1-m1: a same-size rewrite with its mtime restored is re-hashed
+    (ctime moves). R1-m2: deeply nested JSON under a tsbuildinfo name holds
+    instead of raising RecursionError out of the guard."""
+    from local_operator.guardrails import classify as c
+
+    monkeypatch.setattr(c, "_REMNANT_MEMO", {})
+    gone = _committed_tree(repo, "minors")
+    shutil.rmtree(repo / ".git" / "worktrees" / "minors")
+    victim = next(p for p in gone.rglob("*") if p.is_file() and p.name != ".git")
+    assert c._removed_worktree_remnant(str(gone)) is True
+    st = victim.stat()
+    body = victim.read_bytes()
+    victim.write_bytes(bytes(b ^ 1 for b in body) if body else b"")
+    os.utime(victim, ns=(st.st_atime_ns, st.st_mtime_ns))
+    if body:
+        assert c._removed_worktree_remnant(str(gone)) is False
+    victim.write_bytes(body)
+    deep = gone / "deep.tsbuildinfo"
+    deep.write_text("[" * 200_000 + "]" * 200_000)
+    assert c._removed_worktree_remnant(str(gone)) is False

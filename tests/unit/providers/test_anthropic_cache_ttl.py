@@ -630,3 +630,176 @@ async def test_a_long_isolated_turn_does_not_arm(monkeypatch) -> None:
         await parent.close()
     assert not after.cache_after_long_call
     assert _wire_ttls(after) == {None}
+
+
+# -- automation main thread (exec / SDK) ---------------------------------------
+
+
+def test_automation_main_is_5m_on_every_credential_until_a_long_gap() -> None:
+    """An exec/SDK main thread has no idle gap inside the run, so the 1h
+    premium buys nothing: 5m on a subscription AND above the API-key size
+    threshold, until a long start-to-start gap returns it to the main rules."""
+    big = lambda: 200_000  # noqa: E731
+    assert _decide(automation=True) is None
+    assert _decide(automation=True, subscription=False, context_size=big) is None
+    assert _decide(automation=True, after_long_gap=True) == "1h"
+    assert (
+        _decide(automation=True, after_long_gap=True, subscription=False, context_size=big) == "1h"
+    )
+    # Without the automation mark the gap flag changes nothing (interactive).
+    assert _decide(after_long_gap=False) == "1h"
+    assert _decide(subscription=False, context_size=big) == "1h"
+
+
+def test_automation_flags_leave_subagents_and_auxiliary_alone() -> None:
+    assert _decide(role="subagent", automation=True, after_long_call=True) == "1h"
+    assert _decide(role="subagent", automation=True) is None
+    assert _decide(role="auxiliary", automation=True, after_long_gap=True) is None
+
+
+def test_automation_after_long_gap_still_honours_the_global_off_switch() -> None:
+    assert _decide(automation=True, after_long_gap=True, main_min_context_tokens=0) is None
+
+
+async def _run_spaced_calls(
+    stream: Any, request: ChatRequest | list[ChatRequest], gaps: list[float], monkeypatch: Any
+) -> list[ChatRequest]:
+    """One call per entry; ``gaps[i]`` seconds pass BETWEEN call i-1 and i
+    (outside the stream, as a tool run or a ``wait`` would), ``gaps[0]`` before
+    the first. Each stream itself takes no time. ``request`` may be a list, one
+    per gap, so mixed sequences share ONE clock (a fresh clock per helper call
+    would reset the offset and hide the gap)."""
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.model import configure
+
+    clock = _Clock()
+    monkeypatch.setattr(configure, "time", clock)
+    captured: list[ChatRequest] = []
+
+    async def fake_failover(req: ChatRequest, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        captured.append(req)
+        yield StreamEndEvent(stop_reason="stop")
+
+    import local_operator.providers.failover as failover
+
+    monkeypatch.setattr(failover, "stream_with_failover", fake_failover)
+    requests = request if isinstance(request, list) else [request] * len(gaps)
+    for gap, each in zip(gaps, requests, strict=True):
+        clock.offset += gap
+        async for _ in stream(each, None):
+            pass
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_exec_main_thread_goes_out_5m_then_1h_after_a_long_tool_gap(monkeypatch) -> None:
+    """The real stamping path: a marked stream's back-to-back calls carry 5m
+    markers on every breakpoint; once 300 s pass between two calls (a long
+    tool, a subagent wait), that call and every later one carry 1h."""
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
+
+    stream = _session_stream()
+    mark_automation_session(type("S", (), {"_stream_fn": stream})())
+    try:
+        calls = await _run_spaced_calls(
+            stream, _request(), [0.0, 3.0, 28.0, 300.0, 2.0], monkeypatch
+        )
+    finally:
+        await stream.close()
+    assert all(c.cache_automation for c in calls)
+    assert [c.cache_after_long_gap for c in calls] == [False, False, False, True, True]
+    assert [_wire_ttls(c) for c in calls] == [{None}, {None}, {None}, {"1h"}, {"1h"}]
+
+
+@pytest.mark.asyncio
+async def test_unmarked_main_thread_is_unchanged_and_errands_do_not_reset_the_gap(
+    monkeypatch,
+) -> None:
+    plain_stream = _session_stream("s-plain")
+    try:
+        (plain,) = await _run_spaced_calls(plain_stream, _request(), [0.0], monkeypatch)
+    finally:
+        await plain_stream.close()
+    assert not plain.cache_automation and _wire_ttls(plain) == {"1h"}
+
+    stream = _session_stream()
+    stream.mark_automation()
+    try:
+        # An isolated errand 290 s after the first turn must not count as a
+        # turn start: the next turn is 300 s after the last TURN, so the gap
+        # rule fires. Had the errand reset the clock, the gap would read 10 s.
+        first, _errand, after = await _run_spaced_calls(
+            stream,
+            [_request(), _request(isolated=True), _request()],
+            [0.0, 290.0, 10.0],
+            monkeypatch,
+        )
+    finally:
+        await stream.close()
+    assert _wire_ttls(first) == {None}
+    assert after.cache_after_long_gap and _wire_ttls(after) == {"1h"}
+
+
+def test_mark_automation_session_tolerates_sessions_without_a_stream() -> None:
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
+
+    mark_automation_session(object())
+    mark_automation_session(type("S", (), {"_stream_fn": object()})())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("workstream", "team", "marked"),
+    [
+        (False, None, True),
+        (True, None, False),
+        (False, "team", False),
+        (True, "team", False),
+        # ``exec --resume <id>`` with no ``--team`` (the ``sessions`` tool's
+        # resume): the argument is None but the constructor's restore already
+        # attached the stored team, or recorded it as pending (agent review
+        # round 2, MAJOR-1). A resumed solo session is the first row.
+        (False, "restored", False),
+        (False, "unresolved", False),
+    ],
+)
+async def test_exec_run_session_marks_automation_except_for_workstreams_and_teams(
+    monkeypatch, workstream: bool, team: Any, marked: bool
+) -> None:
+    """``lop exec`` marks a solo session; a ``--workstream`` run (long-lived,
+    engaged later) and a team-led run (its manager idles while subagents work;
+    agent review round 1, MAJOR-1) keep the ordinary policy. Startup is made
+    to fail right after the mark so nothing else of the run executes."""
+    import types
+
+    from local_operator import exec_session
+
+    stream = _session_stream()
+
+    class _Stop(Exception):
+        pass
+
+    def stop(*_args: Any, **_kwargs: Any) -> None:
+        raise _Stop
+
+    monkeypatch.setattr(exec_session, "apply_startup", stop)
+
+    class _Session:
+        _stream_fn = stream
+        active_team = object() if team == "restored" else None
+        _unresolved_team = "lopdev" if team == "unresolved" else ""
+
+        async def dispose(self) -> None:
+            return None
+
+    try:
+        with pytest.raises(_Stop):
+            await exec_session.run_session(
+                _Session(),
+                "p",
+                types.SimpleNamespace(workstream=workstream),
+                object() if team == "team" else None,
+            )
+        assert stream._automation is marked
+    finally:
+        await stream.close()

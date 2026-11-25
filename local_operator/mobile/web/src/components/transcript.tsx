@@ -10,7 +10,8 @@ import { useScrollCues } from "../lib/use-scroll-cues";
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Markdown } from "./markdown"
+import type { AssistantPart, InlineUiMessages } from "../inline-ui-parts";
+import { AssistantContent } from "./inline-ui";
 import { AskRow } from "./ask-row";
 import { useAskChipHost } from "./ask-id";
 import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
@@ -24,7 +25,7 @@ import { Disclosure } from "./ui/disclosure";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import { MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
 import { followScrollTop, jumpOffered, newCommandIds } from "../lib/scroll-follow";
-import { getHistory, getSubagentHistory } from "../api";
+import { getHistory, getSubagentHistory, type TranscriptPage } from "../api";
 import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
@@ -155,8 +156,12 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 	);
 }
 
-function Entry({ entry, pid, condensed = false, liveText = false }: {
-	entry: TranscriptEntry; pid: string; condensed?: boolean; liveText?: boolean;
+function Entry({ entry, pid, condensed = false, liveText = false, overlay }: {
+	entry: TranscriptEntry;
+	pid: string;
+	condensed?: boolean;
+	liveText?: boolean;
+	overlay?: readonly AssistantPart[];
 }) {
 	/* A CHIP NEEDS A SCREEN THAT OWNS ITS ASKS. The context is that screen's
 	   opt-in: the session route wraps its transcript in `AskChipHostProvider`, so
@@ -276,7 +281,7 @@ function Entry({ entry, pid, condensed = false, liveText = false }: {
 			   report). */
 			return (
 				<div className="min-w-0 text-body leading-normal break-words">
-					<Markdown text={entry.text} live={liveText} askChips={askChips} />
+					<AssistantContent text={entry.text} overlay={overlay} live={liveText} askChips={askChips} />
 				</div>
 			);
 		case "tool":
@@ -341,11 +346,12 @@ function Entry({ entry, pid, condensed = false, liveText = false }: {
  * competing-patterns defect that rule exists for — so the pending state is said
  * in words and ink, not in motion. */
 function CondensedRows({
-	items, pid, supplements, supplementLive, openRuns, onToggle, liveTextIds,
+	items, pid, overlayFor, liveTextIds, supplements, supplementLive, openRuns, onToggle,
 }: {
 	items: readonly CondenseEntry[];
 	liveTextIds: ReadonlySet<string>;
 	pid: string;
+	overlayFor: (entry: TranscriptEntry) => readonly AssistantPart[] | undefined;
 	supplements: Record<string, SupplementBeat>;
 	supplementLive: (beat: SupplementBeat) => boolean;
 	openRuns: ReadonlySet<string>;
@@ -357,12 +363,12 @@ function CondensedRows({
 			const showBeat = beat && item.entry.kind === "assistant" && !item.condensed;
 			return <RowBoundary key={item.key}>
 				<div data-completion-anchor={item.entry.id} data-completion-complete={item.entry.final && item.entry.text_complete === true ? "true" : "false"}>
-					<Entry entry={item.entry} pid={pid} condensed={item.condensed} liveText={liveTextIds.has(rowKey(item.entry))} />
+					<Entry entry={item.entry} pid={pid} condensed={item.condensed} overlay={overlayFor(item.entry)} liveText={liveTextIds.has(rowKey(item.entry))} />
 				</div>
 				{showBeat ? <SupplementBlock beat={beat} sessionId={pid} jobLive={supplementLive(beat)} /> : null}
 			</RowBoundary>;
 		}
-		const children = <CondensedRows liveTextIds={liveTextIds} items={item.children} pid={pid} supplements={supplements}
+		const children = <CondensedRows items={item.children} pid={pid} overlayFor={overlayFor} liveTextIds={liveTextIds} supplements={supplements}
 			supplementLive={supplementLive} openRuns={openRuns} onToggle={onToggle} />;
 		return item.kind === "turn" ? (
 			<TurnBar key={item.key} entry={item} open={openRuns.has(item.segment.key)}
@@ -612,6 +618,7 @@ export function Transcript({
 	revealEpoch,
 	journalArrivals,
 	topInset = 0,
+	inlineUi,
 	supplements,
 	projectionPid = 0,
 	peerCycles = false,
@@ -622,6 +629,7 @@ export function Transcript({
 }: {
 	pid: string;
 	entries: TranscriptEntry[];
+	inlineUi?: InlineUiMessages;
 	jobId?: string;
 	scrollKey?: string;
 	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
@@ -685,6 +693,13 @@ export function Transcript({
 	   never arrives over SSE — it is paged in from the transcript on disk as
 	   the user scrolls up. */
 	const [older, setOlder] = useState<TranscriptEntry[]>([]);
+	// A held overlay belongs to the actual row snapshot, not just its id.
+	// A current live row lacking an overlay must not inherit one from a page,
+	// while a settled row scrolling out of the live tail may keep its last view.
+	const heldInlineUi = useRef(new WeakMap<TranscriptEntry, readonly AssistantPart[]>());
+	const currentRows = useMemo(() => new Set(entries), [entries]);
+	const overlayFor = (entry: TranscriptEntry) => currentRows.has(entry)
+		? inlineUi?.get(entry.id) : heldInlineUi.current.get(entry);
 	/* Retention is a merge input, not a second UI state update. The current
 	   frame already owns the render; writing the same rows into state after
 	   paint ran the folds and scroll geometry a second time on every delta. */
@@ -978,7 +993,7 @@ export function Transcript({
 	const transcriptRow = (entry: TranscriptEntry) => (
 		<RowBoundary key={entry.id}>
 			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
-				<Entry entry={entry} pid={pid} liveText={motion.liveTextIds.has(rowKey(entry))} />
+				<Entry entry={entry} pid={pid} overlay={overlayFor(entry)} liveText={motion.liveTextIds.has(rowKey(entry))} />
 			</div>
 			{(() => {
 				/* The supplement block's seat: under the FINAL answer, outside
@@ -1130,6 +1145,15 @@ export function Transcript({
 		});
 	};
 
+	// Retain the settled overlay in the same committed frame as the live tail.
+	useLayoutEffect(() => {
+		for (const entry of entries) {
+			const parts = entry.final && inlineUi?.get(entry.id);
+			if (parts) heldInlineUi.current.set(entry, parts);
+			else heldInlineUi.current.delete(entry);
+		}
+	}, [entries, inlineUi]);
+
 	const toggleCondensed = (item: Extract<CondenseEntry, { kind: "turn" | "fold" }>, open: boolean) => {
 		const id = item.kind === "turn" ? item.segment.key : item.key;
 		const header = scrollRef.current?.querySelector(`[data-condense-header="${CSS.escape(item.key)}"]`);
@@ -1151,10 +1175,16 @@ export function Transcript({
 		setLoadingOlder(true);
 		setOlderError(false);
 		try {
-			const { entries: page, has_more } = jobId
+			const { entries: page, has_more, inline_ui: pageInlineUi }: TranscriptPage = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
 			if (page.length > 0) {
+				if (pageInlineUi) {
+					for (const row of page) {
+						const parts = pageInlineUi.get(row.id);
+						if (parts) heldInlineUi.current.set(row, parts);
+					}
+				}
 				prependPage(page);
 				/* A page that lands while the reader is parked at the top has to MOUNT
 				   in the same commit, or they see the idle hairline and nothing else
@@ -1440,7 +1470,7 @@ export function Transcript({
 				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
 				   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
 				{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
-				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
+				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} overlay={overlayFor(detachedOpener)} /></div> : null}
 				{seamOpen ? <SeamLine /> : null}
 				{pagedItems.map((item) => {
 					if (item.kind === "quiet") {
@@ -1455,10 +1485,10 @@ export function Transcript({
 					}
 					if (item.kind !== "row") {
 						return <CondensedRows liveTextIds={motion.liveTextIds} key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 					}
 					return <CondensedRows liveTextIds={motion.liveTextIds} key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 				})}
 				{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
 				{/* After the last projected row, because that is where the session will

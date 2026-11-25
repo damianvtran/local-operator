@@ -1252,6 +1252,9 @@ async def entities(
             current = remote.model.reasoning_effort
         elif spec.name == "approvals":
             rows = [{"value": value} for value in ("auto", "ask")]
+            # The owner's LIVE gate, mirrored canonically (``approval_mode``);
+            # null only when no runtime gate has stated one (PR #4558 X1).
+            current = getattr(state, "approval_mode", "") or None
         elif spec.name in {"team", "agent"}:
             registry = remote.team_registry if spec.name == "team" else remote.agent_registry
             if registry is None:

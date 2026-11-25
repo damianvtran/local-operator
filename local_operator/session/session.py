@@ -295,6 +295,7 @@ from local_operator.session.credential_binding import (
     CredentialBinding,
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
+from local_operator.session.inline_ui import instructions_for as inline_ui_instructions
 from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
 # ONE implementation of "what dial does this row state", shared with the
@@ -507,6 +508,12 @@ def _stamp_input_surface(message: Any, surface: str) -> None:
     message.provider_payload = payload
 
 
+def stamp_tui_composer_steer(message: Message) -> None:
+    """Only the actual local composer can give Message-shaped steering this default."""
+    _stamp_input_surface(message, "tui")
+    message._inline_ui_viewer_capable = True
+
+
 def spooled_input_surface(line: Any) -> str:
     """The surface a SPOOLED owner line carries (``serving._owner_sender``).
 
@@ -517,6 +524,13 @@ def spooled_input_surface(line: Any) -> str:
     sender = getattr(line, "sender", None)
     value = sender.get("input_surface") if isinstance(sender, Mapping) else None
     return _input_surface(value, default="unknown")
+
+
+def spooled_inline_ui(line: Any) -> bool:
+    """Restore only the exact declaration on a pending owner admission."""
+    from local_operator.session.runtime.inbox import SOURCE_USER
+
+    return getattr(line, "source", None) == SOURCE_USER and getattr(line, "inline_ui", None) is True
 
 
 def _noop_answer_surface_undo() -> None:
@@ -4421,6 +4435,7 @@ class Session:
         #: approval or picker answer), or ``None`` for a run with none so far.
         #: Reset at every pipeline head beside ``_run_started_at``.
         self._run_input_surface: str | None = None
+        self._run_inline_ui_viewer_capable = False
         #: The conversation's LAST DRIVER, which a run with no human input (a
         #: wake, a job result, a peer or channel message) inherits. ``None`` means
         #: "not rebuilt yet"; the first run end rebuilds it from the transcript
@@ -5215,8 +5230,13 @@ class Session:
         # its lineage warning exists only at the live context tail and is
         # consumed once, so resume never accumulates synthetic transcript rows.
         from local_operator.fork import consume_fork_boundary
+        from local_operator.network.move_team import seal_unbound_arrival
 
-        fork_boundary = consume_fork_boundary(transcript.directory)
+        # Before the consume below erases the only marker that this unbound
+        # session arrived (fork/recovery), so legacy grandfathering refuses it.
+        # A failed seal keeps the boundary: it is then the only refusal left.
+        sealed = seal_unbound_arrival(transcript.directory)
+        fork_boundary = consume_fork_boundary(transcript.directory) if sealed else ""
         if fork_boundary:
             replayed_messages.append(
                 CustomMessage(
@@ -7852,6 +7872,21 @@ class Session:
             and getattr(self, "_frozen_system_blocks", None) is not None
         )
 
+    def _system_stable_head_blocks(self) -> int:
+        """Leading frozen system blocks that are identical across sessions.
+
+        The provider declares the count (``stable_head_blocks``, stamped by
+        ``session_factory`` / the subagent builder from
+        ``prompts_api.STABLE_HEAD_BLOCK_COUNT``) because only the builder knows
+        where its volatile env block starts. Reported only while the epoch is
+        frozen: an unfrozen or host-supplied provider promises no byte-stable
+        head, so it gets 0 and the wire keeps its historical marker layout.
+        """
+        if not self._system_blocks_are_frozen():
+            return 0
+        count = getattr(self._system_blocks_provider, "stable_head_blocks", 0)
+        return count if isinstance(count, int) and count > 0 else 0
+
     def _system_state_delta(
         self, desired: list[str]
     ) -> tuple[dict[str, dict[str, str]], str | None]:
@@ -9588,6 +9623,10 @@ class Session:
             and not self.active_agent
             and not self.active_team_name
             and needs_reauthorization(directory)
+            # Pre-binding sessions created HERE are stamped on first load
+            # (see move_team "Legacy-local grandfathering"); anything that
+            # arrived, or whose team does not resolve exactly, still refuses.
+            and not self._grandfather_legacy_team(directory, stored.team)
         ):
             # Recovery preserves the attachment bytes as a hint, not a grant.
             # Leave the journal intact so merely setting a goal cannot certify it.
@@ -9619,6 +9658,25 @@ class Session:
             self._apply_stored_attachment(stored)
         finally:
             self._restoring_attachment = False
+
+    def _grandfather_legacy_team(self, directory: Path, team: str) -> bool:
+        """Stamp a pre-binding local team session on first load, or refuse.
+
+        The registry completeness check runs FIRST: a binding written while an
+        installed definition was skipped as corrupt would journal a seed
+        fallback as this session's authority. See move_team's
+        "Legacy-local grandfathering" for the threat analysis and residual.
+        """
+        from local_operator.network.move_team import grandfather_legacy_local
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        complete = getattr(self.agent_registry, "require_complete_metadata", None)
+        try:
+            if complete is not None:
+                complete()
+        except ProfileRegistryUnavailable:
+            return False
+        return grandfather_legacy_local(directory, team, self.team_registry, self.agent_registry)
 
     def _apply_stored_attachment(self, stored: "SessionAttachment") -> None:
         """Re-apply one parsed attachment; see :meth:`_restore_attachment`.
@@ -11059,6 +11117,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -11322,6 +11381,8 @@ class Session:
             # the run inherits the conversation's last driver.
             if not harness_injected:
                 _stamp_input_surface(user, input_surface)
+                if inline_ui is True or (inline_ui is None and input_surface == "tui"):
+                    user._inline_ui_viewer_capable = True
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -11449,6 +11510,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -11537,6 +11599,8 @@ class Session:
         # phone steer into a desk-started run makes that run mobile-origin).
         if not harness_injected:
             _stamp_input_surface(message, input_surface)
+            if inline_ui is True or (inline_ui is None and input_surface == "tui"):
+                message._inline_ui_viewer_capable = True
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -12481,6 +12545,7 @@ class Session:
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
             _file_capture=self._take_file_continuation(command_id),
             input_surface=spooled_input_surface(line),
+            inline_ui=spooled_inline_ui(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -12504,6 +12569,10 @@ class Session:
         stamped = _input_surface_of(message)
         if stamped is not None and getattr(message, "role", None) == "user":
             self._run_input_surface = stamped
+            self._run_inline_ui_viewer_capable = (
+                stamped in {"desktop", "mobile", "tui"}
+                and getattr(message, "_inline_ui_viewer_capable", False) is True
+            )
             return
         if ask_answer_is_person(message):
             details = getattr(message, "details", None) or {}
@@ -12511,6 +12580,7 @@ class Session:
             surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
             if surface is not None:
                 self._run_input_surface = surface
+                self._run_inline_ui_viewer_capable = False
 
     def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
         """The control server's record of WHO answered (ADR 0009, R10).
@@ -12543,11 +12613,14 @@ class Session:
             return undo_queued
         if self._is_streaming:
             previous_run = self._run_input_surface
+            previous_inline_ui = self._run_inline_ui_viewer_capable
             self._run_input_surface = clamped
+            self._run_inline_ui_viewer_capable = False
 
             def undo_live() -> None:
-                if self._run_input_surface == clamped:
+                if self._run_input_surface == clamped and not self._run_inline_ui_viewer_capable:
                     self._run_input_surface = previous_run
+                    self._run_inline_ui_viewer_capable = previous_inline_ui
 
             return undo_live
         return _noop_answer_surface_undo
@@ -21852,7 +21925,9 @@ class Session:
         """
         return self._frontend_state_store.read_field("epoch")
 
-    def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
+    def subscribe_frontend(  # type: ignore[no-untyped-def]
+        self, handler, *, display_window=False, inline_ui_sidecars: bool = False
+    ):
         """Atomically refresh, snapshot and subscribe on the session loop.
 
         The refresh must go through the PUBLISHING path: silently replacing
@@ -21874,6 +21949,7 @@ class Session:
                     "conversation_id": sync.snapshot.session_id,
                     "owner_epoch": sync.epoch,
                     "through_id": sync.live_cursor,
+                    "inline_ui_sidecars": inline_ui_sidecars,
                     "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
@@ -21888,6 +21964,7 @@ class Session:
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
                 window.durable_seed_ids = durable_seed_ids
+                window._sync_inline_ui, window.inline_ui = window.inline_ui, None
                 sync.display_history = window
                 if window.status == "full_required":
                     # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
@@ -21900,6 +21977,7 @@ class Session:
                         self._transcript, **capture_args, bound_oversized=True
                     ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
                     if bounded.status == "ok":
+                        bounded._sync_inline_ui, bounded.inline_ui = bounded.inline_ui, None
                         sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
@@ -21907,7 +21985,12 @@ class Session:
         return subscription
 
     def history_page(  # type: ignore[no-untyped-def]
-        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+        self,
+        before: str,
+        anchor: str = "",
+        *,
+        bound_oversized: bool = False,
+        inline_ui_sidecars: bool = False,
     ):
         """Authenticated reads reuse the resident replay at the signed sync cut.
 
@@ -21926,6 +22009,7 @@ class Session:
             before=before,
             anchor=anchor,
             bound_oversized=bound_oversized,
+            inline_ui_sidecars=inline_ui_sidecars,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
@@ -22951,6 +23035,7 @@ class Session:
         # ADR 0009: origin is per run, so the previous run's human input never
         # labels this one (a wake after a phone prompt inherits it instead).
         self._run_input_surface = None
+        self._run_inline_ui_viewer_capable = False
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -24299,6 +24384,7 @@ class Session:
                 # evaluated per call after ``_prepare_system_blocks`` so turn 1
                 # already marks the single trailing frozen system block.
                 get_system_blocks_frozen=self._system_blocks_are_frozen,
+                get_system_stable_head_blocks=self._system_stable_head_blocks,
                 # The tools array, re-read per provider step and latched to one
                 # publish per turn; see ``_wire_tools``. The loop's tool
                 # RESOLUTION deliberately keeps reading the live
@@ -24323,6 +24409,16 @@ class Session:
                 # prefix cannot diverge (see ``_render_for_request``).
                 convert_to_llm=self._render_for_request,
                 stream_fn=marking_stream_fn,
+                # Resolve at each call, not once per run: a folded steer can
+                # change the input surface between provider requests. Helpers
+                # bypass this loop config and must keep the exact system prefix.
+                get_inline_ui_hint=lambda: (
+                    inline_ui_instructions(
+                        self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
+                    )
+                    if self._output_contract is None
+                    else None
+                ),
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 # The idle-steer wake's opening drain: this run exists because
@@ -34165,6 +34261,7 @@ class Session:
             purpose="aside",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
@@ -34302,6 +34399,7 @@ class Session:
             purpose="clearance",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): the same cache-prefix rule the aside states
             # at length — the tools block leads the prefix, so an empty array
@@ -34454,6 +34552,7 @@ class Session:
             purpose="compaction_advisor",
             system_blocks=list(blocks),
             system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Same array as the running turn (not []): the tools block is the
             # FRONT of the provider cache prefix, so sending [] would change

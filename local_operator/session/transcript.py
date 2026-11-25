@@ -43,7 +43,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence, TextIO
 
@@ -590,11 +590,24 @@ class TranscriptEntry:
     type: str  # ENTRY_MESSAGE | ENTRY_COMPACTION | ENTRY_CUSTOM
     payload: dict[str, Any] = field(default_factory=dict)
 
+    # Envelope-only metadata: older journal readers ignore unknown envelope
+    # keys. The public payload is already prose, so even old journal and file
+    # readers cannot accidentally display component JSON.
+    inline_ui_source_version: int | None = None
+    inline_ui_source_blocks: tuple[tuple[int, str], ...] = ()
+
     def to_json(self) -> str:
-        return json.dumps(
-            {"id": self.id, "ts": self.ts, "type": self.type, "payload": self.payload},
-            separators=(",", ":"),
-        )
+        row: dict[str, Any] = {
+            "id": self.id,
+            "ts": self.ts,
+            "type": self.type,
+            "payload": self.payload,
+        }
+        if self.inline_ui_source_version is not None:
+            row["inline_ui_source_version"] = self.inline_ui_source_version
+            if self.inline_ui_source_blocks:
+                row["inline_ui_source_blocks"] = self.inline_ui_source_blocks
+        return json.dumps(row, separators=(",", ":"))
 
     @staticmethod
     def from_json(line: str) -> "TranscriptEntry | None":
@@ -607,10 +620,83 @@ class TranscriptEntry:
                 ts=float(raw.get("ts", 0.0)),
                 type=str(raw["type"]),
                 payload=dict(raw.get("payload", {})),
+                inline_ui_source_version=_parse_inline_ui_version(
+                    raw.get("inline_ui_source_version")
+                ),
+                inline_ui_source_blocks=_read_inline_ui_blocks(raw.get("inline_ui_source_blocks")),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             logger.warning("dropping malformed transcript line: %.120s", line)
             return None
+
+
+def _parse_inline_ui_version(value: object) -> int | None:
+    # Preserve positive future versions across journal rewrites without
+    # interpreting them; a malformed marker cannot make the row unreadable.
+    return value if type(value) is int and value > 0 else None
+
+
+def _read_inline_ui_blocks(value: object) -> tuple[tuple[int, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    blocks: list[tuple[int, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or type(item[0]) is not int
+            or not isinstance(item[1], str)
+            or item[0] < 0
+            or (blocks and item[0] <= blocks[-1][0])
+        ):
+            return ()
+        blocks.append((item[0], item[1]))
+    return tuple(blocks)
+
+
+def _message_entry(
+    id_: str, ts: float, type_: str, payload: dict[str, Any], message: Message | CustomMessage
+) -> TranscriptEntry:
+    entry = TranscriptEntry(id_, ts, type_, payload)
+    if not isinstance(message, Message) or message.role != "assistant":
+        return entry
+    if message._inline_ui_source_version != 1:
+        return entry
+    from local_operator.session.inline_ui_text import project_inline_ui
+    from local_operator.session.runtime.inline_ui_egress import (
+        is_text_block,
+        replace_text_content,
+    )
+
+    # Read the already privacy-filtered encoding; never recover text that the
+    # standard retained-message seam discarded. Preserve block order for replay.
+    blocks = tuple(
+        (i, block["text"])
+        for i, block in enumerate(payload.get("content", ()))
+        if is_text_block(block)
+    )
+    source = "".join(text for _, text in blocks)
+    text = project_inline_ui(source, streaming=False, source_version=1, capabilities=frozenset())[
+        "text"
+    ]
+    if text != source:
+        entry.inline_ui_source_version = 1
+        entry.inline_ui_source_blocks = blocks
+        replace_text_content(payload, text)
+    return entry
+
+
+def _replay_inline_ui_source(entry: TranscriptEntry, payload: dict[str, Any]) -> None:
+    if entry.inline_ui_source_version != 1 or not entry.inline_ui_source_blocks:
+        return
+    from local_operator.session.runtime.inline_ui_egress import is_text_block
+
+    content = [block for block in payload.get("content", []) if not is_text_block(block)]
+    for index, text in entry.inline_ui_source_blocks:
+        if index > len(content):
+            return  # Malformed optional source metadata cannot damage the prose row.
+        content.insert(index, {"type": "text", "text": text})
+    payload["content"] = content
 
 
 def encode_message_payload(
@@ -3053,7 +3139,9 @@ class Transcript:
                 payload = {"kind": kind, **encode_message_payload(message, self._attachments)}
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
-                rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+                rows.append(
+                    _message_entry(message.id, time.time(), ENTRY_MESSAGE, payload, message)
+                )
             if _file_captures is not None:
                 from local_operator.session.file_provenance import NATIVE_TYPES
 
@@ -3182,7 +3270,7 @@ class Transcript:
                     "kind": kind,
                     **encode_message_payload(message, self._attachments),
                 }
-                rows.append(TranscriptEntry(entry.id, entry.ts, entry.type, payload))
+                rows.append(_message_entry(entry.id, entry.ts, entry.type, payload, message))
             return rows
 
         return await self._commit(build)
@@ -4543,7 +4631,7 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
         return entry
     provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
-    return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+    return replace(entry, payload=payload)
 
 
 def _journal_injection_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
@@ -5692,7 +5780,11 @@ def _entry_to_message(
         # and this is the transcript's one row decoder — replay and the by-id
         # readers all call it — so repairing here heals the row for every
         # consumer of the transcript, not one wire serializer at a time.
-        return _without_blank_user_text(Message.model_validate(payload))
+        _replay_inline_ui_source(entry, payload)
+        message = _without_blank_user_text(Message.model_validate(payload))
+        if isinstance(message, Message) and message.role == "assistant":
+            message._inline_ui_source_version = entry.inline_ui_source_version
+        return message
     except Exception:
         logger.warning("dropping unparseable transcript message entry %s", entry.id)
         return None

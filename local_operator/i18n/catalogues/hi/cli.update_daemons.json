@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "अपडेट इंस्टॉल हो गया, लेकिन ये सेवाएँ अभी भी पुराने बिल्ड पर चल रही हैं:",
+  "cli.update_daemons.incomplete_row": "  {name}: {remedy}",
+  "cli.update_daemons.remedy_fallback": "कारण और इसे नए बिल्ड पर लाने का तरीका जानने के लिए `lop services status` चलाएँ"
+}

@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.update_daemons",
+  "history_sha256": "e07ec5b19fadbf5b7dacdcc6ede76847d922fd001a7f8cb3ddabdf07a7388c7b",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.update_daemons",
+      "source_sha256": "cca6124b02c365e63df15644a46121d8a9c8b0435df929a4411f9bf7390bdca7",
+      "context_sha256": "08b673a4450e5f733bb1d583f45ab77b15d891695aeac1fd392632dc24087e89",
+      "target_sha256": "1c72cb765c71270c345db41f23147c667fab9b38f6aec84e2cdcab257c736920",
+      "translator": {
+        "agent": "i18n-translator (prior pass, uncommitted in worktree fix/updater-daemon-freshness @ 0df98e1c1; session not disclosed to auditor)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-25",
+        "model_source": "not reported to the auditor; left null rather than invented"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent; did not author these bytes)",
+        "session": "fbe8e6b6e763",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys_audited": 3,
+      "note": "3/3 keys; placeholders {name},{remedy}, backticked `lop services status` and two-space indent byte-checked; U+202F before ':' per fr guide; 'build' matches cli.daemon_build; vous imperative. Nit (not blocking): heading 84 cells, fallback row ~103 cells with 'network relay' — wraps at 80, accepted per brief."
+    }
+  ]
+}

@@ -6,6 +6,7 @@
  * the same way, so reload the page and let the server 303 to /login. There
  * is no client-side login form — login is server-rendered.
  */
+import { readInlineUiMessages, type InlineUiMessages } from "./inline-ui-parts";
 import { clearPrivateSessionStorage } from "./private-storage";
 import type {
 	AttentionUnread,
@@ -590,10 +591,13 @@ export type CommandReceipt = {
 };
 
 export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {
+	// This renderer consumes v1 overlays; the relay checks the selected owner
+	// before forwarding the declaration (including a busy prompt → steer).
+	const body = op.op === "prompt" || op.op === "steer" ? { ...op, inline_ui: true } : op;
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify(op),
+		body: JSON.stringify(body),
 	});
 }
 
@@ -1018,14 +1022,26 @@ export function getBridgeCardBody(sessionId: string, entryId: string, signal?: A
     oldest entry the client already has; the daemon returns the page
     immediately older than it (chronological within the page) plus whether
     more history exists beyond. */
-export function getHistory(
+export interface TranscriptPage {
+	entries: TranscriptEntry[];
+	has_more: boolean;
+	inline_ui?: InlineUiMessages;
+}
+
+export async function getHistory(
 	sessionId: string,
 	before: string | null,
 	limit = 80,
-): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
+): Promise<TranscriptPage> {
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
-	return request(`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`);
+	q.set("inline_ui", "1");
+	const { inline_ui, ...page } = await request<Omit<TranscriptPage, "inline_ui"> & { inline_ui?: unknown }>(
+		`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`,
+	);
+	const messages = inline_ui !== undefined && Array.isArray(page.entries)
+		? readInlineUiMessages(inline_ui, page.entries) : undefined;
+	return messages ? { ...page, inline_ui: messages } : page;
 }
 
 export function getSubagentDetail(
