@@ -357,35 +357,50 @@ describe("a waking row that outlived its composer (M1)", () => {
 		clock.mockRestore();
 	});
 
-	/* REVIEW ROUND 1, m1 (PR #4584): a Retry inside the bound, after a failure
-	   nobody saw, starts a NEW relay task with a fresh deadline. Measuring from
-	   the FIRST receipt failed a boot that was still running. Measured RED on
-	   b4adabdd: the failure copy shows at first-receipt + bound. */
-	it("measures the bound from the latest waking answer, a retry's too", async () => {
-		const start = Date.now();
+	/* A retry owns a fresh deadline, even with no SSE frame after the remount.
+	   Publishing at either bound would hide a missing timer (R5-M1). */
+	it("settles by the retry's deadline when the stream stays quiet", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
+		try {
+			const view = mount();
+			await sendWaking(view);
+			await act(async () => { await vi.advanceTimersByTimeAsync(150_000); });
+			const back = switchAway(view);
+			vi.mocked(api.sendCommand).mockResolvedValueOnce(WAKING);
+			const retryName = { name: "Retry earlier instruction" };
+			fireEvent.click(await screen.findByRole("button", retryName));
+			await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(2));
+			await waitFor(() => expect(screen.queryByRole("button", retryName)).toBeNull());
+
+			/* Past the first deadline, still inside the retry's deadline. */
+			await act(async () => { await vi.advanceTimersByTimeAsync(WAKE_SETTLED_BOUND_MS - 149_000); });
+			expect(screen.queryByText(FAILED_COPY)).toBeNull();
+			expect(pendingRows(back)[0]?.textContent).toContain("waking session…");
+
+			/* Past the retry's own deadline, with no new frame: fail safely. */
+			await act(async () => { await vi.advanceTimersByTimeAsync(150_000); });
+			await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+			expect(pendingRows(back)).toHaveLength(0);
+			expect((await composer()).value).toBe(SENT);
+			expect(screen.getByRole("button", retryName)).toBeTruthy();
+			expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("arms a retry without re-reading the previous same-id failure frame", async () => {
 		const view = mount();
 		await sendWaking(view);
-		/* Away while the first wake failed; back 150 s later, the remount shows
-		   the retained-retry affordance and the user taps it. */
-		const clock = vi.spyOn(Date, "now").mockReturnValue(start + 150_000);
-		const back = switchAway(view);
+		view.publish(frame({ version: 2, ended: true, wake_failed: COMMAND_ID }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
 		vi.mocked(api.sendCommand).mockResolvedValueOnce(WAKING);
 		fireEvent.click(await screen.findByRole("button", { name: "Retry earlier instruction" }));
-		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(2));
-		await waitFor(() => expect(pendingRows(back)[0]?.textContent).toContain("waking session…"));
-
-		/* Past the FIRST receipt's bound, inside the retry's: still booting. */
-		clock.mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 1_000);
-		back.publish(frame({ version: 2 }));
+		/* Scheduling the retry is not a new SSE frame. The marker on screen
+		   is still from attempt one and must not immediately fail attempt two. */
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+		expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(2);
 		expect(screen.queryByText(FAILED_COPY)).toBeNull();
-		expect(pendingRows(back)).toHaveLength(1);
-
-		/* Past the retry's own bound: now it has settled, and failed. */
-		clock.mockReturnValue(start + 150_000 + WAKE_SETTLED_BOUND_MS + 1_000);
-		back.publish(frame({ version: 3 }));
-		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
-		expect(pendingRows(back)).toHaveLength(0);
-		clock.mockRestore();
 	});
 
 	/* QA ROUND 2, Q2-1 (PR #4584): the search's first cursor was

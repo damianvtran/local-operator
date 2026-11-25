@@ -9,7 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { contentDir } from "../lib/content-direction";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
 import {
@@ -1066,7 +1066,7 @@ export function Composer({
 		   remount re-checks once. */
 		confirm?: "checking" | "found" | "missing";
 	} | null>(null);
-	/* Bumped by the settle effect's own deadline timer, so the effect re-runs
+	/* Bumped by the tracker's deadline timer, so the settle effect re-runs
 	   when the wake's settled bound passes even if no frame arrives (a cold
 	   session whose wake failed while nobody watched publishes nothing more). */
 	const [wakeDeadlineTick, setWakeDeadlineTick] = useState(0);
@@ -1501,14 +1501,35 @@ export function Composer({
 	   "checking" with nothing left to finish it). */
 	const confirmAbort = useRef<AbortController | null>(null);
 	const mounted = useRef(true);
+	const wakeDeadlineTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const clearWakeDeadline = useCallback(() => {
+		if (wakeDeadlineTimer.current === null) return;
+		clearTimeout(wakeDeadlineTimer.current);
+		wakeDeadlineTimer.current = null;
+	}, []);
+	/* Both a route remount and a fresh waking receipt can install the tracker.
+	   Scheduling is not settling: do not replay the last projection on a new
+	   receipt, as it may still carry the previous attempt's same-id failure. */
+	const armWakeDeadline = useCallback((tracker: NonNullable<typeof wakingCommand.current>) => {
+		clearWakeDeadline();
+		const remaining = tracker.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
+		if (!mounted.current || remaining <= 0) return;
+		const timer = setTimeout(() => {
+			if (wakeDeadlineTimer.current !== timer) return;
+			wakeDeadlineTimer.current = null;
+			if (wakingCommand.current === tracker) setWakeDeadlineTick((n) => n + 1);
+		}, remaining);
+		wakeDeadlineTimer.current = timer;
+	}, [clearWakeDeadline]);
 	useEffect(() => {
 		mounted.current = true;
 		return () => {
 			mounted.current = false;
+			clearWakeDeadline();
 			confirmAbort.current?.abort();
 			confirmAbort.current = null;
 		};
-	}, []);
+	}, [clearWakeDeadline]);
 
 	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
 	   outcomes only the stream can report:
@@ -1778,17 +1799,15 @@ export function Composer({
 		   and history still needs checking. Don't re-arm after the deadline or
 		   a verdict, and leave the callback with the tracker that scheduled it. */
 		const tracked = wakingCommand.current;
-		if (tracked === null || tracked.pid !== pid) return;
-		if (tracked.failed && (!hasMovedColdTail || tracked.confirm !== undefined)) return;
-		const remaining = tracked.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
-		if (remaining <= 0) return;
-		const timer = setTimeout(() => {
-			if (wakingCommand.current === tracked) setWakeDeadlineTick((n) => n + 1);
-		}, remaining);
-		return () => clearTimeout(timer);
+		if (tracked === null || tracked.pid !== pid ||
+			(tracked.failed && (!hasMovedColdTail || tracked.confirm !== undefined))) {
+			clearWakeDeadline();
+			return;
+		}
+		armWakeDeadline(tracked);
 	}, [
 		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
-		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick,
+		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick, armWakeDeadline, clearWakeDeadline,
 	]);
 
 	const addFiles = async (files: Iterable<File>) => {
@@ -2351,6 +2370,9 @@ export function Composer({
 					};
 					/* The row says the session is booting, not just "sending…" (D2). */
 					markPendingEchoWaking(pid, receipt.envelope.command_id, true, wakingCommand.current.tailId);
+					/* A retry replaces the old timer even when the stream sends no
+					   subsequent frame (R5-M1 on PR #4584). */
+					armWakeDeadline(wakingCommand.current);
 					/* A NEW draft that rode along (R2-2): the send replayed the retained
 					   earlier instruction, which is still waking, and the composer kept
 					   what the user just typed. Say so — the tap otherwise looked dead. */
