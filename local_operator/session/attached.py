@@ -5483,8 +5483,9 @@ class AttachedSession:
             # published no live record" (§3.4).
             record, owner = await asyncio.to_thread(self._owner.locate)
             if wait_for_publication is not None and not self._disposed:
-                # Only the send caller opts in, only after a successful engage,
-                # and only once. This can read the published record; it must
+                # Only the publication-waiting callers opt in (send, and the
+                # stored-row slash path), only after a successful engage, and
+                # only once. This can read the published record; it must
                 # neither engage again nor attempt to deliver the pending act.
                 wait, wait_for_publication = wait_for_publication, None
                 if record is None:

@@ -1,0 +1,27 @@
+{
+  "session.attachment.team_unrestored": {
+    "role": "warning",
+    "tone": "direct, factual and actionable",
+    "note": "Shown when a session's stored team could not be re-attached. {team} is the team's name (an identifier, never translated). {reason} is a full clause from session.attachment.reason_authority or session.attachment.reason_unavailable that already ends with a period, which is why there is no punctuation between {reason} and the next sentence. `/team {team}` is a literal command typed into the composer; keep it byte-identical. Also appears in the TUI notice line. Read by the model as well as shown to the operator: it must keep saying that only the operator re-attaches the team, never the assistant, because the authority check exists to stop an assistant granting itself a team."
+  },
+  "session.attachment.reason_authority": {
+    "role": "fragment",
+    "tone": "factual",
+    "note": "The {reason} clause of session.attachment.team_unrestored, beginning lower-case and ending with a period. 'recorded authority' is the security record proving the operator attached this team; without it the team is deliberately not applied. Must not suggest the team is broken or deleted."
+  },
+  "session.attachment.reason_unavailable": {
+    "role": "fragment",
+    "tone": "factual",
+    "note": "The {reason} clause of session.attachment.team_unrestored, beginning lower-case and ending with a period. Used when the team's definition has not reached this device or its authority record cannot be read."
+  },
+  "session.attachment.agent_unrestored": {
+    "role": "warning",
+    "tone": "direct, factual and actionable",
+    "note": "Shown when a session's stored agent profile could not be re-attached. {agent} is the profile name (an identifier, never translated). `/agent {agent}` is a literal command; keep it byte-identical. Read by the model too; keep 'only the operator' explicit."
+  },
+  "session.attachment.refusal": {
+    "role": "error",
+    "tone": "direct, factual and actionable",
+    "note": "Refusal shown when a message is sent to a session whose team or profile could not be restored. The message was NOT sent. `/team <name>`, `/agent <name>`, `/team clear` and `/agent clear` are literal commands; keep them byte-identical including the angle-bracket placeholder <name>, which is not an ICU argument. Rebuilt on the viewer from an error code, so it never names the team."
+  }
+}

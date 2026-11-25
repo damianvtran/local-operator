@@ -1196,3 +1196,21 @@ async def test_generic_child_of_moved_team_cannot_gain_tools_or_pins(tmp_path, r
     finally:
         await child.dispose()
         await moved.dispose()
+
+
+def test_attachment_unavailable_names_the_reattach_remedy_and_keeps_its_code() -> None:
+    """The admission refusal named no real cure ("choose an available profile").
+
+    It is rebuilt viewer-side from ``code`` (``admission_error``), so both the
+    owner's raise and the decoded copy must carry the same keyed remedy.
+    """
+    from local_operator.session.errors import AttachmentUnavailable, admission_error
+
+    raised = AttachmentUnavailable()
+    assert raised.code == "unresolved_attachment"
+    text = str(raised)
+    assert "could not be restored, so the message was not sent" in text
+    assert "/team <name>" in text and "/agent <name>" in text and "/team clear" in text
+    assert "Choose an available profile" not in text
+    decoded = admission_error(raised.code)
+    assert isinstance(decoded, AttachmentUnavailable) and str(decoded) == text

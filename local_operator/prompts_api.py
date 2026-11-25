@@ -1892,6 +1892,11 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     # for a change that has nothing to do with it.
     ("open_asks", "<open-asks>"),
     ("credentials", "<session-credentials>"),
+    # A stored team/agent this runtime REFUSED to restore (``Session.
+    # _attachment_state_notice``). Appended by the session after the provider's
+    # tail and before the memory tail, so it sits here in composition order.
+    # Added 2026-11: no older record contains the marker at a piece start.
+    ("attachment", "<attachment-notice>"),
     ("memory_suggestions", "<memory_suggestions>"),
     ("memory_hint", "<memory_hint"),
 )
@@ -1957,6 +1962,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "interactivity": "Interactivity",
     "open_asks": "Open asks",
     "credentials": "Session credentials",
+    "attachment": "Attachment",
     "memory_suggestions": "Memory suggestions (untrusted)",
     "memory_hint": "Compaction memory",
     "session": "Session state",

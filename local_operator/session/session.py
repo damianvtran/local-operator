@@ -230,6 +230,7 @@ from local_operator.harness.wake import (
     format_duration,
     format_wake_delivery_text,
 )
+from local_operator.i18n.keys import session_attachment as _attach_copy
 from local_operator.i18n.keys import tui_notices as _nt
 from local_operator.i18n.messages import Msg
 from local_operator.imaging import rebound_oversize_image
@@ -650,6 +651,37 @@ def _notice(
         kind=kind,
         headline=headline,
     )
+
+
+#: The shape a team name (``teams._NAME_RE``) or agent id
+#: (``agents._AGENT_ID_RE``) is held to on every write path, so a stored name
+#: matching it is safe to place verbatim inside the ``<attachment-notice>``
+#: section. The union (128 characters) is used because the notice only needs
+#: "cannot break out of its section", not each registry's exact bound.
+_NOTICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+#: How much of an invalid name the escaped fallback shows: enough to recognise
+#: it, never an unbounded paste billed on every turn.
+_NOTICE_NAME_MAX_CHARS = 64
+
+
+def _notice_name(name: str) -> str:
+    """``name`` as it may appear inside the model-facing ``<attachment-notice>``.
+
+    WHY (PR #4583 review R1-2): the name comes from ``attachment.json``, a file
+    that can arrive from another device or be hand-edited, and it is
+    interpolated into a section the model reads every turn. A newline or a
+    literal ``</attachment-notice>`` would end the section early and let the
+    rest of the string pose as harness text. A name every registry would
+    accept passes through unchanged (the common case, and what ``/team <name>``
+    needs to be typed back); anything else is shown as a bounded ``ascii()``
+    repr with angle brackets escaped, so it can neither carry a control
+    character nor open or close a tag, and the raw string is never emitted.
+    """
+    if _NOTICE_NAME_RE.fullmatch(name):
+        return name
+    shown = ascii(name[:_NOTICE_NAME_MAX_CHARS])
+    return shown.replace("<", "\\x3c").replace(">", "\\x3e")
 
 
 def _text(message: Msg) -> str:
@@ -4840,6 +4872,11 @@ class Session:
         #: :meth:`_persist_attachment`.
         self._unresolved_team: str = ""
         self._unresolved_agent: str = ""
+        #: Why ``_unresolved_team`` is set: ``"authority"`` when the authority
+        #: gate refused the stored name, ``""`` for any other miss (definition
+        #: not landed, registry unreadable). Only selects the notice's reason
+        #: clause; it never decides whether a brief is granted.
+        self._unresolved_team_reason: str = ""
         #: Monotonic time of the last re-resolve attempt for those names (see
         #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
         self._attachment_reresolved_at: float | None = None
@@ -7804,6 +7841,19 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
+        # WHY (session 32deb1ecf45b, a team manager that went silent): a stored
+        # team the runtime refused to restore was reported ONLY through
+        # ``attachment_restore_notice``, which only the TUI reads. A
+        # relay-hosted runtime has no TUI, so every turn reached the model with
+        # neither the ``[team: X]`` brief nor any word that it was missing. The
+        # notice rides the tail as its own section while the miss lasts, so the
+        # prefix/delta machinery below carries it on every request and retracts
+        # it (an ordinary "" section) once a re-attach resolves the slot.
+        notice = self._attachment_state_notice()
+        if notice and len(desired) >= 4:
+            desired = list(desired)
+            block = desired[3]
+            desired[3] = f"{block}\n\n{notice}" if block else notice
         # Live memory belongs in tail deltas, never block zero. Checking at each
         # provider boundary harvests late captures without opening another turn.
         from local_operator.memory_capture import session_tail
@@ -9545,6 +9595,7 @@ class Session:
         """
         if slot == "team":
             self._unresolved_team = ""
+            self._unresolved_team_reason = ""
         else:
             self._unresolved_agent = ""
 
@@ -9588,6 +9639,13 @@ class Session:
             read_local_attachment,
         )
 
+        # The reason describes THIS pass's miss (PR #4583 review R1-1). Only the
+        # authority branch below sets it, so it must start empty every pass:
+        # otherwise a session first refused for authority whose definition later
+        # went missing (a re-resolve landing on another miss site) would keep
+        # telling the model "authority could not be verified" — the wrong cause
+        # and the wrong remedy. Empty reads as the neutral "unavailable" reason.
+        self._unresolved_team_reason = ""
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
             return
@@ -9632,6 +9690,14 @@ class Session:
             # Leave the journal intact so merely setting a goal cannot certify it.
             self._unresolved_team = stored.team
             self._unresolved_agent = stored.agent
+            # The GHSA-wmg2-rrrj-p599 authority gate refused this name (no
+            # binding, no mesh team record, grandfather declined): say WHY in
+            # the per-turn notice, because it is the one cause the re-resolve
+            # loop can never cure on its own — only an explicit attach can.
+            self._unresolved_team_reason = "authority"
+            # The TUI line keeps its terse one-line form (96-cell budget, D3);
+            # the full keyed sentence reaches the model via
+            # :meth:`_attachment_state_notice` instead.
             self.attachment_restore_notice = str(
                 TeamIdentityRefused(
                     stored.team, "recorded authority is unavailable; re-attach via /team"
@@ -9817,6 +9883,43 @@ class Session:
                 f"could not restore {what}{cause}. Run {commands} to re-attach."
             )
 
+    def _attachment_state_notice(self) -> str:
+        """The model-facing ``<attachment-notice>`` section, or ``""``.
+
+        Present exactly while a stored team/agent is recorded as unresolved
+        and nothing attached in its place — the same test
+        :meth:`_reresolve_unresolved_attachment` uses, so the notice and the
+        retry cannot disagree about whether the slot is still missing. It
+        grants nothing: it names the miss and the remedy, never the brief.
+
+        The sentence is the keyed ``session.attachment`` copy pinned to
+        English (model-facing; see :func:`_text`), so the model, the TUI line
+        and the admission refusal a peer decodes all say the same thing.
+        """
+        lines: list[str] = []
+        if self._unresolved_team and self.active_team is None:
+            reason = (
+                _attach_copy.reason_authority()
+                if self._unresolved_team_reason == "authority"
+                else _attach_copy.reason_unavailable()
+            )
+            lines.append(
+                _text(
+                    _attach_copy.team_unrestored(
+                        team=_notice_name(self._unresolved_team), reason=_text(reason)
+                    )
+                )
+            )
+        elif self._unresolved_agent and not self._goal_state.agent_name:
+            # A team owns the agent slot (issue #2014), so a stored agent beside
+            # a missing team is superseded, not separately missing.
+            lines.append(
+                _text(_attach_copy.agent_unrestored(agent=_notice_name(self._unresolved_agent)))
+            )
+        if not lines:
+            return ""
+        return "<attachment-notice>\n" + "\n".join(lines) + "\n</attachment-notice>"
+
     def _adopt_stored_attachment(self) -> None:
         """Adopt a stored attachment that landed AFTER construction, before turn one.
 
@@ -9957,6 +10060,7 @@ class Session:
         )
         if team_done and pending_team:
             self._unresolved_team = ""
+            self._unresolved_team_reason = ""
         if agent_done and pending_agent:
             self._unresolved_agent = ""
         if team_done and agent_done:

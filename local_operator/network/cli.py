@@ -8692,7 +8692,16 @@ async def _pilot_act(
             # runs after a SUCCESSFUL engage (a refused engage raises before any
             # locate), is clamped to this deadline, and ends in the same "still
             # starting ... NOT queued" refusal — no resend, queue or re-engage.
-            if verb == "send":
+            # A ``--slash`` on a STORED session also takes the same publication wait
+            # as a cold send (#4470). Without it the bind's short locate retry
+            # (``AttachedSession._bind_under_lock``) gave up before a cold boot
+            # published its record (measured 15.9-22.1 s, ``relay._warm_after_
+            # create``) and answered "could not start a runtime for this
+            # session": the operator's ``/team <name>`` from the head node never
+            # reached the owner's attach path, the only cure for a team the
+            # GHSA-wmg2-rrrj-p599 gate refused (session 32deb1ecf45b). The wait
+            # only reads the published record; it delivers nothing itself.
+            if verb == "send" or (verb == "slash" and not live):
 
                 async def _wait_for_publication(
                     locate: _RuntimeLocator, bind_deadline: float

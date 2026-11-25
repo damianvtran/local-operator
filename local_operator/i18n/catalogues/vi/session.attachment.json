@@ -1,0 +1,7 @@
+{
+  "session.attachment.team_unrestored": "Nhóm {team} chưa được gắn: {reason} Chỉ người vận hành mới có thể gắn lại nhóm này, bằng cách chạy /team {team} trong khung soạn thảo của phiên này (trên thiết bị này hoặc từ một thiết bị khác đang điều khiển phiên); đừng tự gắn nhóm này.",
+  "session.attachment.reason_authority": "không thể xác minh quyền hạn đã ghi nhận của nhóm trên thiết bị này (phiên có từ trước khi có bước kiểm tra quyền hạn nhóm, hoặc được chuyển đến mà không kèm dữ liệu nhóm).",
+  "session.attachment.reason_unavailable": "định nghĩa hoặc quyền hạn đã ghi nhận của nhóm không có trên thiết bị này.",
+  "session.attachment.agent_unrestored": "Hồ sơ {agent} chưa được gắn: định nghĩa của hồ sơ này không có trên thiết bị này. Chỉ người vận hành mới có thể gắn lại, bằng cách chạy /agent {agent} trong khung soạn thảo của phiên này.",
+  "session.attachment.refusal": "Không thể khôi phục nhóm hoặc hồ sơ của phiên này nên tin nhắn chưa được gửi. Gắn lại bằng cách chạy /team <name> hoặc /agent <name> trong phiên này, hoặc tách ra bằng /team clear hoặc /agent clear."
+}
