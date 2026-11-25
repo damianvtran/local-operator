@@ -8625,7 +8625,10 @@ class FrontendStateStore:
         transcript = getattr(session, "_transcript", None)
         if transcript is not None:
             try:
-                entries = transcript.entries()
+                from local_operator.session.transcript import resident_entries
+
+                # Only the newest id is read: never a full-history re-read.
+                entries = resident_entries(transcript)
                 history_cursor = entries[-1].id if entries else None
             except Exception:
                 pass

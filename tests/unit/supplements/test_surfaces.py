@@ -420,6 +420,29 @@ def test_the_relay_file_route_serves_the_recorded_index(tmp_path, monkeypatch) -
     assert response.headers["content-disposition"] == "attachment"
 
 
+def test_the_relay_file_route_folds_mixed_jsonl_in_append_order(tmp_path, monkeypatch) -> None:
+    cfg = _relay_config(tmp_path, monkeypatch)
+    work = tmp_path / "Work"
+    work.mkdir()
+    (work / "winner.md").write_text("latest at highest version", encoding="utf-8")
+    rows = [_file_row(path) for path in ("first.md", "winner.md", "older-version.md")]
+    for n, (row, version) in enumerate(zip(rows, (2, 2, 1), strict=True)):
+        row["id"] = f"{n:032x}"
+        row["payload"]["details"]["version"] = version
+    _journal(cfg, RELAY_SESSION, rows[:2])
+    journal = cfg / "sessions" / RELAY_SESSION / "transcript.jsonl"
+    # A journal can mix older whitespace-bearing JSON with compact appends;
+    # a partial final write must not hide the last complete revision.
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(rows[2], separators=(",", ":")) + '\n{"id":')
+
+    client, daemon = _daemon_relay()
+    _live(daemon, RELAY_SESSION, str(work))
+    response = client.get(f"/api/sessions/{RELAY_SESSION}/supplements/{RELAY_JOB}/file?i=0")
+    assert response.status_code == 200
+    assert response.content == b"latest at highest version"
+
+
 def test_the_relay_file_route_refuses_everything_but_recorded_indices(
     tmp_path, monkeypatch
 ) -> None:

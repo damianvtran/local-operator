@@ -372,7 +372,7 @@ class HarnessImportService:
                     "target_prefix_sha256"
                 )
                 same_source = latest.get("source_fingerprint") == fingerprint
-                committed = {entry.id for entry in Transcript(directory).entries()}
+                committed = Transcript(directory).entry_ids()
                 if latest.get("status") == "partial":
                     # A crash left the rows we managed to write. Re-enter the
                     # SAME directory when the source is still a superset of
@@ -526,7 +526,7 @@ class HarnessImportService:
                 ),
             )
             transcript = Transcript(directory, defer_materialise=True)
-            committed = {entry.id for entry in transcript.entries()}
+            committed = transcript.entry_ids()
             rows = [row for row in mapped.rows if row.id not in committed]
             if rows:
                 self._append(transcript, mapped, outcome, rows=rows)
@@ -572,7 +572,7 @@ class HarnessImportService:
         mapped: MappedSession,
     ) -> SessionResult:
         target_id = directory.name
-        committed = {entry.id for entry in Transcript(directory).entries()}
+        committed = Transcript(directory).entry_ids()
         new_rows = [row for row in mapped.rows if row.id not in committed]
         outcome.target_session_id = target_id
         if not new_rows:

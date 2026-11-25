@@ -308,7 +308,10 @@ def recall_for(transcript: "Transcript | None", provider: str) -> CredentialBind
     if transcript is None:
         return None
     try:
-        entries = transcript.entries()
+        from local_operator.session.transcript import projection_entries
+
+        # Binding rows are a keep-set type: every prefix row is projected.
+        entries = projection_entries(transcript)
     except Exception:  # noqa: BLE001 — a missing index is "no row", not an error
         return None
     for entry in reversed(entries):

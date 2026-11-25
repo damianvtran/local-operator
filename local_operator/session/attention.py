@@ -1263,7 +1263,10 @@ def _import_transcript_outcome(
         or getattr(final, "tool_calls", None)
     ):
         return None
-    entry = next((row for row in reversed(transcript.entries()) if row.id == final.id), None)
+    from local_operator.session.transcript import entries_newest_first
+
+    # The final assistant row is the newest turn: found in the resident suffix.
+    entry = next((row for row in entries_newest_first(transcript) if row.id == final.id), None)
     if entry is None:
         return None
     seen = None

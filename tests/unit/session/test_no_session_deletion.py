@@ -2743,6 +2743,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "compaction temp FILE -> transcript.jsonl inside the same session directory",
     ),
     (
+        "local_operator/session/transcript.py::Transcript._replace_file",
+        "<path>.unlink",
+        "removes its own compaction temp FILE (transcript.jsonl.compact, a sibling "
+        "of transcript.jsonl) when the prefix copy or replace fails, never a directory",
+    ),
+    (
         "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
         "os.replace",
         "fold-on-open temp FILE (transcript.jsonl.fold) -> transcript.jsonl inside "

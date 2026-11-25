@@ -1228,7 +1228,9 @@ def _knowledge_task_id(transcript: Any, indexed_user: Any) -> str | None:
         # The latest raw user row can be a durable continuation or notice. Look
         # behind it, not just at the last cached owner: a real user can have arrived
         # between provider steps before this chrome was appended.
-        for entry in reversed(transcript.entries()):
+        from local_operator.session.transcript import entries_newest_first
+
+        for entry in entries_newest_first(transcript):
             payload = getattr(entry, "payload", None) or {}
             if getattr(entry, "type", None) == "message" and payload.get("role") == "user":
                 if not _is_routing_chrome(payload, _payload_user_text(payload)):
@@ -1249,7 +1251,9 @@ def _image_routing_context(transcript: Any) -> str | None:
     """
     try:
         users = []
-        for entry in reversed(transcript.entries()):
+        from local_operator.session.transcript import entries_newest_first
+
+        for entry in entries_newest_first(transcript):
             payload = getattr(entry, "payload", None) or {}
             if getattr(entry, "type", None) != "message" or payload.get("role") != "user":
                 continue

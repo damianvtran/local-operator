@@ -507,7 +507,9 @@ class SupplementRunner:
 
         settled = 0
         try:
-            rows = sweep.stale_rows(self._session.transcript.entries())
+            from local_operator.session.transcript import projection_entries
+
+            rows = sweep.stale_rows(projection_entries(self._session.transcript))
         except Exception:  # noqa: BLE001 -- an unreadable journal settles nothing
             logger.debug("supplement stale rows could not be read", exc_info=True)
             return 0
@@ -1504,7 +1506,9 @@ class SupplementRunner:
         """The anchor whose highlights row recorded music ``job`` (newest such row wins)."""
         anchor: str | None = None
         try:
-            for entry in self._session.transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            for entry in projection_entries(self._session.transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
@@ -1889,7 +1893,9 @@ class SupplementRunner:
         """
         rows: list[dict[str, Any]] = []
         try:
-            for entry in self._session.transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            for entry in projection_entries(self._session.transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
