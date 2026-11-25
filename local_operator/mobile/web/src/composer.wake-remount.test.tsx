@@ -269,7 +269,14 @@ describe("a waking row that outlived its composer (M1)", () => {
 		   Page 1 is rows 160–239, page 2 rows 80–159. */
 		const older = filler(0, 240);
 		older[100] = userRow(COMMAND_ID, SENT);
+		/* An UNPINNED tail, as a current daemon serves one: no
+		   `transcript_head_pinned` on the wire (`types.py` pops it when false)
+		   and an assistant row at the head. An all-user 80-row tail would trip
+		   the older-daemon fallback in `projectionHeadPinned` (80 rows, user
+		   head → treated as pinned), shifting both cursors by one row of
+		   harmless overlap; the pinned case has its own cell below. */
 		const tail = filler(1000, 80);
+		tail[0] = { ...tail[0], kind: "assistant" };
 		serveHistory([...older, ...tail]);
 		const { back, clock } = await backPastBound(tail);
 
