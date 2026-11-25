@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number}秒",
   "wire.session_status.duration_minutes": "{count, number}分钟",
   "wire.session_status.duration_hours_minutes": "{hours, number}小时{minutes, number}分",
-  "wire.session_status.duration_days_hours": "{days}天{hours, number}小时"
+  "wire.session_status.duration_days_hours": "{days}天{hours, number}小时",
+  "wire.session_status.booting": "启动中 · {duration}",
+  "wire.session_status.booting_not_answering": "无应答 · 启动已持续{duration}"
 }
