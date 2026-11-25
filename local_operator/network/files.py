@@ -1043,3 +1043,23 @@ def install(server: "RelayServer") -> None:
             "net_session_files": file_index.INDEX_OP_DEADLINE_S,
         },
     )
+    if _mentioned_file_serving_enabled(server):
+        # Imported INSIDE the branch on purpose: with the default off, neither
+        # the serving module nor ``mentioned_file_read`` is ever loaded. The
+        # dormancy guard in test_mentioned_file_read.py allows exactly this edge.
+        from local_operator.network import mentioned_file_serve
+
+        mentioned_file_serve.install(server)
+
+
+def _mentioned_file_serving_enabled(server: "RelayServer") -> bool:
+    """``mentioned_file_serving`` as stored in THIS relay's root, strictly ``True``.
+
+    ``read_config_values`` never moves or rewrites a config it cannot parse (a
+    ``ConfigManager`` here would, on a path a peer can reach). Unreadable,
+    missing or any non-``True`` value is OFF: this gate fails closed.
+    """
+    from local_operator.config import read_config_values
+
+    values = read_config_values(Path(server.root))
+    return isinstance(values, dict) and values.get("mentioned_file_serving") is True

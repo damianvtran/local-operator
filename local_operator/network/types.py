@@ -379,6 +379,11 @@ NET_OPS: tuple[str, ...] = (
     # A peer session's Files index, answered by the owner (network/file_index.py;
     # docs/design/remote-files-parity.md §2).
     "net_session_files",
+    # One transcript-NAMED file, by row identity and P2 proof, served from an
+    # owner-sealed snapshot (network/mentioned_file_serve.py). Registered only
+    # when ``mentioned_file_serving`` is on; otherwise the relay's not-implemented
+    # fallback answers it.
+    "net_mentioned_file",
     "net_broker",
     "net_session_lifecycle",
     "net_session_receipt",
@@ -746,6 +751,10 @@ OP_CAPABILITY: dict[str, str | None] = {
     # ``view`` WIDENS NOTHING either: the listing is metadata of the journal ``net_sync``
     # already serves a view member, and every byte still goes through ``net_file_get``.
     "net_session_files": "view",
+    # ``view`` is the TRANSPORT row only: every phase also needs the owner's live
+    # P1 file-device approval for this exact requester key and native account,
+    # plus P2's transcript proof. A view member without that approval is refused.
+    "net_mentioned_file": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
     # ``view``, the same row the stream plane's ``acknowledge_attention`` carries

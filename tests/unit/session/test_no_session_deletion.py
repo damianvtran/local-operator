@@ -72,6 +72,34 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # -- P3 sealed snapshots: ONE nonce directory INSIDE a session ------------
+    # ``sessions/<id>/mentioned-file-versions/<nonce>/`` is a byte copy this op's
+    # own establishment wrote (PR #4563 R1-2/S1-3: otherwise one full copy per
+    # stat, never reclaimed). It sits in the protected tree, so the argument is
+    # the shape, not the location: the nonce must be 32 hex and equal the leaf
+    # name, the parent must be named ``mentioned-file-versions``, the parent is
+    # opened no-follow from the anchor, the leaf is lstat'ed (a link or non-dir
+    # refuses) and, when a seal exists, must match its recorded (dev, ino);
+    # otherwise (a failed establishment) the leaf is the exact nonce directory
+    # that call minted with ``secrets.token_hex`` and created itself; the unlinks are of
+    # that directory's plain entries via its own fd (a subdirectory refuses the
+    # whole removal), and the rmdir is non-recursive. It can never name a
+    # session directory or anything above the nonce.
+    (
+        "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
+        "os.unlink",
+        "Unlinks only plain entries (snapshot, seal.json) of one "
+        "mentioned-file-versions/<nonce>/ directory, by dir_fd; identity-checked when "
+        "a seal exists, else the exact nonce dir its failed establishment created; "
+        "never a directory",
+    ),
+    (
+        "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
+        "os.rmdir",
+        "Non-recursive rmdir of one mentioned-file-versions/<nonce>/ directory this op "
+        "created, by dir_fd; identity-checked when a seal exists, else the exact nonce "
+        "dir its failed establishment created; never a session directory",
+    ),
     (
         "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
         "os.replace",
