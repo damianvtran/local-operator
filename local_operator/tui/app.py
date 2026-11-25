@@ -74,6 +74,7 @@ from textual.geometry import Region, Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
+from textual.reactive import Reactive
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
@@ -4436,7 +4437,7 @@ class Band(Chrome):
     #: (212,212,210), i.e. the one alarm in the band lost its ink the moment it
     #: became actionable. The click itself rides the segment meta and is
     #: unaffected; only the style override is switched off.
-    auto_links = False
+    auto_links: Reactive[bool] = Reactive(False)
 
     class BoxChanged(TextualMessage):
         """The band's content box is a different size than it was."""
