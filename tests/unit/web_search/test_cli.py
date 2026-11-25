@@ -258,3 +258,25 @@ def test_the_help_text_describes_both_bands(capsys) -> None:
     # with its whitespace flattened rather than asserting a line break.
     help_text = " ".join(capsys.readouterr().out.split())
     assert "Set the priority prefix (free legs tried first, paid legs run after them)" in help_text
+
+
+def test_search_list_keeps_columns_aligned_for_a_wide_state_word(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    """`auto Radient credits` outran the fixed 16-character state pad.
+
+    Real-path QA of the Radient leg printed that row's access column four cells
+    to the right of every other row. The column is now sized to its widest word.
+    """
+    from local_operator.web_search import providers as providers_module
+    from local_operator.web_search import radient as radient_module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(providers_module, "radient_login_present", lambda _c: True)
+    radient_module.reset_radient_credit_cache_for_tests()
+    assert search_command(_args("list")) == 0
+    table = capsys.readouterr().out
+    assert "Radient (credits)" in table
+    exa = next(line for line in table.splitlines() if line.startswith("exa "))
+    radient = next(line for line in table.splitlines() if line.startswith("radient "))
+    assert exa.index(" free keyless MCP") == radient.index(" Radient credits |")

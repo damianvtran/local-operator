@@ -920,7 +920,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "web_read": 221,
     # RE-MEASURED (web-research-speed): 189 -> 193 — "with `query`" steers the
     # follow-up fetch of a result toward a passage preview.
-    "web_search": 193,
+    # RE-MEASURED (radient native search chain, PR #4553): 193 -> 196 — the
+    # ``radient`` provider id joins the rendered ``provider`` enum. The only
+    # entry that moved; measured through this test's own printed table.
+    "web_search": 196,
     "write": 137,
 }
 

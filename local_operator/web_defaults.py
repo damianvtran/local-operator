@@ -62,3 +62,27 @@ DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
     "deepseek_evidence": False,
     "read_enabled": True,
 }
+
+
+#: Every built-in web-search provider id, in the user-facing row order of
+#: `search list` and `/settings`. The typed view is
+#: ``web_search.models.PROVIDER_IDS``; it lives HERE so ``settings_io`` can offer
+#: exactly these ids as ``/settings`` members without importing pydantic. (The
+#: members used to be hand-copied tuples, so a new provider id was silently
+#: unsettable from ``/settings``.)
+WEB_SEARCH_PROVIDER_IDS: tuple[str, ...] = (
+    "duckduckgo",
+    "tavily",
+    "deepseek",
+    # Radient's hosted search (Tavily billed to Radient credits), beside the
+    # native model search it follows in the chain.
+    "radient",
+    "perplexity",
+    "brave",
+    "exa",
+    # `parallel` sits beside `exa` because the pair is the same family --
+    # credential-free MCP endpoints.
+    "parallel",
+    "serpapi",
+    "searxng",
+)

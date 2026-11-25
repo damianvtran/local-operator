@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "web_search",
+  "history_sha256": "a0e51812ec9f47793419c21b513d58ac24655b513641b0f02d5503612aa83e94",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "ac3eeb5eff30f6513a846d1753df6dc3db6e005f78b83b1eee315fbdefc5170b",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 7,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 5 minor, 2 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "minor: ASCII apostrophe (4 keys) and plain space instead of U+202F before ';' (5 keys) against the fr guide and corpus (1694 keys use U+2019, 500 U+202F;); 'clé d'API' vs corpus 'clé API' (14:1); '$0.01' localised to '0,01 $' with a breakable space despite the sidecar's verbatim rule; 'dans la Radient Console' vs corpus 'dans Radient Console'; 'facturée à la recherche' reads as 'à la recherche de' -> 'par recherche'. nit: 'auto native (payant)' agreement; 'retentée' vs corpus 'nouvelle tentative'."
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "fr",
+      "namespace": "web_search",
+      "source_sha256": "bf7ec689953956220f49def50f4a64e05d8870ca86a14c1279bd7fd2eda8b9ec",
+      "context_sha256": "d87e78144a7fb0824d9e0d574fa25495f403833dc888ee836e313d42375ec0b3",
+      "target_sha256": "9693b944b899e1474b5ad41f887784752d0e44b04612aac93bf7c59c17b18e91",
+      "translator": {
+        "agent": "coder (PR #4553 coder; round-1 corrections and new keys in commit 2bf8d18177b4)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4553-i18n-reaudit, independent of the translator)",
+        "session": "9019acb0dac3",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "round 2: full namespace (22 keys) against current en + context sidecar, glossary, locale style guide and shipped corpus; round-1 corrections file verified byte-for-byte; legend, markers and signed-in detail rendered through providers.state_meaning()/tr() under the locale; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "clean: 22 keys; 5 new + 2 changed keys correct (U+202F before ';', U+2019, '$0.01' and backticked command verbatim, '(crédits)' twin matches marker); round-1 corrections applied (meaning.auto_radient re-translated for the changed source)."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4553 head 2bf8d18177b4d78caaac7f813c012f07d6b4b9df (scope b54c8d96aeca..2bf8d18177b4). Supersedes the round-1 receipt for the old source hash 9db6805bb0f3; minor/nit fixes applied later change target_sha256 without voiding this pass."
+    }
+  ]
+}

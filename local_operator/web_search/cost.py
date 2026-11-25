@@ -81,6 +81,10 @@ PROVIDER_USD_PER_SEARCH: dict[str, float | None] = {
     # branch below), but the metered one must never render as $0.00.
     "parallel": None,
     "serpapi": 0.015,  # ≈$15 per 1,000 at the 5,000-search plan
+    # Radient's hosted Tavily search: $0.01 per search from Radient credits. Only
+    # the FALLBACK when a response arrives without the server's ``cost`` object --
+    # a normal response carries the billed amount and the transport records it.
+    "radient": 0.01,
     "searxng": 0.0,  # self-hosted
 }
 
@@ -98,6 +102,7 @@ PROVIDER_PRICE_NOTES: dict[str, str] = {
         "≈$5 per 1,000 searches on the REST API; the keyless MCP tier is free within its rate limit"
     ),
     "parallel": ("keyless MCP tier is free; no published rate for the keyed Search API"),
+    "radient": "$0.01 per search from Radient credits (Tavily), billed by Radient",
     "serpapi": "subscription plans; ≈$15 per 1,000 searches",
     "searxng": "self-hosted; costs no money",
 }
@@ -107,6 +112,10 @@ BASIS_FREE = "free"
 BASIS_PER_SEARCH = "published per-search rate"
 BASIS_TOKENS = "tokens at list price (estimate)"
 BASIS_UNKNOWN = "no published rate"
+#: Prefix for a cost the provider itself BILLED and reported (``billed by Radient
+#: (tavily)``): a charge, not an estimate, so it is labelled apart from the
+#: list-price bases above.
+BASIS_BILLED = "billed by"
 
 
 def deepseek_is_peak_hour(moment: datetime | None = None) -> bool:

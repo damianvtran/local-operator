@@ -67870,6 +67870,21 @@ _SEARCH_STATE_TOKENS: dict[str, str] = {
     # describing the provider beside them (round-2 D2-3).
     "excluded": "muted",
     "needs setup": "muted",
+    # Codes added with the chain's leg split (`provider_state_code`): the two
+    # that spend take `warning` like `auto paid`; the rest stay `muted`.
+    "auto free, then key": "muted",
+    "auto native plan": "muted",
+    "auto native paid": "warning",
+    "auto radient": "warning",
+    # `warning`, not `muted`: out of credits is the one Radient state the user has
+    # to ACT on, and the dimmest ink made it the quietest row on screen (PR #4553
+    # design round 1, D5).
+    "radient refused": "warning",
+    # Listed twins take their auto twins' ink: `enabled, then key` matches
+    # `auto free, then key` (free first), `enabled (credits)` matches
+    # `auto radient` (design round 1, D1/D2).
+    "enabled, then key": "muted",
+    "enabled (credits)": "warning",
 }
 
 
@@ -67877,33 +67892,28 @@ def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
     """The `chain` row: every leg in try order, each marker in its own ink.
 
     The markers come from the provider module's single table
-    (``chain_leg_marker``), so the CLI prints exactly the ones this row paints, and
-    the ink comes from ``CHAIN_MARKER_TOKENS`` -- round 2 measured the same `(paid)`
+    (``chain_leg_entries``), so the CLI prints exactly the ones this row paints, and
+    the ink comes with each entry -- round 2 measured the same `(paid)`
     fact at plain dim here and amber on the provider row two lines below, which
     made the row that says a leg will spend the least emphatic one on screen
     (round-2 D2-3).
     """
-    from local_operator.web_search.providers import (
-        CHAIN_MARKER_TOKENS,
-        chain_leg_marker,
-    )
+    from local_operator.web_search.providers import chain_leg_entries
 
     dim = Style(color=theme_mod.semantic_color("dim"))
     row = Text()
-    legs = [status for status in statuses if status.enabled]
-    if not legs:
+    # LEGS, not providers: a keyed Tavily is walked twice (free, then its key in
+    # the API_KEY band), and the row shows the chain the search actually walks.
+    entries = chain_leg_entries(list(statuses))
+    if not entries:
         row.append(_t(_x.providers_none()), style=dim)
         return row
-    for index, status in enumerate(legs):
+    for index, (label, marker, token) in enumerate(entries):
         if index:
             row.append(" → ", style=dim)
-        row.append(status.label, style=dim)
-        marker = chain_leg_marker(status)
+        row.append(label, style=dim)
         if marker:
-            row.append(
-                f" {marker}",
-                style=Style(color=theme_mod.semantic_color(CHAIN_MARKER_TOKENS[marker])),
-            )
+            row.append(f" {marker}", style=Style(color=theme_mod.semantic_color(token)))
     return row
 
 
@@ -67918,11 +67928,16 @@ def _search_status_detail(status: "ProviderStatus") -> Text:
     """
     # Function-local like every other provider touch in this module: the app is the
     # TUI's entry point and the provider graph stays off its import path.
-    from local_operator.web_search.providers import provider_state_label
+    from local_operator.web_search.providers import (
+        provider_state_code,
+        provider_state_label,
+    )
 
-    state = provider_state_label(status)
+    # Ink by CODE: the newer state words are translated, so the word itself is
+    # not a stable table key.
+    token = _SEARCH_STATE_TOKENS[provider_state_code(status)]
     detail = Text()
-    detail.append(state, style=Style(color=theme_mod.semantic_color(_SEARCH_STATE_TOKENS[state])))
+    detail.append(provider_state_label(status), style=Style(color=theme_mod.semantic_color(token)))
     detail.append(" · ", style=Style(color=theme_mod.semantic_color("dim")))
     detail.append(status.detail, style=Style(color=theme_mod.semantic_color("dim")))
     return detail
