@@ -15542,7 +15542,7 @@ def build_grep_tool() -> AgentTool:
 #: dict once a phase's ``items`` list is in hand. A flat ``init`` becomes ONE
 #: implicit phase named ``"Todos"`` (rendered headerless, so an existing
 #: caller sees the identical panel it saw before phases existed).
-TodoItem = dict[str, str]  # {"text", "status"[, "reason"]} — UNCHANGED
+TodoItem = dict[str, str]  # {"text", "status"[, "reason", "block_binding"]}
 TodoPhase = dict[str, Any]  # {"name": str, "items": list[TodoItem]}
 
 #: The sentinel name of the implicit phase a flat ``init`` (or a bare ``add``)
@@ -16155,6 +16155,33 @@ async def execute_todo(
             )
         target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
         verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
+        bind = context.bind_todo_block if context is not None else None
+        binding: str | None = None
+        binding_resolved = False
+
+        def resolve_item(item: TodoItem) -> None:
+            nonlocal binding, binding_resolved
+            item["status"] = target
+            if target == "blocked":
+                if not binding_resolved:
+                    binding = bind(reason) if bind is not None else None
+                    binding_resolved = True
+                old_binding = item.get("block_binding", "")
+                item["reason"] = reason
+                if binding is not None:
+                    # Rephrasing a wait is not permission to give a reused ID
+                    # the old item's meaning. Deliberately select a new ref.
+                    if (
+                        not old_binding
+                        or old_binding.split(":", 2)[:2] != binding.split(":", 2)[:2]
+                    ):
+                        item["block_binding"] = binding
+                elif not reason.startswith(f"[{':'.join(old_binding.split(':', 2)[:2])}]"):
+                    item.pop("block_binding", None)
+            else:
+                # A resolved item keeps neither the condition nor its receipt.
+                item.pop("reason", None)
+                item.pop("block_binding", None)
 
         if not params.items:
             # Phase-target form: resolve EVERY currently-open item in the named
@@ -16178,11 +16205,7 @@ async def execute_todo(
                 item for item in named["items"] if item.get("status") in ("pending", "blocked")
             ]
             for item in matched:
-                item["status"] = target
-                if target == "blocked":
-                    item["reason"] = reason
-                else:
-                    item.pop("reason", None)
+                resolve_item(item)
             if not matched:
                 return _text(
                     tool_call_id,
@@ -16200,13 +16223,7 @@ async def execute_todo(
         # model echoing a text need not know which phase holds it.
         matched, missing = _match_todos(current, params.items, target=target)
         for item in matched:
-            item["status"] = target
-            if target == "blocked":
-                item["reason"] = reason
-            else:
-                # A resolved item keeps no stale blocker: the reason described
-                # a wait that is over, and the panel would still render it.
-                item.pop("reason", None)
+            resolve_item(item)
         if matched:
             changed()
         if missing:

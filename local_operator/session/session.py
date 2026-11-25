@@ -107,7 +107,12 @@ from local_operator.harness.jobs import (
     effort_fallback_clause,
     is_model_fallback,
 )
-from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
+from local_operator.harness.loop import (
+    FAULT_DENIED,
+    AgentLoop,
+    LoopContext,
+    _materialize_asides,
+)
 
 # The custom-message markers this session journals, renders and allow-lists,
 # imported from their one neutral home: the renderer that turns them back into
@@ -236,6 +241,7 @@ from local_operator.i18n.messages import Msg
 from local_operator.imaging import rebound_oversize_image
 from local_operator.incidents import (
     DELIBERATE_CUT_OFF_CAUSE,
+    TODO_INCOMPLETE_CAUSE,
     format_cut_off_notice,
     format_cut_off_raw,
     render_cut_off_reason,
@@ -371,7 +377,6 @@ from local_operator.supplements.trigger import (
     snapshot_messages,
 )
 from local_operator.tools.builtin import (
-    blocked_todos,
     open_todos,
     restore_todos,
     todo_fingerprint,
@@ -1854,6 +1859,19 @@ def _state_section_text(body: Any, heading: str) -> str:
     return f"{heading}\n{text}"
 
 
+# A model explicitly associates one exact owner-local receipt with this item.
+# A handle mentioned in ordinary prose, or merely present in a scheduler, is
+# not correlation. Keep the marker in the persisted reason to avoid changing
+# the tool schema and its cached declaration for every provider request.
+_TODO_BLOCK_REF = re.compile(r"^\[(wake|monitor|ask):([A-Za-z0-9_-]+)\](?:\s|$)")
+_TodoBlock = tuple[str, str, str, str | None, bool]  # phase, text, reason, binding, live
+
+
+def _todo_block_ref(reason: str) -> tuple[str, str] | None:
+    match = _TODO_BLOCK_REF.match(reason.strip())
+    return (match[1], match[2]) if match else None
+
+
 def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, str]]) -> str:
     """The nudge the continuation guardrail injects (``_todo_continuation``).
 
@@ -1906,17 +1924,19 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
             "finished, `todo block` with a reason when it needs a user decision "
             "or an external service, `todo drop` when it is no longer needed. "
             "If the decision is the user's to make, put it to them with the "
-            "`ask` tool."
+            "`ask` tool. Never retry a refused action or resume work the user asked to hold."
         )
     if blocked:
         paragraphs.append(
             # i18n: ignore model-facing system reminder (not shown to the user)
             "Before you finish, account for each blocked item: check whether "
-            "its condition still holds. If it has cleared, resume the work; if "
-            "the decision is the user's, raise it with the `ask` tool; if it "
-            "waits on an external condition, make sure a wake or monitor is "
-            "armed to revisit it. Do not leave a blocked item that nothing is "
-            "watching."
+            "its condition still holds. Resume only if it has cleared and the work is "
+            "still authorized. Never retry a refused action or resume an intentional hold. "
+            "If the decision is the user's, use `ask` when available; for an external "
+            "condition, use a relevant wake or monitor when appropriate. To link a live "
+            "receipt for this exact blocker, re-block with a reason starting with "
+            "`[ask:<id>]`, `[wake:<id>]`, or `[monitor:<id>]` followed by the condition. "
+            "If no safe next action or follow-up exists, explain what remains blocked."
         )
     body = "\n".join([*rows, *paragraphs])
     return (
@@ -5837,33 +5857,23 @@ class Session:
         #: is always above it, because ``_run_turn`` bumps the raw counter first.
         self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
-        # Todo-continuation latch: the full todo fingerprint captured at the
-        # last guardrail nudge in THIS user turn, so a model that yields twice
-        # with a byte-identical list is not nudged a second time. Reset per user
-        # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        # Both fingerprints are the phase-aware 4-tuple form
-        # ``(phase_name, text, status, reason)`` that ``builtin.todo_fingerprint``
-        # now emits (phased-todos change; the reason joined in the blocked-reason
-        # remediation): the reminder latch and the persistence
-        # latch both compare against that source, so their annotations must match
-        # its arity or a comparison silently degrades.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
-        #: The blocked group's IDENTITY latch: (phase, text, status) per blocked item,
-        #: WITHOUT the reason. Deliberately NOT reset per turn (see
-        #: ``_run_turn_pipeline``): a parked set earns exactly ONE reconciliation per
-        #: identity change, across turns, so an unchanged parked set is not re-asserted
-        #: on every wake or quiet end. An empty identity is a change too: it is recorded
-        #: on the silent returns, so an identical re-park is a new identity that earns
-        #: its pass. A reason-only rewrite is bookkeeping, not a new ask — it refreshes
-        #: the rendered assertion's expiry (the full fingerprint rides ``details``) but
-        #: never re-fires one. In-memory on purpose: a process restart re-asks once per
-        #: current set, which is the accepted limit.
-        self._blocked_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
-        # The todo fingerprint that was last WRITTEN to the transcript, so the
+        # Distinguish an offered nudge from one that reached the provider and
+        # from a pass that reached the clean terminal boundary. A shed follow-up,
+        # dropped render, cancellation or output failure must not buy silence on
+        # the next turn. Only the completed per-item checks carry across turns.
+        self._todo_pending_seen: set[tuple[tuple[str, str], ...]] = set()
+        self._todo_offered: tuple[str, tuple[_TodoBlock, ...]] | None = None
+        self._todo_block_offered: set[tuple[str, str]] = set()
+        self._todo_presented: dict[tuple[str, str], _TodoBlock] = {}
+        self._todo_accounted: dict[tuple[str, str], _TodoBlock] = {}
+        self._todo_terminal_checks: dict[tuple[str, str], _TodoBlock] = {}
+        self._todo_terminal_guard_refused = False
+        self._todo_terminal_parked = False
+        # The todo snapshot that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
+        self._persisted_todo_snapshot: list[dict[str, Any]] | None = None
         # Project-continuation latch: the stale-set fingerprint captured at the
         # last project nudge in THIS user turn — the sorted
         # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
@@ -6904,12 +6914,35 @@ class Session:
         """
         if not any(_is_todo_reminder(message) for message in messages):
             return messages
+        # Scope backing reads to the offered blocked rows; no Ask-log read for
+        # ordinary history or legacy prose, and no repeated read for duplicate refs.
         current = todo_fingerprint(self._session_id)
+        blocks: dict[tuple[str, str], _TodoBlock] | None = None
 
         def expired(message: AgentMessage) -> bool:
-            return (
-                _is_todo_reminder(message) and _stamped_todo_fingerprint(message.details) != current
-            )
+            nonlocal blocks
+            if not _is_todo_reminder(message):
+                return False
+            if _stamped_todo_fingerprint(message.details) != current:
+                return True
+            shown = message.details.get("blocks")
+            if shown is None:
+                return False
+            if (
+                self._todo_terminal_guard_refused
+                or self._todo_terminal_parked
+                or self._deliberate_stop_noted
+            ):
+                return True
+            # A reminder is an accounting pass for this turn, not a
+            # directive to repeat on every later wake with the same history.
+            if self._todo_offered is None or message.id != self._todo_offered[0]:
+                return True
+            if not shown:
+                return False
+            if blocks is None:
+                blocks = self._todo_blocks()
+            return any(blocks.get((row[0], row[1])) != row for row in shown)
 
         return [message for message in messages if not expired(message)]
 
@@ -23328,15 +23361,15 @@ class Session:
                 note_open(producer_command_id or "")
             except Exception:  # noqa: BLE001 — an instrument never fails a turn
                 logger.debug("could not open the turn journal row", exc_info=True)
-        # Re-arm the todo guardrail's PENDING branch: a fresh user message may
-        # well be the answer a stalled list was waiting for, so that latch must
-        # not carry over. It is reset HERE and not in `_run_turn` on purpose —
-        # `_run_turn` also runs post-compaction continuations of this SAME user
-        # turn, and re-arming there would re-nudge an unchanged list the model
-        # already declined. The BLOCKED latch is deliberately NOT reset here: it
-        # is cross-turn by design (see `_blocked_reminder_fingerprint`), so an
-        # unchanged parked set is not re-asserted on every wake or quiet end.
-        self._todo_reminder_fingerprint = None
+        # Not in `_run_turn`: compaction can continue the SAME input turn. A
+        # new input re-arms pending, but doesn't re-open accounted blocked work.
+        self._todo_pending_seen.clear()
+        self._todo_offered = None
+        self._todo_block_offered.clear()
+        self._todo_presented.clear()
+        self._todo_terminal_checks.clear()
+        self._todo_terminal_guard_refused = False
+        self._todo_terminal_parked = False
         # The project guardrail's latch and its worked-turn counter share this
         # site for twin reasons: the user's next message may be the update the
         # stale set was waiting for (so a fresh nudge is allowed), and work done
@@ -24273,6 +24306,18 @@ class Session:
         self._held_context_tokens = None
         if held is None:
             return
+        if not (held.aborted or held.error or held.cut_off_cause):
+            if self._todo_terminal_checks:
+                # The logical turn really ended; neither a discarded aside nor
+                # a failed/cancelled continuation can close the accounting pass.
+                current = self._todo_blocks()
+                self._todo_accounted.update(
+                    {
+                        key: row
+                        for key, row in self._todo_terminal_checks.items()
+                        if current.get(key) == row
+                    }
+                )
         generation = self._logical_generation or held.generation
         self._logical_generation = None
         changes: dict[str, Any] = {}
@@ -24623,6 +24668,13 @@ class Session:
 
                 def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
+                    offer = self._todo_offered
+                    if (
+                        offer is not None
+                        and offer[1]
+                        and any(m.id == offer[0] for m in request.messages)
+                    ):
+                        self._todo_presented.update({(row[0], row[1]): row for row in offer[1]})
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
                     )
@@ -24826,6 +24878,7 @@ class Session:
                 # than registering a second seam the charging rule does not
                 # know about — is what keeps the two in step.
                 get_follow_up_messages=self._guardrail_continuations,
+                terminal_cut_off=self._todo_terminal_cut_off,
                 resolve_fallback_tool=self._resolve_tool_outside_inventory,
                 # Redact stored credential values out of every tool result
                 # before the message lands in the transcript. The store is
@@ -24993,6 +25046,20 @@ class Session:
                 if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
                     if event.tool_name != "no_reply":
                         self._turn_tool_calls += 1
+                if isinstance(event, ToolExecutionEndEvent):
+                    details = event.result.details or {}
+                    if details.get(FAULT_KEY) == FAULT_DENIED:
+                        # The terminal producer must not ask the model to find a
+                        # different route around a gate that refused this work.
+                        self._todo_terminal_guard_refused = True
+                    if (
+                        event.tool_name == "sessions"
+                        and not event.is_error
+                        and details.get("op") == "park"
+                        and details.get("self") is True
+                        and details.get("session_id") == self._session_id
+                    ):
+                        self._todo_terminal_parked = True
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -26310,6 +26377,7 @@ class Session:
             # attached).
             attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
+            bind_todo_block=self._bind_todo_block,
             monitor_scheduler=self._monitors,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
@@ -29743,128 +29811,178 @@ class Session:
         else:
             timer.add_done_callback(finish)
 
-    async def _todo_continuation(self) -> list[AgentMessage]:
-        """The loop's follow-up hook: re-assert the outstanding todos at the yield.
+    def _live_todo_binding(self, kind: str, handle: str, now: int) -> str | None:
+        """Return the incarnation of an actionable, owner-local receipt.
 
-        The loop ends a turn the instant the model returns no tool calls, even
-        with every item still open — a steering message answered in prose was
-        enough to end a turn reading ``Todos · 0/6``. A non-empty return here
-        sets ``has_more_tool_calls`` and re-enters the outer loop
-        (harness/loop.py, ``_collect_yield_injections``), so the model gets
-        another turn with its own list in front of it.
-
-        The work set is pending PLUS blocked, and the two are reconciled
-        differently on purpose. Pending items may not be left running: they are
-        work the model is asked to resume or honestly resolve, and their latch
-        re-arms per turn (reset in ``_run_turn_pipeline``). Blocked items are
-        unfinished too — parked on a user decision or an external service — and
-        the failure this covers is a session that ended turns for ~14 hours over
-        six blocked items while a pending-only guardrail saw an empty work set
-        and let every yield stand. So blocked items are ACCOUNTED for at the
-        same boundary: the reminder asks whether the condition still holds, whose
-        decision it is, and whether anything is armed to revisit it.
-
-        The blocked reconciliation fires ONCE PER BLOCKED-IDENTITY CHANGE, on a
-        CROSS-TURN latch (``_blocked_reminder_fingerprint``, deliberately not
-        reset in ``_run_turn_pipeline``). The identity is
-        ``(phase, text, status)`` per blocked item, WITHOUT the reason: a
-        reason-only rewrite is the model re-checking a parked item — its own
-        bookkeeping, not a new ask — so it does not re-fire a reconciliation,
-        though it still expires the stale rendered assertion (the full
-        fingerprint, reason included, rides the reminder's ``details``; see
-        :meth:`_live_todo_reminders`). What this replaces is the measured
-        over-fire: a per-turn re-arm meant an operator session whose open work
-        was ALL blocked — 0 pending, 5-6 parked items — was re-asserted on every
-        turn (every peer wake, every quiet end); across two such sessions ~97 of
-        ~116 quiet-end attempts were overridden by continued model output.
-
-        The honest stop is preserved — a blocked model may still finish its turn
-        (the paragraph asks it to account, never to invent progress), and,
-        crucially, it is not deferred forever by this hook: one accounting pass
-        per identity change is all that is owed (see the latch above). ``done``
-        and ``dropped`` stay out: they are settled, and re-asserting them would
-        feed the model a claim that is false. The latch IS the mechanism — no
-        prompt text, classifier or new tool: a set new or changed since it was
-        last accounted earns one nudge; an unchanged one earns none.
-
-        Fires only while the list is MOVING — for pending, movement since the
-        per-turn re-arm; for blocked, movement of the identity since it was last
-        accounted. A model that yields twice with a byte-identical list is
-        telling you it cannot proceed — usually it needs a decision only the
-        user can make — and nudging it again would burn the loop's
-        ``max_follow_up_continuations`` budget (its own, and the larger one: 64
-        against the 8 the steering/aside producers share), end the turn with a
-        continuation-limit notice, and delay the user's answer by up to that
-        many model calls. That latch is also what keeps the blocked
-        reconciliation bounded: blocking is MOVEMENT (it changes the
-        fingerprint), so it earns exactly one nudge, and the byte-identical
-        yield after the model accounts is released — one pass, not a loop. The
-        larger budget is safe precisely because the latch above is what really
-        bounds this producer — a chatty parent can no longer spend the allowance
-        a still-moving list needs.
-
-        Both latches are IN-MEMORY, and that is the accepted limit: a process
-        restart re-asks once per current set (the first yield after the restart
-        sees fresh latches), which re-founds the same one-pass bound rather than
-        opening a new over-fire path.
-
-        The nudge it returns is a point-in-time assertion and stops being sent
-        the moment the list moves — see :meth:`_live_todo_reminders`, which
-        expires it against the fingerprint stamped in its details.
-
-        Invisible to the user by construction, which is exactly why the nudge is
-        a ``CustomMessage`` and not a ``Message.user(...)``: follow-ups are
-        appended by ``AgentLoop._drain_pending``, which emits no AgentEvent;
-        they never enter the run's ``new_messages``, so nothing persists them;
-        and the TUI's resume replay (``_render_resumed_history``) branches on
-        ``getattr(message, "role", None)``, which a CustomMessage does not have.
-        A plain user message would fail all three and would print in the
-        transcript as if the user had typed it.
+        Runtime snapshots, not list copy or a last tool result, decide liveness.
+        Normal ticks don't change the incarnation; retiring and reusing an ID
+        does. Old rows without creation stamps cannot back a durable binding.
         """
-        pending = open_todos(self._session_id)
-        blocked = blocked_todos(self._session_id)
-        if not pending and not blocked:
-            # Nothing parked means the blocked identity IS the empty tuple, and
-            # THAT is still a fact to record: an identity change with nothing to
-            # ask about must still move the ledger, or a set that resolved to
-            # EMPTY and is re-parked identically later would read as "still
-            # accounted" and stay silent forever (round-1 F1).
-            self._blocked_reminder_fingerprint = ()
+        from hashlib import sha256
+
+        created_at = 0
+        subject = ""
+        if kind == "wake" and not self._wake.disposed:
+            from local_operator.wakes.store import is_internal_wake_row
+
+            for row in self._wake.armed_schedules:
+                if row.id != handle or row.hidden or is_internal_wake_row(row):
+                    continue
+                if row.until_at is not None and (
+                    now >= row.until_at or row.next_due_at > row.until_at
+                ):
+                    continue
+                if row.limit is not None and row.fired_count >= row.limit:
+                    continue
+                created_at = row.created_at
+                subject = row.message
+                break
+        elif kind == "monitor" and not self._monitors.disposed:
+            monitor = self._monitors.runtime(handle)
+            if monitor is not None:
+                spec, counters = monitor.spec, monitor.counters
+                due = counters.get("next_due_at")
+                if (
+                    type(due) is int
+                    and due > 0
+                    and (spec.until_at is None or max(now, due) < spec.until_at)
+                    and not any(
+                        counters.get(key)
+                        for key in ("disabled", "blind", "unavailable_since", "failing")
+                    )
+                ):
+                    created_at = spec.created_at
+                    subject = json.dumps(
+                        [spec.tool, spec.arguments, spec.cwd], sort_keys=True, default=str
+                    )
+        elif kind == "ask":
+            from local_operator.asks import store as ask_store
+
+            queue = self.ask_queue()
+            row = queue.find(handle, now) if queue is not None else None
+            if (
+                row is not None
+                and row.get("status") == ask_store.STATUS_OPEN
+                and row.get("questions")
+                and row.get("expires_at", 0) > now
+            ):
+                created_at = row.get("created_at", 0)
+                subject = row.get("tool_call_id") or ""
+        if type(created_at) is not int or created_at <= 0:
+            return None
+        # Edits to the job's purpose can make it unrelated without retiring it.
+        # Persist a digest, not a second copy of wake text or tool arguments.
+        digest = sha256(subject.encode()).hexdigest()
+        return f"{kind}:{handle}:{created_at}:{digest}"
+
+    def _bind_todo_block(self, reason: str) -> str | None:
+        ref = _todo_block_ref(reason)
+        return self._live_todo_binding(*ref, int(time.time() * 1000)) if ref is not None else None
+
+    def _todo_blocks(
+        self, phases: list[dict[str, Any]] | None = None
+    ) -> dict[tuple[str, str], _TodoBlock]:
+        if phases is None:
+            phases = todo_snapshot(self._session_id)
+        now = int(time.time() * 1000)
+        live: dict[tuple[str, str], str | None] = {}
+        rows: dict[tuple[str, str], _TodoBlock] = {}
+        for phase in phases:
+            for item in phase["items"]:
+                if item.get("status") != "blocked":
+                    continue
+                name, text = phase["name"], item["text"]
+                reason = str(item.get("reason") or "")
+                binding = item.get("block_binding")
+                ref = _todo_block_ref(reason) if binding else None
+                if ref is not None and ref not in live:
+                    live[ref] = self._live_todo_binding(*ref, now)
+                rows[name, text] = (name, text, reason, binding, bool(ref and live[ref] == binding))
+        return rows
+
+    def _todo_terminal_exempt(self) -> bool:
+        # These are host/tool facts, not something an agent can assert in a
+        # todo reason. A free-text hold remains ambiguous, never permission.
+        return (
+            self._deliberate_stop_noted
+            or self._abort_requested
+            or self._todo_terminal_guard_refused
+            or self._todo_terminal_parked
+        )
+
+    def _todo_terminal_cut_off(self) -> str:
+        if self._todo_terminal_exempt():
+            return ""
+        if self._todo_pending_seen and open_todos(self._session_id):
+            return TODO_INCOMPLETE_CAUSE
+        # A reason-only rewrite during a delivered pass may clarify an
+        # ambiguous park; it is not a reason to loop. A live backing becoming
+        # stale is different: never record a changed explicit ref as checked.
+        if self._todo_presented:
+            current = self._todo_blocks()
+            self._todo_terminal_checks = {
+                key: row
+                for key, row in current.items()
+                if (shown := self._todo_presented.get(key)) is not None
+                and (
+                    shown == row or (not _todo_block_ref(shown[2]) and not _todo_block_ref(row[2]))
+                )
+            }
+        return ""
+
+    async def _todo_continuation(self) -> list[AgentMessage]:
+        """Ask only for unfinished work at the actual, shared yield boundary.
+
+        A pending projection may move and earn another pass inside the existing
+        loop budget, but rewriting blocker prose or cycling through already-seen
+        states cannot buy more requests. Blocked accounting is per item, at most
+        once per turn per item, and is carried across turns only after dispatch
+        and a clean logical end. Verified live bindings need no accounting pass.
+        """
+        if self._todo_terminal_exempt():
             return []
         fingerprint = todo_fingerprint(self._session_id)
-        # The blocked group's IDENTITY — (phase, text, status), no reason — see the
-        # field comment beside `self._blocked_reminder_fingerprint`.
-        blocked_identity = tuple(x[:3] for x in fingerprint if x[2] == "blocked")
-        blocked_changed = blocked_identity != self._blocked_reminder_fingerprint
-        pending_fires = bool(pending) and fingerprint != self._todo_reminder_fingerprint
-        blocked_fires = bool(blocked_identity) and blocked_changed
-        if not (pending_fires or blocked_fires):
-            # An identity change with nothing to ask about — the set resolved to
-            # EMPTY — is still a change: record it here, or an identical set
-            # re-parked later would read as "still accounted" and stay silent
-            # forever (round-1 F1). A non-empty change fires above; the no-work
-            # return records the fully-empty case.
-            if blocked_changed:
-                self._blocked_reminder_fingerprint = blocked_identity
+        if not fingerprint and not self._todo_accounted:
             return []
-        self._todo_reminder_fingerprint = fingerprint
-        self._blocked_reminder_fingerprint = blocked_identity
-        return [
-            CustomMessage(
-                custom_type=TODO_REMINDER_MESSAGE_TYPE,
-                attribution="system",
-                # The fingerprint rides ALONG with the text: it is what the render
-                # path compares to decide the assertion is still true (see
-                # :meth:`_live_todo_reminders`). Each group's section renders only
-                # when that group is what fired.
-                details={
-                    "text": _todo_reminder_text(
-                        pending if pending_fires else [], blocked if blocked_fires else []
-                    ),
-                    "fingerprint": fingerprint,
-                },
-            )
-        ]
+        blocks = self._todo_blocks()
+        self._todo_block_offered.intersection_update(blocks)
+        # Clear removed or now-live items, so re-parking or losing that backing
+        # does not inherit an earlier check of an unbacked row.
+        self._todo_accounted = {
+            key: row
+            for key, row in self._todo_accounted.items()
+            if key in blocks and not blocks[key][-1]
+        }
+        pending = tuple(
+            (phase, text) for phase, text, status, _ in fingerprint if status == "pending"
+        )
+        pending_fires = bool(pending) and pending not in self._todo_pending_seen
+        due = tuple(
+            row
+            for key, row in blocks.items()
+            if not row[-1]
+            and self._todo_accounted.get(key) != row
+            and key not in self._todo_block_offered
+        )
+        if not (pending_fires or due):
+            return []
+        if pending_fires:
+            self._todo_pending_seen.add(pending)
+        self._todo_block_offered.update((row[0], row[1]) for row in due)
+        message = CustomMessage(
+            custom_type=TODO_REMINDER_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": _todo_reminder_text(
+                    [{"text": text} for _, text in pending] if pending_fires else [],
+                    [{"text": row[1], "reason": row[2]} for row in due],
+                ),
+                "fingerprint": fingerprint,
+                "blocks": due,
+            },
+        )
+        self._todo_offered = (message.id, due)
+        return [message]
 
     async def _project_continuation(self) -> list[AgentMessage]:
         """The completion-time project check: re-assert stale project rows at the yield boundary.
@@ -37805,16 +37923,15 @@ class Session:
         """Snapshot the todo list to the transcript when it moved this turn.
 
         The todo tool keeps the live list in a process-local table, so a
-        transcript snapshot is the only durable copy a resume can read. Guarded
-        by the FULL-list fingerprint (the same one the continuation guardrail
-        compares): an unchanged list is one tuple comparison and no write, while
-        any init/add/done/block/drop lands a fresh newest-wins entry. Never
-        raises — a status write must not break a turn.
+        transcript snapshot is the only durable copy a resume can read. Compare
+        the snapshot itself: rebinding an explicitly linked receipt may leave
+        the visible reason and status byte-identical. Never raises — a status
+        write must not break a turn.
         """
-        fingerprint = todo_fingerprint(self._session_id)
-        if fingerprint == self._persisted_todo_fingerprint:
+        snapshot = todo_snapshot(self._session_id)
+        if snapshot == self._persisted_todo_snapshot:
             return
-        if not fingerprint and self._persisted_todo_fingerprint is None:
+        if not snapshot and self._persisted_todo_snapshot is None:
             # An empty list that was never persisted is the ordinary
             # never-used-todos session: record nothing and, importantly, do
             # not append an empty snapshot at teardown (which on a wedged mount
@@ -37825,9 +37942,9 @@ class Session:
         try:
             await self._transcript.append_custom(
                 TODO_SNAPSHOT_CUSTOM_TYPE,
-                {"items": todo_snapshot(self._session_id)},
+                {"items": snapshot},
             )
-            self._persisted_todo_fingerprint = fingerprint
+            self._persisted_todo_snapshot = snapshot
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist todo snapshot", exc_info=True)
 
@@ -37846,7 +37963,7 @@ class Session:
         items = details.get("items") or []
         if items:
             restore_todos(self._session_id, list(items))
-            self._persisted_todo_fingerprint = todo_fingerprint(self._session_id)
+            self._persisted_todo_snapshot = todo_snapshot(self._session_id)
 
     # -- active model route (fallback persistence) ---------------------------
 

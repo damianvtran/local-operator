@@ -4452,14 +4452,18 @@ class AgentLoop:
             # continuation guard uses: the loop stamps the token and the
             # involuntariness, the classifier renders the sentence
             # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
+            if length_silent_cut_off or length_answer_cut_off:
+                cut_off_cause = OUTPUT_LIMIT_CAUSE
+            else:
+                terminal_cut_off = config.terminal_cut_off
+                cut_off_cause = terminal_cut_off() if terminal_cut_off is not None else ""
             yield AgentEndEvent(
                 messages=new_messages,
-                aborted=length_silent_cut_off or length_answer_cut_off,
-                cut_off_cause=(
-                    OUTPUT_LIMIT_CAUSE if (length_silent_cut_off or length_answer_cut_off) else ""
-                ),
+                aborted=bool(cut_off_cause),
+                cut_off_cause=cut_off_cause,
                 generation=generation,
-                quiet_requested=context.quiet_candidate,
+                # The candidate only requests silence at a genuinely clean end.
+                quiet_requested=context.quiet_candidate and not cut_off_cause,
             )
         finally:
             context.quiet_request_roots.clear()

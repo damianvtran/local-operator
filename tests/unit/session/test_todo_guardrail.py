@@ -132,7 +132,7 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2  # one nudge, then the turn ends
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_reminder_fingerprint == (("Todos", "decide the domain", "pending", ""),)
+    assert session._todo_pending_seen == {(("Todos", "decide the domain"),)}
     await session.dispose()
 
 
@@ -156,10 +156,9 @@ async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2, "one nudge, then the turn ends — not re-nudged every yield"
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_reminder_fingerprint == (
-        ("Foundation", "decide the domain", "pending", ""),
-        ("Verification", "run the gate", "pending", ""),
-    )
+    assert session._todo_pending_seen == {
+        (("Foundation", "decide the domain"), ("Verification", "run the gate"))
+    }
     # The reminder must actually REACH the model on the continuation request:
     # that render passes through ``_expire_stale_todo_reminders`` →
     # ``_stamped_todo_fingerprint``. If that normaliser is NOT widened to
@@ -212,7 +211,7 @@ async def test_a_fresh_user_turn_rearms_the_latch(tmp_path) -> None:
     session = make_session(tmp_path, stream)
 
     await session.prompt("go")
-    assert session._todo_reminder_fingerprint is not None
+    assert session._todo_pending_seen
     await session.prompt("use example.com")
 
     # Two requests per turn: the prose answer plus one nudge each.
@@ -251,9 +250,11 @@ async def test_blocked_only_list_fires_a_reconciliation_nudge(tmp_path) -> None:
     # there, and the model would have to reconcile it against its own list.
     assert "old plan" not in sent and "schema" not in sent
     assert "Do not end the turn while pending items remain" not in sent
-    # The latch still compares the FULL list, settled items included, and a
-    # blocked item's reason is part of it (the round-1 remediation).
-    assert session._todo_reminder_fingerprint == (
+    # The render still compares the FULL list, settled items included.
+    assert tuple(
+        injected_row
+        for injected_row in reminders(session._context.messages)[0].details["fingerprint"]
+    ) == (
         ("Todos", "pick a domain", "blocked", "needs the user's call"),
         ("Todos", "old plan", "dropped", ""),
         ("Todos", "schema", "done", ""),
@@ -278,8 +279,10 @@ async def test_a_parked_blocked_list_is_reconciled_once_across_turns(tmp_path) -
     session = make_session(tmp_path, stream)
 
     await session.prompt("go")
-    # The latch is the blocked group's IDENTITY — (phase, text, status), no reason.
-    assert session._blocked_reminder_fingerprint == (("Todos", "pick a domain", "blocked"),)
+    # The terminal ledger records the checked reason with the item's identity.
+    assert session._todo_accounted == {
+        ("Todos", "pick a domain"): ("Todos", "pick a domain", "needs the user's call", None, False)
+    }
     await session.prompt("use example.com")
 
     # One reconciliation in turn 1; the fresh turn is NOT re-armed for a set whose
@@ -341,7 +344,7 @@ async def test_an_unblocked_or_resolved_change_earns_one_reconciliation(tmp_path
     nudge = nudges[0]
     assert isinstance(nudge, CustomMessage)
     assert "pick a domain" in nudge.details["text"]  # unblocked: open work again
-    assert "reserve the name" in nudge.details["text"]  # still parked, still asserted
+    assert "reserve the name" not in nudge.details["text"]  # unrelated, already checked
     assert "Do not end the turn while pending items remain" in nudge.details["text"]
     assert await session._todo_continuation() == []
     await session.dispose()
@@ -525,7 +528,7 @@ async def test_a_re_parked_set_earns_a_new_reconciliation(tmp_path) -> None:
     builtin.TODO_STORE[SESSION_ID][0]["status"] = "done"
     builtin.TODO_STORE[SESSION_ID][0].pop("reason", None)
     assert await session._todo_continuation() == []
-    assert session._blocked_reminder_fingerprint == ()
+    assert not session._todo_accounted
 
     # Re-block the SAME text: identical (phase, text, status) to the first park,
     # and a new identity against the recorded empty set — so it earns its pass.

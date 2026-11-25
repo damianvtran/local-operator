@@ -600,6 +600,9 @@ STALL_BOUND_CAUSE = "runtime-stall-bound"
 #: without being taught a new field.
 CONTINUATION_LIMIT_CAUSE = "continuation-limit"
 
+#: The todo producer spent its bounded accounting pass without settling pending work.
+TODO_INCOMPLETE_CAUSE = "todo-incomplete"
+
 #: The LOOP's OTHER involuntary bound: a turn hit the model's OUTPUT limit with
 #: nothing visible produced, and the harness could not continue it. Published so
 #: a bare ``AgentEndEvent`` stops reading as a completed answer on every surface.
@@ -618,6 +621,9 @@ OUTPUT_LIMIT_CAUSE = "output-limit"
 
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
+    # Structured cause only: the generic localized sentence is not distinctive
+    # enough to classify old, untyped incident text in cut_off_cause_from_reason.
+    TODO_INCOMPLETE_CAUSE: "",
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
     # (the runtime, not the operator and not another process) because that is the
     # fact this arm exists to state: every other involuntary arm here names an
@@ -1053,7 +1059,12 @@ def render_cut_off_reason(cause: str, *, detail: str = "", clause: str = "") -> 
     kind of fact: it changes what the row MEANS (the runtime survived a bound and is
     still stalled) rather than adding detail about a death it did not cause.
     """
-    sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
+    if cause == TODO_INCOMPLETE_CAUSE:
+        from local_operator.i18n.keys import wire_exec
+
+        sentence = wire_exec.turn_did_not_complete().envelope(locale="en")["text"]
+    else:
+        sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
     lead = f"; {clause}" if clause else ""
     return f"{sentence}{lead}{_render_cut_off_detail(detail)}"
 
