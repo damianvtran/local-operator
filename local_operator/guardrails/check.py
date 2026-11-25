@@ -383,7 +383,39 @@ def _targets_text(verdict: Verdict) -> str:
     parts = [f"{t.shown or t.path} ({t.reason})" for t in flagged[:6]]
     if len(flagged) > 6:
         parts.append(f"… and {len(flagged) - 6} more")
-    return "; ".join(parts) or "an unresolvable target"
+    return ("; ".join(parts) or "an unresolvable target") + _cleared_text(verdict)
+
+
+def _cleared_text(verdict: Verdict) -> str:
+    """Report LOW worktree rankings, not authority to change a refused call.
+
+    A bash call runs whole or not at all. The same resolved path can have
+    multiple rows (plain and forced, for example); any non-LOW row rules it
+    out of this diagnostic, regardless of which spelling received LOW.
+    """
+    flagged = verdict.flagged_targets
+    if not flagged:
+        return ""
+    non_low_paths = {r.path for r in flagged}
+    low_paths = list(
+        dict.fromkeys(
+            r.path
+            for r in verdict.targets
+            if r.risk is Risk.LOW
+            and r.target.worktree_remove
+            and r.target.path
+            and r.path not in non_low_paths
+        )
+    )
+    if not low_paths:
+        return ""
+    more = f", … and {len(low_paths) - 6} more" if len(low_paths) > 6 else ""
+    shown = ", ".join(low_paths[:6]) + more
+    return (
+        f". Diagnostic only: {len(low_paths)} other resolved worktree "
+        f"path{'' if len(low_paths) == 1 else 's'} ranked LOW in every row ({shown}); "
+        "these rankings do not authorize any part of the original call"
+    )
 
 
 #: What every dangerous-delete refusal tells the agent it CAN do. Model-facing
