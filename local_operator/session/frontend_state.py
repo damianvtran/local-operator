@@ -10684,10 +10684,10 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     a runtime that cannot answer at all is ``(None, None)``; the split is the
     WIRE FIX's capability contract, spelled out below.
 
-    The single derivation every publisher uses (``Session.publish_ask_state``,
-    ``refresh_from_session``, the aggregate routes through the index), so the
-    frontend state, the projection and the list rows cannot disagree about which
-    asks are OUTSTANDING.
+    Both conversation publishers (``Session.publish_ask_state`` and the runtime
+    projection refresh) use the same fold. The durable index is a separate view:
+    native Team Bridge requests stay available to the Requests inbox without
+    becoming conversation cards or contributing to ``asks_open`` here.
 
     THE TALLY IS THE OUTSTANDING SET, which is ``open`` alone: an ask settles
     once the agent is told — by its deadline (``timed_out``, #2388) or by an
@@ -10752,10 +10752,15 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
             if callable(window):
                 rows = [
                     dict(row)
-                    for row in cast("Any", folder(drafts=True, lapsed_visible_ms=window()))
+                    for row in cast(
+                        "Any",
+                        folder(drafts=True, lapsed_visible_ms=window(), conversation_only=True),
+                    )
                 ]
             else:
-                rows = [dict(row) for row in cast("Any", folder(drafts=True))]
+                rows = [
+                    dict(row) for row in cast("Any", folder(drafts=True, conversation_only=True))
+                ]
         except TypeError:
             rows = [dict(row) for row in cast("Any", folder())]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero

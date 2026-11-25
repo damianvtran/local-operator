@@ -2577,6 +2577,7 @@ class AskQueue:
         *,
         drafts: bool = False,
         lapsed_visible_ms: int = store.DEFAULT_LAPSED_VISIBLE_MS,
+        conversation_only: bool = False,
     ) -> list[dict[str, Any]]:
         """The ``PendingAsk`` rows for a surface, open first, capped.
 
@@ -2595,11 +2596,20 @@ class AskQueue:
         index writer (:meth:`_refresh`) does NOT, so the derived index stays
         data at the 7 d horizon the sweep shares, and its readers apply the
         window themselves (``asks/store._shown_rows``).
+
+        ``conversation_only`` keeps native Team Bridge requests in their
+        dedicated Requests inbox rather than in the pending conversation card.
+        The log and index must still carry them for signed decisions and expiry.
         """
         stamp = now_ms if now_ms is not None else self._now()
         horizon_ms = store.LATE_WINDOW_S * 1000
         rows: list[dict[str, Any]] = []
         for record in self.records(stamp):
+            # Exclude before the cap so hidden requests cannot displace visible
+            # asks. The host-stamped scope distinguishes a native request from
+            # browser site consent, which also carries a signed question id.
+            if conversation_only and _is_native_bridge_request(record):
+                continue
             status = record["status"]
             if status == store.STATUS_EXPIRED:
                 continue
@@ -3208,6 +3218,15 @@ def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: b
             f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
         )
     return ""
+
+
+def _is_native_bridge_request(row: Mapping[str, Any]) -> bool:
+    for question in row.get("questions") or ():
+        if isinstance(question, Mapping) and question.get("question_id"):
+            bridge = question.get("bridge")
+            if isinstance(bridge, Mapping) and bridge.get("kind") == "bridge":
+                return True
+    return False
 
 
 def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:
