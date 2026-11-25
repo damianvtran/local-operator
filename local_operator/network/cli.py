@@ -56,6 +56,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_network_send as _network_send
+from local_operator.i18n.keys import cli_network_sessions as _network_sessions
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
 
@@ -577,6 +578,24 @@ def add_parser(
     net_sessions.add_argument(
         "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
     )
+    # THE LISTING'S PAGING (operator report 2026-11-25: a node with 417 session
+    # dirs listed 223 and the rest were unreachable). Asked of an owner that
+    # advertises ``remote-catalog-page-v1``; the answer carries ``next_cursor``
+    # and ``total`` on each peer's block. ``--cursor`` is one device's position,
+    # so it needs ``--peer``.
+    net_sessions.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="listing: at most N rows per peer (1-100), paged with --cursor",
+    )
+    net_sessions.add_argument(
+        "--cursor",
+        default=None,
+        metavar="TOKEN",
+        help="listing with --peer: the next page, from the previous answer's next_cursor",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -708,7 +727,10 @@ def add_parser(
         "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
     )
     net_sessions.add_argument(
-        "--query", default=None, metavar="TEXT", help="with --peek: window and count for a search"
+        "--query",
+        default=None,
+        metavar="TEXT",
+        help="with --peek: window and count for a search; listing: search each peer's store",
     )
     net_sessions.add_argument(
         "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
@@ -9591,6 +9613,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # (``session.peek.peek_validation_error``): one sentence for "over budget"
     # on every surface, and every such refusal is a usage error (rc 2).
     journal = _peek_journal_fields(args)
+    # WITHOUT ``--peek``, ``--query`` IS THE LISTING'S SEARCH (one flag, the
+    # same meaning — "find this" — in both reads), so it leaves the journal set
+    # here and rides the listing below with ``--limit``/``--cursor``.
+    listing_query = journal.pop("query", None) if not peek else None
     if journal and not peek:
         named_flags = ", ".join(f"--{name.replace('_', '-')}" for name in journal)
         print(f"{named_flags} applies to --peek only", file=sys.stderr)
@@ -9600,6 +9626,33 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         if refusal:
             print(refusal, file=sys.stderr)
             return 2
+
+    # THE LISTING FLAGS DESCRIBE A LISTING, so beside an act they would be
+    # accepted and then silently dropped — refused, as ``--steps`` is.
+    listing_flags = [
+        flag
+        for flag, value in (
+            ("--limit", getattr(args, "limit", None)),
+            ("--cursor", getattr(args, "cursor", None)),
+            ("--query", listing_query),
+        )
+        if value is not None
+    ]
+    acts = (
+        "create",
+        "engage",
+        "stop",
+        "archive",
+        "unarchive",
+        "delete",
+        "send",
+        "steer",
+        "slash",
+        "peek",
+    )
+    if listing_flags and any(getattr(args, name, None) for name in acts):
+        print(f"{', '.join(listing_flags)} applies to the listing only", file=sys.stderr)
+        return 2
 
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
     # the only verbs here that open a VIEWER, and a command line that asked for
@@ -10153,18 +10206,36 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             "peer_required",
             "name a device with --peer, or ask every device with --all-peers",
         )
+    page = _listing_page_fields(args, listing_query, peer)
+    if isinstance(page, int):
+        return page
     # The merge is a LISTING, so it is the one verb here whose success does not
     # rest on a single reported word: what it must not do is dress an unreachable
     # relay up as "no sessions" (Q-R4-1), which is why this call refuses instead
     # of falling through to an empty set. When the relay IS up, the peer block per
     # row is what labels an empty answer (``reachable`` + ``reason``).
-    payload = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    payload = _relay_answer(
+        "peer_session_rows",
+        timeout=_listing_timeout(),
+        **({**page, "peer": peer} if page else {}),
+    )
     # Bound to a narrow local first: `payload.get` is `Any | None`, and the two
     # comprehensions below iterate it as a mapping (`projection.RelayPeerCatalog`
     # takes the same precaution for the same reason).
     raw_facts = payload.get("peers")
     facts: dict[str, Any] = raw_facts if isinstance(raw_facts, dict) else {}
     remote = [row for row in (payload.get("sessions") or []) if isinstance(row, dict)]
+    relay_paged = bool(payload.get("paged"))
+    if page and not relay_paged:
+        # THIS DEVICE'S RELAY PREDATES THE PAGED READ: it ignored the fields
+        # and answered the whole federated listing (its own rows included).
+        # Without a cursor or query that is today's capped answer and may
+        # stand, labelled; with one, it is not the page or search asked for.
+        for block in facts.values():
+            if isinstance(block, dict) and block.get("reachable"):
+                block["paging"] = "unsupported"
+        if "cursor" in page or "query" in page:
+            remote = []
     matched: list[dict[str, Any]] = []
     if peer:
         wanted = peer.lower()
@@ -10268,6 +10339,41 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             f"{str(block.get('name') or device_id)}: unreachable "
             f"({peer_reason_words(str(block.get('reason') or ''))})"
         )
+    # THE NEXT PAGE, NAMED, and an owner too old to page named as such: a
+    # capped answer from an older build must never read as the whole store
+    # (``wire.REMOTE_CATALOG_PAGE_V1``).
+    unpaged: set[str] = set()
+    if page:
+        from local_operator.i18n.text import tr
+
+        if not relay_paged:
+            lines.append(tr("cli.network_sessions")(_network_sessions.relay_unpaged()))
+        for device_id, block in sorted(facts.items()):
+            if not isinstance(block, dict) or not block.get("reachable"):
+                continue
+            label = str(block.get("name") or device_id)
+            if block.get("paging") == "unsupported":
+                unpaged.add(str(device_id))
+                if not relay_paged:
+                    continue
+                lines.append(
+                    tr("cli.network_sessions")(_network_sessions.paging_unsupported(peer=label))
+                )
+            elif isinstance(block.get("next_cursor"), str):
+                lines.append(
+                    tr("cli.network_sessions")(
+                        _network_sessions.next_page(
+                            peer=label,
+                            shown=sum(
+                                1
+                                for row in remote
+                                if (row.get("peer") or {}).get("device_id") == device_id
+                            ),
+                            total=int(block.get("total") or 0),
+                            cursor=str(block["next_cursor"]),
+                        )
+                    )
+                )
     if not remote:
         # The sentence is narrowed to what was actually established. Reaching
         # here with every peer asked means the global one is true; with a peer
@@ -10275,17 +10381,44 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # device is missing from the answer.
         if peer:
             block = matched[0]
-            if block.get("reachable"):
+            if block.get("reachable") and str(block.get("device_id") or "") not in unpaged:
                 lines.insert(0, f"no sessions are held by {block.get('name') or peer} right now")
         elif unasked:
             lines.insert(0, "no sessions are held by the devices that answered")
         else:
             lines.insert(0, "no sessions are held by other devices right now")
-    return _emit(
-        args,
-        {"ok": True, "sessions": remote, "peers": payload.get("peers") or {}},
-        lines,
-    )
+    result: dict[str, Any] = {"ok": True, "sessions": remote, "peers": payload.get("peers") or {}}
+    if page:
+        # Machine half of the footer: ``False`` = this device's relay could not
+        # page or search, so no row set here is a page or a search result.
+        result["relay_paging"] = relay_paged
+    return _emit(args, result, lines)
+
+
+def _listing_page_fields(args: argparse.Namespace, query: Any, peer: str) -> dict[str, Any] | int:
+    """The listing's ``limit``/``cursor``/``query`` for the relay, or rc 2.
+
+    Bounds match the owner's (``relay.CATALOG_PAGE_MAX_LIMIT``), checked here
+    so a typo is a usage error before a hop; the owner still checks them,
+    because its frame comes off the wire.
+    """
+    limit = getattr(args, "limit", None)
+    cursor = getattr(args, "cursor", None)
+    relay_mod = _import_relay()
+    if limit is not None and not 1 <= limit <= relay_mod.CATALOG_PAGE_MAX_LIMIT:
+        print(f"--limit must be 1 to {relay_mod.CATALOG_PAGE_MAX_LIMIT}", file=sys.stderr)
+        return 2
+    if cursor is not None and not peer:
+        print("--cursor needs --peer: a cursor is one device's position", file=sys.stderr)
+        return 2
+    page: dict[str, Any] = {}
+    if limit is not None:
+        page["limit"] = limit
+    if cursor is not None:
+        page["cursor"] = str(cursor)
+    if query is not None:
+        page["query"] = str(query)
+    return page
 
 
 def _status_membership_lines(row: dict[str, Any]) -> list[str]:

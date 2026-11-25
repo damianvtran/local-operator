@@ -57,6 +57,7 @@ five ``peer_*`` local ops a viewer's CLI drives."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
@@ -773,6 +774,64 @@ class NetworkSettings:
 #: reports it as unreachable. Sized to cover a handshake (``HANDSHAKE_TIMEOUT_S``)
 #: on a couple of endpoints, not to wait out an unreachable fleet.
 LISTING_PROBE_BUDGET_S = 12.0
+
+#: The frame fields that turn ``net_catalog`` into the paged read
+#: (``RelayServer._catalog_page``). A frame carrying none of them gets the
+#: unpaged answer byte-for-byte, which is what keeps every poller unchanged.
+_CATALOG_PAGE_FIELDS = ("limit", "cursor", "query")
+#: A page's default and ceiling. 100 is the ``sessions`` tool's own ``limit``
+#: ceiling, so one tool call never needs more than one page per peer; the
+#: ceiling also bounds the per-page stamp/serialisation work an asker can buy.
+CATALOG_PAGE_DEFAULT_LIMIT = 100
+CATALOG_PAGE_MAX_LIMIT = 100
+#: Longest cursor or query accepted off the wire. A minted cursor is ~80
+#: characters (base64 of an offset and one session id); a search is a few words.
+#: Anything longer is a client that concatenated something, refused unread.
+CATALOG_PAGE_MAX_TOKEN = 512
+
+
+def _catalog_cursor_encode(offset: int, last_id: str) -> str:
+    """The position after a page: how many rows were handed out, and the last id.
+
+    Opaque and NOT signed, for the reason ``session.catalog.encode_cursor``
+    gives: it carries no authority (it is a position in a listing the viewer is
+    already authorised to read), so a forged one can only ask for a page the
+    viewer could ask for anyway. The id is what makes a resume survive rows
+    being added above the position between two pages (``_catalog_cursor_start``).
+    """
+    raw = json.dumps({"v": 1, "o": offset, "id": last_id}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _catalog_cursor_start(token: str, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Where the page after ``token`` starts in ``rows``; refuses a token it did not mint.
+
+    The id wins over the offset: when the row the previous page ended on has
+    moved (a session started, or one was deleted, between pages) the walk
+    resumes right after it, so the common case — new rows arriving at the top
+    — neither repeats nor skips a row. When that row is gone entirely the offset
+    is the best position left. A cursor is a position, not a snapshot: a row
+    that re-ranks ACROSS the position between pages can still be seen twice or
+    not at all, the same promise ``catalogue_page`` makes.
+    """
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        offset = payload["o"]
+        last_id = payload["id"]
+        if payload.get("v") != 1 or not isinstance(last_id, str):
+            raise ValueError("version")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset")
+    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+        raise MeshRefusal("bad_cursor", "that cursor is not one this listing minted") from exc
+    if 0 < offset <= len(rows) and str(rows[offset - 1].get("session_id") or "") == last_id:
+        return offset
+    for index, row in enumerate(rows):
+        if str(row.get("session_id") or "") == last_id:
+            return index + 1
+    return min(offset, len(rows))
+
 
 #: How long a CLIENT of the control socket should allow for a listing verb: the
 #: relay's own probe budget plus slack, because a client must OUTWAIT the server
@@ -9595,7 +9654,16 @@ class RelayServer:
         second must not become a scan storm. The rows carry no transcript content:
         an id, a name, a cwd, a model label and liveness, which is what a listing
         needs and nothing more.
+
+        A FRAME WITH NONE OF ``limit``/``cursor``/``query`` IS ANSWERED EXACTLY AS
+        BEFORE: the sidebar and desktop pollers adopt this answer as membership
+        every second, and they rely on its shape and on the stored half's
+        ``CATALOG_SCAN_LIMIT`` cap (one bounded hydrate per poll). Only a frame
+        that names one of them takes the paged read (``_catalog_page``), which a
+        viewer sends only to an owner advertising ``REMOTE_CATALOG_PAGE_V1``.
         """
+        if any(key in frame for key in _CATALOG_PAGE_FIELDS):
+            return self._catalog_page(link, frame)
         return {
             "complete": True,
             "device": {
@@ -9606,7 +9674,90 @@ class RelayServer:
             "sessions": self._rows_for_viewer(link),
         }
 
-    def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
+    def _catalog_page(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """One page (or one search) of the viewer's rows, plus where the next starts.
+
+        WHY IT EXISTS: the unpaged answer stops at ~``CATALOG_SCAN_LIMIT`` stored
+        rows (a node with 417 session dirs listed 223: its live rows plus 200
+        stored), and a viewer had no way to reach the rest. So this read builds the
+        viewer's list WITHOUT that cap and hands it out ``limit`` rows at a time.
+
+        THE ROWS ARE THE UNPAGED ANSWER'S ROWS, NOTHING MORE (read-role
+        invariant): every row comes from ``local_session_rows`` and is stamped by
+        ``_rows_for_viewer``'s own stamp, so a paged or searched row has exactly
+        the keys and viewer-specific fields the unpaged row has. A ``query`` is
+        the local search (``session_search.search_store``, the matcher
+        ``sessions list query=`` uses) run against THIS device's store; only the
+        matched ids are used, to select and order rows the viewer already gets —
+        no snippet, digest or body-match flag leaves this device.
+
+        Inputs are bounded here, on the owner, because the frame comes off the
+        wire: a malformed one is refused with a sentence, never a crash.
+        """
+        limit = frame.get("limit", CATALOG_PAGE_DEFAULT_LIMIT)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CATALOG_PAGE_MAX_LIMIT
+        ):
+            raise MeshRefusal(
+                "bad_frame", f"limit must be a whole number from 1 to {CATALOG_PAGE_MAX_LIMIT}"
+            )
+        cursor = frame.get("cursor")
+        if cursor is not None and (
+            not isinstance(cursor, str) or len(cursor) > CATALOG_PAGE_MAX_TOKEN
+        ):
+            raise MeshRefusal("bad_cursor", "that cursor is not one this listing minted")
+        query = frame.get("query")
+        if query is not None and (
+            not isinstance(query, str) or len(query) > CATALOG_PAGE_MAX_TOKEN
+        ):
+            raise MeshRefusal(
+                "bad_frame", f"query must be text of at most {CATALOG_PAGE_MAX_TOKEN} characters"
+            )
+        rows = self.local_session_rows(uncapped=True)
+        if query is not None and query.strip():
+            from local_operator.session.session_search import search_store
+
+            try:
+                matches = search_store(self.root, query)
+            except Exception:  # noqa: BLE001 — a listing is not an error path
+                matches = []
+            by_id = {str(row.get("session_id") or ""): row for row in rows}
+            ordered: list[dict[str, Any]] = []
+            for match in matches:
+                row = by_id.pop(str(match.row.id), None)
+                if row is not None:
+                    ordered.append(row)
+            rows = ordered
+        start = 0
+        if cursor:
+            start = _catalog_cursor_start(cursor, rows)
+        page = rows[start : start + limit]
+        end = start + len(page)
+        next_cursor = (
+            _catalog_cursor_encode(end, str(page[-1].get("session_id") or ""))
+            if page and end < len(rows)
+            else None
+        )
+        return {
+            "complete": True,
+            "device": {
+                "device_id": self.identity.device_id,
+                "name": self._own_label(),
+            },
+            "generated_at": time.time(),
+            # Stamped AFTER slicing: the stamp decides per row, so a page's rows
+            # get exactly the fields they would have in the whole list, and a
+            # page costs one stamp pass over ``limit`` rows rather than all.
+            "sessions": self._rows_for_viewer(link, rows=page),
+            "next_cursor": next_cursor,
+            "total": len(rows),
+        }
+
+    def _rows_for_viewer(
+        self, link: PeerLink, *, rows: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """The catalogue rows as THIS link's viewer may see them.
 
         ``local_session_rows`` stays viewer-blind (the federated listing, the
@@ -9617,8 +9768,12 @@ class RelayServer:
         older viewer gets the exact rows it always did), and the per-row origin
         match on ``link.device_id`` happens inside the stamp — so one member can
         never read another member's completions by asking.
+
+        ``rows`` is a page ``_catalog_page`` already cut from
+        ``local_session_rows``; omitted, the whole capped list is read.
         """
-        rows = self.local_session_rows()
+        if rows is None:
+            rows = self.local_session_rows()
         if wire.REMOTE_ATTENTION_V1 in link.capabilities:
             from local_operator.network.operator_binding import is_operator_link
             from local_operator.notifications.remote_attention import (
@@ -9638,8 +9793,13 @@ class RelayServer:
             )
         return rows
 
-    def local_session_rows(self) -> list[dict[str, Any]]:
+    def local_session_rows(self, *, uncapped: bool = False) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.
+
+        The stored half is capped at the catalogue's own per-poll bound
+        (``CATALOG_SCAN_LIMIT``) for every existing caller; ``uncapped=True`` is
+        the paged read's whole store (``_catalog_page``).
+
 
         A COLD SESSION IS STILL A ROW, and that is not a listing convenience: a
         session that is idle on a peer must still list as remote (mobility §1.2 —
@@ -9742,7 +9902,7 @@ class RelayServer:
                     **self._row_avatar(record.session_id),
                 }
             )
-        for row in self._stored_rows():
+        for row in self._stored_rows(uncapped=uncapped):
             session_id = str(row.get("session_id") or "")
             if session_id in seen:
                 continue
@@ -9913,7 +10073,7 @@ class RelayServer:
 
         return stored_session_title(self.root / "sessions" / session_id)
 
-    def _stored_rows(self) -> list[dict[str, Any]]:
+    def _stored_rows(self, *, uncapped: bool = False) -> list[dict[str, Any]]:
         """Sessions with a directory and no live record — the idle half.
 
         Read through `session.catalog.load_catalog`, the same ranking the sidebar
@@ -9926,12 +10086,14 @@ class RelayServer:
         answer, and a device whose `sessions/` is unreadable is a device whose
         live sessions a viewer can still reach.
         """
-        from local_operator.session.catalog import load_catalog
+        from local_operator.session.catalog import CATALOG_SCAN_LIMIT, load_catalog
         from local_operator.session.placement import local_placement, read_stamp
 
         rows: list[dict[str, Any]] = []
         try:
-            entries = load_catalog(self.root)
+            # ``sys.maxsize`` for "uncapped": ``load_catalog`` slices its ranking
+            # with the limit, so this hydrates every stored row, in rank order.
+            entries = load_catalog(self.root, sys.maxsize if uncapped else CATALOG_SCAN_LIMIT)
         except Exception:  # noqa: BLE001 — a listing is not an error path
             return rows
         for entry in entries:
@@ -15284,7 +15446,7 @@ class RelayServer:
             ),
             "stream_send": self._ctl_stream_send,
             "stream_close": self._ctl_stream_close,
-            "peer_session_rows": lambda _frame: self.federated_rows(),
+            "peer_session_rows": self._ctl_peer_session_rows,
             "peer_session_facts": self._ctl_peer_facts,
             "peer_session_create": self._ctl_peer_create,
             "peer_session_engage": self._ctl_peer_engage,
@@ -17002,8 +17164,20 @@ class RelayServer:
         self._close_stream(stream_id, cause="viewer-requested")
         return {"stream": stream_id, "closed": existed}
 
-    def _fan_out_catalog(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    def _fan_out_catalog(
+        self, page: Mapping[str, Any] | None = None, only_device: str = ""
+    ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
         """Ask every peer for its rows, once. Returns ``(peers, sessions)``.
+
+        ``page`` (the paged read's ``limit``/``cursor``/``query``) rides the
+        ``net_catalog`` frame ONLY to an owner advertising
+        ``REMOTE_CATALOG_PAGE_V1``; its ``next_cursor``/``total`` land on that
+        peer's block. An older owner would ignore the fields and answer its
+        capped list, so it is not sent them: with a ``cursor`` or ``query`` it
+        contributes NO rows (a capped list is not the page or the search that was
+        asked for), with only a ``limit`` its unpaged rows stand; either way its
+        block says ``paging: "unsupported"`` so no surface calls it complete.
+        ``only_device`` asks just that member (a cursor is one device's position).
 
         A LIVE read rather than the transport's cached fan-out (§9.4): that cache,
         its TTL and its delta op belong to the transport slice, and a second
@@ -17032,6 +17206,8 @@ class RelayServer:
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == self.identity.device_id:
+                    continue
+                if only_device and member.device_id != only_device:
                     continue
                 if peers.get(member.device_id, {}).get("reachable"):
                     # THE SAME DEVICE, ASKED ONCE. Every later shared network would
@@ -17067,8 +17243,16 @@ class RelayServer:
                 if link is None:
                     peers.setdefault(member.device_id, block)
                     continue
+                ask: dict[str, Any] = {
+                    "op": "net_catalog",
+                    "req": self._next_relay_req(),
+                    "locality": "remote",
+                }
+                pages = bool(page) and wire.REMOTE_CATALOG_PAGE_V1 in link.capabilities
+                if pages and page is not None:
+                    ask.update(page)
                 reply = link.request(
-                    {"op": "net_catalog", "req": self._next_relay_req(), "locality": "remote"},
+                    ask,
                     timeout=max(0.5, min(self.settings.op_wait_s, deadline - time.monotonic())),
                 )
                 if reply is None:
@@ -17090,6 +17274,18 @@ class RelayServer:
                 peers[member.device_id] = block
                 raw_detail = reply.get("detail")
                 detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+                if page and not pages:
+                    block["paging"] = "unsupported"
+                    if page.get("cursor") is not None or page.get("query") is not None:
+                        continue
+                elif pages:
+                    block["paging"] = "paged"
+                    next_cursor = detail.get("next_cursor")
+                    block["next_cursor"] = next_cursor if isinstance(next_cursor, str) else None
+                    total = detail.get("total")
+                    block["total"] = (
+                        total if isinstance(total, int) and not isinstance(total, bool) else None
+                    )
                 for row in detail.get("sessions") or ():
                     if not isinstance(row, dict):
                         continue
@@ -17098,6 +17294,42 @@ class RelayServer:
                     item["peer"] = block
                     sessions.append(item)
         return peers, sessions
+
+    def _ctl_peer_session_rows(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``peer_session_rows``: the federated listing, or a PAGED read of peers.
+
+        A frame with no ``limit``/``cursor``/``query`` is the federated listing
+        exactly as before. With any of them it is the paged read: only OTHER
+        devices' rows (this device's own listing is ``lop sessions``, which
+        pages and searches its store already), each peer asked with the same
+        fields, and ``peer`` narrowing the ask to that one device — required
+        with a ``cursor``, because a cursor is a position in ONE owner's list.
+        """
+        page = {key: frame[key] for key in _CATALOG_PAGE_FIELDS if frame.get(key) is not None}
+        if not page:
+            return self.federated_rows()
+        peer = str(frame.get("peer") or "")
+        if "cursor" in page and not peer:
+            raise MeshRefusal(
+                "peer_required", "a cursor is one device's position: name that device"
+            )
+        only_device = self._resolve_peer(peer) if peer else ""
+        reports = self.refresh_membership()
+        peers, sessions = self._fan_out_catalog(page, only_device)
+        return {
+            "ok": True,
+            # The client's proof that THIS relay paged: an older relay ignores
+            # the fields and answers the federated listing without this key,
+            # which the CLI must not present as a page or a search result.
+            "paged": True,
+            "sessions": sessions,
+            "peers": peers,
+            "membership": {
+                network_id: report.to_json() for network_id, report in sorted(reports.items())
+            },
+            "device_id": self.identity.device_id,
+            "device_name": self._own_label(),
+        }
 
     def federated_rows(self) -> dict[str, Any]:
         """The federated listing: this device's rows plus every peer's (R6, §9).

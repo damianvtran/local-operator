@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{peer}: {shown, number} of {total, number} shown — next page: --peer {peer} --cursor {cursor}",
+  "cli.network_sessions.paging_unsupported": "{peer}: its build predates remote paging and search, so this is not its whole listing",
+  "cli.network_sessions.relay_unpaged": "this device's running relay predates remote paging and search, so no device was paged or searched"
+}

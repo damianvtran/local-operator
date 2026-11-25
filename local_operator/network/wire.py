@@ -236,6 +236,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # Origin-only completion/notice fields on catalogue rows; see
     # REMOTE_ATTENTION_V1 below.
     "remote-attention-v1",
+    # Paged/searched catalogue reads; see REMOTE_CATALOG_PAGE_V1 below.
+    "remote-catalog-page-v1",
     # The operator's device presents its signed onboarding decision; see
     # OPERATOR_BINDING_V1 below.
     "operator-binding-v1",
@@ -249,6 +251,14 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_catalog`` honours optional ``limit``/``cursor``/``query`` frame fields
+#: (``RelayServer._catalog_page``): one page of the viewer's rows past the
+#: unpaged answer's ``CATALOG_SCAN_LIMIT`` stored cap, with ``next_cursor`` and
+#: ``total``, or the owner's own store search over those rows. A viewer sends
+#: the fields only to an owner advertising this; an older owner would ignore
+#: them and answer the capped list, which a viewer must never present as the
+#: complete answer to a paged or searched ask.
+REMOTE_CATALOG_PAGE_V1 = "remote-catalog-page-v1"
 #: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
 #: presents the onboarding decision the operator already signed, so a node can
 #: forward asks/notices of sessions STARTED on it to that device. A peer without

@@ -1,0 +1,17 @@
+{
+  "cli.network_sessions.next_page": {
+    "role": "Footer line of `lop network sessions` when a peer holds more rows than the page shown",
+    "tone": "factual and terse; a pointer to the next command, not a warning",
+    "note": "{peer} is a device name or ID, {shown} and {total} are row counts (ICU number arguments), {cursor} is an opaque paging token. Preserve all four verbatim, and keep `--peer` and `--cursor` exactly as written: they are command-line flags the reader types. No final period."
+  },
+  "cli.network_sessions.paging_unsupported": {
+    "role": "Footer line of `lop network sessions` when a peer runs an older build that cannot page or search its listing",
+    "tone": "factual; say plainly that the listing is incomplete, without blaming the user",
+    "note": "{peer} is a device name or ID; preserve it verbatim. The rows shown (if any) are that device's capped default listing; a page or search could not be answered. No final period."
+  },
+  "cli.network_sessions.relay_unpaged": {
+    "role": "Footer line of `lop network sessions --limit/--cursor/--query` when this device's own background relay is an older build that ignored the paging request",
+    "tone": "factual; state that the answer is not a page or a search, without blaming the user",
+    "note": "'Relay' is the background mesh service on this device (glossary term). The rows shown, if any, are the older capped listing. No final period."
+  }
+}

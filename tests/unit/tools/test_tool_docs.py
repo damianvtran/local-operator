@@ -847,7 +847,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # `force`/`peer`/`include_stored` field clauses shortened (same meaning) to
     # bring `scripts/bench_context_budget.py` back under its budget. The ONLY
     # entry that moved.
-    "sessions": 906,
+    # RE-MEASURED 2026-11-25 (remote list paging): 906 -> 924. `list` gains the
+    # `cursor` input and its refusal clause (a remote `query` is forwarded, a
+    # `cursor` needs `peer`). Measured through this test's own printed table;
+    # the ONLY entry that moved.
+    "sessions": 924,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
