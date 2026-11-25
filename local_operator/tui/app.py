@@ -4429,6 +4429,15 @@ class Band(Chrome):
     other's reasons.
     """
 
+    #: NO AUTO LINK STYLING (PR #4558 design D1). The band's `!` carries an
+    #: ``@click`` meta (the one-click way back to ``ask``), and Textual's
+    #: ``auto_links`` repaints any ``@click`` segment in ``$link-color`` —
+    #: measured turning the alarm's danger red (225,121,113) into link grey
+    #: (212,212,210), i.e. the one alarm in the band lost its ink the moment it
+    #: became actionable. The click itself rides the segment meta and is
+    #: unaffected; only the style override is switched off.
+    auto_links = False
+
     class BoxChanged(TextualMessage):
         """The band's content box is a different size than it was."""
 
@@ -31253,6 +31262,8 @@ class OperatorApp(App[None]):
             on_set_global_auto=(
                 None if bridge_latched else partial(self._set_global_auto_for_card, source)
             ),
+            # Tightening is never refused, latched or not: the way back stays.
+            on_set_session_ask=partial(self._set_session_ask_for_card, source),
             person_only=bridge_latched,
             notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
@@ -31929,7 +31940,7 @@ class OperatorApp(App[None]):
             # screen asserting something no longer true.
             self._append_block(
                 NoticeBlock(
-                    "tool approvals: auto — /approvals ask restores prompting",
+                    "tool approvals: auto — click ! auto or /approvals ask to restore prompting",
                     "warning",
                 )
             )
@@ -32612,6 +32623,34 @@ class OperatorApp(App[None]):
             )
         return ApprovalSettingOutcome(kind="ok", mode="auto", provenance="session")
 
+    def _set_session_ask_for_card(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The card's `S` while this session is auto: back to asking (R1-M2).
+
+        The mirror of :meth:`_set_session_auto_for_card` — same record, same
+        routing to an owner elsewhere, and the card stays PARKED. No latch
+        check: tightening needs no authority and is never refused.
+        """
+        if self._gate_is_owned_elsewhere():
+            card = self._approval
+            if card is None:
+                return ApprovalSettingOutcome(kind="refused", mode="auto", provenance="session")
+            self.run_worker(
+                self._route_approvals_setting(card, "ask", "session"),
+                thread=False,
+                group="session",
+            )
+            return None
+        self._explicit_approvals_mode = "ask"
+        self._set_approve_all(False)
+        problem = self._persist_approval_override(source, "ask")
+        if problem:
+            return ApprovalSettingOutcome(
+                kind="applied-unsaved", mode="ask", provenance="session", reason=problem
+            )
+        return ApprovalSettingOutcome(kind="ok", mode="ask", provenance="session")
+
     def _set_global_auto_for_card(
         self, source: SessionInteraction
     ) -> ApprovalSettingOutcome | None:
@@ -32821,20 +32860,23 @@ class OperatorApp(App[None]):
         data = (outcome or {}).get("data") or {}
         ok = data.get("ok")
         saved = data.get("approval_saved_for_resume", True)
+        # The receipt's first words name the mode it switched TO; the `S`-as-ask
+        # route (R1-M2) expects "tool approvals: ask", not "...: auto".
+        said = "tool approvals: ask" if argument == "ask" else "tool approvals: auto"
         if ok is None:
             # Fallback for an owner built before the structured outcome. The
             # runtime's DEFAULT-write failure receipt also begins
             # "tool approvals: auto", which is exactly how a failed loosening
             # used to be painted as saved; the failure family names itself, so
             # its absence is part of the evidence, not decoration.
-            if text.startswith("tool approvals: auto") and "NOT saved for resume" in text:
+            if text.startswith(said) and "NOT saved for resume" in text:
                 # A session switch whose live half took and whose record did
                 # not. It is NOT a plain failure — the gate moved — so it gets
                 # the applied-and-unsaved sentence rather than "unchanged".
                 ok, saved = True, False
             else:
                 ok = (
-                    text.startswith("tool approvals: auto")
+                    text.startswith(said)
                     and "NOT saved" not in text
                     and "NOT applied" not in text
                 )
@@ -32850,7 +32892,7 @@ class OperatorApp(App[None]):
                 ),
             )
             return
-        mode = str(data.get("approval_mode") or "auto")
+        mode = str(data.get("approval_mode") or ("ask" if argument == "ask" else "auto"))
         provenance = str(
             data.get("approval_provenance") or ("session" if scope == "session" else "global")
         )

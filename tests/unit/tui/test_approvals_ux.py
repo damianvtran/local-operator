@@ -373,7 +373,7 @@ async def test_the_saved_default_is_in_force_in_the_next_session(config_dir: Pat
         # The band's trailing cell is the alarm. It no longer spells the mode out
         # — the session NAME owns that slot now — so `auto` and `always` are one
         # glyph here, and `/approvals` is what distinguishes them.
-        assert _band(relaunched).rstrip().endswith("!")
+        assert _band(relaunched).rstrip().endswith("! auto")
 
 
 @pytest.mark.asyncio
@@ -457,7 +457,7 @@ async def test_an_unwritable_config_still_switches_the_session(
         assert "could not save default" in _notices(app)[-1]
         # Still alarmed: the session got the mode, only the promise about the
         # NEXT session failed, and the band never claimed that part anyway.
-        assert _band(app).rstrip().endswith("!")
+        assert _band(app).rstrip().endswith("! auto")
 
 
 # -- the list: offered, not remembered ----------------------------------------
@@ -1021,7 +1021,7 @@ async def test_the_band_and_the_gate_agree_through_every_route(config_dir: Path)
             so both scopes look identical here on purpose: the band's promise is
             "no tool will ask", and "until when" is `/approvals`' answer.
             """
-            return _band(app).rstrip().endswith("!")
+            return _band(app).rstrip().endswith("! auto")
 
         assert await gate_runs_without_asking() is False
         assert band_is_alarmed() is False
@@ -1111,7 +1111,7 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
         # One glyph for both scopes: the band says "no tool will ask", and the
         # keystroke's session-only scope is proved by the config below staying
         # unwritten rather than by a word in the band.
-        assert _band(app).rstrip().endswith("!")
+        assert _band(app).rstrip().endswith("! auto")
         assert _saved_mode(config_dir) is None
 
 
@@ -1394,3 +1394,47 @@ async def test_a_click_on_the_bands_auto_mark_switches_the_session_back_to_ask(
 
         assert app._approve_all is False
         assert _saved_mode(config_dir) is None
+
+
+@pytest.mark.asyncio
+async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> None:
+    """Design D1 (PR #4558 round 1): making `!` clickable greys it without this.
+
+    Textual applies its link style to any segment carrying ``@click``, so the
+    band's only alarm was repainted in ``$link-color`` — measured (225,121,113)
+    -> (212,212,210). The click must survive; the ink must too. Asserted on the
+    COMPOSITED strip, because the override happens at widget render, not on the
+    ``Text`` the StatusLine builds.
+    """
+    from local_operator.tui import theme as theme_mod
+    from rich.color import Color as RColor
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        await pilot.pause()
+        await pilot.pause()
+        from textual.widgets import Static
+
+        band = app.query_one("#status-band", Static)
+        y = band.region.y + band.region.height - 1
+        strips = list(app.screen._compositor.render_strips())
+        wanted = RColor.parse(theme_mod.semantic_color("danger")).get_truecolor().hex.lower()
+        def _hex(value):  # type: ignore[no-untyped-def]
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return RColor.parse(value).get_truecolor().hex.lower()
+            return value.get_truecolor().hex.lower()
+
+        seen: list[tuple[str, str | None]] = []
+        for segment in strips[y]._segments:
+            style = segment.style
+            ink = _hex(style.color) if style is not None else None
+            seen.append((segment.text, ink))
+        mark = [(text, ink) for text, ink in seen if "!" in text]
+        assert mark, ("the band painted no alarm", seen)
+        assert any(ink == wanted for _text, ink in mark), (
+            f"the alarm lost its danger ink: {mark} vs {wanted}"
+        )

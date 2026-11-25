@@ -1288,9 +1288,9 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Auto-approve",
+        "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -6176,9 +6176,9 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Auto-approve",
+        "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -7125,9 +7125,9 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Auto-approve",
+        "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -8010,7 +8010,7 @@ async def test_the_boot_approval_gate_never_scrolls_a_label_off() -> None:
                 rendered = card.render_lines_for_test()
                 frame = "\n".join(rendered)
                 # Every authorisation label is on screen.
-                for label in ("y. Allow", "n. Deny", "A. Auto-approve"):
+                for label in ("y. Allow", "n. Deny", "A. Allow + auto-approve"):
                     assert label in frame, (
                         size,
                         f"the boot approval gate hid {label!r} — a label scrolled off an"
@@ -8077,7 +8077,7 @@ async def test_a_gate_without_the_labels_fit_hook_scrolls_a_label_off(
                 "without the hook the tall gate should window",
                 rendered,
             )
-            hidden = [label for label in ("n. Deny", "A. Auto-approve") if label not in frame]
+            hidden = [label for label in ("n. Deny", "A. Allow + auto-approve") if label not in frame]
             assert hidden, (
                 "no label scrolled off even with the hook disabled; the boot-gate"
                 " guard would not have caught the C3/D1 regression",

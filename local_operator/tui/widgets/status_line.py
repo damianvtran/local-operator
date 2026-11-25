@@ -1391,6 +1391,10 @@ class StatusLine:
         # session-wide mode with no persistent indicator is how a disarmed gate
         # gets forgotten about.
         self._approvals_auto: bool = False
+        #: Whether the alarm paints its mode word (`! auto`) or the bare glyph.
+        #: Flipped per render when the wider form costs the name its floor; see
+        #: ``_render``.
+        self._alarm_with_word: bool = True
         # True while the turn is parked on something the USER owes (currently
         # the tool-approval prompt). Only the terminal title reads it; see
         # :meth:`set_attention` for why it is not inferred from `_streaming`.
@@ -2211,6 +2215,39 @@ class StatusLine:
         # ladder row.
         hidden = _composer_hidden_segments()
         fitted = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+        if (
+            fitted is not None
+            and self._alarm_with_word
+            and self._conversation_name
+            and "name" in fitted[0]
+        ):
+            # The wider mark pushed the NAME off the row (measured: 96-100
+            # columns with mcp, context, rate and cost all up). Retry with the
+            # bare glyph and keep that row if it buys the name back — the name
+            # is the segment the band's corner is reserved for, and an alarm
+            # that spends it is the inversion the ladder exists to prevent.
+            self._alarm_with_word = False
+            try:
+                narrower = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+            finally:
+                self._alarm_with_word = True
+            if narrower is not None and "name" not in narrower[0]:
+                fitted = narrower
+        if fitted is None and self._alarm_with_word:
+            # THE MODE WORD YIELDS BEFORE THE NAME DOES (PR #4558 D3, round 1).
+            # `! auto` is five cells wider than the bare alarm, and the alarm is
+            # authored LAST in every ladder — so at the one width where the row
+            # is fully subscribed (measured: 100 columns with mcp, context, rate
+            # and cost all up) the extra cells pushed the walk past its last
+            # rung and the irreducible tail cut the session name to six cells.
+            # The band degrades to the bare glyph, which is still clickable and
+            # still the alarm, rather than taking the cells from the name: the
+            # one thing the band must not do is spend a title to say its mode.
+            self._alarm_with_word = False
+            try:
+                fitted = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+            finally:
+                self._alarm_with_word = True
         if fitted is not None:
             dropped, left, right = fitted
             # Recorded so a caller can ask whether the band actually SAID
@@ -2977,7 +3014,11 @@ class StatusLine:
             parts.append(
                 (
                     "",
-                    ICON_APPROVALS,
+                    # `! auto`, not a bare `!` (design D3): a clickable mark
+                    # must say what it is, and the word is the one the banner
+                    # and `/approvals` use. Five cells; still the narrowest
+                    # bounded rung, so its last-place argument holds.
+                    f"{ICON_APPROVALS} auto" if self._alarm_with_word else ICON_APPROVALS,
                     # CLICKABLE: the one-click way back to "ask" (operator
                     # request, 2026-11-24 — "the mode should show somewhere
                     # visible with a one-click way back"). The `!` is already

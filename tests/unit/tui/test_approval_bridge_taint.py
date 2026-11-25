@@ -61,7 +61,7 @@ async def test_a_pre_latch_allow_all_keeps_covering_and_the_latched_card_has_no_
         # Clean session: three answers; the operator presses A on a bash card.
         first = asyncio.ensure_future(gate("bash", "ls"))
         await _wait_prompt(pilot, app)
-        assert _labels(app) == ["Allow", "Deny", "Auto-approve"]
+        assert _labels(app) == ["Allow", "Deny", "Allow + auto-approve"]
         await pilot.press("A")
         assert await first is True
         assert app._approve_all is True
@@ -242,7 +242,7 @@ async def test_q11_press_time_refusal_on_a_card_parked_across_the_latch(
 
         parked = asyncio.ensure_future(gate("bash", "ls"))
         await _wait_prompt(pilot, app)
-        assert _labels(app) == ["Allow", "Deny", "Auto-approve"]
+        assert _labels(app) == ["Allow", "Deny", "Allow + auto-approve"]
         records_before = _approvals_records(config_dir)
 
         session.bridge_latched = True  # type: ignore[attr-defined]
@@ -281,7 +281,7 @@ async def test_q11_a_parked_card_is_re_rendered_when_the_latch_fires(
 
         parked = asyncio.ensure_future(gate("bash", "ls"))
         await _wait_prompt(pilot, app)
-        assert _labels(app) == ["Allow", "Deny", "Auto-approve"]
+        assert _labels(app) == ["Allow", "Deny", "Allow + auto-approve"]
         card = app._approval
         records_before = _approvals_records(config_dir)
 
@@ -330,7 +330,7 @@ async def test_y3_a_latch_in_another_conversation_leaves_this_card_alone(
 
         parked = asyncio.ensure_future(gate("bash", "ls"))
         await _wait_prompt(pilot, app)
-        assert _labels(app) == ["Allow", "Deny", "Auto-approve"]
+        assert _labels(app) == ["Allow", "Deny", "Allow + auto-approve"]
 
         other = _LatchingSession()
         other_source = SessionInteraction(other)
@@ -342,7 +342,7 @@ async def test_y3_a_latch_in_another_conversation_leaves_this_card_alone(
         assert _labels(app) == [
             "Allow",
             "Deny",
-            "Auto-approve",
+            "Allow + auto-approve",
         ], "another conversation's latch restyled this conversation's card"
 
         session.bridge_taint_latch.mark()
@@ -453,7 +453,7 @@ async def test_r7_lead_a_viewer_card_parked_before_the_latch_is_redrawn_from_the
 
         parked = asyncio.ensure_future(gate("bash", "ls"))
         await _wait_prompt(pilot, app)
-        assert _labels(app) == ["Allow", "Deny", "Auto-approve"]
+        assert _labels(app) == ["Allow", "Deny", "Allow + auto-approve"]
         records_before = _approvals_records(config_dir)
 
         session.bridge_taint_latch.mark()

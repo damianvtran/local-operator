@@ -324,7 +324,7 @@ class ApprovalBlock(TranscriptBlock):
     BINDINGS = [
         ("y", "answer('y')", "Allow"),
         ("n", "answer('n')", "Deny"),
-        ("A", "answer('a')", "Auto-approve"),
+        ("A", "answer('a')", "Allow + auto-approve"),
     ]
 
     #: The answer keys, excluded from the typing passthrough below. Spelled out
@@ -973,7 +973,9 @@ APPROVAL_CHOICES: tuple[tuple[str, str, str], ...] = (
     # them — guardrail refusals and the dangerous-delete review are enforced
     # below this gate and auto does not disarm them. `/approvals ask` (or a
     # click on the band's `!`) takes it back.
-    ("Auto-approve", "A", "this session; guardrails still apply"),
+    # "Allow + auto-approve" (design D4): the row ALSO allows this call, and
+    # a label naming only the mode hid that it answers the request too.
+    ("Allow + auto-approve", "A", "this session; guardrails still apply"),
 )
 
 #: Answer key -> the label the picker hands back, so the two ways of answering
@@ -993,6 +995,14 @@ APPROVAL_KEY_BY_LABEL: dict[str, str] = {label: key for label, key, _ in APPROVA
 #: did not fire: "allow all" answered the one call and the very next tool asked
 #: again, which is the opposite of what the row promises.
 ALLOW_ALL_KEY = "A"
+
+#: The limit of auto, worded once for every surface (design D6; the relay card's
+#: ``relay.approvals.card.guardrails_still_apply`` says the same sentence).
+#: Auto skips THIS prompt only; guardrail refusals and the dangerous-delete
+#: review are enforced below the gate and still run.
+GUARDRAIL_NOTE = "Guardrail refusals and dangerous-delete review still apply."
+#: The width-forced form D6 permits; same claim, fewer cells.
+GUARDRAIL_NOTE_SHORT = "Guardrails still apply."
 ALLOW_ALL_ANSWER = "a"
 
 
@@ -1274,6 +1284,7 @@ class ApprovalPrompt(AskPickerScreen):
         policy: ApprovalPolicy | None = None,
         on_set_session_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
         on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
+        on_set_session_ask: Callable[[], ApprovalSettingOutcome | None] | None = None,
         person_only: bool = False,
         notice: str = "",
     ) -> None:
@@ -1343,6 +1354,7 @@ class ApprovalPrompt(AskPickerScreen):
         self._policy = policy or ApprovalPolicy()
         self._on_set_session_auto = on_set_session_auto
         self._on_set_global_auto = on_set_global_auto
+        self._on_set_session_ask = on_set_session_ask
         #: Painted spans, in BODY-LINE coordinates: ``(row, start, end, scope)``
         #: for the callout, and ``(row, start, end, answer_index)`` for the
         #: compact rail. Both are re-recorded on every paint from the same plan
@@ -1426,6 +1438,7 @@ class ApprovalPrompt(AskPickerScreen):
         self._ANSWER_KEYS = frozenset({"y", "n"})
         self._on_set_session_auto = None
         self._on_set_global_auto = None
+        self._on_set_session_ask = None
         self._latched_notice = clean
         self._latched_take = 0
         self._latched_rows_cache = None
@@ -1487,7 +1500,12 @@ class ApprovalPrompt(AskPickerScreen):
         """
         if self._person_only or self._answer is not None or self._policy.saving:
             return
-        callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
+        if scope == "session" and self._session_is_auto():
+            callback = self._on_set_session_ask
+        else:
+            callback = (
+                self._on_set_session_auto if scope == "session" else self._on_set_global_auto
+            )
         if callback is None:
             return
         self._policy = replace(self._policy, saving=scope, status="", detail="")
@@ -1785,28 +1803,34 @@ class ApprovalPrompt(AskPickerScreen):
         else: a click on the separator or the gap must not activate a
         destination (the spec's "no overlapping padding" rule).
         """
+        # WHILE THE SESSION IS AUTO, [S] IS THE WAY BACK (review R1-M2): a
+        # card parked before an `S` press outlives the switch, and offering
+        # "auto this session" again would be a no-op where the reader needs
+        # the reverse. One vocabulary at every width (R1-N3): "Auto-approve"
+        # shortens to "Auto", never to a different word.
+        back = self._session_is_auto()
         if width >= self._HANDLES_FULL_MIN:
             parts = [
-                ("Auto-approve this session [S]", "handle"),
+                ("Always ask this session [S]" if back else "Auto-approve this session [S]", "handle"),
                 ("  ·  ", "state"),
                 ("Auto-approve all sessions [G]", "handle"),
             ]
         elif width >= self._HANDLES_MEDIUM_MIN:
             parts = [
-                ("[S] Auto for this session", "handle"),
+                ("[S] Always ask" if back else "[S] Auto-approve session", "handle"),
                 (" · ", "state"),
-                ("[G] Auto for all sessions", "handle"),
+                ("[G] Auto-approve all", "handle"),
             ]
         elif width >= self._HANDLES_SHORT_MIN:
             parts = [
-                ("[S] Session auto", "handle"),
+                ("[S] Always ask" if back else "[S] Auto session", "handle"),
                 (" · ", "state"),
-                ("[G] All-session auto", "handle"),
+                ("[G] Auto all", "handle"),
             ]
         else:
             parts = [
-                ("auto ", "state"),
-                ("S:session", "handle"),
+                ("" if back else "auto ", "state"),
+                ("S:ask" if back else "S:session", "handle"),
                 (" ", "state"),
                 ("G:all", "handle"),
             ]
@@ -1817,10 +1841,31 @@ class ApprovalPrompt(AskPickerScreen):
                 # `[S]`/`S:session` are the SESSION forms; "sessions" also
                 # contains "session", so a substring test on the bare word
                 # mislabels the global destination.
-                scope = "session" if ("[S]" in text or text == "S:session") else "global"
+                scope = (
+                    "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
+                )
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         return parts, spans
+
+    def _session_is_auto(self) -> bool:
+        """Is THIS session's gate auto by its own choice (so `S` means "ask")?"""
+        return self._policy.mode == "auto" and self._policy.provenance == "session"
+
+    def _state_row(self, state: str, width: int) -> Text:
+        """The mode line, carrying the limit of auto whenever it fits (design D2).
+
+        The note used to live only in the `A` row's description, and the card's
+        allocator drops descriptions first at short heights (100x30), so the
+        one sentence that says what still protects an auto session vanished
+        exactly where the card is tight. The mode line is never dropped, so the
+        note rides it: the full wording (D6, shared with the relay card) when
+        it fits, a shortened form otherwise, nothing only below that.
+        """
+        for note in (GUARDRAIL_NOTE, GUARDRAIL_NOTE_SHORT):
+            if cell_len(state) + 1 + cell_len(note) <= width:
+                return self._styled(((state, "state"), (" " + note, "state")))
+        return self._styled(((state, "state"),))
 
     def _styled(self, parts: tuple[tuple[str, str], ...], *, overflow: bool = True) -> Text:
         """One row from ``(text, kind)`` parts; ``kind`` is state or handle."""
@@ -1929,7 +1974,7 @@ class ApprovalPrompt(AskPickerScreen):
         if two_row:
             parts, spans = self._handles(width)
             return (
-                [self._styled(((state, "state"),)), self._styled(tuple(parts))],
+                [self._state_row(state, width), self._styled(tuple(parts))],
                 [(1, start, end, scope) for start, end, scope in spans],
             )
         # The combined row uses the COMPACT state in every form: it is the only
@@ -1939,7 +1984,7 @@ class ApprovalPrompt(AskPickerScreen):
         if width >= self._COMBINED_FULL_MIN:
             parts = [
                 (f"{prefix} · auto: ", "state"),
-                ("[S]session", "handle"),
+                ("[S]ask" if self._session_is_auto() else "[S]session", "handle"),
                 (" ", "state"),
                 ("[G]all sessions", "handle"),
             ]
@@ -1954,7 +1999,9 @@ class ApprovalPrompt(AskPickerScreen):
         spent = 0
         for text, kind in parts:
             if kind == "handle":
-                scope = "session" if ("[S]" in text or text == "S:session") else "global"
+                scope = (
+                    "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
+                )
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         if spent > width:
@@ -1963,7 +2010,7 @@ class ApprovalPrompt(AskPickerScreen):
             # keep one row.
             handle_parts, handle_spans = self._handles(width)
             return (
-                [self._styled(((state, "state"),)), self._styled(tuple(handle_parts))],
+                [self._state_row(state, width), self._styled(tuple(handle_parts))],
                 [(1, start, end, scope) for start, end, scope in handle_spans],
             )
         return [self._styled(tuple(parts))], [(0, start, end, scope) for start, end, scope in spans]

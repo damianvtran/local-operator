@@ -330,6 +330,41 @@ export function PendingCard({
 			}),
 		);
 
+	/* Back to asking for THIS session (operator request, 2026-11-24). The same
+	   `/approvals ask` the gate sheet sends: tightening needs no proof and works
+	   unpaired. The receipt is read exactly as `setPolicy` reads one (R1-M1): a
+	   routed refusal changed nothing and must not be confirmed, and the
+	   runtime's own sentence is the notice when it gives one. */
+	const setAsk = async () => {
+		if (policyBusy) return;
+		setPolicyBusy("ask");
+		setPolicyError("");
+		setPolicyNotice("");
+		try {
+			const receipt = await sendCommand(pid, {
+				op: "slash_result",
+				command: "approvals",
+				args: "ask",
+				images: [],
+			});
+			if (receipt.refused) {
+				setPolicyError(
+					receipt.detail.trim() ||
+						messageRuntime.t("relay.approvals.gate.refused_nothing_changed"),
+				);
+				return;
+			}
+			const said = asSentence(
+				receipt.detail.trim() || messageRuntime.t("relay.asks.gate.notice_ask"),
+			);
+			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
+		} catch (failure) {
+			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
+		} finally {
+			setPolicyBusy(null);
+		}
+	};
+
 	/* A MODE CHANGE, NEVER AN ANSWER — and that distinction is the whole reason
 	   these two links exist here instead of sending the reader to the gate sheet.
 	   The card is what stands between a gated call and its execution: leaving it
@@ -348,25 +383,6 @@ export function PendingCard({
 	   the one implementation both this card and the gate sheet send, so a
 	   challenge minted for `loosen` cannot end up shaped differently on one of
 	   the two surfaces. */
-	/* Back to asking for THIS session. The same `/approvals ask` the gate
-	   sheet sends: ordinary, proof-free, works unpaired. */
-	const setAsk = async () => {
-		if (policyBusy) return;
-		setPolicyBusy("ask");
-		setPolicyError("");
-		setPolicyNotice("");
-		try {
-			await sendCommand(pid, { op: "slash_result", command: "approvals", args: "ask", images: [] });
-			setPolicyNotice(
-				`${asSentence(messageRuntime.t("relay.asks.gate.notice_ask"))} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`,
-			);
-		} catch (failure) {
-			setPolicyError(failure instanceof Error ? failure.message : String(failure));
-		} finally {
-			setPolicyBusy(null);
-		}
-	};
-
 	const setPolicy = async (mode: "auto" | "default auto") => {
 		if (policyBusy) return;
 		setPolicyBusy(mode);

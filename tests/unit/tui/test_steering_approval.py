@@ -800,12 +800,12 @@ async def test_approvals_command_restores_prompting() -> None:
         assert app._approve_all is True
         # The band's alarm is a bare `!` in the trailing cell now — the session
         # name took the words that used to be there.
-        assert any(row.rstrip().endswith("!") for row in rows(app))
+        assert any(row.rstrip().endswith("! auto") for row in rows(app))
 
         app._run_slash_command("/approvals ask")
         await pilot.pause()
         assert app._approve_all is False
-        assert not any(row.rstrip().endswith("!") for row in rows(app))
+        assert not any(row.rstrip().endswith("! auto") for row in rows(app))
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause()
@@ -2005,7 +2005,7 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
         # property D9's `esc deny`-only frame failed.
         assert "y.Allow" in text, lines
         assert "n.Deny" in text, lines
-        assert "A.Auto-approve" in text, lines
+        assert "A.Allow + auto-approve" in text, lines
         # ...and both setting destinations are named, so the row that used to
         # carry the hint still carries an actionable sentence.
         assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1], lines
