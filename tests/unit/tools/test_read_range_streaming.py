@@ -134,7 +134,14 @@ def _reference_rendering(data: bytes, spec: str, path: Path) -> str:
     start, end = builtin._parse_line_range(spec)
     selected = lines[start - 1 : end]
     assert selected, "fixture must select at least one line"
-    return builtin._clamp_file_body(builtin._number_lines(selected, start), path, start, len(lines))
+    # Ranged reads clamp at their own budget, not the whole-file one.
+    return builtin._clamp_file_body(
+        builtin._number_lines(selected, start),
+        path,
+        start,
+        len(lines),
+        limit=builtin.READ_RANGE_OUTPUT_LIMIT_CHARS,
+    )
 
 
 _NUMBERED_RE = re.compile(r"\s*(\d+)\| (.*)$")
@@ -657,15 +664,17 @@ async def test_clamped_bounded_window_still_reports_the_exact_total(
 ) -> None:
     """A window whose head IS clamped recovers the file's exact line count.
 
-    This is the other half of the early exit: the scan stopped at line 200, so
-    nothing has counted the remaining 44 800 lines, yet the footer has to name
+    This is the other half of the early exit: the scan stopped at line 700, so
+    nothing has counted the remaining 44 300 lines, yet the footer has to name
     the real total. The snapshot's count-only pass over the same bytes is what
     makes that exact, and ``None`` must never reach the footer.
     """
     path = tmp_path / "big.txt"
     path.write_bytes(PLAIN_BYTES)
 
-    result = await _call(tools, "read", {"path": "big.txt", "range": "1-200"}, context)
+    # 700 rendered ~58-char lines is ~40k: over READ_RANGE_OUTPUT_LIMIT_CHARS,
+    # so the head is genuinely clamped (200 lines stopped being, at 32 KiB).
+    result = await _call(tools, "read", {"path": "big.txt", "range": "1-700"}, context)
 
     assert result.is_error is False, result.text
     assert "of 45000 lines not shown" in result.text, result.text

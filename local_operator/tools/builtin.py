@@ -415,6 +415,17 @@ READ_LINE_CAP = 2000
 #: spill handle, because spilling a copy of a file that is already on disk
 #: would double the bytes for nothing.
 READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+#: Char budget for a ``read`` WITH an explicit ``range``. An explicit range is
+#: an explicit request: the model already narrowed to the span it wants, so
+#: clipping that span at 8 KiB only buys a paging call (on the long-coding
+#: bench, 5/5 truncated file reads were paged on within 3 calls). Measured over
+#: the fixture repos' non-test sources rendered with line numbers: 21/49 exceed
+#: 8 KiB, 3/49 exceed 32 KiB (p50 5.3k, p90 24.6k, max 188k), so 32 KiB returns
+#: nearly every requested span whole while still bounding a ``range="1-"``.
+#: Whole-file reads keep :data:`READ_OUTPUT_LIMIT_CHARS` (and ``.py`` its
+#: structural summary); bash keeps its 8 KiB clamp, whose log-tail rationale is
+#: unchanged.
+READ_RANGE_OUTPUT_LIMIT_CHARS = 32 * 1024
 
 #: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
 #: before it is shaped into a map. DELIBERATELY 16 KiB rather than
@@ -6790,7 +6801,7 @@ def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
 
 
-def _fits_output_budget(body: str) -> bool:
+def _fits_output_budget(body: str, limit: int = READ_OUTPUT_LIMIT_CHARS) -> bool:
     """Whether a rendered ``read`` body escapes the per-result clamp.
 
     One definition of the threshold, because two callers must agree on it to
@@ -6801,12 +6812,20 @@ def _fits_output_budget(body: str) -> bool:
     restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
     future edit to one of them stop the scan early on a body that then gets
     clamped, which is precisely the ``None`` leak the footer must never see.
+    The ranged callers therefore all pass the same
+    :data:`READ_RANGE_OUTPUT_LIMIT_CHARS`.
     """
-    return len(body) <= READ_OUTPUT_LIMIT_CHARS
+    return len(body) <= limit
 
 
 def _clamp_file_body(
-    body: str, path: Path, start: int, total: int, *, display: str | None = None
+    body: str,
+    path: Path,
+    start: int,
+    total: int,
+    *,
+    display: str | None = None,
+    limit: int = READ_OUTPUT_LIMIT_CHARS,
 ) -> str:
     """Hold one ``read`` result inside the char budget.
 
@@ -6827,15 +6846,15 @@ def _clamp_file_body(
     gate escalates to an approval prompt, while ``scratchpad://big.md`` is the
     same continuation the caller already made (QA round 1, Q3).
     """
-    if _fits_output_budget(body):
+    if _fits_output_budget(body, limit):
         return body
-    clipped = body[:READ_OUTPUT_LIMIT_CHARS]
+    clipped = body[:limit]
     cut = clipped.rfind("\n")
     if cut > 0:
         clipped = clipped[:cut]
     next_line = start + len(clipped.splitlines())
     return (
-        f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
+        f"{clipped}\n\n[truncated at {limit} chars; "
         f"{total - next_line + 1} of {total} lines not shown. Continue with "
         f'read(path="{display or path}", range="{next_line}-{next_line + 200}") '
         f"or narrow with grep]"
@@ -7901,7 +7920,7 @@ _LINE_BREAK_RE = re.compile(f"[{_LINE_BREAK_CHARS}\r]")
 #: exactly the same character (see :func:`_stream_text_window`). This is what
 #: bounds peak memory for an open-ended ``range="30000-"``, where "the
 #: requested lines" is the whole tail of the file.
-_RANGED_KEEP_CHARS = READ_OUTPUT_LIMIT_CHARS
+_RANGED_KEEP_CHARS = READ_RANGE_OUTPUT_LIMIT_CHARS
 
 
 class _RangedRead(NamedTuple):
@@ -8118,7 +8137,9 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
         with path.open("rb") as handle:
             binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
             body = _number_lines(lines, start, span=window_lines)
-            if total_lines is None and not _fits_output_budget(body):
+            if total_lines is None and not _fits_output_budget(
+                body, READ_RANGE_OUTPUT_LIMIT_CHARS
+            ):
                 # The head would be clamped and the footer needs the exact
                 # count, so recover it: the same scanner with retention off,
                 # over the same bytes, never a second divergent splitter.
@@ -10584,7 +10605,7 @@ async def _read_path(
             # keep fewer lines than the window holds, and the width must
             # still be the one the full window renders with.
             body = _number_lines(ranged.lines, start, span=ranged.window_lines)
-            if _fits_output_budget(body):
+            if _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # No footer, so the file's exact total was never needed and
                 # the scan was allowed to stop as soon as the window was
                 # complete (see _stream_text_window): this is the common
@@ -10597,7 +10618,14 @@ async def _read_path(
                 # exact total with a count-only pass over the same bytes
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
-                rendered = _clamp_file_body(body, path, start, total, display=display_path)
+                rendered = _clamp_file_body(
+                    body,
+                    path,
+                    start,
+                    total,
+                    display=display_path,
+                    limit=READ_RANGE_OUTPUT_LIMIT_CHARS,
+                )
             return _text(
                 tool_call_id,
                 "read",

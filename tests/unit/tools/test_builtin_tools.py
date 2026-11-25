@@ -936,6 +936,46 @@ async def test_read_large_file_capped_with_footer(tools, context, tmp_path) -> N
     assert "line 2500" in more.text
 
 
+def _source_lines(count: int) -> list[str]:
+    """~60-char source-like lines, so a span's rendered size is predictable."""
+    return [f"    value_{i:05d} = compute(alpha, beta, gamma)  # note {i:05d}" for i in range(1, count + 1)]
+
+
+@pytest.mark.asyncio
+async def test_read_explicit_range_returns_a_22k_span_whole(tools, context, tmp_path) -> None:
+    # An explicit range is an explicit request: a span over the 8 KiB whole-
+    # file clamp but under READ_RANGE_OUTPUT_LIMIT_CHARS comes back whole, with
+    # no continuation footer to page on.
+    lines = _source_lines(2000)
+    (tmp_path / "mod.txt").write_text("\n".join(lines))
+    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-330"}, context)
+    assert result.is_error is False
+    assert 20 * 1024 < len(result.text) < 24 * 1024
+    assert "truncated at" not in result.text
+    assert result.text.splitlines()[-1].endswith(lines[329])
+
+
+@pytest.mark.asyncio
+async def test_read_explicit_range_clamps_a_40k_span_at_32k(tools, context, tmp_path) -> None:
+    lines = _source_lines(2000)
+    (tmp_path / "mod.txt").write_text("\n".join(lines))
+    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-620"}, context)
+    assert result.is_error is False
+    body, _, footer = result.text.partition("\n\n[truncated at ")
+    assert footer.startswith(f"{builtin.READ_RANGE_OUTPUT_LIMIT_CHARS} chars;")
+    assert 8 * 1024 < len(body) <= builtin.READ_RANGE_OUTPUT_LIMIT_CHARS
+    assert 'read(path="' in footer and 'range="' in footer
+
+
+@pytest.mark.asyncio
+async def test_read_without_range_keeps_the_8k_clamp(tools, context, tmp_path) -> None:
+    # The 32 KiB budget is range-only; a whole-file read is still 8 KiB.
+    (tmp_path / "mod.txt").write_text("\n".join(_source_lines(2000)))
+    result = await _call(tools, "read", {"path": "mod.txt"}, context)
+    assert f"[truncated at {builtin.READ_OUTPUT_LIMIT_CHARS} chars;" in result.text
+    assert builtin.READ_OUTPUT_LIMIT_CHARS == builtin.BASH_OUTPUT_LIMIT_CHARS == 8 * 1024
+
+
 @pytest.mark.asyncio
 async def test_read_refuses_oversized_file(tools, context, tmp_path) -> None:
     # RT-06: stat-first refusal above 2MB with an actionable message.
