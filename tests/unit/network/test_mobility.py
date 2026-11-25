@@ -234,21 +234,27 @@ def test_move_promotes_and_pins_the_skill_manifest(
 
         monkeypatch.setattr(mobility, "_promote", promote_silently)
     elif case == "write_failure":
-        replace = Path.replace
+        # The attachment writer publishes through ``atomic_files.atomic_write_bytes``,
+        # whose rename is ``os.replace(temp, target)``: fail exactly that rename of the
+        # destination's sidecar, so the strict pin raises after staging its temp.
+        replace = os.replace
         original_sidecar = (source / "attachment.json").read_bytes()
 
-        def fail_pin(self: Path, to: Path) -> Path:
+        def fail_pin(src: Any, dst: Any, **kwargs: Any) -> None:
+            to = Path(dst)
             if to.name == "attachment.json" and to.is_relative_to(server_b.root):
                 raise OSError("injected attachment replace failure")
-            return replace(self, to)
+            replace(src, dst, **kwargs)
 
         with monkeypatch.context() as patch:
-            patch.setattr(Path, "replace", fail_pin)
+            patch.setattr(os, "replace", fail_pin)
             refused = _move(server_b, SESSION, monkeypatch=patch)
         assert refused["ok"] is False and "was not published" in refused["message"]
         assert not target.exists()
         stage = sync.staging_dir(server_b.root, SESSION)
         assert (stage / "attachment.json").read_bytes() == original_sidecar
+        # The shared writer discards its own unique temp: no partial member stays staged.
+        assert not [path.name for path in stage.iterdir() if path.name.endswith(".tmp")]
         ready = json.loads((stage / "ready.json").read_text())
         assert mobility._staging_content_digest(server_b, SESSION, stage) == ready["content_digest"]
     elif case == "interrupted_publish":
