@@ -594,7 +594,7 @@ def add_parser(
         "--cursor",
         default=None,
         metavar="TOKEN",
-        help="listing with --peer: the next page, from the previous answer's next_cursor",
+        help="listing with --peer: the next page, the token the previous page's footer names",
     )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
@@ -10260,6 +10260,12 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 "unknown_peer",
                 f"this device is not in a network with anything called {peer!r}",
             )
+        refused = matched[0].get("refused")
+        if isinstance(refused, str) and refused:
+            # THE OWNER ANSWERED AND REFUSED THIS ASK (a cursor it never minted,
+            # an over-long query): a refusal with its sentence and code, not an
+            # empty listing and not an unreachable device (QA round 1, Q1).
+            raise MeshRefusal(str(matched[0].get("refused_code") or "bad_frame"), refused)
         remote = [
             row
             for row in remote
@@ -10352,17 +10358,27 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             if not isinstance(block, dict) or not block.get("reachable"):
                 continue
             label = str(block.get("name") or device_id)
-            if block.get("paging") == "unsupported":
+            kind = "search" if "query" in page else "other"
+            if isinstance(block.get("refused"), str):
+                # Only an --all-peers ask reaches here (``--peer`` raised above),
+                # and the CLI pre-checks what that ask can carry; kept so an
+                # answered refusal never reads as a complete listing.
+                unpaged.add(str(device_id))
+                lines.append(f"{label}: refused ({block['refused']})")
+            elif block.get("paging") == "unsupported":
                 unpaged.add(str(device_id))
                 if not relay_paged:
                     continue
                 lines.append(
-                    tr("cli.network_sessions")(_network_sessions.paging_unsupported(peer=label))
+                    tr("cli.network_sessions")(
+                        _network_sessions.paging_unsupported(kind=kind, peer=label)
+                    )
                 )
             elif isinstance(block.get("next_cursor"), str):
                 lines.append(
                     tr("cli.network_sessions")(
                         _network_sessions.next_page(
+                            kind=kind,
                             peer=label,
                             shown=sum(
                                 1
@@ -10370,7 +10386,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                                 if (row.get("peer") or {}).get("device_id") == device_id
                             ),
                             total=int(block.get("total") or 0),
-                            cursor=str(block["next_cursor"]),
+                            command=_next_page_command(label, str(block["next_cursor"]), page),
                         )
                     )
                 )
@@ -10395,6 +10411,25 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     return _emit(args, result, lines)
 
 
+def _next_page_command(peer: str, cursor: str, page: Mapping[str, Any]) -> str:
+    """The footer's next page as ONE pasteable, shell-quoted command line.
+
+    It carries the asker's ``--limit`` and ``--query`` as well as the cursor:
+    the cursor is a position in the FILTERED list, so a pointer without the
+    query silently turned a search into an unfiltered listing on the next page,
+    and one without the limit changed the page size (design round 1, D1/D3 on
+    #4592). ``shlex.join`` so a peer name or query with spaces pastes intact.
+    """
+    import shlex
+
+    argv = ["lop", "network", "sessions", "--peer", peer, "--cursor", cursor]
+    if page.get("limit") is not None:
+        argv += ["--limit", str(page["limit"])]
+    if page.get("query") is not None:
+        argv += ["--query", str(page["query"])]
+    return shlex.join(argv)
+
+
 def _listing_page_fields(args: argparse.Namespace, query: Any, peer: str) -> dict[str, Any] | int:
     """The listing's ``limit``/``cursor``/``query`` for the relay, or rc 2.
 
@@ -10410,6 +10445,11 @@ def _listing_page_fields(args: argparse.Namespace, query: Any, peer: str) -> dic
         return 2
     if cursor is not None and not peer:
         print("--cursor needs --peer: a cursor is one device's position", file=sys.stderr)
+        return 2
+    max_token = relay_mod.CATALOG_PAGE_MAX_TOKEN
+    if query is not None and len(str(query)) > max_token:
+        # Before the hop, as for --limit: the owner would refuse it anyway.
+        print(f"--query must be at most {max_token} characters", file=sys.stderr)
         return 2
     page: dict[str, Any] = {}
     if limit is not None:

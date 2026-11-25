@@ -9,15 +9,15 @@ from __future__ import annotations
 from ..messages import Msg
 
 
-def next_page(*, peer: str, shown: int | float, total: int | float, cursor: str) -> Msg:
+def next_page(*, kind: str, peer: str, shown: int | float, total: int | float, command: str) -> Msg:
     return Msg(
         "cli.network_sessions.next_page",
-        {"peer": peer, "shown": shown, "total": total, "cursor": cursor},
+        {"kind": kind, "peer": peer, "shown": shown, "total": total, "command": command},
     )
 
 
-def paging_unsupported(*, peer: str) -> Msg:
-    return Msg("cli.network_sessions.paging_unsupported", {"peer": peer})
+def paging_unsupported(*, kind: str, peer: str) -> Msg:
+    return Msg("cli.network_sessions.paging_unsupported", {"kind": kind, "peer": peer})
 
 
 def relay_unpaged() -> Msg:

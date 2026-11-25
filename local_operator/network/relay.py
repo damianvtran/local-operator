@@ -784,10 +784,13 @@ _CATALOG_PAGE_FIELDS = ("limit", "cursor", "query")
 #: ceiling also bounds the per-page stamp/serialisation work an asker can buy.
 CATALOG_PAGE_DEFAULT_LIMIT = 100
 CATALOG_PAGE_MAX_LIMIT = 100
-#: Longest cursor or query accepted off the wire. A minted cursor is ~80
-#: characters (base64 of an offset and one session id); a search is a few words.
-#: Anything longer is a client that concatenated something, refused unread.
-CATALOG_PAGE_MAX_TOKEN = 512
+#: Longest cursor or query accepted off the wire (``wire`` owns the number so
+#: the ``sessions`` tool can pre-check a query without importing this module).
+CATALOG_PAGE_MAX_TOKEN = wire.CATALOG_PAGE_MAX_TOKEN
+#: Refusal codes a paged ``net_catalog`` handler raises on the ASKER's input.
+#: The owner answered them, so the viewer reports an answered refusal
+#: (``reachable`` + ``refused``), never an unreachable device (QA Q1, #4592).
+CATALOG_PAGE_REFUSALS = frozenset({"bad_cursor", "bad_frame"})
 
 
 def _catalog_cursor_encode(offset: int, last_id: str) -> str:
@@ -801,6 +804,27 @@ def _catalog_cursor_encode(offset: int, last_id: str) -> str:
     """
     raw = json.dumps({"v": 1, "o": offset, "id": last_id}, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _link_may_search_content(link: Any) -> bool:
+    """True ONLY when ``link`` positively holds ``view`` right now.
+
+    FAILS CLOSED (delegator condition on R1, #4592): the content search is the
+    one that can reveal transcript text through which rows match, so anything
+    short of a readable capability set that contains ``view`` — no link, a
+    lookup that raises, a value that is not a set of strings — gets the
+    names/ids search. Read per call (``PeerLink.role_capabilities`` re-reads
+    the member row), so a revoke narrows an open link at once.
+    """
+    if link is None:
+        return False
+    try:
+        capabilities = link.role_capabilities()
+    except Exception:  # noqa: BLE001 — unknown authority is no authority
+        return False
+    if not isinstance(capabilities, (set, frozenset)):
+        return False
+    return any(isinstance(item, str) and item == "view" for item in capabilities)
 
 
 def _catalog_cursor_start(token: str, rows: Sequence[Mapping[str, Any]]) -> int:
@@ -829,7 +853,13 @@ def _catalog_cursor_start(token: str, rows: Sequence[Mapping[str, Any]]) -> int:
         return offset
     for index, row in enumerate(rows):
         if str(row.get("session_id") or "") == last_id:
-            return index + 1
+            # Only a row that moved DOWN (rows arrived above it) is a better
+            # position than the offset. One that moved UP (that session went
+            # live, ranked first) would restart near the top and re-serve the
+            # whole previous page (agent review round 1, R2 on #4592).
+            if index + 1 >= offset:
+                return index + 1
+            break
     return min(offset, len(rows))
 
 
@@ -9716,11 +9746,36 @@ class RelayServer:
                 "bad_frame", f"query must be text of at most {CATALOG_PAGE_MAX_TOKEN} characters"
             )
         rows = self.local_session_rows(uncapped=True)
+        search: str | None = None
         if query is not None and query.strip():
-            from local_operator.session.session_search import search_store
+            from local_operator.session.session_search import search_rows, search_store
 
+            # THE CONTENT SEARCH NEEDS THE CAPABILITY THAT READS CONTENT (agent
+            # review round 1, R1 on #4592). ``net_catalog`` needs only ``list``,
+            # but ``search_store`` also matches transcript digests, so a
+            # list-only member could test what a body contains, one prefix at a
+            # time, from which rows come back. Without ``view`` (what
+            # ``net_session_peek`` requires, ``types.OP_CAPABILITY``) the same
+            # matcher runs over what the row already shows: its name and id.
+            content = _link_may_search_content(link)
+            search = "content" if content else "names"
             try:
-                matches = search_store(self.root, query)
+                if content:
+                    matches = search_store(self.root, query)
+                else:
+                    from local_operator.resume import SessionRow
+
+                    matches = search_rows(
+                        [
+                            SessionRow(
+                                str(row.get("session_id") or ""),
+                                0.0,
+                                str(row.get("conversation_name") or ""),
+                            )
+                            for row in rows
+                        ],
+                        query,
+                    )
             except Exception:  # noqa: BLE001 — a listing is not an error path
                 matches = []
             by_id = {str(row.get("session_id") or ""): row for row in rows}
@@ -9753,6 +9808,9 @@ class RelayServer:
             "sessions": self._rows_for_viewer(link, rows=page),
             "next_cursor": next_cursor,
             "total": len(rows),
+            # Which search ran (``None`` for a plain page): peer-block metadata,
+            # not a row field, so the asker can say a search was names-only.
+            "search": search,
         }
 
     def _rows_for_viewer(
@@ -17260,6 +17318,18 @@ class RelayServer:
                     block["reason"] = "asked, and it did not answer"
                     peers.setdefault(member.device_id, block)
                     continue
+                if (
+                    reply.get("op") != "ack"
+                    and pages
+                    and reply.get("code") in CATALOG_PAGE_REFUSALS
+                ):
+                    # THE OWNER ANSWERED, refusing the asker's cursor/limit/query
+                    # (QA round 1, Q1 on #4592): ``reachable: false`` would be a
+                    # false fact about a device that just replied.
+                    block["refused"] = str(reply.get("message") or "the page was refused")[:200]
+                    block["refused_code"] = str(reply.get("code"))
+                    peers[member.device_id] = block
+                    continue
                 if reply.get("op") != "ack":
                     # THE PEER'S OWN SENTENCE, not a shrug. A refusal frame carries a
                     # message (the authoriser's refusal, or a handler failure), and
@@ -17286,6 +17356,9 @@ class RelayServer:
                     block["total"] = (
                         total if isinstance(total, int) and not isinstance(total, bool) else None
                     )
+                    search = detail.get("search")
+                    if search in ("names", "content"):
+                        block["search"] = search
                 for row in detail.get("sessions") or ():
                     if not isinstance(row, dict):
                         continue

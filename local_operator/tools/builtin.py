@@ -18384,8 +18384,8 @@ class SessionsParams(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            "info/resume/stop/peek: an exact name/id wins over a name/id/cwd "
-            "substring (live, then stored); a team role word is refused."
+            "info/resume/stop/peek: exact name/id beats a name/id/cwd "
+            "substring (live, then stored); team role words are refused."
         ),
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
@@ -18396,13 +18396,11 @@ class SessionsParams(BaseModel):
     # Both sit with the ADDRESSES because they modify addressing, not content.
     peer: str | None = Field(
         default=None,
-        description=(
-            "Remote (mesh): the session's device, name or id; on `list`, selects only its rows."
-        ),
+        description=("Remote (mesh): the session's device (name/id); on `list`, only its rows."),
     )
     scope: Literal["all", "local", "remote"] = Field(
         default="all",
-        description="list: all (default), local, or remote; peer selects only its device.",
+        description="list: all (default), local, or remote.",
     )
     prompt: str | None = Field(
         default=None,
@@ -18439,28 +18437,28 @@ class SessionsParams(BaseModel):
     paused: bool = Field(default=False, description="resume set: interrupted/retired.")
     failed: bool = Field(default=False, description="resume set: error.")
     all: bool = Field(default=False, description="resume set: all stored, non-live.")
-    dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
+    dry_run: bool = Field(default=False, description="resume set: preview only.")
     include_stored: bool = Field(
         default=False,
-        description="list: also stored (not running) ones.",
+        description="list: also stored (idle) ones.",
     )
     limit: int = Field(
         default=20,
         ge=1,
         le=100,
-        description="list: max rows; resume: cap on the set.",
+        description="list: max rows; resume: set cap.",
     )
     query: str | None = Field(
         default=None,
-        description="list: search stored sessions by name/content; peek: locate a step.",
+        description="list: search by name/content; peek: locate a step.",
     )
     # A remote listing's next page (the owner's ``net_catalog`` cursor). One
     # short clause: the schema is billed on every request, and the footer of a
     # remote list that has more names the exact `peer` + `cursor` to pass.
-    cursor: str | None = Field(default=None, description="list: next-page token from the footer.")
+    cursor: str | None = Field(default=None, description="list: footer's next-page token.")
     # --- peek windows (design §8; PR B) -------------------------------------
     steps: int | None = Field(default=None, description="peek: last N steps (default 12, max 50).")
-    head: int | None = Field(default=None, description="peek: first N steps instead of the tail.")
+    head: int | None = Field(default=None, description="peek: first N steps, not the tail.")
     before_id: str | None = Field(
         default=None, description="peek: steps just before this entry id."
     )
@@ -18468,7 +18466,7 @@ class SessionsParams(BaseModel):
         default=None, description="peek: window centred on this entry id."
     )
     regex: bool = Field(default=False, description="peek: `query` is a regex.")
-    digest: bool = Field(default=False, description="peek: compact fold instead of steps.")
+    digest: bool = Field(default=False, description="peek: compact fold, not steps.")
     # --- stop escalation (runtime memory-runaway incident, 2026-11-24) -------
     # The idle-only stop refused a runaway that was "working" (its wake turn
     # had been open since boot) while it drove the host into swap, and the
@@ -19062,8 +19060,10 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "`peer` applies to the mesh ops (list/info/spawn/resume/stop/peek) — "
                 f"not to op='{op}'.",
             )
-        if field == "scope":
-            return _sessions_stray_field_refusal(op, "`scope` applies to op='list' only.")
+        if field in ("scope", "cursor"):
+            # ``cursor`` is a remote listing's next page; without this branch
+            # it fell through to the spawn default (QA round 1, Q2 on #4592).
+            return _sessions_stray_field_refusal(op, f"`{field}` applies to op='list' only.")
         if op == "list":
             return _sessions_stray_field_refusal(
                 op, f"`{field}` applies to other ops; list takes no `{field}`."
@@ -19966,9 +19966,17 @@ async def _sessions_remote_fetch(
     federated read exactly, so the default call costs what it did.
     ``relay paging`` is the CLI's ``relay_paging`` (``None`` = not asked).
     """
+    from local_operator.network.wire import CATALOG_PAGE_MAX_TOKEN
     from local_operator.resume import peer_reason_words
 
     query = (params.query or "").strip() or None
+    if query is not None and len(query) > CATALOG_PAGE_MAX_TOKEN:
+        # Checked before the hop: every owner refuses a longer one (QA Q1).
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"`query` must be at most {CATALOG_PAGE_MAX_TOKEN} characters for a remote listing.",
+        )
     paged = bool(peer or params.scope == "remote" or params.cursor or query)
     argv = (
         _mesh_doc_argv(peer, limit=params.limit, cursor=params.cursor, query=query)
@@ -19994,7 +20002,15 @@ async def _sessions_remote_fetch(
     raw_peers = payload.get("peers")
     peers: dict[str, Any] = raw_peers if isinstance(raw_peers, dict) else {}
     for device_id, block in sorted(peers.items()):
-        if isinstance(block, dict) and not block.get("reachable"):
+        if not isinstance(block, dict):
+            continue
+        if isinstance(block.get("refused"), str):
+            # The owner ANSWERED and refused this ask (QA Q1): its sentence,
+            # never "unreachable". A named `peer` gets it as the error itself.
+            if peer:
+                return _error(tool_call_id, "sessions", str(block["refused"]))
+            notes.append(f"{block.get('name') or device_id}: refused ({block['refused']})")
+        elif not block.get("reachable"):
             notes.append(
                 f"{block.get('name') or device_id}: unreachable "
                 f"({peer_reason_words(str(block.get('reason') or ''))})"
@@ -20051,7 +20067,7 @@ def _sessions_page_notes(
         ]
     notes: list[str] = []
     for device_id, block in sorted(peers.items()):
-        if not isinstance(block, dict) or not block.get("reachable"):
+        if not isinstance(block, dict) or not block.get("reachable") or block.get("refused"):
             continue
         label = str(block.get("name") or device_id)
         if block.get("paging") == "unsupported":
@@ -20072,7 +20088,9 @@ def _sessions_page_notes(
             continue
         count = _sessions_peer_row_count(shown, str(device_id))
         sent = _sessions_peer_row_count(remote_rows, str(device_id))
-        scope_text = f" matching {query!r}" if query else ""
+        # A ``list``-only link gets a names/ids search (relay R1): say so.
+        names_only = " (names only)" if query and block.get("search") == "names" else ""
+        scope_text = f" matching {query!r}{names_only}" if query else ""
         query_text = f" query={query!r}" if query else ""
         if count < sent:
             # THE SHARED ``limit`` CUT THIS OWNER'S PAGE (several devices, or
@@ -20221,7 +20239,10 @@ async def _sessions_list(
     ]
     # A PAGED remote answer names its next page per owner (``page_notes``);
     # "raise `limit`" would be wrong there — the rest is past the owner's page.
-    if len(deduped) > len(shown) and not (scope == "remote" and relay_paging is True):
+    # Nor beside the relay-too-old note: no `limit` reaches past it (QA Q3).
+    if len(deduped) > len(shown) and not (
+        (scope == "remote" and relay_paging is True) or relay_paging is False
+    ):
         if scope == "local":
             lines.append(
                 f"({len(deduped)} rows available; {len(shown)} shown — raise `limit` "

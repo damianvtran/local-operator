@@ -1261,12 +1261,14 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # is legitimate, and what the ladder does, live in op='help' and in every
     # refusal that names it.
     # RE-MEASURED for remote list paging (``fix/remote-session-list-paging``,
-    # 2026-11-25): one optional ``cursor`` string ("list: next-page token from
-    # the footer.") — 1354 on origin/main, 1398 with it (+44: name, title,
-    # anyOf/null/default plumbing and the one clause), measured with this
-    # test's own ruler; pinned at 1399, one-token headroom. What a cursor is
-    # and when it is refused lives in op='help' and in the footer that mints it.
-    assert count_text_tokens(params) <= 1399
+    # 2026-11-25): one optional ``cursor`` string ("list: footer's next-page
+    # token.") — 1354 on origin/main, 1398 with it (+44: name, title,
+    # anyOf/null/default plumbing and the one clause). Round-1 remediation (CI
+    # ``context-budget`` red by 32) tightened other ``sessions`` clauses with no
+    # change of meaning: 1379 measured with this test's own ruler, pinned at
+    # 1380, one-token headroom. What a cursor is and when it is refused lives
+    # in op='help' and in the footer that mints it.
+    assert count_text_tokens(params) <= 1380
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -2806,8 +2808,11 @@ def test_a_cursor_without_a_peer_is_refused_naming_peer() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="list", scope="remote", cursor="t"))
     assert refusal is not None and "pass the `peer`" in refusal
     assert _sessions_validation_error(SessionsParams(op="list", peer="p", cursor="t")) is None
-    # ``cursor`` belongs to list alone: any other op refuses it as a stray field.
-    assert _sessions_validation_error(SessionsParams(op="info", session="s", cursor="t"))
+    # ``cursor`` belongs to list alone: any other op refuses it with THAT
+    # sentence, not the spawn default it used to fall through to (Q2).
+    stray = _sessions_validation_error(SessionsParams(op="info", session="s", cursor="t"))
+    assert stray is not None and "`cursor` applies to op='list' only." in stray
+    assert "op='spawn'" not in stray
 
 
 @pytest.mark.asyncio
@@ -5083,3 +5088,68 @@ def test_the_forced_stop_approval_does_not_promise_idle_only() -> None:
     assert "never signals" in plain
     assert "never signals" not in forced
     assert "SIGKILL" in forced and "aaaa00000001" in forced
+
+
+@pytest.mark.asyncio
+async def test_an_owner_refusal_is_the_tool_error_not_unreachable(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1 on #4592: an owner that ANSWERED with a refusal (bad
+    cursor) is the tool's error with the owner's sentence when ``peer`` was
+    named — never ``<peer>: unreachable`` beside zero rows."""
+    doc = _paged_doc(0, total=0, cursor=None)
+    block = doc["peers"]["d_b"]
+    block.update(refused="that cursor is not one this listing minted", refused_code="bad_cursor")
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "cursor": "bad!!"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "that cursor is not one this listing minted" in result.text
+    assert "unreachable" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_remote_query_is_refused_before_the_hop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: the owner's 512-char bound is checked tool-side first."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _paged_doc(0, total=0, cursor=None), calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "query": "q" * 600}, None, None, _context(root)
+    )
+    assert result.is_error and "at most 512 characters" in result.text
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_names_only_remote_search_says_so_in_the_footer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, R1: an owner that searched names/ids only (the
+    asking link lacks ``view``) is labelled, so no reader takes it as a body search."""
+    doc = _paged_doc(2, total=5, cursor="tok-n")
+    doc["peers"]["d_b"]["search"] = "names"
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "query": "chat", "limit": 2}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert f"2 of 5 matching 'chat' (names only) shown — next page: peer={PEER!r}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_older_local_relay_drops_the_raise_limit_hint(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q3: beside the relay-too-old note, "raise `limit`" cannot help."""
+    _fake_mesh(
+        monkeypatch, _paged_doc(5, total=0, cursor=None, paging="unsupported", relay_paging=False)
+    )
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "limit": 2}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "this device's relay predates remote paging/search" in result.text
+    assert "raise `limit`" not in result.text

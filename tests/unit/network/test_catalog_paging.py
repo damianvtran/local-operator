@@ -308,7 +308,10 @@ def test_the_cli_pages_a_real_owner_and_prints_the_next_page(
 
     rc, text = run("--peer", name, "--limit", "100")
     assert rc == 0
-    assert f"{name}: 100 of {CATALOG_SCAN_LIMIT + 5} shown — next page: --peer {name}" in text
+    assert (
+        f"{name}: 100 of {CATALOG_SCAN_LIMIT + 5} shown — next page: "
+        f"lop network sessions --peer {name} --cursor "
+    ) in text and text.rstrip().endswith("--limit 100")
     seen: list[str] = []
     cursor: str | None = None
     while True:
@@ -329,3 +332,220 @@ def test_the_cli_pages_a_real_owner_and_prints_the_next_page(
         net_cli.main(parser.parse_args(["network", "sessions", "--all-peers", "--cursor", "t"]))
         == 2
     )
+
+
+def _body_session(root: Path, session_id: str, title: str, body: str) -> None:
+    """One stored conversation whose TRANSCRIPT alone holds ``body``."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000999.0", encoding="utf-8")
+    (directory / "transcript.jsonl").write_text(
+        '{"id":"e1","ts":1,"type":"message","payload":{"kind":"message","role":"user",'
+        f'"content":[{{"text":"please remember {body} for later"}}]}}}}\n',
+        encoding="utf-8",
+    )
+    write_session_title(directory, title, user_set=False, past_names=[])
+
+
+#: Sessions whose TRANSCRIPT alone holds the body-only term (their titles do not).
+BODY_ONLY = 3
+
+
+@pytest.mark.parametrize("can_view", [False, True])
+def test_a_list_only_link_searches_names_not_transcript_content(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, can_view: bool
+) -> None:
+    """Agent review round 1, R1 on #4592 (red first on 9d7cd1e2b, list-only half).
+
+    ``net_catalog`` needs only ``list``, so a link WITHOUT ``view`` (what peek
+    needs) must not learn what a body holds from which rows a search returns.
+    Same seeded store on both arms: the body-only term returns EXACTLY
+    ``BODY_ONLY`` rows to a ``view`` link and NONE (nor its prefix) to a
+    list-only one; a title term matches for both."""
+    from local_operator.network import store
+    from local_operator.network.relay import set_member_capabilities
+
+    server_a, server_b, _host, _port = pair
+    _stored(server_a.root, 5)
+    body_ids = {f"b{index:011x}" for index in range(BODY_ONLY)}
+    for index, session_id in enumerate(sorted(body_ids)):
+        _body_session(server_a.root, session_id, f"plain chat body {index}", "zebra42secret")
+    _body_session(server_a.root, "cccccccccccc", "quokka titled one", "nothing special")
+    record, link = _live_link(pair, monkeypatch)
+    try:
+        if not can_view:
+            with store.mutate(record.network_id, server_a.root) as rec:
+                set_member_capabilities(rec, device_id=server_b.identity.device_id, revoke=["view"])
+                store.save(rec, server_a.root)
+        body = _detail(link, query="zebra42secret")
+        prefix = _detail(link, query="zebra4")
+        title = _detail(link, query="quokka titled")
+    finally:
+        link.close("test")
+    got = {row["session_id"] for row in body["sessions"]}
+    if can_view:
+        assert got == body_ids and body["total"] == BODY_ONLY
+    else:
+        assert got == set() and body["total"] == 0
+        assert prefix["sessions"] == [] and prefix["total"] == 0
+    # A title term matches either way: names are what the row already shows.
+    assert [row["session_id"] for row in title["sessions"]] == ["cccccccccccc"]
+    assert body.get("search") == ("content" if can_view else "names")
+
+
+class _Link:
+    def __init__(self, capabilities: Any) -> None:
+        self._capabilities = capabilities
+
+    def role_capabilities(self) -> Any:
+        if isinstance(self._capabilities, Exception):
+            raise self._capabilities
+        return self._capabilities
+
+
+@pytest.mark.parametrize(
+    ("link", "expected"),
+    [
+        (None, False),
+        (_Link(RuntimeError("store unreadable")), False),
+        (_Link(None), False),
+        (_Link("view"), False),
+        (_Link(["view"]), False),
+        (_Link({b"view"}), False),
+        (_Link(set()), False),
+        (_Link({"list"}), False),
+        (_Link({"list", "view"}), True),
+        (_Link(frozenset({"view"})), True),
+    ],
+)
+def test_the_content_search_fails_closed(link: Any, expected: bool) -> None:
+    """Delegator condition on R1: content only when ``view`` is POSITIVELY held."""
+    assert relay._link_may_search_content(link) is expected
+
+
+def test_a_cursor_whose_row_moved_up_resumes_at_its_offset() -> None:
+    """Agent review round 1, R2: the anchor row moving UP (that session went
+    live) must not restart the walk near the top and re-serve a page."""
+    rows = [{"session_id": f"s{index:03d}"} for index in range(250)]
+    token = relay._catalog_cursor_encode(100, "s099")
+    assert relay._catalog_cursor_start(token, rows) == 100
+    moved_up = [rows[99]] + rows[:99] + rows[100:]
+    assert relay._catalog_cursor_start(token, moved_up) == 100
+    # Rows arriving ABOVE it still resume right after the anchor row.
+    arrived = [{"session_id": "new0"}, {"session_id": "new1"}] + rows
+    assert relay._catalog_cursor_start(token, arrived) == 102
+    # Anchor gone: the offset stands.
+    assert relay._catalog_cursor_start(token, rows[:99] + rows[100:]) == 100
+
+
+def test_an_owner_refusing_the_ask_is_answered_not_unreachable(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: a malformed cursor is the OWNER's answered refusal —
+    ``reachable`` stays true and the sentence rides ``refused``; the CLI with
+    ``--peer`` exits as a refusal naming it, not as an empty listing."""
+    import argparse
+
+    from local_operator.network import cli as net_cli
+
+    server_a, server_b, _host, _port = pair
+    _stored(server_a.root, 3)
+    _record, link = _live_link(pair, monkeypatch)
+    link.close("test")
+    device_a = server_a.identity.device_id
+    answer = server_b._ctl_peer_session_rows({"cursor": "not-a-token!!", "peer": device_a})
+    block = answer["peers"][device_a]
+    assert block["reachable"] is True
+    assert block["refused"] == "that cursor is not one this listing minted"
+    assert block["refused_code"] == "bad_cursor" and answer["sessions"] == []
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, timeout=0.0, **fields: server_b._ctl_peer_session_rows(fields),
+    )
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    args = parser.parse_args(
+        ["network", "sessions", "--peer", server_a._own_label(), "--cursor", "not-a-token!!"]
+    )
+    with pytest.raises(relay.MeshRefusal) as refusal:
+        net_cli._cmd_sessions(args)
+    assert refusal.value.code == "bad_cursor"
+    assert "not one this listing minted" in refusal.value.sentence
+    # Through ``main`` it is a refusal exit, never rc 0 with an empty listing.
+    assert net_cli.main(args) == 1
+
+
+def test_the_printed_next_page_command_continues_the_same_search(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Design round 1, D1/D3: the footer's pointer, pasted VERBATIM through the
+    real parser, continues the FILTERED walk at the same size (300 rows, half
+    titled ``needle``) — it used to drop ``--query`` and turn the search into
+    an unfiltered listing on page two."""
+    import argparse
+    import shlex
+
+    from local_operator.network import cli as net_cli
+
+    server_a, server_b, _host, _port = pair
+    ids = _stored(server_a.root, 300, needle_every=2)
+    needles = {ids[index] for index in range(0, 300, 2)}
+    _record, link = _live_link(pair, monkeypatch)
+    link.close("test")
+    name = server_a._own_label()
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, timeout=0.0, **fields: server_b._ctl_peer_session_rows(fields),
+    )
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+
+    def run(argv: list[str]) -> str:
+        assert net_cli.main(parser.parse_args(argv)) == 0
+        return capsys.readouterr().out
+
+    argv = ["network", "sessions", "--peer", name, "--limit", "40", "--query", "needle"]
+    seen: list[str] = []
+    for _ in range(10):
+        out = run(argv)
+        seen += [sid for sid in ids if sid in out.split()]
+        pointer = [line for line in out.splitlines() if "next page: " in line]
+        if not pointer:
+            break
+        assert "matching shown" in pointer[0]
+        command = pointer[0].split("next page: ", 1)[1]
+        words = shlex.split(command)
+        assert words[:3] == ["lop", "network", "sessions"]
+        assert "--query" in words and "--limit" in words
+        argv = words[1:]
+    assert len(seen) == len(set(seen)) == 150
+    assert set(seen) == needles
+
+
+@pytest.mark.parametrize("asked", [["--query", "x"], ["--limit", "5"]])
+def test_an_older_owner_line_says_whether_the_search_ran(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], asked: list[str]
+) -> None:
+    """Design round 1, D5: with ``--query`` the older-owner line says the
+    search did not run there, not merely that the listing is partial."""
+    import argparse
+
+    from local_operator.network import cli as net_cli
+
+    block = {"device_id": "d_x", "name": "node2", "reachable": True, "paging": "unsupported"}
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, timeout=0.0, **fields: {"paged": True, "sessions": [], "peers": {"d_x": block}},
+    )
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    rc = net_cli.main(parser.parse_args(["network", "sessions", "--peer", "node2", *asked]))
+    out = capsys.readouterr().out
+    assert rc == 0
+    if asked[0] == "--query":
+        assert "node2: its build predates remote search, so the search did not run there" in out
+    else:
+        assert "node2: its build predates remote paging, so this is not its whole listing" in out
