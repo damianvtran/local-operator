@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 PATH = "local_operator/session/session.py"
-PRAGMAS = 18
+PRAGMAS = 19  # the 19th: the cold-boot catch-up prompt's model-facing header
 
 
 def test_session_is_pragma_clean_and_activated(i18n_check) -> None:
