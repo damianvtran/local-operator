@@ -32,7 +32,7 @@ def test_vendor_product_names_are_not_keyed(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert defaults.suggested_model_for("anthropic") == defaults.SUGGESTED_MODELS["anthropic"]
     assert defaults.suggested_model_for("kimi", oauth=True) == defaults.SuggestedModel(
-        "k3", "Kimi K3"
+        "k3.1-pro", "Kimi K3.1 Pro"
     )
 
 
