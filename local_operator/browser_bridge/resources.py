@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,65 @@ _REPLAY_LANES = (HOST_UI, HOST_BRIDGE)
 #: paused tab) is dropped: it is in use, not owed.
 #: Private like ``surface_id``: ``read_inventory`` publishes only a count.
 STRANDED_FIELD = "stranded_surfaces"
+
+#: PENDING-ASK HOLD: the retention a session's DISPOSAL writes while one of its
+#: asks still waits on the user, so the tab the user was sent to survives the
+#: process boundary the ask spans.
+#:
+#: Why it exists (session a64fec9430f3, 2026-11-25): the agent opened a sign-in
+#: tab, queued ask a-e69c, and correctly left the tab open. Four minutes later
+#: the fleet update retired the runtime ("retiring for 0.113.5"), the retiring
+#: process ran its ordinary disposal, and ``finish("disposed")`` sent
+#: ``owner_finish`` to an UNRETAINED scope — so the extension closed the tab
+#: while the ask still pointed at it. The user answered to an empty browser.
+#: Disposal is a fallback for "this session is gone", but a runtime retirement,
+#: an idle exit or a restart is not the session ending: the ask outlives the
+#: process and is answered by its successor.
+#:
+#: The hold is DERIVED, never asserted by the model: it is recomputed from the
+#: session's own ask log at every ``finish`` (and released at ``recover``), so
+#: it exists exactly while an ask is ``open``. It is distinguishable from an
+#: explicit ``retain`` by this prefix and never overwrites one. Its expiry is the
+#: latest deadline among the open asks (``ASK_HOLD_EXPIRES_FIELD``); past it the
+#: hold no longer protects the row from ``lop browser cleanup``, so a session
+#: that is never resumed cannot pin a tab forever.
+ASK_HOLD_PREFIX = "pending ask "
+ASK_HOLD_EXPIRES_FIELD = "retention_expires_at"
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def open_ask_hold(directory: Path) -> tuple[str, int | None] | None:
+    """``(reason, expires_at_ms)`` while the session in ``directory`` has an open ask.
+
+    ``None`` when no ask is open. Reads the same durable log the ask queue
+    folds (``asks.jsonl`` in the session directory) through the same ``fold``,
+    so "open" here cannot disagree with the ask bar: a timed-out, answered,
+    declined or withdrawn ask folds to settled and releases the hold.
+    ``expires_at`` is ``None`` when any open ask has no deadline (it then
+    lasts until that ask settles).
+
+    Raises ``OSError``/``ValueError`` on an unreadable log: the caller decides
+    which way an unknown fails (adding a hold fails closed to the old close;
+    dropping one keeps it), so the error is not swallowed here.
+    """
+    from local_operator.asks import store as ask_store
+
+    records = ask_store.fold(ask_store.read_events(directory), _now_ms())
+    pending = ask_store.outstanding_asks(records)
+    if not pending:
+        return None
+    newest = str(pending[-1].get("ask_id", "")) or "?"
+    deadlines = [r.get("expires_at") for r in pending]
+    known = [d for d in deadlines if isinstance(d, int) and not isinstance(d, bool)]
+    expires = max(known) if len(known) == len(deadlines) else None
+    return f"{ASK_HOLD_PREFIX}{newest}", expires
+
+
+def is_ask_hold(retention: Any) -> bool:
+    return isinstance(retention, str) and retention.startswith(ASK_HOLD_PREFIX)
 
 
 def _tab_key(surface_id: str) -> str:
@@ -1294,6 +1354,13 @@ class BrowserResource:
         # set would make a LATER finish's terminal clearable by a recover that
         # is no longer a resume at all.
         self.record.pop("resumed_scope", None)
+        if result.get("state") != "unresolved":
+            # The successor of a run that held the tab for a pending ask: once
+            # the ask has settled the hold is spent, and leaving it on the
+            # extension would make this run's own disposal keep a tab nobody is
+            # waiting on. A still-open ask keeps it (the tab is now addressable
+            # again through the `tab` this reply just re-attributed).
+            await self._drop_settled_ask_hold()
         # A successful reconcile means this link really does implement the
         # lifecycle, so any `unavailable` marker written by an earlier degraded
         # pass under a different peer is retired with it.
@@ -1534,6 +1601,7 @@ class BrowserResource:
         # Persist intent BEFORE waiting for a possibly in-flight tool. A crash
         # or timeout leaves an exact obligation, not guessed terminal evidence.
         self.assert_current()
+        prior_terminal = str(self.record.get("terminal") or "")
         outcome = str(self.record.get("terminal") or outcome)
         self.record["terminal"] = outcome
         self.record["state"] = "cleanup_pending"
@@ -1567,6 +1635,11 @@ class BrowserResource:
                 stranded = await self.close_stranded(close_allowed=close_allowed)
                 if close_allowed is not None and not close_allowed():
                     return BrowserCleanupResult("pending", admission_skipped=True)
+                # Only a FIRST settle by disposal may add the hold: a child's
+                # authoritative finish (completed/failed) has its own handoff
+                # rules, and a later disposal over an already-settled child
+                # arrives with `prior_terminal` set.
+                await self._refresh_ask_hold(may_add=outcome == "disposed" and not prior_terminal)
                 if self.record.get("retention"):
                     await self.client().call(
                         "owner_retain", {**self.params(), "reason": self.record["retention"]}
@@ -1592,6 +1665,60 @@ class BrowserResource:
             # failure; the class name is the fallback for a type that carries
             # no message, matching how the CLI renders its outer handler.
             return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
+
+    async def _refresh_ask_hold(self, *, may_add: bool) -> None:
+        """Make this scope's pending-ask hold match the session's ask log.
+
+        Called under ``self.lock`` from ``finish`` on an owner-aware link, just
+        before the existing retention/``owner_finish`` step, which then honours
+        whatever this leaves (see ``ASK_HOLD_PREFIX`` for the incident).
+
+        * An explicit ``retain`` (any reason without the prefix) is the model's
+          or the user's statement and is never touched.
+        * ``may_add``: a live surface plus an open ask writes the hold, so the
+          ``owner_retain`` below keeps the tab through this disposal. No live
+          surface means nothing to keep — the hold is not written.
+        * An existing hold whose asks have all settled is RELEASED on the host
+          before the finish, otherwise the extension's copy of the retention
+          would keep a tab the user is no longer being asked to use.
+
+        An unreadable ask log adds nothing (the old close behaviour) and keeps
+        an existing hold (its expiry still bounds it).
+        """
+        current = self.record.get("retention")
+        if current and not is_ask_hold(current):
+            return
+        try:
+            hold = open_ask_hold(self.directory)
+        except (OSError, ValueError):
+            return
+        live = bool(self.record.get("surface_id"))
+        if hold is not None and live and (current or may_add):
+            reason, expires = hold
+            self.record["retention"] = reason
+            self.record[ASK_HOLD_EXPIRES_FIELD] = expires
+            self._save()
+        elif current:
+            # Settled asks, or the tab is already gone (closed explicitly or by
+            # the user): the hold protects nothing any more.
+            await self._release_ask_hold()
+
+    async def _drop_settled_ask_hold(self) -> None:
+        if not is_ask_hold(self.record.get("retention")):
+            return
+        try:
+            hold = open_ask_hold(self.directory)
+        except (OSError, ValueError):
+            return
+        if hold is None:
+            await self._release_ask_hold()
+
+    async def _release_ask_hold(self) -> None:
+        await self.client().call("owner_release", self.params())
+        self.assert_current()
+        self.record["retention"] = ""
+        self.record.pop(ASK_HOLD_EXPIRES_FIELD, None)
+        self._save()
 
     async def release_and_finish(self, outcome: str) -> BrowserCleanupResult:
         """Drop this scope's retention, then settle it (close its tab).
@@ -1698,7 +1825,23 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
     in. Guessing wrong pushes them to retry against a protected tab, which is
     the behaviour the fence exists to discourage.
     """
-    if value.get("retention"):
+    expires = value.get(ASK_HOLD_EXPIRES_FIELD)
+    ask_hold_lapsed = (
+        is_ask_hold(value.get("retention"))
+        and isinstance(expires, int)
+        and not isinstance(expires, bool)
+        and expires <= _now_ms()
+    )
+    # A lapsed pending-ask hold is no longer a reason to refuse: its ask's
+    # deadline passed, so the session that never came back cannot keep the tab
+    # forever. `finish` (which cleanup runs) re-reads the ask log and releases
+    # the hold on the host before closing.
+    if value.get("retention") and not ask_hold_lapsed:
+        if is_ask_hold(value.get("retention")):
+            return False, (
+                f"retained: {value['retention']} — the session is waiting on that answer; "
+                "the hold lifts when the ask settles or expires"
+            )
         if value.get("handed_to"):
             # A finished child's retained tab handed to its parent (see
             # ``browser_bridge.handoff``): the CHILD's record still holds it, so
@@ -1718,6 +1861,12 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
             "no terminal intent recorded (owner did not finish) — "
             "resume it with 'lop --resume <session>' and let it close the tab"
         )
+    if ask_hold_lapsed:
+        # Terminal, and the only thing keeping its tab was a hold whose ask is
+        # past its deadline. The row reads `retained` (that is what the host
+        # answered the disposal), which is not a stranded state, so without
+        # this the lapse would only change the refusal's wording.
+        return True, ""
     if value.get(STRANDED_FIELD):
         # Terminal and unretained, but still owing a tab it lost track of. The
         # live slot may read "closed" (the LATEST tab settled), which is exactly

@@ -1056,3 +1056,176 @@ async def test_child_open_result_drops_top_level_left_open_reminder(
     finally:
         await child.dispose()
         await parent.dispose()
+
+
+# -- pending-ask hold across a runtime retirement (session a64fec9430f3) -----
+#
+# The incident's own shape through the real stack: Session -> authenticated
+# HTTP -> the bundled extension's ownership code. The agent opens a tab, queues
+# an ask and ends its turn WITHOUT closing; the runtime is then retired (an
+# update, an idle exit), which runs the ordinary `Session.dispose`. Before the
+# pending-ask hold that disposal closed the tab; the user answered to nothing.
+
+
+def _queue_open_ask(session: Session, ask_id: str, *, expires_in_ms: int = 3_600_000) -> None:
+    from local_operator.asks import store
+
+    now = store.now_ms()
+    store.append_event(
+        session._browser.resource.directory,
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + expires_in_ms,
+            "timeout_s": max(1, expires_in_ms // 1000),
+            "questions": [{"id": "signin", "question": "Sign in?", "options": []}],
+            "tool_call_id": "call_synthetic",
+            "urgent": False,
+        },
+    )
+
+
+def _answer_ask(directory: Path, ask_id: str) -> None:
+    from local_operator.asks import store
+
+    store.append_event(
+        directory,
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": ask_id,
+            "at": store.now_ms(),
+            "answers": {"signin": ["Signed in"]},
+            "by": {"surface": "unverified"},
+            "tool_call_id": "call_synthetic",
+        },
+    )
+
+
+async def _open(session: Session, call_id: str = "synthetic-open") -> Any:
+    opened = await execute_browser(
+        call_id,
+        {"action": "open", "url": "https://example.test/"},
+        None,
+        None,
+        session._build_tool_context(),
+    )
+    assert not opened.is_error, opened.text
+    return opened
+
+
+@pytest.mark.asyncio
+async def test_pending_ask_keeps_tab_across_runtime_retirement_then_answer_releases(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _session(headless_tui_env)
+    try:
+        await _open(session)
+        held_surface = session._browser.surface_id
+        _queue_open_ask(session, "a-signin")
+    finally:
+        # The retirement: ordinary disposal, no explicit close, no retain.
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 1, "disposal closed the tab the ask points at"
+    _control(protocol_peer, restartWorker=True)
+
+    successor = _session(headless_tui_env)
+    directory = successor._browser.resource.directory
+    try:
+        # Next turn, new runtime: the SAME tab is addressable again.
+        snap = await execute_browser(
+            "synthetic-snapshot",
+            {"action": "snapshot"},
+            None,
+            None,
+            successor._build_tool_context(),
+        )
+        assert not snap.is_error, snap.text
+        assert successor._browser.surface_id == held_surface
+        # Still unanswered: a second retirement keeps holding it.
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+    _answer_ask(directory, "a-signin")
+    answering = _session(headless_tui_env)
+    try:
+        snap = await execute_browser(
+            "synthetic-snapshot-2",
+            {"action": "snapshot"},
+            None,
+            None,
+            answering._build_tool_context(),
+        )
+        assert not snap.is_error, snap.text
+        assert answering._browser.surface_id == held_surface
+        assert answering._browser.resource.record.get("retention") == ""
+    finally:
+        # Answer settled the hold: ordinary cleanup closes the tab.
+        await answering.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ask", ["none", "timed_out"])
+async def test_disposal_without_an_open_ask_still_closes_the_tab(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, ask: str
+) -> None:
+    session = _session(headless_tui_env)
+    try:
+        await _open(session)
+        if ask == "timed_out":
+            _queue_open_ask(session, "a-late", expires_in_ms=-1_000)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_another_session_cannot_reach_a_tab_held_for_an_ask(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _session(headless_tui_env)
+    try:
+        await _open(session)
+        held = session._browser.surface_id
+        _queue_open_ask(session, "a-signin")
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+    other_dir = headless_tui_env / "sessions" / "synthetic-other"
+    lease = acquire_session_lease(other_dir)
+    other = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda _r, _s: _never_streams(_r, _s),
+        tools=[],
+        transcript=Transcript(other_dir),
+        system_blocks_provider=lambda: [],
+    )
+    other.add_dispose_hook(lease.release)
+    try:
+        context = other._build_tool_context()
+        # Adoption and a handed-tab close are the two verbs that take a handle;
+        # neither may reach a tab this session never owned.
+        adopted = await execute_browser(
+            "synthetic-foreign-adopt", {"action": "open", "tab": held}, None, None, context
+        )
+        assert adopted.is_error
+        closed = await execute_browser(
+            "synthetic-foreign-close", {"action": "close", "tab": held}, None, None, context
+        )
+        assert closed.is_error
+        assert _control(protocol_peer)["tabs"] == 1
+        recovered = await execute_browser(
+            "synthetic-foreign-recover", {"action": "recover"}, None, None, context
+        )
+        assert other._browser.surface_id == ""
+        assert held not in (recovered.text or "")
+    finally:
+        await other.dispose()
+    # The other session's disposal must not have closed the held tab.
+    assert _control(protocol_peer)["tabs"] == 1

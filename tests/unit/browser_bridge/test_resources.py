@@ -56,6 +56,9 @@ class BridgeFixture:
         if method == "owner_retain":
             self.retained = True
             return {"state": "retained"}
+        if method == "owner_release":
+            self.retained = False
+            return {"state": "released", "terminal": ""}
         if method == "owner_finish":
             if self.unreachable:
                 raise BridgeUnreachable(
@@ -741,3 +744,212 @@ def test_an_owed_handle_whose_tab_number_was_reused_stays_owed(tmp_path: Path) -
     resource.record["stranded_surfaces"] = [{"surface": "ui:8:A", "allocation_id": "a"}]
     resource.remember("ui:8:B")
     assert resource.record["stranded_surfaces"] == [{"surface": "ui:8:A", "allocation_id": "a"}]
+
+
+# -- pending-ask hold (session a64fec9430f3) ---------------------------------
+#
+# The incident: a sign-in tab was left open for ask a-e69c, the fleet update
+# retired the runtime, and the retiring process's disposal closed the tab
+# because the scope was unretained. These pin that a disposal while an ask is
+# OPEN keeps the tab, that the hold is released once the ask settles (answered,
+# timed out, withdrawn) or the tab is gone, and that ordinary cleanup with no
+# open ask is unchanged.
+
+
+def _queue_ask(directory: Path, ask_id: str, *, expires_in_ms: int = 3_600_000) -> None:
+    from local_operator.asks import store
+
+    now = store.now_ms()
+    store.append_event(
+        directory,
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + expires_in_ms,
+            "timeout_s": max(1, expires_in_ms // 1000),
+            "questions": [{"id": "signin", "question": "Sign in?", "options": []}],
+            "tool_call_id": "call_synthetic",
+            "urgent": False,
+        },
+    )
+
+
+def _settle_ask(directory: Path, ask_id: str, kind: str) -> None:
+    from local_operator.asks import store
+
+    event: dict[str, Any] = {
+        "v": 1,
+        "kind": kind,
+        "ask_id": ask_id,
+        "at": store.now_ms(),
+        "tool_call_id": "call_synthetic",
+    }
+    if kind == "answered":
+        event["answers"] = {"signin": ["Signed in"]}
+        event["by"] = {"surface": "unverified"}
+    store.append_event(directory, event)
+
+
+def _methods(bridge: BridgeFixture) -> list[str]:
+    return [method for method, _ in bridge.calls]
+
+
+@pytest.mark.asyncio
+async def test_disposal_with_an_open_ask_keeps_the_tab(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """The reproduction: before the hold this closed the tab (`owner_finish`
+    on an unretained scope answers `closed`)."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:private")
+    _queue_ask(tmp_path, "a-e69c")
+    result = await resource.finish(resource.generation, "disposed")
+    assert result.state == "retained"
+    retain = [p for m, p in bridge.calls if m == "owner_retain"]
+    assert retain and retain[0]["reason"] == "pending ask a-e69c"
+    record = json.loads(resource.path.read_text())
+    assert record["retention"] == "pending ask a-e69c"
+    assert record["surface_id"] == "bridge:100:private"
+    assert isinstance(record[resources.ASK_HOLD_EXPIRES_FIELD], int)
+    assert "close" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["none", "answered", "withdrawn", "timed_out"])
+async def test_disposal_without_an_open_ask_closes_as_before(
+    tmp_path: Path, bridge: BridgeFixture, settle: str
+) -> None:
+    """Ordinary cleanup is unchanged: no ask, or only settled ones, closes."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:private")
+    if settle == "timed_out":
+        _queue_ask(tmp_path, "a-1", expires_in_ms=-1_000)
+    elif settle != "none":
+        _queue_ask(tmp_path, "a-1")
+        _settle_ask(tmp_path, "a-1", settle)
+    result = await resource.finish(resource.generation, "disposed")
+    assert result.state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+    assert not json.loads(resource.path.read_text()).get("retention")
+
+
+@pytest.mark.asyncio
+async def test_a_child_finish_does_not_add_the_hold(tmp_path: Path, bridge: BridgeFixture) -> None:
+    """A child's authoritative finish keeps its own handoff rules (explicit
+    retain hands to the parent); only a session's disposal derives the hold."""
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:private")
+    _queue_ask(tmp_path, "a-1")
+    assert (await resource.finish(resource.generation, "completed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+async def test_no_live_tab_means_no_hold(tmp_path: Path, bridge: BridgeFixture) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:private")
+    resource.remember("")  # the agent closed its tab before asking
+    bridge.recover_reply = {"state": "closed", "tab": ""}
+    _queue_ask(tmp_path, "a-1")
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+async def _retire_with_open_ask(directory: Path, bridge: BridgeFixture) -> None:
+    first = BrowserResource(directory, directory.name)
+    first.initialize()
+    first.remember("bridge:100:private")
+    _queue_ask(directory, "a-1")
+    assert (await first.finish(first.generation, "disposed")).state == "retained"
+    bridge.calls.clear()
+
+
+@pytest.mark.asyncio
+async def test_successor_run_readdresses_the_held_tab_and_keeps_it_while_open(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Runtime restart: the next run recovers the SAME tab (addressable), and
+    its own disposal keeps holding it while the ask is still open."""
+    await _retire_with_open_ask(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    assert successor.record["surface_id"] == "bridge:100:private"
+    assert "owner_release" not in _methods(bridge)
+    result = await successor.finish(successor.generation, "disposed")
+    assert result.state == "retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["answered", "withdrawn"])
+async def test_successor_releases_the_hold_once_the_ask_settles(
+    tmp_path: Path, bridge: BridgeFixture, settle: str
+) -> None:
+    await _retire_with_open_ask(tmp_path, bridge)
+    _settle_ask(tmp_path, "a-1", settle)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    # Released at recovery: the answering turn still drives the same tab...
+    assert successor.record["surface_id"] == "bridge:100:private"
+    assert successor.record["retention"] == ""
+    assert "owner_release" in _methods(bridge)
+    # ...and ordinary cleanup closes it afterwards.
+    assert (await successor.finish(successor.generation, "disposed")).state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_hold_is_released_when_the_tab_was_closed_meanwhile(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_open_ask(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    bridge.recover_reply = {"state": "closed", "tab": ""}
+    await successor.ensure_recovered()
+    await successor.finish(successor.generation, "disposed")
+    assert "owner_release" in _methods(bridge)
+    assert json.loads(successor.path.read_text())["retention"] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_retain_is_never_rewritten_or_released(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember("bridge:100:private")
+    resource.record["retention"] = "pending login"
+    result = await resource.finish(resource.generation, "disposed")
+    assert result.state == "retained"
+    assert [p["reason"] for m, p in bridge.calls if m == "owner_retain"] == ["pending login"]
+    assert "owner_release" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_a_live_ask_hold_and_closes_a_lapsed_one(
+    tmp_path: Path, bridge: BridgeFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that is never resumed cannot pin the tab forever: once the
+    ask's deadline passes, `lop browser cleanup` releases the hold and closes."""
+    await _retire_with_open_ask(tmp_path, bridge)
+    record = json.loads((tmp_path / RESOURCE_NAME).read_text())
+    assert record["state"] == "retained"
+    eligible, reason = cleanup_disposition(record)
+    assert not eligible and "waiting on that answer" in reason
+    # No deadline at all: held until the ask settles.
+    assert not cleanup_disposition({**record, resources.ASK_HOLD_EXPIRES_FIELD: None})[0]
+
+    deadline = int(record[resources.ASK_HOLD_EXPIRES_FIELD])
+    monkeypatch.setattr(resources, "_now_ms", lambda: deadline + 1)
+    assert cleanup_disposition(record) == (True, "")
+    result = await cleanup_exact(tmp_path, record["generation"])
+    assert result.state == "closed", result
+    assert _methods(bridge)[-2:] == ["owner_release", "owner_finish"]
