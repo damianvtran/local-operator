@@ -102,9 +102,9 @@ async def test_wake_right_after_operator_turn_is_parked_not_delivered(tmp_path, 
 
     await session.prompt("q")
     assert len(stream.requests) == 1
-    assert session._last_operator_turn_end is not None, (
-        "the operator turn did not open the quiet window — parking keys on it"
-    )
+    assert (
+        session._last_operator_turn_end is not None
+    ), "the operator turn did not open the quiet window — parking keys on it"
 
     await session._deliver_wake(_due())
     # Parked: the deadline is armed and HOLDING the batch, so "no second turn,
