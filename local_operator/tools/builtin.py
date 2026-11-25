@@ -26926,6 +26926,15 @@ def _host_of_surface(surface_id: str) -> str:
     return ""
 
 
+def _named_host_label(host: str) -> str:
+    """:func:`_host_label` that never GUESSES (review F3): an empty or unknown
+    host is "an unknown browser host", not the extension by default, because a
+    handoff that names the wrong profile reads like success on a login wall."""
+    if host in (HOST_UI_PREFIX, HOST_BRIDGE_PREFIX):
+        return _host_label(host)
+    return "an unknown browser host"
+
+
 def _host_label(host: str) -> str:
     """A short prose name for a host, for the few sentences that need one."""
     if host == HOST_UI_PREFIX:
@@ -31718,7 +31727,7 @@ async def _reopen_handoff_if_gone(
     # only, because a path or query can hold a token and transcripts travel.
     origin = url_origin_for_copy(ref["url"])
     label = f"ask {ref['ask_id']} ({ref.get('ask_status')})"
-    recorded_host = _host_label(HOST_UI_PREFIX if str(ref.get("host", "")) == "ui" else "bridge")
+    recorded_host = _named_host_label(str(ref.get("host", "")))
     if reopened.is_error:
         # ALWAYS an error result, whatever the triggering action returned (a
         # `recover` answers in plain text): a failed reopen must be impossible
@@ -31731,10 +31740,14 @@ async def _reopen_handoff_if_gone(
             f"{result.text}\n\nThe tab for {label} is no longer open, and reopening {origin} "
             f"on {recorded_host} (where it was recorded) failed; nothing was opened on any "
             f"other browser host: {_origin_only_text(reopened.text)}",
+            # The triggering result's own details survive (review F5).
+            details=dict(result.details or {}),
         )
     # Named from the handle the host actually returned, never from the hint, so
     # the reply cannot claim a host the tab did not open on.
-    opened_on = _host_label(_host_of_surface(str((reopened.details or {}).get("surface_id", ""))))
+    opened_on = _named_host_label(
+        _host_of_surface(str((reopened.details or {}).get("surface_id", "")))
+    )
     note = (
         f"Reopened handoff: the tab for {label} is no longer open, so its page on {origin} "
         f"was reopened in a new background tab of this session in {opened_on}. This is the "
@@ -31781,11 +31794,16 @@ async def _reopen_handoff_if_gone(
     return _append_result_text(retried, note)
 
 
-#: A URL in prose: a scheme, then everything up to whitespace, a quote or an
-#: angle bracket. Compiled once (review N4-3).
-_PROSE_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+#: A URL in prose: a scheme, then everything up to whitespace, a double quote
+#: or an angle bracket. Compiled once (review N4-3). The APOSTROPHE is part of
+#: the URL (review F1): browsers leave it unencoded in userinfo, path and
+#: fragment, so ending the match there let everything after it survive.
+_PROSE_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
 #: Trailing characters that close the SURROUNDING text, not the URL: kept out of
-#: the rewrite so `(url=…)` or a sentence's full stop stays balanced (N4-2).
+#: the rewrite so `(url=…)` or a sentence's full stop stays balanced (N4-2). A
+#: trailing apostrophe is one only when it closes a quote the text opened; see
+#: :func:`_origin_only_text`. Dropping these can only SHORTEN what is kept,
+#: because the origin is rebuilt from what remains.
 _PROSE_URL_TAIL = ".,;:!?)]}"
 
 
@@ -31796,13 +31814,20 @@ def _origin_only_text(text: str) -> str:
     def origin(match: re.Match[str]) -> str:
         url = match.group(0)
         bare = url.rstrip(_PROSE_URL_TAIL)
+        # A closing quote is kept only when the URL was opened by one, and only
+        # the quote itself: never a tail carrying URL bytes.
+        quoted = match.start() > 0 and text[match.start() - 1] == "'"
+        while quoted and bare.endswith("'"):
+            bare = bare[:-1].rstrip(_PROSE_URL_TAIL)
         return url_origin_for_copy(bare) + url[len(bare) :]
 
     return _PROSE_URL.sub(origin, text)
 
 
 def _origin_only_value(value: Any) -> Any:
-    """:func:`_origin_only_text` over every string inside a details payload."""
+    """:func:`_origin_only_text` over every string inside a details payload.
+
+    Tuples are not walked (review F4): no detail builder produces one today."""
     if isinstance(value, str):
         return _origin_only_text(value)
     if isinstance(value, dict):

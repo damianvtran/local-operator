@@ -2817,6 +2817,7 @@ async def test_reopen_opens_on_the_recorded_host_with_both_reachable(
     recorded, other = (bridge_client, ui_client) if host == "bridge" else (ui_client, bridge_client)
     assert [p["url"] for p in _opens(recorded)] == [_HANDOFF_URL]
     assert _opens(other) == []
+    assert result.details is not None
     assert result.details["reopened_handoff"] == "a-signin"
     label = "the browser extension" if host == "bridge" else "desktop app's browser host"
     assert label in result.text.splitlines()[-1]
@@ -2903,3 +2904,17 @@ async def test_a_tab_with_no_ask_still_closes_on_either_host(
     client = bridge_client if host == "bridge" else ui_client
     assert "owner_finish" in [m for m, _ in client.calls]
     assert "owner_retain" not in [m for m, _ in client.calls]
+
+
+@pytest.mark.parametrize(
+    ("host", "label"),
+    [
+        ("bridge", "the browser extension"),
+        ("ui", "the Local Operator desktop app's browser host"),
+        ("", "an unknown browser host"),
+        ("cmux", "an unknown browser host"),
+    ],
+)
+def test_a_handoff_never_guesses_the_host_it_names(host: str, label: str) -> None:
+    """Review F3: an empty or unknown host used to be named the extension."""
+    assert builtin._named_host_label(host) == label

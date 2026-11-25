@@ -1066,7 +1066,8 @@ def test_reopen_is_offered_only_with_no_live_tab_and_a_wanting_ask(tmp_path: Pat
     resource.record_handoff_ref("a-1")
     assert resource.reopenable_handoff() is None  # the tab is still live
     resource.remember("")
-    assert resource.reopenable_handoff()["ask_id"] == "a-1"
+    reopenable = resource.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_id"] == "a-1"
     # A read failure never opens a page on a guess.
     log = store.asks_log_path(tmp_path)
     saved = log.read_bytes()
@@ -1101,7 +1102,8 @@ def test_an_answered_ask_reopens_only_inside_the_short_window(
     resource.record_handoff_ref("a-1")
     resource.remember("")
     _settle_ask(tmp_path, "a-1", "answered")
-    assert resource.reopenable_handoff()["ask_status"] == "answered"
+    reopenable = resource.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_status"] == "answered"
     now = resources._now_ms()
     monkeypatch.setattr(
         resources, "_now_ms", lambda: now + resources.REOPEN_AFTER_ANSWER_MS + 1_000
@@ -1122,7 +1124,8 @@ async def test_a_hold_settled_by_its_ask_spends_the_reference_but_a_vanished_tab
     bridge.recover_reply = {"state": "closed", "tab": ""}
     await tab_gone.ensure_recovered()
     # Ask still open, tab vanished: the reference survives for the floor.
-    assert tab_gone.reopenable_handoff()["ask_id"] == "a-1"
+    reopenable = tab_gone.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_id"] == "a-1"
     _settle_ask(tmp_path, "a-1", "withdrawn")
     tab_gone.record["retention"] = "pending ask a-1"
     tab_gone.record[resources.ASK_HANDOFFS_FIELD] = [{"ask_id": "a-1"}]
@@ -1142,3 +1145,23 @@ def test_origin_only_text_keeps_the_surrounding_delimiters() -> None:
         "'https://h.test:8443' failed (url=https://h.test:8443). "
         "See https://h.test, or [https://h.test] and <https://h.test>"
     )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://us'er:pa'SECRETPW@h.test/",
+        "https://h.test/reset/abc'SECRETTAIL",
+        "https://h.test/p#frag'SECRETFRAG",
+    ],
+)
+def test_origin_only_text_keeps_bytes_after_an_apostrophe_out(url: str) -> None:
+    """Review F1: an apostrophe is a URL byte (unencoded in userinfo, path and
+    fragment), so ending the match there let everything after it survive."""
+    from local_operator.tools.builtin import _origin_only_text
+
+    for text in (url, f"failed (url={url}).", f"see {url} now", f"'{url}'"):
+        out = _origin_only_text(text)
+        print("F1:", repr(text), "->", repr(out))
+        assert "SECRET" not in out and "us'er" not in out
+        assert "https://h.test" in out

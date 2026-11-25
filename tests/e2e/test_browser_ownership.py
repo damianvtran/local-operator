@@ -20,7 +20,7 @@ import httpx
 import pytest
 
 from local_operator.browser_bridge import state
-from local_operator.browser_bridge.protocol import PROTO_VERSION
+from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
 from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
@@ -1582,7 +1582,9 @@ async def test_release_clears_references_on_disk_even_when_the_rpc_fails(
 
         async def failing(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
             if method == "owner_release":
-                raise backend.BridgeError("internal", "synthetic release failure")
+                raise backend.BridgeError(
+                    ErrorCode.EXTENSION_DISCONNECTED, "synthetic release failure"
+                )
             return await original(client, method, params)
 
         monkeypatch.setattr(backend.HostClient, "call", failing)
