@@ -853,6 +853,32 @@ def test_freshness_a_reasonless_failed_row_takes_the_census_remedy(
     assert "service daemons: run `lop services status`" in captured.err
 
 
+def test_freshness_a_reasonless_unsupervised_row_gets_no_per_daemon_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An ``unsupervised`` row's own warning already names the fix.
+
+    Regression (merge gate run 45523620065): the census remedy for ``mobile``
+    is ``lop mobile restart``, which is launchd-only and wrong for a daemon
+    running outside its supervisor — ``test_update_command_unsupervised_warns``
+    pins that it never appears. Such a row, and a reasonless ``pending`` one,
+    takes the generic pointer at ``lop services status`` instead.
+    """
+    stage = update.StageReport(
+        daemons=(
+            update.DaemonStatus("mobile", "unsupervised"),
+            update.DaemonStatus("network relay", "pending"),
+        )
+    )
+    captured, report = _emit(stage, monkeypatch, capsys)
+    remedies = {row["name"]: row["remedy"] for row in report["daemons_incomplete"]}
+    assert remedies == {"mobile": "", "network relay": ""}
+    assert "lop mobile restart" not in captured.err
+    assert "lop network restart" not in captured.err
+    assert "mobile: run `lop services status`" in captured.err
+    assert "network relay: run `lop services status`" in captured.err
+
+
 def test_freshness_a_fully_refreshed_report_still_reads_clean(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

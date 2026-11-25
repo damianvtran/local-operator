@@ -11017,10 +11017,20 @@ def _incomplete_daemons(report: StageReport) -> list[dict[str, str]]:
 
     THE REMEDY IS THE CENSUS'S, NEVER A SECOND TABLE: a row's own ``reason``
     when it has one (the reconciliation folds ``services._DAEMON_MODULES``'s
-    sentence in there, a deferral keeps its own), else the census sentence for
-    that display name (``services.daemon_remedy``), else ``""`` — which the
-    human half renders as "see ``lop services status``". Adding a command list
-    here would let this output disagree with ``lop services status``.
+    sentence in there, a deferral keeps its own); else, for a ``failed`` row
+    ONLY, the census sentence for that display name (``services.daemon_remedy``);
+    else ``""`` — which the human half renders as "see ``lop services status``".
+    Adding a command list here would let this output disagree with ``lop
+    services status``.
+
+    WHY ONLY ``failed`` (merge gate run 45523620065): the census sentence is
+    the fix for a supervised daemon that did not move. An ``unsupervised``
+    row's refresher already printed its own warning naming the right command
+    (``lop mobile serve``); the census's ``lop mobile restart`` is launchd-only
+    and wrong there, and ``test_update_command_unsupervised_warns`` pins that
+    it never appears. A reasonless ``pending`` row (reconciliation always gives
+    one a reason) is likewise not proven to need that command, so it gets the
+    generic pointer rather than a guess.
 
     Disclosure only: nothing here restarts, signals or re-reads a daemon.
     """
@@ -11034,7 +11044,8 @@ def _incomplete_daemons(report: StageReport) -> list[dict[str, str]]:
             {
                 "name": status.name,
                 "status": status.status,
-                "remedy": status.reason or daemon_remedy(status.name),
+                "remedy": status.reason
+                or (daemon_remedy(status.name) if status.status == "failed" else ""),
             }
         )
     return rows
