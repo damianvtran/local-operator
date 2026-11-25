@@ -508,6 +508,10 @@ def decide(
     except StoreRefused as failure:
         if failure.code == "already_decided":
             raise HoldRefused(409, "already_decided") from None
+        if failure.code == "snapshot_stale":
+            # #4570 security S-1: a re-drive replaced the decision row while
+            # this word was being signed; the renderer re-reads it.
+            raise HoldRefused(409, "snapshot_stale") from None
         raise HoldRefused(409, "state_unavailable") from None
     if settle_locally:
         # Closed words only, like every release line; nothing for the

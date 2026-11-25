@@ -10136,6 +10136,92 @@ class Store:
         except (sqlite3.Error, StoreRefused):
             return
 
+    #: Bounded retries of the one-statement conditional drop under ``busy``.
+    #: Each attempt already waits up to ``_BUSY_TIMEOUT_MS`` (2 s), so three
+    #: bound the stall a screening pass can take here at about 6 s.
+    _UNDECIDED_DROP_ATTEMPTS = 3
+
+    def drop_undecided_review_decision(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        hold_code: str,
+        require_verdict: str | None = None,
+    ) -> bool:
+        """Drop ONE message's review decision row only while the owner has given
+        no word on it; return whether a row was dropped. Never raises.
+
+        WHY (#4546 security review S-4). The conflict paths used to read
+        ``owner_release(...) is None`` on one connection and then call
+        ``drop_review_decision`` in a second transaction, which deletes the
+        release row too. An owner Discard committed between the two was erased:
+        the owner was told "Discarded", and the next current preferred allow
+        delivered the message. Here the "undecided" test and the delete are ONE
+        ``BEGIN IMMEDIATE`` statement (``NOT EXISTS`` over ``owner_releases``),
+        so a concurrent Discard either commits first (nothing is dropped) or
+        waits for this write. A Discard that waits was signed over the row
+        this deletes, so its own write re-checks the CURRENT row
+        (:meth:`_require_release_matches_decision`) and is refused
+        ``snapshot_stale`` instead of recording a word for a row that no longer
+        exists (#4570 security S-1). Between this delete and the caller's
+        ``record_work_scope_decision`` there is briefly NO decision row; a
+        Discard landing in that gap is refused for lack of one, which fails
+        closed (the owner re-reads and decides the new row).
+
+        BUSY (#4570 security S-2). Under write contention the statement is
+        retried ``_UNDECIDED_DROP_ATTEMPTS`` times (each attempt already waits
+        up to the store's busy timeout), then a content-free warning is logged
+        and ``False`` returned. The caller cannot reschedule the hold sooner
+        from inside the pass: the connector re-writes a ``write_once_conflict``
+        hold a day out by its code after the pass returns. So the bounded
+        retry is what keeps a Deliver-able row from outliving a current bounce,
+        and the warning is what makes a residual failure visible.
+
+        CONSTRAINTS: it never touches ``owner_releases`` — a signed word is
+        never deleted on this path. Any release row for the message counts as
+        decided, whatever its generation, because erring towards "decided" only
+        leaves a stale row in place, while erring the other way loses a word.
+        ``hold_code`` (and ``require_verdict`` when given) must still match
+        inside the same statement, so a row another pass already replaced is
+        left alone. The unscreened-rescreen drop (round 3, Q3) deliberately
+        removes a refused release and keeps using ``drop_review_decision``.
+        """
+
+        key = _owner_key(owner)
+        sql = (
+            "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND hold_code = ? "
+            "AND NOT EXISTS (SELECT 1 FROM owner_releases r "
+            "WHERE r.owner_key = ? AND r.message_id = ?)"
+        )
+        params: list[Any] = [key, message_id, hold_code, key, message_id]
+        if require_verdict is not None:
+            sql += " AND screener_verdict = ?"
+            params.append(require_verdict)
+        for _attempt in range(self._UNDECIDED_DROP_ATTEMPTS):
+            try:
+                with self._connect() as conn:
+                    self._init(conn)
+                    self._begin_write(conn)
+                    self._require_live(conn, owner)
+                    self._ensure_work_scope_tables(conn)
+                    return conn.execute(sql, params).rowcount > 0
+            except StoreRefused as refused:
+                if refused.code != "busy":
+                    return False
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error) and "busy" not in str(error):
+                    return False
+            except sqlite3.Error:
+                return False
+        # Closed words only: no id, owner or content (DESIGN §2.2).
+        logger.warning(
+            "bridge: undecided review drop refused code=busy attempts=%d",
+            self._UNDECIDED_DROP_ATTEMPTS,
+        )
+        return False
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 
@@ -11125,7 +11211,38 @@ class Store:
                 self._rearm_write_once_conflict(conn, _owner_key(owner), str(row["message_id"]))
             if existing is not None:
                 return existing
+            self._require_release_matches_decision(conn, owner, row)
             return self._insert_owner_release(conn, owner, row, outcome="pending", outcome_at=None)
+
+    @staticmethod
+    def _require_release_matches_decision(
+        conn: sqlite3.Connection, owner: OwnerSnapshot, row: Mapping[str, Any]
+    ) -> None:
+        """Refuse ``snapshot_stale`` unless the CURRENT decision row is the one signed.
+
+        WHY (#4570 security S-1, the reverse race). The desktop route reads the
+        decision row and signs over it OUTSIDE any transaction, and signing can
+        prompt the operator for seconds. A connector re-drive can replace that
+        row meanwhile (narrow an allow conflict to a Discard-only bounce, or
+        swap a conflict for a ``model_hold``). Writing the release anyway told
+        the owner "Discarded" for a row that no longer existed; the next pass
+        refused the mismatched release and screened on, and a current allow
+        delivered. Re-reading under this write lock makes sign-then-write a
+        check-and-write: the route answers 409 ``snapshot_stale``, the renderer
+        re-reads, and nothing false is reported. The match is the connector's
+        own consume-time test (``hold_release.release_matches_decision``), so
+        the two can never disagree about what "the same decision" means.
+        """
+
+        from local_operator.team_bridge import hold_release as hr
+
+        decision = conn.execute(
+            "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND creator_generation = ?",
+            (_owner_key(owner), row["message_id"], owner.enrollment_generation),
+        ).fetchone()
+        if decision is None or not hr.release_matches_decision(row, dict(decision)):
+            raise StoreRefused("snapshot_stale", "the decision changed since it was signed")
 
     @staticmethod
     def _rearm_write_once_conflict(conn: sqlite3.Connection, key: str, message_id: str) -> None:
@@ -11223,6 +11340,9 @@ class Store:
                 raise StoreRefused(
                     "state_unavailable", "local terminal audit row already recorded"
                 ) from error
+            # #4570 security S-1: checked last so a duplicate audit row keeps
+            # its own typed refusal; raising here still rolls back both rows.
+            self._require_release_matches_decision(conn, owner, row)
             return written
 
     def _insert_local_terminal_audit(
