@@ -415,6 +415,31 @@ READ_LINE_CAP = 2000
 #: spill handle, because spilling a copy of a file that is already on disk
 #: would double the bytes for nothing.
 READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+#: Char budget for a ``read`` WITH an explicit ``range``. An explicit range is
+#: an explicit request: the model already narrowed to the span it wants, so
+#: clipping that span at 8 KiB only buys a paging call (on the long-coding
+#: bench, 5/5 truncated file reads were paged on within 3 calls). Measured over
+#: the fixture repos' non-test sources rendered with line numbers: 21/49 exceed
+#: 8 KiB (p50 5.3k, p90 24.6k, max 188k), so doubling the budget returns most
+#: requested spans whole while still bounding a ``range="1-"``.
+#:
+#: DELIBERATELY 16 KiB, not 32, for two reasons that both bind:
+#:
+#: * It must fit ``harness.replay_bound.READ_REPLAY_BOUND_CHARS`` (16 KiB +
+#:   1 KiB footer room). That bound middle-elides every ``read`` result on
+#:   EVERY request, the current turn included, so a 32 KiB span arrived cut in
+#:   the middle with the clamp footer pointing past the gap (PR #4566 round 1,
+#:   M1/Q1). A unit test pins this budget plus footer under that bound.
+#: * A delivered result is re-sent on every later turn until compaction, and a
+#:   ``range`` rides in the result's details, so reads of different spans of
+#:   one file are never superseded. On a long session a 32 KiB span re-sent
+#:   per turn (~8k tokens) costs far more than the one ~2k-token paging call it
+#:   saves; 16 KiB halves that standing cost and still removes the common page.
+#:
+#: Whole-file reads keep :data:`READ_OUTPUT_LIMIT_CHARS` (and ``.py`` its
+#: structural summary); bash keeps its 8 KiB clamp, whose log-tail rationale is
+#: unchanged.
+READ_RANGE_OUTPUT_LIMIT_CHARS = 16 * 1024
 
 #: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
 #: before it is shaped into a map. DELIBERATELY 16 KiB rather than
@@ -4535,6 +4560,109 @@ def _bash_output_summary(stdout: str, stderr: str) -> str:
     return "\n".join(parts)
 
 
+#: BSD sed's complaints when handed GNU's ``sed -i 's/a/b/' FILE``: BSD reads
+#: the script as ``-i``'s backup suffix, then parses FILE as the script, so the
+#: message depends on FILE's first character, read as a sed command. Measured
+#: with real ``sed -i 's/a/b/' <file>`` runs on macOS (PR #4566 round 1, m1):
+#:
+#: * ``invalid command code`` -- ``README.md``, ``Makefile``, ``./x.py``, ``util.js``
+#: * ``extra characters at the end of`` -- ``x.py``, ``lib/a.py``, ``docs/b.md``,
+#:   ``package.json``, absolute paths
+#: * ``unterminated substitute pattern`` -- ``src/main.py``, ``s.py``
+#: * ``command a|c|i expects`` -- ``app.py``, ``config.py``, ``index.ts``
+#: * ``undefined label`` -- ``tests/x.py``, ``bin.sh``
+#: * ``unterminated transform source string`` -- ``yarn.lock``
+#: * ``unused label`` -- ``:x.py``
+#: * ``-I or -i may not be used with stdin`` -- ``requirements.txt``, ``w.py``
+#:   (``r``/``w``/``#`` consume the rest as a filename or comment)
+#:
+#: In the long-coding bench both LOP and Claude Code re-sent the failing GNU
+#: form once before switching (one wasted call per occurrence). Anchored on
+#: BSD's ``sed: `` prefix so GNU sed's wording (``sed: -e expression #1``)
+#: and unrelated stderr never match; the command gate
+#: (:data:`_GNU_SED_INPLACE_CMD_RE`) is what makes a list this wide safe, since
+#: several of these messages also follow an ordinary bad script.
+#: BSD echoes the script it parsed in quotes WITH sed's appended newline, so the
+#: real complaint spans two lines (``sed: 1: "f\n": invalid command code f``);
+#: ``[^"]*`` crosses that newline where ``.*`` would not, which is why a
+#: single-line fixture once passed while real output never matched.
+_BSD_SED_INPLACE_RE = re.compile(
+    r'^sed: (?:\d+: "[^"]*": (?:invalid command code|extra characters at the end of'
+    r"|unterminated substitute pattern|unterminated transform source string"
+    r"|command [aci] expects|undefined label|unused label)"
+    r"|-I or -i may not be used with stdin)",
+    re.MULTILINE,
+)
+#: A ``sed`` invocation whose ``-i`` (alone or ending a flag cluster such as
+#: ``-Ei``) is followed by a separate argument that is not an empty suffix:
+#: GNU's form. ``sed -i '' …`` and an attached suffix (``-i.bak``) are BSD-
+#: correct and never match, and neither does a sed with no ``-i`` at all, so
+#: ``echo a | sed 'foo'`` failing with ``invalid command code`` gets no
+#: in-place advice (round 1, m2). Stops at a shell separator so a later
+#: command's ``-i`` is not attributed to this sed.
+#:
+#: Round 2 (m2, n1), each form measured against real BSD sed on macOS:
+#:
+#: * ``sed`` may follow ``/`` (``/usr/bin/sed``) or a quote opening a nested
+#:   shell's script (``bash -c "sed -i …"``), not just whitespace/separators.
+#: * ``-i''`` / ``-i""`` reach sed as a bare ``-i`` (the shell drops the empty
+#:   quotes), so they fail exactly like ``-i`` and are treated as it.
+#: * Only OPTION tokens (``-…``, plus the argument ``-e``/``-f`` take) may sit
+#:   between ``sed`` and ``-i``: BSD's getopt stops at the first operand, so a
+#:   `` -i `` inside the script text (``sed 's/a -i b' f``) is not a flag and
+#:   gets no in-place advice, while ``sed -e 's/a/b/' -i f`` still does.
+#:   A token is quote-aware (``'…'`` / ``"…"`` count as one span), so a script
+#:   holding spaces is never split into fake option tokens.
+#:
+#: Round 3 (M1): every option token must have exactly ONE parse. The generic
+#: ``-…`` branch used to accept ``-e``/``-f`` too, so ``-e -n`` read either as
+#: one option-plus-argument or as two bare options; on a command with no ``-i``
+#: to find, the engine retried every split of the run -- 2^n. ``sed`` + ``-e -n``
+#: x24 took >20 s and a 10 KB run of `` -e`` >100 s, synchronously inside
+#: ``execute_bash`` on the event loop. The lookahead bars the generic branch
+#: from a letters-only flag ending in ``e``/``f``, so such a flag can only take
+#: its argument, and each token now has one reading: the scan is linear. A side
+#: effect is also the correct BSD reading: in ``sed -e -i f`` the ``-i`` is
+#: ``-e``'s script, not a flag, so it gets no in-place advice.
+_SED_TOKEN = r"""(?:[^\s|;&'"]|'[^']*'|"[^"]*")+"""
+_GNU_SED_INPLACE_CMD_RE = re.compile(
+    r"(?:^|[\s;&|(`\"'/])sed"
+    rf"(?:\s+(?:-[A-Za-z]*[ef]\s+{_SED_TOKEN}|-(?![A-Za-z]*[ef](?:\s|$)){_SED_TOKEN}))*?"
+    r"\s+-[A-Za-z]*i(?:''|\"\")?\s+(?!''|\"\")\S"
+)
+#: One line, not a man page: the fix is a single argument and the model already
+#: knows ``sed``.
+BSD_SED_INPLACE_HINT = "macOS BSD sed: `-i` takes a suffix argument; use `sed -i '' …`."
+#: Commands longer than this get no sed hint (see :func:`_bsd_sed_hint`).
+_SED_HINT_MAX_COMMAND = 4096
+
+
+def _bsd_sed_hint(command: str, stderr: str) -> str | None:
+    """The BSD ``sed -i`` hint for this result, or ``None``.
+
+    Darwin only, because the hint is only true where ``sed`` is BSD's; a Linux
+    host's GNU sed takes ``-i`` with no argument, and the advice would be wrong
+    there. Needs BOTH a GNU-form ``-i`` in ``command`` and a BSD complaint in
+    ``stderr``: either alone is a different mistake. Returned once per result
+    however many matching lines stderr holds.
+    """
+    if sys.platform != "darwin" or not stderr:
+        return None
+    # Belt and braces for M1 (round 3): the regex is linear now, but it still
+    # runs synchronously on the event loop for every failed bash call, so a
+    # future edit that reintroduces an ambiguous branch must not be able to
+    # freeze the TUI on a huge command. The substring precheck skips the regex
+    # for the overwhelmingly common failure with no ``sed`` in it, and the
+    # length cap bounds the worst case; a GNU-form ``sed -i`` one-liner is far
+    # below it, and a command past it just loses a one-line hint. No ``"-i"``
+    # precheck: a flag cluster (``sed -Ei``) holds no ``-i`` substring.
+    if len(command) > _SED_HINT_MAX_COMMAND or "sed" not in command:
+        return None
+    if not _GNU_SED_INPLACE_CMD_RE.search(command):
+        return None
+    return BSD_SED_INPLACE_HINT if _BSD_SED_INPLACE_RE.search(stderr) else None
+
+
 def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tuple[int, int]:
     """Split ``budget`` chars between stdout and stderr, stderr first.
 
@@ -6325,6 +6453,12 @@ async def execute_bash(
         # Under the exit code, not last: the tool card keeps the HEAD of a
         # result, and this line is an instruction the agent must act on.
         parts.insert(1, worktree_notice)
+    sed_hint = _bsd_sed_hint(params.command, stderr)
+    if sed_hint:
+        # Same head slot as worktree_notice, for the same reason: the tool card
+        # keeps the head, and the line is the one action that ends the retry.
+        # Its own line, so stdout/stderr bodies stay byte-for-byte what ran.
+        parts.insert(1, sed_hint)
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     if pad_exceeded:
@@ -6684,7 +6818,7 @@ class ReadParams(BaseModel):
         default=None,
         description=(
             "Optional 1-based inclusive line range 'start-end' (e.g. '10-40') "
-            "or 'start-' to read to the end. Applies to files and to "
+            "or 'start[-]' to the end. Applies to files and to "
             "spill:// handles; on a spill search ('?q=') it selects which "
             "MATCHES to return, not which lines. Ignored for other internal URLs."
         ),
@@ -6698,11 +6832,17 @@ class ReadParams(BaseModel):
     )
 
 
-_LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
+# The dash group is optional so a bare start line (``"76"``) parses: models
+# send it often enough that rejecting it cost a whole retry call each time.
+_LINE_RANGE_RE = re.compile(r"^(\d+)(?:\s*-\s*(\d+)?)?$")
 
 
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
-    """Parse a ``'start-end'`` / ``'start-'`` range spec.
+    """Parse a ``'start-end'`` / ``'start-'`` / bare ``'start'`` range spec.
+
+    A bare start means ``'start-'``: it is a superset of any plausible reading
+    (one line, or "from here"), and the clamp footer already names the
+    continuation if the rest does not fit, so nothing is lost by reading on.
 
     Raises :class:`InvalidToolArgumentsError` (a ``ValueError`` subclass, so
     existing ``except ValueError`` callers are unaffected) because every
@@ -6721,7 +6861,7 @@ def _parse_line_range(spec: str) -> tuple[int, int | None]:
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
         raise InvalidToolArgumentsError(
-            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
+            f"invalid line range '{spec}' (expected 'start-end', 'start-' or 'start')"
         )
     start = int(match.group(1))
     if start < 1:
@@ -6746,7 +6886,7 @@ def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
 
 
-def _fits_output_budget(body: str) -> bool:
+def _fits_output_budget(body: str, limit: int = READ_OUTPUT_LIMIT_CHARS) -> bool:
     """Whether a rendered ``read`` body escapes the per-result clamp.
 
     One definition of the threshold, because two callers must agree on it to
@@ -6757,12 +6897,20 @@ def _fits_output_budget(body: str) -> bool:
     restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
     future edit to one of them stop the scan early on a body that then gets
     clamped, which is precisely the ``None`` leak the footer must never see.
+    The ranged callers therefore all pass the same
+    :data:`READ_RANGE_OUTPUT_LIMIT_CHARS`.
     """
-    return len(body) <= READ_OUTPUT_LIMIT_CHARS
+    return len(body) <= limit
 
 
 def _clamp_file_body(
-    body: str, path: Path, start: int, total: int, *, display: str | None = None
+    body: str,
+    path: Path,
+    start: int,
+    total: int,
+    *,
+    display: str | None = None,
+    limit: int = READ_OUTPUT_LIMIT_CHARS,
 ) -> str:
     """Hold one ``read`` result inside the char budget.
 
@@ -6783,15 +6931,15 @@ def _clamp_file_body(
     gate escalates to an approval prompt, while ``scratchpad://big.md`` is the
     same continuation the caller already made (QA round 1, Q3).
     """
-    if _fits_output_budget(body):
+    if _fits_output_budget(body, limit):
         return body
-    clipped = body[:READ_OUTPUT_LIMIT_CHARS]
+    clipped = body[:limit]
     cut = clipped.rfind("\n")
     if cut > 0:
         clipped = clipped[:cut]
     next_line = start + len(clipped.splitlines())
     return (
-        f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
+        f"{clipped}\n\n[truncated at {limit} chars; "
         f"{total - next_line + 1} of {total} lines not shown. Continue with "
         f'read(path="{display or path}", range="{next_line}-{next_line + 200}") '
         f"or narrow with grep]"
@@ -7857,7 +8005,7 @@ _LINE_BREAK_RE = re.compile(f"[{_LINE_BREAK_CHARS}\r]")
 #: exactly the same character (see :func:`_stream_text_window`). This is what
 #: bounds peak memory for an open-ended ``range="30000-"``, where "the
 #: requested lines" is the whole tail of the file.
-_RANGED_KEEP_CHARS = READ_OUTPUT_LIMIT_CHARS
+_RANGED_KEEP_CHARS = READ_RANGE_OUTPUT_LIMIT_CHARS
 
 
 class _RangedRead(NamedTuple):
@@ -8074,7 +8222,7 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
         with path.open("rb") as handle:
             binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
             body = _number_lines(lines, start, span=window_lines)
-            if total_lines is None and not _fits_output_budget(body):
+            if total_lines is None and not _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # The head would be clamped and the footer needs the exact
                 # count, so recover it: the same scanner with retention off,
                 # over the same bytes, never a second divergent splitter.
@@ -10540,7 +10688,7 @@ async def _read_path(
             # keep fewer lines than the window holds, and the width must
             # still be the one the full window renders with.
             body = _number_lines(ranged.lines, start, span=ranged.window_lines)
-            if _fits_output_budget(body):
+            if _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # No footer, so the file's exact total was never needed and
                 # the scan was allowed to stop as soon as the window was
                 # complete (see _stream_text_window): this is the common
@@ -10553,7 +10701,14 @@ async def _read_path(
                 # exact total with a count-only pass over the same bytes
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
-                rendered = _clamp_file_body(body, path, start, total, display=display_path)
+                rendered = _clamp_file_body(
+                    body,
+                    path,
+                    start,
+                    total,
+                    display=display_path,
+                    limit=READ_RANGE_OUTPUT_LIMIT_CHARS,
+                )
             return _text(
                 tool_call_id,
                 "read",
@@ -36786,7 +36941,7 @@ class HubParams(BaseModel):
     range: str | None = Field(
         default=None,
         description=(
-            "op='peek': transcript steps to read, as 'start-end' or 'start-' "
+            "op='peek': transcript steps to read, as 'start-end' or 'start[-]' "
             "(1-based, stable across peeks); steps= reads the last N."
         ),
     )
