@@ -394,17 +394,17 @@ if TYPE_CHECKING:
     from local_operator.harness.verifier_evidence import VerifierEvidence
     from local_operator.mcp.manager import McpManager
 
-    # Type-only: the contract itself is built by the host that installs it
-    # (``exec_startup`` / ``sdk._build_session``), and the session holds the
-    # object without ever constructing one.
-    from local_operator.output_contract import OutputContract
-    from local_operator.research_evidence import AuxiliaryUsageReceipt
-
     # Type-only for the same reason ``resume`` is imported lazily at its two
     # call sites below: ``cli.py``'s startup path is guarded by a test that
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
     # in the other direction too.
     from local_operator.network.move_team import PendingMovedTeam
+
+    # Type-only: the contract itself is built by the host that installs it
+    # (``exec_startup`` / ``sdk._build_session``), and the session holds the
+    # object without ever constructing one.
+    from local_operator.output_contract import OutputContract
+    from local_operator.research_evidence import AuxiliaryUsageReceipt
     from local_operator.resume import SessionAttachment
 
     # Type-only: ``session_factory`` builds sessions, so a runtime import
@@ -4886,6 +4886,7 @@ class Session:
         self._unresolved_team_reason: str = ""
         self._pending_moved_team: PendingMovedTeam | None = None
         self._pending_move_apply_seen: tuple[int, int, int, int] | None = None
+        self._pending_move_retry: tuple[tuple[int, int, int, int], float] | None = None
         #: Monotonic time of the last re-resolve attempt for those names (see
         #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
         self._attachment_reresolved_at: float | None = None
@@ -9714,6 +9715,7 @@ class Session:
                 self._attachment_adoption_attempted = True
             self._pending_moved_team = None
             self._pending_move_apply_seen = None
+            self._pending_move_retry = None
             self._unresolved_team = ""
             self._unresolved_team_reason = ""
         else:
@@ -10108,7 +10110,7 @@ class Session:
         ):
             return
         from local_operator.network.definitions import index_path
-        from local_operator.network.move_team import restore_bound
+        from local_operator.network.move_team import TeamIdentityRefused, restore_bound
         from local_operator.session.errors import ProfileRegistryUnavailable
         from local_operator.types import TeamRegistryRecoveryError
 
@@ -10118,10 +10120,20 @@ class Session:
             # of an installed team/role. The token is only a scan throttle;
             # the bound restore below independently proves identity/ceilings.
             stat = index_path(teams.config_dir).stat()
-            applied = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
-            if applied == self._pending_move_apply_seen:
-                return
-            self._pending_move_apply_seen = applied
+        except OSError:
+            return  # No readable apply signal; no registry scan or authority write.
+        applied = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
+        if applied == self._pending_move_apply_seen:
+            return
+        now = time.monotonic()
+        retry = self._pending_move_retry
+        if retry is not None and retry[0] == applied and now < retry[1]:
+            return
+        # An unchanged apply need not rewrite the index. Allow a later send to
+        # retry a transient failure, at the existing attachment refresh floor;
+        # a new apply always gets one immediate attempt of its own.
+        self._pending_move_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
+        try:
             teams.refresh()
             agents = self.agent_registry
             if agents is not None:
@@ -10137,17 +10149,24 @@ class Session:
                 self._restoring_attachment = False
         except ProfileRegistryUnavailable:
             raise  # The owner already has a separate typed registry refusal.
-        except (OSError, TypeError, ValueError, TeamRegistryRecoveryError):
+        except (OSError, TypeError, ValueError, TeamRegistryRecoveryError) as error:
+            # The authority helpers wrap unreadable team/role rows as identity
+            # refusals. Only actual read/recovery failures are retryable; a
+            # completed mismatch (or still-missing row) waits for another apply.
+            transient = (OSError, ProfileRegistryUnavailable, TeamRegistryRecoveryError)
+            if not isinstance(error, transient) and not (
+                isinstance(error, TeamIdentityRefused) and isinstance(error.__cause__, transient)
+            ):
+                self._pending_move_apply_seen = applied
             # Existing owner admission still returns AttachmentUnavailable. No
             # name-only fallback, grandfathering or sync request from this path.
             logger.debug("bound attachment still unavailable at admission", exc_info=True)
             return
         self.attachment_restore_notice = ""
 
-    #: Minimum seconds between two re-resolve attempts of an unresolved stored
-    #: attachment when the registries expose no root to fingerprint.
-    #: ``_prepare_system_blocks`` runs at every provider step, and a team that is
-    #: genuinely gone would otherwise force a registry rescan per step.
+    #: Minimum seconds between re-resolves without a change signal, including
+    #: a transiently failed scan of one definitions generation. Without a
+    #: floor, every provider step or refused send could force a registry scan.
     _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
 
     def _reresolve_unresolved_attachment(self) -> None:

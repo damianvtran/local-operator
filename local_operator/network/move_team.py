@@ -1175,7 +1175,10 @@ def bind_runtime_authority(
             snapshot = _with_recorded_efforts(_with_recorded_tiers(snapshot, expected), expected)
         record = snapshot.record()
         if restoring:
-            _compare(expected, record, local=True)
+            # A pending move has not yet attached on this owner. It may only
+            # recover the revision arrival attested, unlike an ordinary resume
+            # of a locally established binding, which can follow brief edits.
+            _compare(expected, record, local=True, exact_revision=pending_move is not None)
     except _DefinitionNotLoaded as missing:
         missing.binding = expected
         raise

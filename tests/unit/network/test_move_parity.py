@@ -927,6 +927,15 @@ class TestReresolveRefreshesBothRegistries:
             "replaced-proof",
             "different-mirror",
             "different-definition",
+            "different-brief",
+            "transient-registry",
+            "transient-team-read",
+            "transient-journal",
+            "retiring",
+            "disposing",
+            "updating",
+            "busy",
+            "turn-locked",
             "revoked-source",
             "wrong-owner",
             "wrong-network-seat",
@@ -937,20 +946,29 @@ class TestReresolveRefreshesBothRegistries:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
     ) -> None:
         import asyncio
+        import time
         from dataclasses import replace
         from datetime import datetime, timezone
+        from unittest.mock import Mock
 
         from local_operator.agents import AgentRegistry
         from local_operator.harness.types import Message, TextContent
         from local_operator.network import definitions, identity, move_team, store
         from local_operator.network.types import MemberRecord, NetworkRecord
         from local_operator.resume import write_session_attachment
-        from local_operator.session.errors import AttachmentUnavailable
-        from local_operator.session.placement import MeshStamp, SessionPlacement, write_stamp_into
+        from local_operator.session.errors import (
+            AttachmentUnavailable,
+            ProfileRegistryUnavailable,
+        )
+        from local_operator.session.placement import (
+            MeshStamp,
+            SessionPlacement,
+            write_stamp_into,
+        )
         from local_operator.session.runtime.server import AckDetail, RuntimeServer
         from local_operator.session.runtime.serving import ServingSessionHandle
         from local_operator.session.transcript import Transcript
-        from local_operator.teams import Team, TeamRegistry
+        from local_operator.teams import Team, TeamEditFields, TeamRegistry
 
         source, dest = tmp_path / "src", tmp_path / "dst"
         session_id = "000000000080"
@@ -1053,6 +1071,9 @@ class TestReresolveRefreshesBothRegistries:
             if case == "different-definition":
                 source_teams.save_team(team.model_copy(update={"manager": "reviewer"}))
                 bundle = definitions.local_bundle(source)
+            if case == "different-brief":
+                source_teams.update_team(team.id, TeamEditFields(instructions="Different brief."))
+                bundle = definitions.local_bundle(source)
             if case == "wrong-owner":
                 write_stamp_into(session_dir, replace(stamp, home_device=author.device_id))
             if case == "wrong-network-seat":
@@ -1074,11 +1095,110 @@ class TestReresolveRefreshesBothRegistries:
                 # The definitions already landed, but the current membership
                 # record no longer authorizes their recorded source.
                 store.save(replace(network, removed_ids=[author.device_id]), dest)
-            if case not in {"missing-row", "existing-row", "detached"}:
+            if case == "different-brief":
+                updated = TeamRegistry(dest).get_team_by_name(team.name, require_loaded=True)
+                assert updated is not None and updated.id == checked["id"]
+                assert updated.instructions == "Different brief."
+
+            if case in {"transient-registry", "transient-team-read", "transient-journal"}:
+                def_index = definitions.index_path(dest)
+                applied = def_index.stat()
+                attempts = 0
+
+                def unreadable(*args: Any, **kwargs: Any) -> None:
+                    nonlocal attempts
+                    attempts += 1
+                    if case == "transient-registry":
+                        raise ProfileRegistryUnavailable(count=1)
+                    raise PermissionError("synthetic unreadable local authority")
+
+                with monkeypatch.context() as failing:
+                    if case == "transient-registry":
+                        failing.setattr(session.agent_registry, "refresh_now", unreadable)
+                    elif case == "transient-team-read":
+                        failing.setattr(session.team_registry, "get_team_by_name", unreadable)
+                    else:
+                        failing.setattr(move_team, "_write_local_binding", unreadable)
+                    refusal = (
+                        ProfileRegistryUnavailable
+                        if case == "transient-registry"
+                        else AttachmentUnavailable
+                    )
+                    with pytest.raises(refusal):
+                        await server._dispatch("prompt", frame)
+                    with pytest.raises(AttachmentUnavailable):
+                        await server._dispatch("prompt", frame)
+                    assert attempts == 1  # Same failed generation, before the refresh floor.
+                assert session.active_team is None and stream.requests == []
+                assert not binding_file.exists()
+                assert not handle.has_admitted_command(frame["command_id"])
+                # Advance just this session's refresh floor, without sleeping or
+                # changing the apply signal that the warm owner already saw.
+                clock = Mock(wraps=time)
+                clock.monotonic.side_effect = (
+                    lambda: time.monotonic() + session._ATTACHMENT_RERESOLVE_INTERVAL_S
+                )
+                monkeypatch.setattr("local_operator.session.session.time", clock)
+                current = def_index.stat()
+                assert (current.st_ino, current.st_mtime_ns) == (
+                    applied.st_ino,
+                    applied.st_mtime_ns,
+                )
+            if case in {"retiring", "disposing", "updating", "busy", "turn-locked"}:
+                if case == "retiring":
+                    handle.begin_retire("stop")
+                elif case == "disposing":
+                    monkeypatch.setattr(handle, "_disposing", True)
+                elif case == "updating":
+                    monkeypatch.setattr(handle, "_updating", True)
+
+                    async def unexpected_spool(*args: Any, **kwargs: Any) -> None:
+                        pytest.fail("unresolved attachment must not be spooled")
+
+                    monkeypatch.setattr(handle, "_spool_for_successor", unexpected_spool)
+                elif case == "busy":
+                    # A populated queue must not do recovery, even with no
+                    # streaming flag yet. Do not park the red control forever.
+                    monkeypatch.setattr(handle, "_prompt_queue", [object()])
+                    frame["wait_for_turn"] = False
+                else:
+                    await session._turn_lock.acquire()
+                # Preserve the attachment refusal; no outgoing or queued prompt
+                # may perform the owner's new recovery write.
+                try:
+                    with pytest.raises(AttachmentUnavailable):
+                        await asyncio.wait_for(server._dispatch("prompt", frame), timeout=1)
+                finally:
+                    if case == "turn-locked":
+                        session._turn_lock.release()
+                assert session.active_team is None and stream.requests == []
+                assert not binding_file.exists()
+                assert not handle.has_admitted_command(frame["command_id"])
+                return
+            if case not in {
+                "missing-row",
+                "existing-row",
+                "detached",
+                "transient-registry",
+                "transient-team-read",
+                "transient-journal",
+            }:
                 with pytest.raises(AttachmentUnavailable):
                     await server._dispatch("prompt", frame)
                 assert session.active_team is None and stream.requests == []
                 assert not handle.has_admitted_command(frame["command_id"])
+                if case == "different-brief":
+                    assert not binding_file.exists()
+                    with monkeypatch.context() as unchanged:
+                        unchanged.setattr(
+                            session.team_registry,
+                            "refresh",
+                            lambda: pytest.fail(
+                                "definitive revision refusal rescanned unchanged apply"
+                            ),
+                        )
+                        with pytest.raises(AttachmentUnavailable):
+                            await server._dispatch("prompt", frame)
                 return
 
             receipt = await server._dispatch("prompt", frame)
