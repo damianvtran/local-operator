@@ -58,8 +58,8 @@ cycle mid-task.
   low|medium|high and refuses both ``minimal`` and ``xhigh``. The ladders
   differ per model, so the LIVE source is models.dev's
   ``reasoning_options`` (projected by ``model.prices``, which carried exactly
-  those two ladders on the probe date), and this table holds only the
-  conservative rung set every probed Gemini 3+ model accepted, so a model too
+  those two ladders on the probe date). Offline, Neon gets its documented
+  ladder and other Gemini 3+ models get the common rung set, so a model too
   new for the catalogue still gets a working dial. No default is seeded: the
   model's own default applies until the user picks. A rung a model refuses is
   shed by ``GoogleClient`` (one retry without the key), never a failed turn.
@@ -319,10 +319,13 @@ _KIMI_K3 = EffortSupport(("low", "high", "max"))
 # Gemini 3+ (see the Google bullet in the module docstring for the probes).
 # The INTERSECTION of the probed ladders, not the union: ``xhigh`` is a 400 on
 # gemini-3.8-flash, so offering it family-wide would break one model to serve
-# another. Richer ladders (gemini-4-neon's ``xhigh``) arrive live from
-# models.dev, which outranks this offline fallback in ``build_model_spec``.
-_GEMINI_3_PLUS = EffortSupport(
-    ("low", "medium", "high"), hostings=frozenset({"google", "google-vertex"})
+# another. Keep the verified Neon ladder available even before the models.dev
+# capture lands, so the offline picker and a resolving session offer the same
+# tiers. A provider listing or models.dev still outranks the offline table.
+_GOOGLE_NATIVE_HOSTINGS = frozenset({"google", "google-vertex"})
+_GEMINI_3_PLUS = EffortSupport(("low", "medium", "high"), hostings=_GOOGLE_NATIVE_HOSTINGS)
+_GEMINI_4_NEON = EffortSupport(
+    ("low", "medium", "high", "xhigh"), hostings=_GOOGLE_NATIVE_HOSTINGS
 )
 
 #: First match wins, so the narrower Anthropic generations are listed before the
@@ -400,6 +403,8 @@ _EFFORT_TABLE: tuple[tuple[re.Pattern[str], EffortSupport], ...] = (
         re.compile(r"(?:^|/)(?:kimi-for-coding|(?:kimi-)?k3(?:[.:-]|$))"),
         _KIMI_K3,
     ),
+    # The wider ladder is model-specific; don't give other Gemini models xhigh.
+    (re.compile(r"(?:^|/)gemini-4-neon$"), _GEMINI_4_NEON),
     # Gemini generation 3 and above, forward-reading so ``gemini-5-*`` works the
     # day it ships. ``(?:^|/)`` anchors on the id (bare, ``models/``-prefixed,
     # or an aggregator's ``google/``, matching how the other arms treat a
