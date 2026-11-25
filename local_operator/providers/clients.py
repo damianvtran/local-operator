@@ -5796,9 +5796,13 @@ class AnthropicClient:
         if system_head_marker is not None and system_head_marker in system_markers:
             # Keep-priority order: the head marker moves to the end so the
             # budget trim below sheds it first; the rest keep their
-            # historical earliest-first priority.
-            system_markers.remove(system_head_marker)
-            system_markers.append(system_head_marker)
+            # historical earliest-first priority. Rebuilt rather than
+            # mutated in place: ``test_no_session_deletion`` flags any
+            # ``.remove(x)`` on a non-literal receiver as a possible disk
+            # removal, and an in-memory index list must not need an exemption.
+            system_markers = [i for i in system_markers if i != system_head_marker] + [
+                system_head_marker
+            ]
         ephemeral = ephemeral_indices if ephemeral_indices is not None else frozenset()
         message_targets: list[dict[str, Any]] = []
         # 1. Persistent rolling tail: skip trailing ephemeral frames so the

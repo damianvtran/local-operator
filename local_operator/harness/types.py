@@ -5203,14 +5203,17 @@ class ChatRequest(BaseModel):
     #: ``system[-1]`` instead of guessing from block count. Transport metadata,
     #: never wire content.
     system_blocks_frozen: bool = Field(default=False, exclude=True, repr=False)
-    #: How many LEADING ``system_blocks`` are identical across sessions with the
-    #: same tools (persona + tool inventory; ``prompts_api.STABLE_HEAD_BLOCK_COUNT``),
-    #: i.e. where the first volatile block (env: date, cwd) begins. ``0`` means
-    #: unknown, and the wire places no head marker. Only meaningful with
-    #: ``system_blocks_frozen``: ``AnthropicClient`` then adds a second system
-    #: breakpoint after the head so a new session or subagent in another cwd,
-    #: or on another day, reads tools+persona from cache instead of rewriting it.
-    #: Transport metadata, never wire content.
+    #: How many LEADING ``system_blocks`` carry no date or cwd (persona + tool
+    #: inventory; ``prompts_api.STABLE_HEAD_BLOCK_COUNT``), i.e. where the first
+    #: volatile block (env: date, cwd) begins. ``0`` means unknown, and the wire
+    #: places no head marker. Only meaningful with ``system_blocks_frozen``:
+    #: ``AnthropicClient`` then adds a second system breakpoint after the head
+    #: so a new session or subagent on another day reads tools+persona from
+    #: cache instead of rewriting it. The head is shared only between sessions
+    #: with the same tools AND the same repo guidance, custom instructions,
+    #: language line and identity name (all folded into block 0); subagents'
+    #: pruned tool set (no ``wake``/``monitor``) means they share a head with
+    #: each other, not with the parent. Transport metadata, never wire content.
     system_stable_head_blocks: int = Field(default=0, exclude=True, repr=False)
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request

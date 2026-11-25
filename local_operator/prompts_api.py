@@ -1789,10 +1789,21 @@ def build_system_blocks(
     return [instructions, inventory, env_block, tail]
 
 
-#: How many LEADING blocks of :func:`build_system_blocks` are session-agnostic:
-#: the persona/standing instructions (0) and the tool inventory (1). Block 2,
-#: the env block, carries ``Today is <date>`` and the working directory, so it
-#: differs between any two sessions started in another cwd or on another day.
+#: How many LEADING blocks of :func:`build_system_blocks` carry no date or
+#: working directory: the persona/standing instructions (0) and the tool
+#: inventory (1). Block 2, the env block, carries ``Today is <date>`` and the
+#: working directory, so it differs between any two sessions started in
+#: another cwd or on another day.
+#:
+#: "Session-agnostic" is narrower than it sounds. Block 0 also folds in the
+#: per-cwd repo guidance (AGENTS.md), the operator's custom instructions, the
+#: preferred-language line and the configured identity name, and block 1 is
+#: rendered from the session's tool set. So the head is shared only between
+#: sessions with the same tools AND the same guidance, instructions, language
+#: and identity — e.g. two sessions in one repo, not sessions in two repos
+#: with different AGENTS.md files. Subagents get a different tool set from
+#: their parent (``wake``/``monitor`` are pruned, see ``subagent.py``), so
+#: subagents share a head with each other but not with the parent session.
 #:
 #: WHY IT EXISTS: the Anthropic wire caches ``tools + system`` only up to a
 #: ``cache_control`` marker, and the frozen-epoch policy used to place its one

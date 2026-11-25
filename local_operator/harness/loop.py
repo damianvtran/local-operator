@@ -40,7 +40,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypedDict, TypeVar, cast
 
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
@@ -195,6 +195,17 @@ def _notice(
         kind=kind,
         headline=headline,
     )
+
+
+class _SystemCacheLayout(TypedDict):
+    """``ChatRequest`` marker-placement kwargs splatted at the request site.
+
+    Typed so pyright still checks each key against ``ChatRequest``'s fields
+    through the ``**`` splat (a ``dict[str, Any]`` would hide a renamed field).
+    """
+
+    system_blocks_frozen: bool
+    system_stable_head_blocks: int
 
 
 class _ToolDone:
@@ -4547,7 +4558,7 @@ class AgentLoop:
         return max(0, int(reader()))
 
     @classmethod
-    def _host_system_cache_layout(cls, config: LoopConfig) -> dict[str, Any]:
+    def _host_system_cache_layout(cls, config: LoopConfig) -> _SystemCacheLayout:
         """The ``ChatRequest`` system marker-placement fields, read per call.
 
         One splat at the request site rather than one kwarg per field: the

@@ -151,7 +151,17 @@ def test_two_message_markers_keep_both_system_markers() -> None:
     ]
 
 
-def test_cap_drops_head_marker_before_tail_and_message_markers() -> None:
+@pytest.mark.parametrize(
+    ("oauth", "head", "tail"),
+    [
+        (False, ".system[1]", ".system[3]"),
+        # OAuth prepends the identity block, shifting head and tail by one.
+        (True, ".system[2]", ".system[4]"),
+    ],
+)
+def test_cap_drops_head_marker_before_tail_and_message_markers(
+    oauth: bool, head: str, tail: str
+) -> None:
     # Static preamble split + settled image + rolling tail = 3 message markers,
     # leaving ONE system slot: the tail marker must win it, not the head.
     history = [
@@ -161,11 +171,11 @@ def test_cap_drops_head_marker_before_tail_and_message_markers() -> None:
         Message.assistant("step 2"),
         Message.user("latest"),
     ]
-    body = AnthropicClient()._build_body(_request(messages=history))
+    body = AnthropicClient()._build_body(_request(messages=history), oauth=oauth)
     paths = _marker_paths(body)
     assert len(paths) == AnthropicClient.MAX_CACHE_BREAKPOINTS
-    assert ".system[3]" in paths
-    assert ".system[1]" not in paths
+    assert tail in paths
+    assert head not in paths
     assert sum(p.startswith(".messages") for p in paths) == 3
 
 
