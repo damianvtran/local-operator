@@ -169,6 +169,47 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert [f["create_key"] for f in wire.sent] == [key, key, key]
 
 
+def test_new_cli_does_not_infer_skill_routing_from_a_legacy_relay_replay(
+    pair: tuple[Any, Any, _Wire],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from local_operator.cli import build_cli_parser
+    from local_operator.network import cli
+    from local_operator.resume import read_session_attachment
+
+    owner, requester, wire = pair
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(requester.root))
+    key = "7" * 32
+    frame = {"op": "net_session_create", "create_key": key, "skill_manifest": {}}
+    initial = wire.request(frame)
+    assert initial is not None and initial["detail"]["skill_selection"]["status"] == "pinned"
+    sid = initial["detail"]["session_id"]
+    attachment = read_session_attachment(owner.root / "sessions" / sid)
+    assert attachment is not None and attachment.skill_manifest_pinned
+    assert attachment.skill_manifest == {}
+
+    def legacy_relay(op: str, *, timeout: float, **fields: Any) -> dict[str, Any]:
+        assert op == "peer_session_create" and fields["create_key"] == key
+        # The old control handler forwarded the owner's create-key reply
+        # without normalizing skill_selection. Use the actual replay, not a
+        # fixture that could quietly diverge from the owner's payload.
+        answer = wire.request({"op": "net_session_create", "create_key": fields["create_key"]})
+        assert answer is not None and answer["op"] == "reply"
+        detail = answer["detail"]
+        assert detail["replayed"] and detail["session_id"] == sid
+        assert "skill_selection" not in detail
+        return detail
+
+    monkeypatch.setattr(cli, "_relay_answer", legacy_relay)
+    argv = ["network", "sessions", "--peer", "node-2", "--create", "--create-key", key]
+    assert cli.main(build_cli_parser().parse_args(argv)) == 0
+    out = capsys.readouterr().out
+    assert "The destination did not confirm a skill snapshot." in out, out
+    assert "will select skills locally" not in out
+    assert _sessions(owner) == [sid]
+
+
 def test_without_a_key_two_creates_are_two_sessions(
     pair: tuple[Any, Any, _Wire],
 ) -> None:

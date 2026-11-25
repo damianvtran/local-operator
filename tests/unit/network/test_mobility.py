@@ -15,6 +15,7 @@ for a session that is mid-handoff.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from pathlib import Path
@@ -194,6 +195,107 @@ def test_a_move_is_allowed_and_does_not_carry_the_approval_choice(
     assert not (
         destination / OVERRIDE_FILENAME
     ).exists(), "the copy inherited the source conversation's approval choice"
+
+
+@pytest.mark.parametrize(
+    "case", ["pinned", "legacy", "no_ack", "write_failure", "interrupted_publish"]
+)
+def test_move_promotes_and_pins_the_skill_manifest(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    from local_operator.cli import _carry_lines
+    from local_operator.resume import read_session_attachment, write_session_attachment
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(
+        pair, monkeypatch, role="admin", settings=server_b.settings if case == "no_ack" else None
+    )
+    source = _owned_session(server_a)
+    manifest = {"carry-alpha": "a" * 64, "carry-beta": "b" * 64}
+    expected = None if case == "legacy" else manifest
+    write_session_attachment(source, team="", agent="", goal="Keep this", skill_manifest=expected)
+    before = read_session_attachment(source)
+    assert before is not None and not before.skill_manifest_pinned
+    target = server_b.root / "sessions" / SESSION
+    if case == "no_ack":
+        promote = mobility._promote
+
+        def promote_silently(
+            server: relay.RelayServer, staging: Path, target_id: str
+        ) -> mobility._PromoteOutcome:
+            outcome = promote(server, staging, target_id)
+            if server is server_b and outcome.ok:
+                # Same wire shape as a legacy destination; the requester
+                # cannot infer the actual pin from successful publication.
+                # ``skill_selection`` is its own outcome field (the wake-carry
+                # block stays exact), so dropping it is what a legacy peer sends.
+                return outcome._replace(skill_selection=None)
+            return outcome
+
+        monkeypatch.setattr(mobility, "_promote", promote_silently)
+    elif case == "write_failure":
+        # The attachment writer publishes through ``atomic_files.atomic_write_bytes``,
+        # whose rename is ``os.replace(temp, target)``: fail exactly that rename of the
+        # destination's sidecar, so the strict pin raises after staging its temp.
+        replace = os.replace
+        original_sidecar = (source / "attachment.json").read_bytes()
+
+        def fail_pin(src: Any, dst: Any, **kwargs: Any) -> None:
+            to = Path(dst)
+            if to.name == "attachment.json" and to.is_relative_to(server_b.root):
+                raise OSError("injected attachment replace failure")
+            replace(src, dst, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", fail_pin)
+            refused = _move(server_b, SESSION, monkeypatch=patch)
+        assert refused["ok"] is False and "was not published" in refused["message"]
+        assert not target.exists()
+        stage = sync.staging_dir(server_b.root, SESSION)
+        assert (stage / "attachment.json").read_bytes() == original_sidecar
+        # The shared writer discards its own unique temp: no partial member stays staged.
+        assert not [path.name for path in stage.iterdir() if path.name.endswith(".tmp")]
+        ready = json.loads((stage / "ready.json").read_text())
+        assert mobility._staging_content_digest(server_b, SESSION, stage) == ready["content_digest"]
+    elif case == "interrupted_publish":
+        replace_directory = os.replace
+        observed: list[bool] = []
+
+        def stop_before_publish(src: Any, dst: Any, **kwargs: Any) -> None:
+            if dst == str(target):
+                attachment = read_session_attachment(Path(src))
+                observed.append(bool(attachment and attachment.skill_manifest_pinned))
+                raise OSError("injected interruption before publication")
+            replace_directory(src, dst, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", stop_before_publish)
+            refused = _move(server_b, SESSION, monkeypatch=patch)
+        assert refused["ok"] is False and not target.exists()
+        assert observed == [True], "the single publish boundary must already contain the pin"
+
+    if case == "no_ack":
+        # The source must wait for the destination's report over the link.
+        result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    else:
+        result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    stored = read_session_attachment(target)
+    assert stored is not None
+    assert stored.skill_manifest == expected
+    assert stored.skill_manifest_pinned is (expected is not None)
+    assert stored.goal == "Keep this"
+    assert not (target / mobility._SKILL_PIN_ORIGINAL).exists()
+
+    if case == "no_ack":
+        status, phrase = ("unconfirmed", "did not confirm a skill snapshot")
+    elif expected is None:
+        status, phrase = ("local_routing", "will select skills locally")
+    else:
+        status, phrase = ("pinned", "pinned the source's skill selection")
+    assert result["carry"]["skill_selection"]["status"] == status
+    assert any(phrase in line for line in _carry_lines(result))
 
 
 def test_a_recall_moves_the_session_and_leaves_a_tombstone(

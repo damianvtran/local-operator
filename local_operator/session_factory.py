@@ -2084,6 +2084,8 @@ class _KnowledgeHooks:
     #: symlink to an outer skill dir was admitted by the reachable walk; QA
     #: round 1, Q2). ``None`` on every ordinary session.
     world_root: Path | None = None
+    skill_manifest_dir: Path | None = None
+    pinned_skill_manifest: dict[str, str] | None = None
     frozen_block: str | None = None
     #: Compaction entry id observed when ``frozen_block`` was computed. A
     #: change here (a new compaction marker) re-opens selection once — the
@@ -4098,14 +4100,45 @@ async def _select_knowledge_block(
 
     from local_operator.skills.api import render_block
 
+    skill_notes: list[str] = []
+    if hooks.pinned_skill_manifest is not None:
+        from urllib.parse import quote
+
+        from local_operator.skills.manifest import description_fingerprint
+
+        # The pin narrows automatic routing, not the receiver's authority.
+        # Keep local guides, discovery scope and model-invocation opt-outs;
+        # matching metadata neither grants nor removes explicit skill access.
+        picked = [item for item in picked if item.resource_type != "skill"]
+        for name, expected_description in hooks.pinned_skill_manifest.items():
+            skill = hooks.skills_by_name.get(name)
+            # Names from a peer are data, not free-form prompt text. Use the
+            # same percent encoding as a skill URL for legacy names with spaces.
+            label = quote(name, safe="")
+            if skill is None or skill.hide:
+                skill_notes.append(f"- Unavailable on this device: {label}")
+            elif description_fingerprint(skill) != expected_description:
+                skill_notes.append(f"- Different description on this device: {label}")
+            else:
+                picked.append(skill)
+    elif query and hooks.skill_manifest_dir is not None:
+        from local_operator.resume import record_session_skill_manifest
+        from local_operator.skills.manifest import selected_skill_manifest
+
+        # Capture the selection we are actually rendering, not the inventory or
+        # a second routing pass. A preview with no task isn't a new selection;
+        # don't create a sidecar or overwrite the last real turn for it.
+        record_session_skill_manifest(hooks.skill_manifest_dir, selected_skill_manifest(picked))
+
     # Image requests have a second, reasoning-based router but the embedder
     # cannot see the pixels. Do not promote its unverified domain match into
     # a mandatory skill read (e.g. a lighting edit routed to flag targeting).
-    selected_block = (
-        render_block(picked, conditional_skills=True)
-        if hooks.image_routing_context
-        else render_block(picked)
-    )
+    render_kwargs: dict[str, Any] = {}
+    if hooks.image_routing_context:
+        render_kwargs["conditional_skills"] = True
+    if skill_notes:
+        render_kwargs["skill_notes"] = tuple(skill_notes)
+    selected_block = render_block(picked, **render_kwargs)
     sections = [section for section in [selected_block] if section]
     catalogue = ""
     if hooks.mcp_catalogue is not None:
@@ -5496,6 +5529,13 @@ async def _prepare(
     hooks = await _setup_knowledge(
         config_dir, agent_registry, knowledge_warnings, effective_cwd, world_root=world_root
     )
+    if transcript_dir.parent.name == "sessions":
+        from local_operator.resume import read_session_attachment
+
+        hooks.skill_manifest_dir = transcript_dir
+        attachment = read_session_attachment(transcript_dir)
+        if attachment is not None and attachment.skill_manifest_pinned:
+            hooks.pinned_skill_manifest = attachment.skill_manifest
     # Configuration discovery is local filesystem work and must precede the
     # first prompt. The TUI deliberately defers live MCP connections; deriving
     # names only from the eventual manager let the knowledge block freeze empty

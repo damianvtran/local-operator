@@ -1,0 +1,6 @@
+{
+  "network.skill_transfer.receipt.local_routing": "Aucun instantané des compétences n'a été épinglé. L'appareil de destination choisira parmi ses compétences locales.",
+  "network.skill_transfer.receipt.pinned": "L’appareil de destination a verrouillé la sélection de compétences de l’appareil source. Seules les compétences locales correspondantes seront chargées.",
+  "network.skill_transfer.receipt.unconfirmed": "L’appareil de destination n’a pas confirmé l’instantané des compétences. Rien ne garantit qu’il utilise la sélection de l’appareil source.",
+  "network.skill_transfer.receipt.write_failed": "L’appareil de destination n’a pas pu enregistrer l’instantané des compétences. La copie temporaire a été conservée sans être publiée."
+}

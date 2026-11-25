@@ -11157,6 +11157,18 @@ class RelayServer:
         if stale:
             raise MeshRefusal("definition_stale", stale)
 
+        from local_operator.skills.manifest import (
+            SkillTransferStatus,
+            parse_skill_manifest,
+            skill_transfer_receipt,
+        )
+
+        skill_manifest = parse_skill_manifest(frame.get("skill_manifest"))
+        if "skill_manifest" in frame and skill_manifest is None:
+            raise MeshRefusal(
+                "protocol_error", "the create frame carried an invalid skill manifest"
+            )
+
         wanted_model = _model_choice(frame.get("model"))
         credential_refusal = _model_credential_refusal(
             self.root, frame.get("model"), identity.birth
@@ -11298,14 +11310,18 @@ class RelayServer:
         # field. It is written BEFORE the engage below, because that is the runtime
         # whose construction reads it.
         #
-        # ONLY A NAMED, ATTACHABLE IDENTITY WRITES ONE. An unnamed create writes no
-        # file at all, which is what keeps today's create byte-for-byte identical; and
-        # an agent row that is not attachable (a legacy conversational row: see
+        # Only an attachable identity or an explicit skill pin writes one. An
+        # agent row that is not attachable (a legacy conversational row: see
         # ``definitions.resolve_create_identity``) is NOT written, because a name the
         # runtime cannot resolve would be reported as a failed restore. That half is
         # reported in the reply instead — silence about it is the one thing the
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
+        # Only a fresh create without an offer opts into local routing. A failed
+        # readback cannot tell us whether an offered pin actually landed.
+        skill_status: SkillTransferStatus = (
+            "local_routing" if skill_manifest is None else "unconfirmed"
+        )
         if attachment_agent or identity.team_name:
             from local_operator.resume import bind_session_attachment
 
@@ -11315,6 +11331,22 @@ class RelayServer:
                 raise MeshRefusal(
                     "session_create_failed", "the selected session attachment could not be saved"
                 )
+        if skill_manifest is not None:
+            from local_operator.resume import (
+                read_session_attachment,
+                record_session_skill_manifest,
+            )
+
+            # AFTER the identity bind, never folded into it: ``bind_session_attachment``
+            # is main's fail-closed, root-aware CREATE contract (team authorization,
+            # readback of agent/team), and this pin rides on top of whatever it
+            # stored. The writer preserves the bound team/agent/goal.
+            record_session_skill_manifest(session_dir, skill_manifest, pinned=True)
+            # The general attachment writer is best effort. Do not attest to a
+            # pin just because it was offered in the frame: confirm it on disk.
+            stored = read_session_attachment(session_dir)
+            if stored and stored.skill_manifest_pinned and stored.skill_manifest == skill_manifest:
+                skill_status = "pinned"
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload
@@ -11372,6 +11404,7 @@ class RelayServer:
         # from its own registries — a claim about a store that does not hold this
         # session (the desktop route already makes that argument for its local half).
         identity_blocks: dict[str, Any] = {
+            "skill_selection": skill_transfer_receipt(skill_status),
             "agent": (
                 {
                     "name": identity.agent_name,
@@ -17035,8 +17068,8 @@ class RelayServer:
             }
         # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
         # on the session's FIRST turn rather than after the next cadence tick (up to
-        # a minute later). Unconditional — unlike definitions, nothing in the frame
-        # names which skills a session will read — and BOUNDED
+        # a minute later). The selection pin below is metadata, not a change to
+        # which bodies this existing unconditional push mirrors. It remains BOUNDED
         # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
         # background and the receipt says so, so it can never stall the create.
         # Best-effort: a peer that is unreachable or predates skill sync answers the
@@ -17087,6 +17120,15 @@ class RelayServer:
                 fields[key] = value
         if expect:
             fields["expect"] = expect
+        # Local tool/CLI attribution names the source session on THIS device;
+        # only its exact selection (no ID, paths or bodies) crosses the link.
+        from local_operator.network.approvals import filing_session
+        from local_operator.resume import read_session_attachment
+
+        if source_session := filing_session(frame.get("source_session")):
+            attachment = read_session_attachment(self.root / "sessions" / source_session)
+            if attachment is not None and attachment.skill_manifest is not None:
+                fields["skill_manifest"] = attachment.skill_manifest
         # THE CREATE KEY (``network/create_keys.py``): minted here unless the caller
         # brought one (a retry of a create whose reply was lost brings the key it
         # was told), so the owner can answer a replay with the session it already
@@ -17111,7 +17153,17 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
-        extra: dict[str, Any] = {}
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
+        # Only a fresh owner acknowledgement can report a routing decision.
+        # Older owners may omit it; lookup or replay only confirms existence.
+        reported = skill_transfer_status(detail.get("skill_selection"))
+        if reported is None or detail.get("create_unconfirmed") or detail.get("replayed"):
+            reported = "unconfirmed"
+        extra: dict[str, Any] = {"skill_selection": skill_transfer_receipt(reported)}
         if instructions_notice:
             extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:

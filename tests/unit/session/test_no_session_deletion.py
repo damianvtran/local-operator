@@ -3905,10 +3905,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "sessions/); unlink rejects directories",
     ),
     (
+        "local_operator/network/mobility.py::_verify_staging",
+        "<path>.replace",
+        "Before replacing, the containment helper checks every staging directory component "
+        "below the config anchor and requires regular-file leaves (an absent target is "
+        "allowed); the digest must match before any write. The swap cannot address a "
+        "directory under sessions/",
+    ),
+    (
+        "local_operator/network/mobility.py::_verify_staging",
+        "<path>.unlink",
+        "Removes only the checked, contained regular-file backup. Replacing two hard "
+        "links to the same inode is a no-op, so this cleanup is not redundant",
+    ),
+    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
-        "Removes the move's own ready.json boot marker from the just-adopted session "
-        "directory: a bookkeeping FILE written by the move, not session content",
+        "After publication, removes two distinct fixed bookkeeping names: the existing "
+        "ready.json boot marker and the separate .skill-pin-original backup. Unlink "
+        "rejects real directories and does not follow the leaf",
+        2,
     ),
     (
         "local_operator/network/mobility.py::_roll_back_destination",
@@ -3923,26 +3939,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "marker exempts one, because those bytes may be the last copy alive); never "
         "a path under sessions/",
     ),
-    # THE MOVE'S OWN BOOT MARKER, removed from a session directory a promote already
-    # adopted. This is the one call in the move that touches a file INSIDE
-    # ``sessions/``, and it removes exactly one name — ``ready.json``, which
-    # ``sync.EXCLUDED_ENTRIES`` classifies as the move's own bookkeeping rather than
-    # content. It exists because a promote that reached ``os.replace`` and then died
-    # leaves the marker behind, and carrying it forward would put a file every reader
-    # has to learn to ignore into a conversation the user opens.
     (
         "local_operator/network/mobility.py::_reconcile_destination",
         "<path>.unlink",
-        "Removes the move's own ready.json boot marker from an already-promoted "
-        "session: a bookkeeping FILE the move wrote, never session content",
+        "When the staged ready.json marker is missing, clears two distinct fixed names: "
+        "the destination's ready.json boot marker and .skill-pin-original backup. "
+        "Unlink rejects real directories and does not follow the leaf",
+        2,
     ),
     (
         "local_operator/network/mobility.py::settle_promoted_handoff",
         "<path>.unlink",
-        "Removes the SAME marker from the same place, in the other recovery path: a "
-        "destination whose promote landed and then failed before it deleted its own boot "
-        "marker. Only reached when the session directory exists with a transcript, i.e. "
-        "the move already finished (review round 2, the p1c probe)",
+        "Once the session has arrived with a transcript, clears two distinct fixed "
+        "names: the existing ready.json boot marker and the separate .skill-pin-original "
+        "backup. Unlink rejects real directories and does not follow the leaf",
+        2,
     ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor

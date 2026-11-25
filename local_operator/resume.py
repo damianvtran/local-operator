@@ -16,6 +16,7 @@ transcript-directory decision, so the rule has one definition.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -922,6 +923,8 @@ class SessionAttachment(NamedTuple):
     #: The standing ``/goal`` text; "" when unset. Stored here rather than left
     #: to the transcript because it shares the volatile tail's fate exactly.
     goal: str
+    skill_manifest: dict[str, str] | None = None
+    skill_manifest_pinned: bool = False
 
 
 def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
@@ -950,7 +953,16 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
         value = payload.get(key)
         return value.strip() if isinstance(value, str) else ""
 
-    return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
+    from local_operator.skills.manifest import parse_skill_manifest
+
+    manifest = parse_skill_manifest(payload.get("skill_manifest"))
+    return SessionAttachment(
+        team=_text("team"),
+        agent=_text("agent"),
+        goal=_text("goal"),
+        skill_manifest=manifest,
+        skill_manifest_pinned=manifest is not None and payload.get("skill_manifest_pinned") is True,
+    )
 
 
 class SessionAttachmentUnreadable(ValueError):
@@ -983,24 +995,30 @@ def read_session_attachment_evidence(session_dir: Path) -> SessionAttachment | N
     return SessionAttachment(*(payload.get(key, "").strip() for key in ("team", "agent", "goal")))
 
 
-def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
+def write_session_attachment(
+    session_dir: Path,
+    *,
+    team: str,
+    agent: str,
+    goal: str,
+    skill_manifest: dict[str, str] | None = None,
+    skill_manifest_pinned: bool = False,
+    strict: bool = False,
+) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 
-    Called on CHANGE (attach, detach, goal set/clear), never per turn: the
-    attachment moves a handful of times in a session's life, and a per-turn
-    write would be pure I/O for a value that did not move.
+    Called on attachment or goal changes and when a routed turn changes the
+    skill snapshot. The snapshot recorder deduplicates unchanged selections.
 
-    Best-effort by contract, exactly like :func:`write_session_title` and
-    :func:`mark_session_origin`. An attachment that cannot be journalled
-    (read-only volume, full disk) must never fail the turn that changed it: the
-    cost is one resume that opens unattached, which is the behaviour every
-    session had before this file existed.
+    Local journaling is best effort: an unavailable disk must not fail the
+    turn that changed the attachment. A move uses ``strict`` instead: a failed
+    pin write must be visible to the adopter before it publishes the session.
 
-    The write is ATOMIC (pid-named temp + ``replace``) because two processes
+    The write is ATOMIC (unique temp + ``replace``) because two processes
     can hold the same session directory — a live owner and a ``/resume`` that
     is about to be refused both touch it — and a reader hitting a half-written
     document would parse as "no attachment" and silently drop the persona. The
-    PID in the temp name keeps two concurrent writers from ``replace``-ing a
+    unique temp name keeps concurrent writers from ``replace``-ing a
     document the other is still filling, the same hazard ``write_session_title``
     and ``search_index._save`` document.
 
@@ -1020,23 +1038,64 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
     # resume and told the user it had been renamed or deleted (R2). Normalising
     # is right for a title (the sidecar this shape was copied from) and wrong
     # for a key: what is stored has to be what the resolver will compare.
-    payload = {
+    # Persona/goal edits also rewrite this file. Keep the transfer data when
+    # those callers supply no manifest; an explicit {} is a real selection.
+    if skill_manifest is None:
+        stored = read_session_attachment(session_dir)
+        if stored is not None:
+            skill_manifest = stored.skill_manifest
+            skill_manifest_pinned = stored.skill_manifest_pinned
+    payload: dict[str, Any] = {
         "team": (team or "").strip(),
         "agent": (agent or "").strip(),
         "goal": (goal or "").strip(),
     }
+    if skill_manifest is not None:
+        payload["skill_manifest"] = skill_manifest
+        if skill_manifest_pinned:
+            payload["skill_manifest_pinned"] = True
+    sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
     try:
         try:
             previous = session_dir.stat().st_mtime
         except OSError:
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
-        sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
-        atomic_write_text(sidecar, json.dumps(payload))
-        if previous is not None:
-            os.utime(session_dir, (previous, previous))
+        # The shared atomic writer (unique sibling temp, discarded on failure)
+        # is the one write path for local and transfer writes. ``fsync`` only
+        # for a strict transfer pin: the adopter must not publish a sidecar the disk
+        # has not durably kept. A crash-left ``*.tmp`` at the session root is
+        # excluded from the transfer digest (``network.sync.TRANSIENT_SUFFIX``),
+        # so the unique temp name cannot poison a recovery re-verification.
+        atomic_write_text(sidecar, json.dumps(payload), fsync=strict)
     except (OSError, TypeError, ValueError):
+        if strict:
+            # A failed pre-publish pin must leave the verified sidecar intact;
+            # ``atomic_write_text`` already removed its own temp before raising,
+            # so no temporary member is left in the staged session.
+            raise
         return
+    if previous is not None:
+        with contextlib.suppress(OSError):
+            os.utime(session_dir, (previous, previous))
+
+
+def record_session_skill_manifest(
+    session_dir: Path, manifest: dict[str, str], *, pinned: bool = False, strict: bool = False
+) -> None:
+    """Update only skill metadata; local snapshots are not local routing pins."""
+    stored = read_session_attachment(session_dir) or SessionAttachment("", "", "")
+    if stored.skill_manifest == manifest and stored.skill_manifest_pinned == pinned:
+        return
+    write_session_attachment(
+        session_dir,
+        team=stored.team,
+        agent=stored.agent,
+        goal=stored.goal,
+        skill_manifest=manifest,
+        skill_manifest_pinned=pinned,
+        strict=strict,
+    )
 
 
 def bind_session_attachment(

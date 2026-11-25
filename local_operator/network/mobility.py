@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, TypedDi
 
 if TYPE_CHECKING:
     from local_operator.network.relay import PeerLink, RelayServer
+    from local_operator.skills.manifest import SkillTransferReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -545,7 +546,7 @@ class MoveQueueBlock(TypedDict, total=False):
 
 
 class MoveCarryBlock(TypedDict, total=False):
-    """What a finished move knows about the session's scheduled state.
+    """What a finished move knows about the session's carried state.
 
     Assembled by BOTH ends and merged by the source, because each half is knowable
     only where it is produced:
@@ -616,6 +617,8 @@ class MoveCarryBlock(TypedDict, total=False):
     #: writes. An older source still sends it on the carry, so the key must keep
     #: parsing and keep reaching the receipt's printed lines.
     definitions_notice: str
+    #: The destination's pin acknowledgement, or explicit receiver-local routing.
+    skill_selection: SkillTransferReceipt
 
 
 class SessionMoveResult(TypedDict):
@@ -1786,7 +1789,13 @@ def _unreachable(peer: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _staging_content_digest(server: "RelayServer", session_id: str, staging: Path) -> str:
+def _staging_content_digest(
+    server: "RelayServer",
+    session_id: str,
+    staging: Path,
+    *,
+    original_attachment: Path | None = None,
+) -> str:
     """The digest of the bytes a copy holds, as the adopting device sees them.
 
     ``sync.copy_content_digest`` over the staging directory and this install's
@@ -1800,12 +1809,69 @@ def _staging_content_digest(server: "RelayServer", session_id: str, staging: Pat
     # ``<dir>/<ref>.bin``, so passing the root silently dropped every attachment from the
     # comparison — a copy whose blobs were all zeroed would have matched. Both ends pass
     # the same directory now, which is what makes the comparison mean what it says.
-    return sync_mod.copy_content_digest(staging, session_id, Path(server.root) / "attachments")
+    return sync_mod.copy_content_digest(
+        staging,
+        session_id,
+        Path(server.root) / "attachments",
+        staged_original_attachment=original_attachment,
+    )
+
+
+_SKILL_PIN_ORIGINAL = ".skill-pin-original"
+_UNSAFE_STAGING_REASON = (
+    "the staged conversation was not adopted: its path must be contained in network/staging "
+    "with no symlink components, and its handoff markers and attachment must be regular files"
+)
+
+
+def _plain_staging_sidecar(path: Path) -> bool:
+    """Whether a staging sidecar is a regular file rather than a link to something else.
+
+    THE SIDECAR NAMES ARE WHAT THE RECOVERY RENAMES OVER AND DELETES (see
+    ``_verify_staging``), so a link there turns a rollback into a write outside the
+    staged copy. Containment of the DIRECTORY — including Windows reparse points —
+    is ``_contained_handoff_path``'s job and is not re-derived here; this answers
+    only the entry's own type, the same question the credentials store's
+    ``_checked_info`` asks of its own files.
+
+    A HARD LINK IS ALLOWED HERE, which is why this is not ``_checked_info`` itself:
+    the pin stores the attachment's original bytes by ``os.link``-ing them to
+    ``_SKILL_PIN_ORIGINAL``, so a pinned sidecar legitimately carries ``st_nlink 2``.
+    ``lstat`` keeps the entry's own mode and attributes, so an alias the kernel would
+    follow (a symlink, a reparse point, or a directory named like a marker) is
+    refused while the sidecar's own inode passes.
+    """
+    info = path.lstat()
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if getattr(info, "st_file_attributes", 0) & reparse:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
+def _staging_for_verification(root: Path, session_id: str, staging: Path) -> Path | None:
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+    checked = _contained_handoff_path(
+        root, staging, parent_parts=("network", "staging"), leaf=session_id
+    )
+    if checked is None:
+        return None
+    # The restore touches these sidecars before _promote runs its own check.
+    # Other members of the copy are content, not rollback paths.
+    for name in ("ready.json", _SKILL_PIN_ORIGINAL, ATTACHMENT_SIDECAR_NAME):
+        try:
+            if not _plain_staging_sidecar(checked / name):
+                return None
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+    return checked
 
 
 def _verify_staging(
     server: "RelayServer", session_id: str, staging: Path, ready: dict[str, Any]
-) -> str:
+) -> tuple[str, str] | None:
     """Re-hash a staged copy against what ``ready.json`` recorded, before adopting.
 
     THE LAST CHECK BEFORE THE ONLY ``os.replace`` INTO ``sessions/``. The
@@ -1820,18 +1886,46 @@ def _verify_staging(
     record one, and it is refused rather than trusted: the whole point of the field
     is that the adopting device has a value to check against.
     """
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return "unsafe_staging", _UNSAFE_STAGING_REASON
     expected = str(ready.get("content_digest") or "")
     if not expected:
         return (
+            "digest_mismatch",
             "the copy of that conversation was staged before this build recorded what it "
-            "verified, so it was not adopted; asking again evaluates it from scratch"
+            "verified, so it was not adopted; asking again evaluates it from scratch",
         )
-    if _staging_content_digest(server, session_id, staging) != expected:
+    # An interrupted pin leaves the source's original bytes under the rollback
+    # marker. Hash those bytes under their original name before changing either
+    # file, so a digest refusal leaves the verified-copy evidence untouched.
+    backup = checked / _SKILL_PIN_ORIGINAL
+    original = backup if backup.is_file() else None
+    if (
+        _staging_content_digest(server, session_id, checked, original_attachment=original)
+        != expected
+    ):
         return (
+            "digest_mismatch",
             "the staged copy of that conversation no longer matches the bytes that were "
-            "verified, so it was not adopted and nothing was deleted"
+            "verified, so it was not adopted and nothing was deleted",
         )
-    return ""
+    if original is not None:
+        from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+        try:
+            original.replace(checked / ATTACHMENT_SIDECAR_NAME)
+            # rename is a no-op if both names still point at the original inode.
+            original.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("mobility: could not restore staged skill metadata for %s", session_id)
+            from local_operator.i18n.keys import network_skill_transfer
+            from local_operator.i18n.text import tr
+
+            return "digest_mismatch", tr("network.skill_transfer")(
+                network_skill_transfer.receipt_write_failed()
+            )
+    return None
 
 
 def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
@@ -2646,17 +2740,19 @@ def _destination_move(
     # are re-hashed against what this device recorded when it verified them, so a
     # copy damaged between the two moments is never presented as a session (M-2's
     # destination half, and the structural form of M-5's "never a partial copy").
-    damaged = _verify_staging(server, target_id, staging, ready)
-    if damaged:
-        # THE STAGING DIRECTORY IS KEPT, deliberately: by now the owner may already
-        # have deleted its copy, so sweeping it would destroy the only one left. The
-        # id is released and the sentence names where the bytes are.
-        clear_handoff_entry(server.root, session_id)
+    verification_refusal = _verify_staging(server, target_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
+        # The owner may have deleted its copy already, so keep the staging bytes.
+        # An unsafe path also keeps the journal: this device cannot account for
+        # its copy and should not release the handoff on that evidence.
+        if code != "unsafe_staging":
+            clear_handoff_entry(server.root, session_id)
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging}, and this device's "
                 "``lop sessions sync`` cannot replace it)",
                 phase_reached="handing_off",
@@ -2691,7 +2787,7 @@ def _destination_move(
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     if session_roles_left:
         # THE NOTICE THE TARGET RECORDS (design §3.5): the count came from the
         # source, the device name is the source's, and the sentence rides the
@@ -3041,9 +3137,22 @@ def _finish_from_tombstone(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
 
-    progress = progress_for(server)
     staging = sync_mod.staging_dir(server.root, session_id)
-    ready_path = staging / "ready.json"
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                "unsafe_staging",
+                _UNSAFE_STAGING_REASON,
+                phase_reached="handing_off",
+                changed=True,
+            ),
+            "",
+        )
+    progress = progress_for(server)
+    ready_path = checked / "ready.json"
     if not ready_path.is_file():
         return (
             None,
@@ -3063,13 +3172,14 @@ def _finish_from_tombstone(
     # thing that says the bytes were ever verified (M-2). A ``ready.json`` whose
     # digest no longer describes the staged bytes refuses here, keeping the
     # staging directory so the bytes are not lost with the id.
-    damaged = _verify_staging(server, session_id, staging, ready)
-    if damaged:
+    verification_refusal = _verify_staging(server, session_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging})",
                 phase_reached="handing_off",
                 changed=True,
@@ -3116,7 +3226,7 @@ def _finish_from_tombstone(
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     clear_handoff_entry(server.root, session_id)
     progress.note(session_id, "committed")
     _audit(server, AUDIT_DONE, session_id, owner_device, resumed=True)
@@ -3152,9 +3262,18 @@ class _PromoteOutcome(NamedTuple):
     """``_promote``'s answer: whether the copy landed, and its scheduled-state block.
 
     ``ok`` is the bool the callers used to get back wholesale. ``carry`` is
-    ``None`` unless the arriving session carried wakes — the block the move's
-    receipt reports (see :class:`MoveCarryBlock`), which is the half a bool
-    could never carry out of the promote.
+    ``None`` unless the arriving session carried something to report — the block
+    the move's receipt reports (see :class:`MoveCarryBlock`), which is the half a
+    bool could never carry out of the promote. A promote with no wakes (or other
+    adopted state) MUST leave it ``None``: the wake hook exists so sleepers pay
+    nothing for it, and ``test_move_carry_supervisor`` pins that contract.
+
+    ``skill_selection`` is a SEPARATE concern and so a separate field: the
+    destination's pin acknowledgement (or explicit local routing), present on
+    every successful promote. Folding it into ``carry`` here made ``carry``
+    non-``None`` for every promote and broke the exact wake-carry receipt shape.
+    The callers merge it into the RECEIPT's carry block (``MoveCarryBlock``
+    declares ``skill_selection``), which is where the source and the CLI read it.
 
     ``stamps_refused`` (QA Q-1) marks the one refusal that is NOT about the id
     already being taken here: the copy's origin stamps could not be lowered to
@@ -3167,6 +3286,21 @@ class _PromoteOutcome(NamedTuple):
     carry: dict[str, Any] | None
     stamps_refused: bool = False
     team_refusal: str = ""
+    skill_pin_refused: bool = False
+    skill_selection: SkillTransferReceipt | None = None
+
+
+def _receipt_carry(outcome: _PromoteOutcome) -> dict[str, Any] | None:
+    """The receipt's carry block: the promote's wake-carry plus its skill selection.
+
+    ``_promote`` keeps the two apart so its own ``carry`` stays the exact wake-carry
+    contract; the RECEIPT (``MoveCarryBlock``) is where they meet, because the done
+    frame and the returned move result are what the source and the CLI read
+    ``skill_selection`` from.
+    """
+    if outcome.skill_selection is None:
+        return outcome.carry
+    return {**(outcome.carry or {}), "skill_selection": outcome.skill_selection}
 
 
 #: The refusal ``_promote`` answers with when the id is taken or the copy could
@@ -3179,12 +3313,15 @@ _PROMOTE_STAMPS_REFUSED = _PromoteOutcome(ok=False, carry=None, stamps_refused=T
 def _promote_refusal_detail(target_id: str, outcome: _PromoteOutcome) -> str:
     """The reply for a refused promote, naming its real cause (QA Q-1).
 
-    Shared by ``_destination_move`` and ``_finish_from_tombstone`` so both say
-    the same thing. This module words its replies inline rather than through
-    i18n keys, so this follows suit.
+    Shared by live and recovered adoption so both name the same refusal.
     """
     if outcome.team_refusal:
         return outcome.team_refusal
+    if outcome.skill_pin_refused:
+        from local_operator.i18n.keys import network_skill_transfer
+        from local_operator.i18n.text import tr
+
+        return tr("network.skill_transfer")(network_skill_transfer.receipt_write_failed())
     if outcome.stamps_refused:
         return (
             f"{target_id} could not be adopted here because its origin stamps could not "
@@ -3406,6 +3543,33 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             target,
             target_id,
         )
+    # The copied sidecar was just checked against the source digest. Pin it in
+    # staging, before any other normalization or the single publication rename:
+    # a failed write leaves the original verified bytes available for recovery.
+    from local_operator.resume import (
+        ATTACHMENT_SIDECAR_NAME,
+        read_session_attachment,
+        record_session_skill_manifest,
+    )
+    from local_operator.skills.manifest import skill_transfer_receipt
+
+    attachment = read_session_attachment(source)
+    has_snapshot = attachment is not None and attachment.skill_manifest is not None
+    if (
+        attachment is not None
+        and attachment.skill_manifest is not None
+        and not attachment.skill_manifest_pinned
+    ):
+        try:
+            # The original member participates in the source's digest. Keep
+            # its exact bytes until the stage has atomically become the session.
+            os.link(source / ATTACHMENT_SIDECAR_NAME, source / _SKILL_PIN_ORIGINAL)
+            record_session_skill_manifest(
+                source, attachment.skill_manifest, pinned=True, strict=True
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("mobility: could not pin the skill snapshot of %s: %s", target_id, exc)
+            return _PromoteOutcome(ok=False, carry=None, skill_pin_refused=True)
     # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1). Every mesh
     # origin stamp in the copy is lowered to ``verified: false`` BEFORE the one
     # atomic promote, whoever minted it: a session shed A→D and recalled D→A can
@@ -3452,6 +3616,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         # the same answer a store that never archived anything gives, and a promote
         # must never fail because bookkeeping could not be read.
         ready_doc = {}
+    (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
     ready_path.unlink(missing_ok=True)
     # THE STORE MARKER, which is what makes this directory REMOVABLE later.
     # ``remove_session_dir`` refuses a store that carries no marker, and the marker
@@ -3590,7 +3755,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         workset_move.promote_incoming(server.root, target_id)
     except Exception:  # noqa: BLE001 — the session is promoted; the files wait
         logger.warning("mobility: could not promote %s's working set", target_id, exc_info=True)
-    return _PromoteOutcome(ok=True, carry=carry_block)
+    # Kept OUT of ``carry_block``: that block is the wake-carry receipt and stays
+    # ``None`` for a promote that adopted nothing (see ``_PromoteOutcome``).
+    return _PromoteOutcome(
+        ok=True,
+        carry=carry_block,
+        skill_selection=skill_transfer_receipt("pinned" if has_snapshot else "local_routing"),
+    )
 
 
 def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path) -> None:
@@ -3841,6 +4012,7 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     # layout is how this check would drift away from the thing it is checking.
     if sync_mod.staging_dir(Path(root), session_id).exists():
         return False
+    (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
     (target / "ready.json").unlink(missing_ok=True)
     clear_handoff_entry(root, session_id)
     logger.info(
@@ -7358,6 +7530,7 @@ def adopt_staged_if_mine(
                 {"phase": "committed", "at": time.time()},
             ],
             "recovered": True,
+            "carry": {"skill_selection": report["skill_selection"]},
         },
     )
 
@@ -7659,7 +7832,9 @@ def _reconcile_destination(
         # (``sync.EXCLUDED_ENTRIES`` says so) and this is the only moment anything
         # still knows it is ours, so it goes here rather than lingering in a
         # conversation the user will open.
-        (Path(root) / "sessions" / session_id / "ready.json").unlink(missing_ok=True)
+        target = Path(root) / "sessions" / session_id
+        (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
+        (target / "ready.json").unlink(missing_ok=True)
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
     if server is None:
@@ -7714,7 +7889,13 @@ def _reconcile_destination(
             "phase": "handing_off",
             "detail": (refusal or {}).get("message", ""),
         }
-    return {"session_id": session_id, "action": "promoted", "phase": "committed"}
+    selection = (result.get("carry") or {}).get("skill_selection")
+    return {
+        "session_id": session_id,
+        "action": "promoted",
+        "phase": "committed",
+        "skill_selection": selection,
+    }
 
 
 def sweep_staging(root: Path, *, max_age_s: float = STAGING_MAX_AGE_S) -> list[str]:
@@ -8496,9 +8677,17 @@ def _offload(
         # arrived on the ``done`` frame — wakes carried plus the supervisor's verified
         # state, including the LOUD fallback when it is not running — and this side adds
         # the monitor half from its own count (``monitors_here``, read before the
-        # commit). Either half may be absent (an older peer sends none; no monitors),
-        # and the key is absent when both are, so an unchanged move parses unchanged.
+        # commit). Older peers may send none; the source names that fallback.
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
         carry_block = progress.carry(session_id) or {}
+        # An older destination completes without this additive field. Move
+        # completion alone confirms neither a pin nor a local routing decision.
+        reported = skill_transfer_status(carry_block.get("skill_selection"))
+        carry_block["skill_selection"] = skill_transfer_receipt(reported or "unconfirmed")
         if monitors_here > 0:
             carry_block.setdefault("monitors", monitors_here)
             carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)

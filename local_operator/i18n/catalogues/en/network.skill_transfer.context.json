@@ -1,0 +1,22 @@
+{
+  "network.skill_transfer.receipt.local_routing": {
+    "note": "No source selection was pinned; the receiving device routes locally.",
+    "role": "Peer session transfer receipt",
+    "tone": "Plain and explicit"
+  },
+  "network.skill_transfer.receipt.pinned": {
+    "note": "The source selection is pinned, not a claim that every skill is present or loaded.",
+    "role": "Peer session transfer receipt",
+    "tone": "Plain and explicit"
+  },
+  "network.skill_transfer.receipt.unconfirmed": {
+    "note": "Lost or incomplete acknowledgement: the destination’s behavior is unknown.",
+    "role": "Peer session transfer receipt",
+    "tone": "Plain and explicit"
+  },
+  "network.skill_transfer.receipt.write_failed": {
+    "note": "Move refused before publication; the staged copy remains.",
+    "role": "Peer session transfer receipt",
+    "tone": "Plain and explicit"
+  }
+}

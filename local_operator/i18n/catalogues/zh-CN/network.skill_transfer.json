@@ -1,0 +1,6 @@
+{
+  "network.skill_transfer.receipt.local_routing": "未固定技能快照。目标设备将自行选择本地技能。",
+  "network.skill_transfer.receipt.pinned": "目标设备已固定源设备选定的技能，只会加载匹配的本地技能。",
+  "network.skill_transfer.receipt.unconfirmed": "目标设备未确认技能快照。请勿假定它使用的是源设备选定的技能。",
+  "network.skill_transfer.receipt.write_failed": "目标设备未能保存技能快照。暂存副本已保留，尚未发布。"
+}
