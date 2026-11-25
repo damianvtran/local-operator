@@ -1040,10 +1040,12 @@ def test_the_resume_line_names_the_target_model_not_one_that_ran(
     job N on X`` read as a model that had already executed."""
     from local_operator.tools.builtin import _resumed_line
 
-    line = _resumed_line(_OneRowComms(OPUS, owns), "explore", "job-1", "job-2", FLASH, session_model)
+    line = _resumed_line(
+        _OneRowComms(OPUS, owns), "explore", "job-1", "job-2", FLASH, session_model
+    )
 
     assert line.startswith("- explore (job-1): resumed as job job-2 \u2014 "), line
     assert clause in line, line
-    assert f"resumed as job job-2 on " not in line, line
+    assert "resumed as job job-2 on " not in line, line
     # The previous run really did execute, so its past tense stays.
     assert f"(its previous run was on {FLASH})" in line, line

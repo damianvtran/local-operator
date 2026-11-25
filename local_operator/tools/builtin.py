@@ -35383,9 +35383,11 @@ def _resumed_line(
         # Inherited from an ancestor rather than from this session (D9.4): "on
         # this session's model" would be false, and a bare "on <model>" reads
         # as a pin.
-        line += f" \u2014 will run on its parent's model ({model})"  # i18n: ignore model-facing tool output
+        # i18n: ignore model-facing tool output
+        line += f" \u2014 will run on its parent's model ({model})"
     else:
-        line += f" \u2014 will run {_model_clause(model, owns, session_model)}"  # i18n: ignore model-facing tool output
+        # i18n: ignore model-facing tool output
+        line += f" \u2014 will run {_model_clause(model, owns, session_model)}"
     if previous_model and previous_model != model:
         line += f" (its previous run was on {previous_model})"
     return line
