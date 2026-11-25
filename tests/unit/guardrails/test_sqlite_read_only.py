@@ -23,6 +23,11 @@ from local_operator.guardrails.preview import preview_tool_call
 FIELD = 'sqlite3 ~/.local-operator/team_bridge/state.sqlite3 "SELECT * FROM t"'
 LEDGER = "~/.local-operator/guardrails/created.sqlite"
 BRIDGE = "~/.local-operator/team_bridge/state.sqlite3"
+_LEDGER_ABS = "$HOME/.local-operator/guardrails/created.sqlite"
+_ZIP_WRITE = (
+    "create virtual table temp.z using zipfile('/x/a.zip'); "
+    "insert into temp.z(name,data) values('f','x')"
+)
 
 
 @pytest.fixture
@@ -124,6 +129,21 @@ _REFUSED = [
     (f'sqlite3 -readonly -cmd ".output /x" {LEDGER} "select 1"', Risk.HIGH),
     (f'X=1 sqlite3 {LEDGER} "select 1"', Risk.CRITICAL),
     (f'python3 -c "x" {LEDGER}', Risk.HIGH),  # not sqlite3: unchanged
+    # Security round 1, B1: ``#`` ends the URI for sqlite, so ``?mode=ro``
+    # after it is fragment text and the open is read-write (measured, 3.54).
+    (f'sqlite3 "file:{_LEDGER_ABS}#?mode=ro" "delete from t"', Risk.HIGH),
+    (f'sqlite3 "file:{_LEDGER_ABS}#?mode=ro" "drop table t"', Risk.HIGH),
+    (f'sqlite3 "file:{_LEDGER_ABS}?mode=ro#x" "delete from t"', Risk.HIGH),
+    # Security round 1, M1: a TEMP virtual table's module writes outside the
+    # read-only database (measured: this exact command creates the zip).
+    (f"sqlite3 -readonly {LEDGER} \"{_ZIP_WRITE}\"", Risk.HIGH),
+    (f'sqlite3 "file:{_LEDGER_ABS}?mode=ro" "{_ZIP_WRITE}"', Risk.HIGH),
+    (
+        f"sqlite3 -readonly {LEDGER} \"create virtual table temp.g using "
+        "generate_series(1,2)\"",
+        Risk.HIGH,
+    ),
+    (f"sqlite3 -readonly {LEDGER} \"select * from zipfile('/x/a.zip')\"", Risk.HIGH),
 ]
 
 
@@ -170,3 +190,22 @@ def test_hint_only_on_sqlite_refusals(home: Path) -> None:
     )
     assert report.action == "refuse"  # a CRITICAL built-in is a refusal
     assert SQLITE_READ_HINT not in report.builtin_text and report.builtin_text
+
+
+def test_hint_skipped_when_sqlite_is_not_the_only_target(home: Path) -> None:
+    """Security round 1, N1: in a mixed command the read-only form would not
+    lift the refusal, so the hint is left out."""
+    ctx = CallContext(
+        cwd=str(home / "repo"), env=_env(home), scratchpad=None, session_id="own"
+    )
+    rules = home / "rules"
+    rules.mkdir()
+    settings = GuardSettings(rules_dirs=(rules,))
+    mixed = f'rm -f {BRIDGE}; sqlite3 {LEDGER} "DELETE FROM created"'
+    report = preview_tool_call("bash", {"command": mixed}, ctx, settings=settings)
+    assert report.action == "refuse"
+    assert SQLITE_READ_HINT not in report.builtin_text and report.builtin_text
+    # Control: sqlite3 alone still carries it.
+    solo = f'sqlite3 {LEDGER} "DELETE FROM created"'
+    report = preview_tool_call("bash", {"command": solo}, ctx, settings=settings)
+    assert SQLITE_READ_HINT in report.builtin_text

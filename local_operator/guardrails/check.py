@@ -441,9 +441,11 @@ SQLITE_READ_HINT = (
 
 def _sqlite_hint(verdict: Verdict) -> str:
     flagged = verdict.flagged_targets or verdict.targets
+    # Only when sqlite3 is the WHOLE reason: in ``cp a b; sqlite3 …`` the
+    # read-only form would not lift the refusal, so the hint would mislead.
     return (
         f" {SQLITE_READ_HINT}"
-        if any(t.target.program == "sqlite3" for t in flagged)
+        if flagged and all(t.target.program == "sqlite3" for t in flagged)
         else ""
     )
 

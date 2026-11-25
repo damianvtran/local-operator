@@ -7651,8 +7651,29 @@ _SQLITE_READ_DOT_COMMANDS = frozenset(
 #: and ``"vacuum into 'f'"`` both create ``f``), or attach/extend the
 #: connection. Matched as whole words anywhere in the text — inside a string
 #: literal too, which costs a judge call, never a missed write.
+#:
+#: ``virtual`` closes a whole class (PR #4587 security round 1, M1): a TEMP
+#: virtual table is creatable on a read-only connection, and its module then
+#: writes wherever it likes — measured on sqlite 3.54: ``sqlite3 -readonly db
+#: "create virtual table temp.z using zipfile('a.zip'); insert into temp.z
+#: (name,data) values('f','x')"`` creates ``a.zip``. No read needs ``CREATE
+#: VIRTUAL TABLE``, and a module cannot be reached for writing without it in
+#: the same call (a persisted vtab, or the eponymous ``zipfile``, is refused
+#: by sqlite on a read-only open — measured), so refusing the word refuses
+#: the class whatever the module is named. ``zipfile`` is belt and braces:
+#: it also drops ``select … from zipfile('x.zip')`` reads, which costs a
+#: judge call, never a missed write.
 _SQLITE_ESCAPE_WORDS = frozenset(
-    {"attach", "vacuum", "writefile", "edit", "load_extension", "fts3_tokenizer"}
+    {
+        "attach",
+        "vacuum",
+        "writefile",
+        "edit",
+        "load_extension",
+        "fts3_tokenizer",
+        "virtual",
+        "zipfile",
+    }
 )
 #: Words that write the database itself. Only consulted when the database is
 #: opened read-write; ``replace`` is also a scalar function, so ``replace()``
@@ -7827,8 +7848,15 @@ def _sqlite_read_only(args: list[Expanded], cwd: str | None) -> bool:
     if path.startswith("file:"):
         from urllib.parse import parse_qs, unquote
 
+        # A ``#`` ends the URI for sqlite wherever it appears, so in
+        # ``file:db#?mode=ro`` the ``?mode=ro`` is fragment text and the open
+        # is read-write (PR #4587 security round 1, B1: measured on sqlite
+        # 3.54, that spelling runs ``delete``/``drop``). Rather than mirror
+        # sqlite's split exactly, any fragment leaves the read-only route.
+        if "#" in path:
+            return False
         body, _, query = path[5:].partition("?")
-        params = parse_qs(query.split("#", 1)[0], keep_blank_values=True)
+        params = parse_qs(query, keep_blank_values=True)
         if "vfs" in params or any(len(v) > 1 for v in params.values()):
             return False
         mode = params.get("mode", [""])[0]
