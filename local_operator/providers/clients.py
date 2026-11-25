@@ -2044,11 +2044,63 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
     return int(visible * _estimate_slope(request.model)) + native, visible + native
 
 
-def _inline_ui_suffix_tokens(request: ChatRequest) -> int:
-    # Only serializers that send the suffix count it. It contributes to this
+def _inline_ui_hint_tokens(request: ChatRequest) -> int:
+    # Only serializers that send the hint count it, wherever they place it (a
+    # tail row, or the Anthropic thinking HEAD row). It contributes to this
     # request's admission, but is not part of the stored conversation measure.
     hint = request.inline_ui_hint
     return (len(hint) + 3) // 4 if hint is not None else 0
+
+
+def thinking_binds_prefix(model: ModelSpec) -> bool:
+    """Whether a request for ``model`` turns thinking on (signed blocks follow).
+
+    The SAME rule as :func:`_reasoning_effort` (which decides whether
+    ``body["thinking"]`` is written), stated on the model so a caller that has
+    no request yet (the session's inline-UI head latch) asks the identical
+    question the body builder will.
+    """
+    level = model.reasoning_effort
+    return bool(level) and level in model.reasoning_efforts
+
+
+def inline_ui_hint_binds_head(model: ModelSpec) -> bool:
+    """Whether the inline-UI hint must ride a FIXED head row for ``model``.
+
+    True on the Anthropic Messages body (first party and Bedrock invoke) with
+    thinking on: there :meth:`AnthropicClient._build_body` pins the hint at
+    ``messages[0]``, and every signed thinking block is bound to all content
+    before it, so the head row is part of each signature's prefix. The session
+    therefore latches the hint per conversation for these models
+    (``Session._inline_ui_head_hint``). Bedrock Converse never encodes the hint
+    (``bedrock/converse.py``), so a latched hint reaching it is inert.
+    """
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_anthropic_messages_wire,
+    )
+
+    definition = get_provider_definition(model.provider)
+    wire = definition.wire if definition is not None else None
+    return is_anthropic_messages_wire(wire) and thinking_binds_prefix(model)
+
+
+def carries_signed_thinking(messages: Sequence[Any]) -> bool:
+    """Whether ``messages`` hold an assistant turn with stored Anthropic thinking.
+
+    Such a turn is replayed with its signed blocks, each bound to everything
+    before it, so the head of the conversation is frozen while it is present.
+    Conservative on purpose: a payload the replay gate would refuse (another
+    model or credential) still counts, which only keeps the latch longer.
+    ``_anthropic_native_payload`` writes a payload only when thinking streamed.
+    """
+    for message in messages:
+        if getattr(message, "role", None) != "assistant":
+            continue
+        payload = (getattr(message, "provider_payload", None) or {}).get("native_replay")
+        if isinstance(payload, dict) and payload.get("protocol") == _ANTHROPIC_NATIVE_PROTOCOL:
+            return True
+    return False
 
 
 def _reasoning_effort(request: ChatRequest) -> str | None:
@@ -3967,7 +4019,7 @@ class OpenAICompatClient:
             "openai-responses",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=_inline_ui_suffix_tokens(request),
+            extra_native_tokens=_inline_ui_hint_tokens(request),
         )
         wire_messages = request.wire_messages()
         body: dict[str, Any] = {
@@ -6124,7 +6176,7 @@ class AnthropicClient:
             _ANTHROPIC_NATIVE_PROTOCOL,
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=_inline_ui_suffix_tokens(request),
+            extra_native_tokens=_inline_ui_hint_tokens(request),
         )
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -6199,12 +6251,41 @@ class AnthropicClient:
                 ephemeral_indices=ephemeral_indices,
                 system_head_marker=head_marker,
             )
-        # An ephemeral frame belongs beyond all original cache points. Keep a
-        # preceding user/tool-result row byte-identical, including block order.
+        # The discovery hint is request-only: it is never stored, so the next
+        # request's history cannot contain it where this one put it. WHERE it
+        # rides therefore decides whether earlier turns stay byte-stable.
         if request.inline_ui_hint is not None:
-            messages.append(
-                {"role": "user", "content": [{"type": "text", "text": request.inline_ui_hint}]}
-            )
+            hint_row = {
+                "role": "user",
+                "content": [{"type": "text", "text": request.inline_ui_hint}],
+            }
+            if thinking_binds_prefix(request.model):
+                # Thinking is on (same rule as ``_reasoning_effort``, which
+                # writes ``body["thinking"]`` below), so signed thinking blocks
+                # get replayed. Sonnet/Opus/Haiku 5.5 bind each block to ALL
+                # content before it: a tail hint sits right before the block the
+                # model produces next, then vanishes from the following request
+                # ("Content that preceded this block when it was created is
+                # missing", HTTP 400, every 2nd tool call since v0.113.0). Pin it
+                # at the HEAD instead, so every replayed block sees the prefix it
+                # was created with. Consecutive user rows are accepted (the API
+                # joins them into one turn); cache markers were placed on block
+                # dicts above, so prepending moves none.
+                # CONSTRAINT: the head row must NEVER change within a
+                # conversation. Adding, dropping or editing it shifts the prefix
+                # of every signed block already in history: a signature
+                # rejection (400) AND a miss of the whole message-level cache,
+                # since the row sits before every message breakpoint. This
+                # builder cannot enforce that alone (the hint is decided per
+                # request), so the session latches it per conversation and
+                # sends the same bytes on every Anthropic thinking request,
+                # asides included (``Session._inline_ui_head_hint``).
+                messages.insert(0, hint_row)
+            else:
+                # No thinking, so there is no signature to break. Keep the
+                # suffix past every cache point, so the cached prefix and the
+                # user/tool-result row before it stay byte-identical.
+                messages.append(hint_row)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
@@ -7066,7 +7147,7 @@ class GoogleClient:
             "google-content",
             scope,
             _estimate_slope(request.model),
-            extra_native_tokens=boundary_tokens + _inline_ui_suffix_tokens(request),
+            extra_native_tokens=boundary_tokens + _inline_ui_hint_tokens(request),
         )
         if request.inline_ui_hint is not None:
             contents.append({"role": "user", "parts": [{"text": request.inline_ui_hint}]})
