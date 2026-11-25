@@ -777,6 +777,12 @@ jobs:
       - name: Install and start the built wheel
         run: python scripts/smoke_wheel.py --wheel dist/packaging-smoke/local_operator-*.whl
 
+      # This is a persisted-session compatibility check, not another interpreter
+      # compatibility matrix. Test the same artifact once, on the Python floor.
+      - name: Resume pre-binding team sessions after upgrading
+        if: matrix.python-version == '3.12'
+        run: python scripts/smoke_team_session_upgrade.py --wheel dist/packaging-smoke/local_operator-*.whl
+
   # The source-tree half of the same interpreter class. `packaging-smoke` above
   # proves the BUILT artifact starts on 3.14; this job proves the tree the next
   # tag is cut from can be installed and imported on 3.14 first. That is a
