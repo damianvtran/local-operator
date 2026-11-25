@@ -461,10 +461,11 @@ def read_complete_events(session_directory: Path | str) -> list[dict[str, Any]] 
             if ask_id in seen:
                 return None
             if kind == EVENT_QUEUED:
-                # The tolerant fold defaults a missing deadline to zero (already
-                # expired). Expiry is evidence only with an actual deadline.
+                # Both queued writers add a positive timeout to the row's
+                # creation time (`at`). An impossible deadline is not evidence
+                # of expiry, even if the tolerant fold would mark it expired.
                 deadline = event.get("expires_at")
-                if type(deadline) is not int or deadline <= 0:
+                if type(deadline) is not int or deadline <= at:
                     return None
             else:
                 origin = event.get("relay")

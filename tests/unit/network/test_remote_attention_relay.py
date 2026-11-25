@@ -338,6 +338,8 @@ def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
         "orphan",
         "bad-deadline",
         "missing-deadline",
+        "deadline-at-creation",
+        "deadline-before-creation",
     ],
 )
 def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
@@ -427,6 +429,10 @@ def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
                         + newest.replace(str(clock + 1000).encode(), b"true"),
                         "missing-deadline": history
                         + newest.replace(b'"expires_at":' + str(clock + 1000).encode() + b",", b""),
+                        "deadline-at-creation": history
+                        + newest.replace(str(clock + 1000).encode(), str(clock).encode()),
+                        "deadline-before-creation": history
+                        + newest.replace(str(clock + 1000).encode(), str(clock - 1).encode()),
                     }[settle]
                 )
             row = _catalog_row(link)
