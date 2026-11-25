@@ -1141,6 +1141,9 @@ async def test_todos_and_wakes_restore_identically_after_the_fold(tmp_path):
 
     reopened = Transcript(directory)
     entry_after = reopened.latest_custom_entry(_WAKES)
+    # Both rows must survive the fold, so narrow before reading their fields.
+    assert entry_before is not None
+    assert entry_after is not None
     assert (entry_after.id, entry_after.ts) == (entry_before.id, entry_before.ts)
     schedules = entry_after.payload["details"]["schedules"]
     assert [WakeSchedule.model_validate(row) for row in schedules] == [newest_schedule]
@@ -1148,10 +1151,12 @@ async def test_todos_and_wakes_restore_identically_after_the_fold(tmp_path):
     assert len(_rows_of(reopened, _TODO)) == 1
 
     assert reopened.latest_custom(_TODO) == todo_before
+    todo_after = reopened.latest_custom(_TODO)
+    assert todo_after is not None
     probe = "fold-restore-probe"
     TODO_STORE.pop(probe, None)
     try:
-        restore_todos(probe, list(reopened.latest_custom(_TODO)["items"]))
+        restore_todos(probe, list(todo_after["items"]))
         restored = todo_snapshot(probe)
     finally:
         TODO_STORE.pop(probe, None)
@@ -1173,19 +1178,26 @@ async def test_torn_newest_todo_and_wake_rows_never_supersede_the_last_valid_cop
 
     def torn(custom_type: str, details: dict[str, Any]) -> str:
         row = TranscriptEntry(
-            id=f"torn-{custom_type}", ts=98.0, type="custom",
+            id=f"torn-{custom_type}",
+            ts=98.0,
+            type="custom",
             payload={"custom_type": custom_type, "details": details},
         ).to_json()
         return row[: len(row) // 2]  # crash mid-row, no newline
 
     after = TranscriptEntry(
-        id="after-crash", ts=99.0, type="message",
+        id="after-crash",
+        ts=99.0,
+        type="message",
         payload=encode_message_payload(Message.user("after the crash")),
     ).to_json()
     with path.open("a", encoding="utf-8") as handle:
         handle.write(torn(_TODO, _todo_details(99, 40 * 1024)) + after + "\n")
-        handle.write(torn(_WAKES, _wake_details(99, 40 * 1024)) + after.replace(
-            "after-crash", "after-crash-2") + "\n")
+        handle.write(
+            torn(_WAKES, _wake_details(99, 40 * 1024))
+            + after.replace("after-crash", "after-crash-2")
+            + "\n"
+        )
 
     reopened = Transcript(directory)
     assert reopened.latest_custom(_TODO) == _todo_details(copies - 1, 40 * 1024)
