@@ -346,6 +346,9 @@ class ClassificationService:
         # Typed calls must not resolve or reuse a generated-hint route, even
         # when they ask a choice question. Hold separate memos for the two lanes.
         self._typed_legs: tuple[DecisionVendor, ...] | None = None
+        # Only a fenced resolution can vouch that Radient was absent when a
+        # lower-priority native leg was selected. The plain probe cannot.
+        self._typed_radient_stamp: RadientStamp | None = None
         self._typed_trace: VendorResolution | None = None
         self._auth_store: AdvisoryAuthSource | None = None
         self._advisory_session_id: str | None = None
@@ -465,21 +468,26 @@ class ClassificationService:
         )
 
     async def recommend_resources(
-        self, request: RecommendationRequest, *, automatic: bool | None = None
+        self,
+        request: RecommendationRequest,
+        *,
+        automatic: bool | None = None,
+        deadline: float | None = None,
     ) -> Recommendation:
         """Recommend resources for one user message. Never raises; see the module docstring.
 
         ``automatic=None`` is the public native-only seam. The session hook
         passes False for the foreground (native only with the takeover fence)
         or True for its detached native-miss fallback. Never await True on a
-        chat-model step.
+        chat-model step. A session supplies its absolute event-loop deadline
+        because the native availability probe has already spent some of it.
 
         The only exception that may leave this coroutine is cancellation, which
         is not a failure to swallow: a cancelled turn must stay cancelled rather
         than be turned into an empty recommendation the caller then injects.
         """
         try:
-            return await self._recommend(request, automatic=automatic)
+            return await self._recommend(request, automatic=automatic, deadline=deadline)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the classifier may never fail a turn
@@ -571,7 +579,11 @@ class ClassificationService:
     # -- internals ---------------------------------------------------------
 
     async def _recommend(
-        self, request: RecommendationRequest, *, automatic: bool | None
+        self,
+        request: RecommendationRequest,
+        *,
+        automatic: bool | None,
+        deadline: float | None,
     ) -> Recommendation:
         """The real body, with the gates applied in their documented order."""
         if not self.enabled:
@@ -612,7 +624,9 @@ class ClassificationService:
             # One in-flight call per (session, cache key): the second caller for
             # the same message joins the first rather than spending a second
             # request against a 0.5 req/s key (§3).
-            task = asyncio.create_task(self._attempt(request, key, automatic=automatic))
+            task = asyncio.create_task(
+                self._attempt(request, key, automatic=automatic, deadline=deadline)
+            )
             self._inflight[key] = task
             task.add_done_callback(lambda _finished, _key=key: self._inflight.pop(_key, None))
         # ``shield`` keeps the shared call alive when a joiner is cancelled: the
@@ -621,7 +635,12 @@ class ClassificationService:
         return await asyncio.shield(task)
 
     async def _attempt(
-        self, request: RecommendationRequest, key: str, *, automatic: bool | None
+        self,
+        request: RecommendationRequest,
+        key: str,
+        *,
+        automatic: bool | None,
+        deadline: float | None,
     ) -> Recommendation:
         """Build, call the cascade, map the answers — and cache the outcome."""
         started = time.monotonic()
@@ -645,6 +664,8 @@ class ClassificationService:
         )
         decision_request = build_decision_request(plan, state)
         timeout_s = self.timeout_s
+        if deadline is None:
+            deadline = asyncio.get_running_loop().time() + timeout_s
         structured = automatic is True
 
         def mark_leg(name: str) -> None:
@@ -652,16 +673,12 @@ class ClassificationService:
             structured = name == GOOGLE_VERTEX
 
         try:
-            async with asyncio.timeout(timeout_s) as budget:
-                deadline = budget.when()
-                assert deadline is not None
-                loop = asyncio.get_running_loop()
-                remaining = timeout_s
+            async with asyncio.timeout_at(deadline):
                 while True:
                     try:
                         response = await self._call_cascade(
                             decision_request,
-                            remaining,
+                            deadline,
                             automatic=automatic,
                             on_leg=mark_leg,
                         )
@@ -671,7 +688,6 @@ class ClassificationService:
                         # extending the original deadline or recording a failure.
                         self._legs = self._typed_legs = None
                         await asyncio.sleep(0)
-                        remaining = max(0.0, deadline - loop.time())
         except TimeoutError:
             logger.warning("classification: timed out after %.0f ms", timeout_s * 1000)
             self._record_failure("timeout", structured=structured)
@@ -759,8 +775,9 @@ class ClassificationService:
         request = DecisionRequest(state=state, questions=(question,))
         timeout_s = self.timeout_s
         try:
-            async with asyncio.timeout(timeout_s):
-                response = await self._call_cascade(request, timeout_s)
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            async with asyncio.timeout_at(deadline):
+                response = await self._call_cascade(request, deadline)
         except TimeoutError:
             logger.warning("classification: decide timed out after %.0f ms", timeout_s * 1000)
             self._record_failure("timeout")
@@ -812,7 +829,7 @@ class ClassificationService:
     async def _call_cascade(
         self,
         request: DecisionRequest,
-        timeout_s: float,
+        deadline: float,
         *,
         automatic: bool | None = None,
         on_leg: Callable[[str], None] | None = None,
@@ -829,7 +846,16 @@ class ClassificationService:
         picked up without restarting the session.
         """
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s
+
+        def remaining() -> float:
+            # An expired timeout only cancels on the next event-loop cycle.
+            # Never start work (or another leg) on that scheduling grace.
+            seconds = deadline - loop.time()
+            if seconds <= 0:
+                raise TimeoutError
+            return seconds
+
+        remaining()
         advisory = automatic is True
         cached = self._legs if advisory else self._typed_legs
         # Only automatic hints require this extra authority fence. In
@@ -844,8 +870,7 @@ class ClassificationService:
             stamp = await asyncio.to_thread(radient_stamp, self._config_dir, deadline=deadline)
             # Cancellation alone cannot prevent a send if a worker completion
             # is scheduled ahead of the loop's timeout callback.
-            if loop.time() >= deadline:
-                raise TimeoutError
+            remaining()
             return stamp
 
         authorized_stamp = await snapshot() if fenced else None
@@ -857,6 +882,7 @@ class ClassificationService:
         after_probe = check_radient if fenced else None
         legs = await self._available_legs(
             advisory=advisory,
+            radient_snapshot=authorized_stamp,
             after_probe=after_probe,
         )
         if not legs:
@@ -876,7 +902,7 @@ class ClassificationService:
                     response = await self._metered_decide(
                         vendor,
                         request,
-                        timeout_s,
+                        remaining(),
                         note=note,
                         check_radient=guard,
                     )
@@ -1075,6 +1101,7 @@ class ClassificationService:
         self,
         *,
         advisory: bool,
+        radient_snapshot: RadientStamp | None = None,
         after_probe: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
@@ -1092,6 +1119,16 @@ class ClassificationService:
         if advisory and (not cached or cached[0].name != "radient"):
             # Re-prove that all native routes are unavailable on each distinct
             # hint; a new TypeSafe/OpenRouter login also outranks Vertex.
+            cached = None
+        if (
+            not advisory
+            and radient_snapshot is not None
+            and (not cached or cached[0].name != "radient")
+            and radient_snapshot != self._typed_radient_stamp
+        ):
+            # A warm foreground miss is only valid for the auth generation
+            # that selected it. Also re-prove a memo from the plain probe or
+            # typed path, which deliberately takes no authority snapshot.
             cached = None
         if cached is not None:
             return cached
@@ -1133,8 +1170,10 @@ class ClassificationService:
             self._legs = legs
             if legs and legs[0].name != GOOGLE_VERTEX:
                 self._typed_legs, self._typed_trace = legs, resolution
+                self._typed_radient_stamp = radient_snapshot
         else:
             self._typed_legs = legs
+            self._typed_radient_stamp = radient_snapshot
         return legs
 
     def _client(self) -> httpx.AsyncClient:

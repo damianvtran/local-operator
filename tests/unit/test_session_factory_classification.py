@@ -2114,9 +2114,24 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("route", ["disabled", "no-vertex", "early", "blocked", "oauth", "native"])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "disabled",
+        "no-vertex",
+        "early",
+        "blocked",
+        "oauth",
+        "native",
+        "takeover",
+        "takeover-vertex-breaker",
+        "expired-probe",
+        "spent-probe",
+    ],
+)
 async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatch, route):
     import statistics
+    import threading
     import time
 
     import httpx
@@ -2131,6 +2146,7 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
         StreamToolCallDelta,
         ToolResult,
     )
+    from local_operator.providers import registry
     from local_operator.providers.auth_store import OAuthAccess
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
@@ -2138,17 +2154,38 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
     monkeypatch.setattr(analytics, "record_tool_call", lambda *args, **kwargs: None)
     if route == "native":
         monkeypatch.setenv("RADIENT_API_KEY", "fixture-radient")
+    takeover = route.startswith("takeover")
+    if takeover:
+        monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-typesafe")
+    held_probe = route in {"expired-probe", "spent-probe"}
     cold, warm = [], []
-    for run in range(5):
+    for run in range(1 if held_probe or takeover else 5):
         root = tmp_path / str(run)
         root.mkdir()
-        oauth_started, request_started, release = (asyncio.Event() for _ in range(3))
+        oauth_started, request_started, release, finish_early = (asyncio.Event() for _ in range(4))
         posts, prompts, dispatches = [], [], []
+        probe_started, probe_released, probe_finished = (threading.Event() for _ in range(3))
+        probe_starts = []
+        if held_probe:
+            read_secret = registry.provider_secret_value
+
+            def held_secret(name, *args, read_secret=read_secret, **kwargs):
+                if name != "RADIENT_API_KEY":
+                    return read_secret(name, *args, **kwargs)
+                probe_starts.append(time.perf_counter())
+                probe_started.set()
+                try:
+                    assert probe_released.wait(4), "fixture did not release native probe"
+                    return read_secret(name, *args, **kwargs)
+                finally:
+                    probe_finished.set()
+
+            monkeypatch.setattr(registry, "provider_secret_value", held_secret)
 
         class Auth:
             async def get_oauth_access(self, *_args, **_kwargs):
                 oauth_started.set()
-                if route == "oauth":
+                if route in {"oauth", "spent-probe"}:
                     await release.wait()
                 return OAuthAccess(
                     access_token="fixture-vertex",
@@ -2160,9 +2197,11 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
         async def advisory_transport(request: httpx.Request) -> httpx.Response:
             posts.append(request.url.host)
             request_started.set()
+            if route == "early":
+                await finish_early.wait()
             if route == "blocked":
                 await release.wait()
-            if route == "native":
+            if request.url.host in {"api.radienthq.com", "api.typesafe.ai"}:
                 return httpx.Response(
                     200,
                     json={"answers": {"recommend_skill": {"choice": "alpha", "confidence": 1}}},
@@ -2216,7 +2255,9 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
                         # Arrange an answer between chat steps, not before
                         # first dispatch. Unlike product, the fixture may wait.
                         await request_started.wait()
-                        result = await hooks.classification_outstanding[0].task
+                        pending = hooks.classification_outstanding[0].task
+                        finish_early.set()
+                        result = await pending
                         assert result.resources
                     elif route == "blocked":
                         await request_started.wait()
@@ -2250,23 +2291,74 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
                 await session.prompt("find alpha skill")
                 cold.append((dispatches[0] - start) * 1000)
                 assert len(dispatches) == 2 and not release.is_set()
-                assert ("<resource_recommendations>" in prompts[0]) == (route == "native")
+                assert ("<resource_recommendations>" in prompts[0]) == (
+                    route == "native" or takeover
+                )
                 if route == "early":
                     assert "<resource_recommendations>" in prompts[1]
-                elif route != "native":
+                elif route != "native" and not takeover:
                     assert "<resource_recommendations>" not in prompts[1]
                 if route == "native":
                     assert posts == ["api.radienthq.com"] and not oauth_started.is_set()
                 if route in {"disabled", "no-vertex", "oauth"}:
                     assert posts == []
+                if held_probe:
+                    assert probe_started.is_set() and not probe_released.is_set()
+                    assert posts == [] and not oauth_started.is_set()
+                    foreground = hooks.classification_outstanding[0].task
+                    budget = classifier.timeout_s
+                    # Probe entry is after classifier admission, unlike entry to
+                    # Session.prompt(), which includes unrelated turn preparation.
+                    probe_start = probe_starts[0]
+                    if route == "spent-probe":
+                        # Spend part of the budget on native discovery, then hold
+                        # Vertex auth past the original admission deadline.
+                        await asyncio.sleep(
+                            max(0.0, probe_start + budget / 2 - time.perf_counter())
+                        )
+                        probe_released.set()
+                        await oauth_started.wait()
+                        await foreground
+                    await asyncio.sleep(max(0.0, probe_start + budget - time.perf_counter()) + 0.05)
+                    completed_before_release = all(
+                        pending.task.done() for pending in hooks.classification_outstanding
+                    )
+                    probe_released.set()
+                    release.set()
+                    assert await asyncio.to_thread(probe_finished.wait, 1)
+                    await foreground
+                    for pending in hooks.classification_outstanding:
+                        await pending.task
+                    print(
+                        f"{route}: dispatch={cold[-1]:.1f} ms, "
+                        f"finished before release={completed_before_release}, POSTs={posts}"
+                    )
+                    assert not posts and oauth_started.is_set() == (route == "spent-probe")
+                    assert completed_before_release
+                if takeover:
+                    assert posts == ["api.typesafe.ai"] and not oauth_started.is_set()
+                    if route == "takeover-vertex-breaker":
+                        classifier._structured_circuit_open = True
+                    monkeypatch.setenv("RADIENT_API_KEY", "fixture-new-radient")
                 release.set()
                 start = time.perf_counter()
-                await session.prompt("another alpha skill")
-                warm.append((dispatches[2] - start) * 1000)
+                if not held_probe:
+                    await session.prompt("another alpha skill")
+                    warm.append((dispatches[2] - start) * 1000)
+                if takeover:
+                    await session.prompt("a third alpha skill")
+                    print(f"warm native authority: POSTs={posts}")
+                    assert posts == ["api.typesafe.ai", "api.radienthq.com", "api.radienthq.com"]
+                    assert not oauth_started.is_set()
+                    assert all("<resource_recommendations>" in prompts[i] for i in (2, 3))
         finally:
+            probe_released.set()
+            finish_early.set()
             release.set()
             await classifier.aclose()
             await session.dispose()
+    if not warm:
+        return
     print(
         f"dispatch {route}: n={len(cold)} cold ms median={statistics.median(cold):.1f} "
         f"range={min(cold):.1f}–{max(cold):.1f}; warm ms median={statistics.median(warm):.1f} "
