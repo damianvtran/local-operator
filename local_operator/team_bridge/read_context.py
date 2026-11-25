@@ -531,7 +531,8 @@ async def resolve_read_context(
 
     client = wire if wire is not None else wire_for(config_dir)
     access = await client.current_access()  # raises the sign-in / refusal states
-    if str(getattr(access, "account_id", "")) != str(expected_account_id):
+    account_id = str(getattr(access, "account_id", ""))
+    if account_id != str(expected_account_id):
         raise ReadRefused("account_mismatch")
     if str(getattr(access, "kind", "")) != "oauth":
         raise ReadRefused("not_signed_in")
@@ -539,10 +540,12 @@ async def resolve_read_context(
     owner = _read_state(store.active_owner_readonly)
     if owner is None:
         raise ReadRefused("history_context_unavailable")
-    if int(getattr(access, "credential_id", -1)) != int(owner.credential_id):
-        # The signed-in row is not this owner's row: there is no retained
-        # namespace to read for the declared account, and guessing one is the
-        # fallback the contract forbids.
+    if account_id != owner.account_id or int(getattr(access, "credential_id", -1)) != int(
+        owner.credential_id
+    ):
+        # An auth-only restore can reuse a numeric credential ID for another
+        # account. Neither a matching pin nor a current capture authorizes
+        # that account to read or act on the old enrollment.
         raise ReadRefused("history_context_unavailable")
     reason = _receive_fence(store, owner, access)
     if reason == "":

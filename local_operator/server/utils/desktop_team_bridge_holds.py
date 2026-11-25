@@ -188,7 +188,7 @@ def _iso(seconds: float | None) -> str | None:
 
 
 def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dict[str, Any]:
-    """``GET …/holds``: active conversation holds and recent settled decisions."""
+    """``GET …/holds``: active conversation holds and recent signed decisions."""
 
     store = Store(config_dir)
     now = time.time() if now is None else float(now)
@@ -314,11 +314,17 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         "enabled": enabled,
         "key_protection": hr.key_protection(config_dir),
         "items": items,
-        "history": _hold_history(store, owner),
+        "history": _hold_history(
+            store,
+            owner,
+            live_decision_ids=tuple(item["message_id"] for item in items if item["decision"]),
+        ),
     }
 
 
-def _hold_history(store: Store, owner: Any) -> list[dict[str, Any]]:
+def _hold_history(
+    store: Store, owner: Any, *, live_decision_ids: tuple[str, ...] = ()
+) -> list[dict[str, Any]]:
     """Project the signed decision, never another delivery or discard capability.
 
     The signature binds the owner, conversation, message and decision, not the
@@ -327,7 +333,9 @@ def _hold_history(store: Store, owner: Any) -> list[dict[str, Any]]:
     hold time. Do not reconstruct those from unverified refs or guess them.
     """
 
-    releases = store.owner_release_history(owner, limit=_HISTORY_LIMIT)
+    releases = store.owner_release_history(
+        owner, limit=_HISTORY_LIMIT, live_decision_ids=live_decision_ids
+    )
     if not releases:
         return []
     spki, _ = hr.anchor_spki(store.config_dir)
@@ -339,11 +347,16 @@ def _hold_history(store: Store, owner: Any) -> list[dict[str, Any]]:
         conversation_id = str(release["conversation_id"])
         code = str(release["hold_code"])
         word = release["word"]
+        outcome = _outcome_word(release)
         if (
             not is_conversation_message_id(bare)
             or re.fullmatch(CONVERSATION_ID_PATTERN, conversation_id) is None
             or code not in hr.RELEASABLE_HOLD_CODES
-            or word != ("deliver" if release["outcome"] == "admitted" else "discard")
+            # Either click can still be pending or be refused. Only a matching
+            # signed word may be paired with a successful terminal outcome.
+            or word not in ("deliver", "discard")
+            or (outcome == "admitted" and word != "deliver")
+            or (outcome in ("rejected", OWNER_RELEASE_LOCAL_TERMINAL) and word != "discard")
         ):
             continue
         try:
@@ -372,7 +385,7 @@ def _hold_history(store: Store, owner: Any) -> list[dict[str, Any]]:
                 "decision": {
                     "word": word,
                     "decided_at": decided_at,
-                    "outcome": _outcome_word(release),
+                    "outcome": outcome,
                 },
             }
         )

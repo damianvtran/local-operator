@@ -11365,18 +11365,23 @@ class Store:
         row["owner_key"] = _owner_key(owner)
         return row
 
-    def owner_release_history(self, owner: OwnerSnapshot, *, limit: int) -> list[dict[str, Any]]:
-        """Recent settled releases for this exact live owner, without reading hold rows.
+    def owner_release_history(
+        self, owner: OwnerSnapshot, *, limit: int, live_decision_ids: tuple[str, ...]
+    ) -> list[dict[str, Any]]:
+        """Recent clicks for this exact live owner, even when the hold disappears.
 
-        Connector settlement removes the temporary hold but keeps the signed
-        release. Pending and refused attempts can still move, so they are not
-        history. The enrollment check is part of the SELECT, so an old owner
-        snapshot cannot read a preceding generation's releases.
+        Connector settlement (including refusal) or a retry can retire the
+        conversation-shaped hold without erasing the signed click. Skip pending
+        clicks already presented by live items before LIMIT, so they neither
+        duplicate those items nor crowd out history. Keep the enrollment fence
+        inside the query so stale owner snapshots cannot read prior generations.
         """
 
         return self._work_scope_rows(
             "SELECT r.* FROM owner_releases r WHERE r.owner_key = ? "
-            "AND r.creator_generation = ? AND r.outcome IN ('admitted', 'rejected', ?) "
+            "AND r.creator_generation = ? AND (r.outcome IN ('admitted', 'rejected', ?) "
+            "OR r.outcome GLOB 'refused:?*' OR (r.outcome = 'pending' "
+            "AND r.message_id NOT IN (SELECT value FROM json_each(?)))) "
             "AND EXISTS (SELECT 1 FROM enrollments e WHERE e.owner_key = r.owner_key "
             "AND e.credential_id = ? AND e.tenant_id = ? AND e.endpoint_id = ? "
             "AND e.enrollment_generation = r.creator_generation AND e.state = 'committed') "
@@ -11385,6 +11390,7 @@ class Store:
                 _owner_key(owner),
                 owner.enrollment_generation,
                 OWNER_RELEASE_LOCAL_TERMINAL,
+                json.dumps(live_decision_ids),
                 owner.credential_id,
                 owner.tenant_id,
                 owner.endpoint_id,
