@@ -3887,6 +3887,16 @@ class FrontendSessionState(BaseModel):
     #: refused and OFF for one it served (review M3 / UX U3), so the field now
     #: carries the setting the user sees, from ``command.saver_state``.
     saver_on: bool = False
+    #: The LIVE tool-approval gate of the owning runtime: ``"auto"``, ``"ask"``,
+    #: or ``""`` when no runtime gate has stated one (a facade with no serving
+    #: handle, an old owner). Canonical rather than derived because the gate
+    #: (``ServingSessionHandle._auto_approve``) lives in the owner process: the
+    #: desktop's ``/approvals`` picker and composer mode chip read it through
+    #: ``command-entities?command=approvals`` and had nothing to show (PR #4558
+    #: review X1). Published from the handle's ``_notify`` seam, which follows
+    #: every gate mutation, so it cannot lag a switch. Empty means UNKNOWN —
+    #: never read it as ``ask``.
+    approval_mode: str = ""
     #: The session's own tri-state override (``None`` follows the global setting
     #: and the agent's pin), so a surface can say WHY Saver is on or off.
     last_usage: FrontendUsage | None = None
