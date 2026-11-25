@@ -102,7 +102,9 @@ def resolve_hosting_model(
         # this mirrors. A provider with no known default still raises.
         from local_operator.model.defaults import default_model_for
 
-        model_name = default_model_for(hosting)
+        model_name = default_model_for(
+            hosting, config_dir=getattr(config_manager, "config_dir", None)
+        )
         if not model_name:
             # Reuse the resolver's own message rather than inlining a copy: the
             # two are the SAME error (no default model for this hosting) and a

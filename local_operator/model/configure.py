@@ -57,6 +57,7 @@ from local_operator.model.catalogue import (
     note_unavailable,
 )
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
+from local_operator.model.defaults import default_model_for
 from local_operator.model.effort import (
     default_effort,
     resolve_effort_in,
@@ -3400,7 +3401,7 @@ def configure_model(
     if definition.local_setup and not model_name:
         raise ValueError(f"Model is required for {canonical} hosting")
     if not model_name:
-        model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
+        model_name = default_model_for(canonical, config_dir=config_dir) or ""
 
     # Best-effort static key for legacy consumers; the store-first reader tries
     # the provider-class row, then the environment (the legacy plaintext file is
@@ -8794,7 +8795,7 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
 # OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
 # dated snapshots; future and aggregator models must not inherit these prices.
 _OPENAI_LONG_CONTEXT_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
     r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
 )
@@ -8804,7 +8805,7 @@ _OPENAI_LONG_CONTEXT_MODELS = re.compile(
 # twice Standard for these families, including their long-context rates. Other
 # tiers cannot inherit this rule: some have a different premium or no quote.
 _OPENAI_FAST_DOUBLE_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna)(?:-\d{4}-\d{2}-\d{2})?$"
 )
 # These two older Fast rows have only a short-context quote and one is 2.5x,

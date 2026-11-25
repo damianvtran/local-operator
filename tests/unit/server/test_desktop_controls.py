@@ -1466,17 +1466,17 @@ async def test_provider_census_carries_the_suggested_model(desktop):
         "id": "claude-opus-5-5",
         "name": "Claude Opus 5.5",
     }
-    assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
+    assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-v4-pro"
     assert rows["ollama"]["suggested_model"] is None
     assert rows["typesafe"]["suggested_model"] is None
     # Per method, because the route decides the spelling (Kimi). Both OAuth
     # entries (kimi.ai and the WeChat entry) reach the same coding host, so
-    # both spell K3 `k3`; only the API-key method uses the mainland `kimi-k3`.
+    # both spell K3.1 Pro `k3.1-pro`; only the API-key method uses the mainland `kimi-k3.1-pro`.
     kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
     assert kimi == {
-        "kimi": "k3",
-        "kimi-wechat": "k3",
-        "kimi:api-key": "kimi-k3",
+        "kimi": "k3.1-pro",
+        "kimi-wechat": "k3.1-pro",
+        "kimi:api-key": "kimi-k3.1-pro",
     }
 
 
@@ -1490,15 +1490,15 @@ async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
     assert result["valid"] is None  # the conftest stubs the live check
     assert result["defaults_applied"] == {
         "hosting": "deepseek",
-        "model": "deepseek-flash",
-        "model_name": "DeepSeek Flash",
-        "receipt": "Set default hosting to 'deepseek', model to 'deepseek-flash'.",
+        "model": "deepseek-v4-pro",
+        "model_name": "DeepSeek V4 Pro",
+        "receipt": "Set default hosting to 'deepseek', model to 'deepseek-v4-pro'.",
     }
     assert "sk-first-run-secret" not in response.text
     # The side effect, read from disk through a fresh manager.
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "deepseek"
-    assert on_disk.get_config_value("model_name") == "deepseek-flash"
+    assert on_disk.get_config_value("model_name") == "deepseek-v4-pro"
 
 
 async def test_key_save_leaves_an_existing_working_choice_alone(desktop):
@@ -1541,13 +1541,13 @@ async def test_key_save_replaces_a_stranded_default(desktop):
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-strand"})
     assert response.status_code == 200, response.text
     applied = response.json()["result"]["defaults_applied"]
-    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-v4-pro"
     assert applied["receipt"] == (
-        "Default moved to deepseek/deepseek-flash — not signed in to anthropic."
+        "Default moved to deepseek/deepseek-v4-pro — not signed in to anthropic."
     )
     on_disk = ConfigManager(app.state.config_manager.config_dir)
     assert on_disk.get_config_value("hosting") == "deepseek"
-    assert on_disk.get_config_value("model_name") == "deepseek-flash"
+    assert on_disk.get_config_value("model_name") == "deepseek-v4-pro"
 
 
 async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop):
@@ -1556,9 +1556,9 @@ async def test_key_save_fills_an_empty_model_for_the_configured_provider(desktop
     app.state.config_manager.set_config_value("model_name", "")
     response = await client.put("/v1/auth/providers/deepseek/key", json={"value": "sk-fill"})
     applied = response.json()["result"]["defaults_applied"]
-    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-flash"
+    assert applied["hosting"] == "deepseek" and applied["model"] == "deepseek-v4-pro"
     assert ConfigManager(app.state.config_manager.config_dir).get_config_value("model_name") == (
-        "deepseek-flash"
+        "deepseek-v4-pro"
     )
 
 

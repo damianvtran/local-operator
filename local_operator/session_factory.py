@@ -751,7 +751,7 @@ def resolve_hosting_model_with_source(
             from local_operator.model.defaults import default_model_for
 
             provider = flag_hosting or saved.provider
-            model = flag_model or default_model_for(provider)
+            model = flag_model or default_model_for(provider, config_dir=config_manager.config_dir)
             if get_provider_definition(provider) is None:
                 raise HostingUnknownError(
                     _unknown_hosting_message(provider, "flag"), provider, "flag"
@@ -886,7 +886,9 @@ def resolve_hosting_model_with_source(
         # errors, and its message now names current models to choose from.
         from local_operator.model.defaults import default_model_for
 
-        model_name = default_model_for(hosting)
+        model_name = default_model_for(
+            hosting, config_dir=getattr(config_manager, "config_dir", None)
+        )
         if not model_name:
             # RECOVERABLE, not fatal: a provider with no known default is a
             # config the user can still fix from inside the app (`/model`), and

@@ -32,6 +32,7 @@ from local_operator.model.registry import (
     ModelInfo,
     anthropic_models,
     deepseek_models,
+    get_model_info,
     static_models,
 )
 from local_operator.model.tariff import DEEPSEEK_TOU
@@ -635,6 +636,18 @@ def test_openai_astra_long_context_prices_entire_request(count: int, expected: f
     model = _priced(
         id="gpt-6-astra", name="gpt-6-astra", input_price=10, output_price=50, cache_reads_price=1
     )
+    usage = Usage(
+        input_tokens=count,
+        output_tokens=10_000,
+        cache_read_tokens=250_000,
+        openai_long_context=count > 272_000,
+    )
+    assert cost_for_usage("openai", model, usage) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(("count", "expected"), [(272_000, 0.169), (272_001, 0.288004)])
+def test_default_sol_uses_its_documented_long_context_price(count: int, expected: float) -> None:
+    model = get_model_info("openai", "gpt-6.2-sol")
     usage = Usage(
         input_tokens=count,
         output_tokens=10_000,

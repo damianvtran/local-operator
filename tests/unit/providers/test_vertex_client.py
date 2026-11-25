@@ -135,6 +135,26 @@ async def test_vertex_client_oauth_global_and_regional_endpoints() -> None:
     assert seen[1].headers["authorization"] == "Bearer ya29.regional-bearer"
 
 
+@pytest.mark.parametrize("location", ["us", "eu"])
+def test_vertex_neon_multi_region_uses_data_residency_endpoint(location: str) -> None:
+    from local_operator.providers.oauth.vertex import validate_location
+
+    client = GoogleClient(base_url=VERTEX_API_URL, vertex=True)
+    access = OAuthAccess(
+        access_token="synthetic",
+        credential_id=1,
+        email=None,
+        kind="oauth",
+        raw={"project_id": "example-project", "location": validate_location(location)},
+    )
+    url, _ = client._vertex_endpoint_and_headers("gemini-4-neon", None, access)
+    assert url == (
+        f"https://aiplatform.{location}.rep.googleapis.com/v1/projects/example-project"
+        f"/locations/{location}/publishers/google/models/gemini-4-neon"
+        ":streamGenerateContent?alt=sse"
+    )
+
+
 @pytest.mark.asyncio
 async def test_vertex_client_oauth_without_project_raises_clear_provider_error(
     monkeypatch: pytest.MonkeyPatch,
@@ -224,7 +244,7 @@ def test_vertex_registry_documents_and_model_tables() -> None:
     assert OPENROUTER_NAMESPACE["google-vertex"] == "google"
     assert "google" in _PRICE_CATALOGUE_KEYS["google-vertex"]
     suggested = suggested_model_for("google-vertex")
-    assert suggested is not None and suggested.id == "gemini-3.8-flash"
+    assert suggested is not None and suggested.id == "gemini-2.5-flash"
     info = get_model_info("google-vertex", "gemini-3.8-flash")
     assert info is not None and info.id == "gemini-3.8-flash"
 
@@ -245,6 +265,7 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
     from local_operator.server.routes.auth import router as auth_router
     from local_operator.server.utils.desktop_auth import DesktopAuth
 
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     config_manager = ConfigManager(cfg_dir)
@@ -277,6 +298,13 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
             assert methods["google-vertex-key"]["kind"] == "api_key"
             assert methods["google-vertex-key"]["requires_secret_input"] is True
             assert methods["google-vertex-sa"]["requires_secret_input"] is True
+            assert {
+                method_id: method["suggested_model"]["id"] for method_id, method in methods.items()
+            } == {
+                "google-vertex": "gemini-4-neon",
+                "google-vertex-key": "gemini-2.5-flash",
+                "google-vertex-sa": "gemini-4-neon",
+            }
 
             # POST /v1/auth/login for google-vertex-sa opens a paste prompt cleanly.
             started = await client.post("/v1/auth/login", json={"provider": "google-vertex-sa"})

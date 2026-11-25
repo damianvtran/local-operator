@@ -15,8 +15,8 @@ from local_operator.model.defaults import DEFAULT_MODEL_NAMES, default_model_for
 
 
 def test_default_model_for_known_provider() -> None:
-    assert default_model_for("deepseek") == "deepseek-flash"
-    assert default_model_for("zai") == "glm-5.3"
+    assert default_model_for("deepseek") == "deepseek-v4-pro"
+    assert default_model_for("zai") == "glm-5.4"
     # noop aliases to test, which has no default.
     assert default_model_for("noop") is None
 
@@ -44,7 +44,7 @@ def test_apply_login_defaults_sets_hosting_and_model_when_empty(
 
     manager = ConfigManager(tmp_path)
     assert manager.get_config_value("hosting") == "deepseek"
-    assert manager.get_config_value("model_name") == "deepseek-flash"
+    assert manager.get_config_value("model_name") == "deepseek-v4-pro"
 
 
 def test_apply_login_defaults_leaves_existing_hosting_untouched(
@@ -73,15 +73,15 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
         # default model of its own, which is what made the first version of the
         # repair leave the dead model in place beside the new hosting.
         ("xai-oauth", "xai", "grok-4.7"),
-        ("openai-device", "openai", "gpt-6-astra"),
-        ("zai-oauth", "zai", "glm-5.3"),
+        ("openai-device", "openai", "gpt-6.2-sol"),
+        ("zai-oauth", "zai", "glm-5.4"),
         # No default model even after alias resolution: the stale model must be
         # CLEARED, not kept. An empty model_name is a recoverable setup state
         # (ModelNotConfiguredError), not a fully-configured boot; a model from
         # a provider that never existed is worse (boots, then fails at stream).
         ("ollama", "ollama", ""),
         # Ordinary provider with a default: the baseline case.
-        ("deepseek", "deepseek", "deepseek-flash"),
+        ("deepseek", "deepseek", "deepseek-v4-pro"),
     ],
 )
 def test_repair_never_leaves_a_model_from_the_replaced_provider(
@@ -196,7 +196,7 @@ def test_apply_login_defaults_repairs_an_unknown_hosting(
 
     reloaded = ConfigManager(tmp_path)
     assert reloaded.get_config_value("hosting") == "deepseek"
-    assert reloaded.get_config_value("model_name") == "deepseek-flash"
+    assert reloaded.get_config_value("model_name") == "deepseek-v4-pro"
 
 
 def test_apply_login_defaults_leaves_a_legacy_alias_hosting_untouched(
@@ -238,7 +238,79 @@ def test_resolve_hosting_model_falls_back_to_default_model(
     args = argparse.Namespace(hosting=None, model=None)
     hosting, model = resolve_hosting_model(None, args, manager)
     assert hosting == "deepseek"
-    assert model == "deepseek-flash"
+    assert model == "deepseek-v4-pro"
+
+
+@pytest.mark.parametrize(
+    ("hosting", "credential", "expected"),
+    [
+        ("openai", None, "gpt-6.2-sol"),
+        ("google", None, "gemini-3.8-flash"),
+        ("google-vertex", None, "gemini-2.5-flash"),
+        ("google-vertex", {"location": "global"}, "gemini-4-neon"),
+        ("google-vertex", {"location": "eu"}, "gemini-4-neon"),
+        ("google-vertex", {"location": "asia-northeast1"}, "gemini-3.8-flash"),
+        ("kimi", None, "kimi-k3.1-pro"),
+        ("kimi", {}, "k3.1-pro"),
+    ],
+)
+def test_omitted_model_uses_the_local_inference_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hosting: str,
+    credential: dict[str, str] | None,
+    expected: str,
+) -> None:
+    import argparse
+
+    from local_operator.bootstrap import resolve_hosting_model as bootstrap_pair
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.session.cold_model import configured_model_pair
+    from local_operator.session_factory import resolve_hosting_model
+
+    # A stored Vertex location outranks contradictory ambient configuration.
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", hosting)
+    manager.set_config_value("model_name", "")
+    db_path = tmp_path / "auth.db"
+    if credential is not None:
+        store = AuthStore(db_path, config_dir=tmp_path)
+        try:
+            store.upsert_credential(hosting, {"type": "oauth", "access": "synthetic", **credential})
+        finally:
+            store.close()
+    args = argparse.Namespace(hosting=None, model=None)
+    assert resolve_hosting_model(None, args, manager) == (hosting, expected)
+    assert bootstrap_pair(manager, None, None, None) == (hosting, expected)
+    assert configured_model_pair(tmp_path) == (hosting, expected)
+    if credential is None:
+        assert not db_path.exists()  # merely selecting a default is not a credential write
+
+    args.model = "explicit-choice"
+    assert resolve_hosting_model(None, args, manager) == (hosting, "explicit-choice")
+
+
+@pytest.mark.parametrize(
+    ("flavour", "location", "expected"),
+    [
+        ("google-vertex", "global", "gemini-4-neon"),
+        ("google-vertex-sa", "us", "gemini-4-neon"),
+        ("google-vertex-sa", "northamerica-northeast1", "gemini-3.8-flash"),
+        ("google-vertex-key", "global", "gemini-2.5-flash"),
+        ("google", "global", "gemini-3.8-flash"),
+    ],
+)
+def test_vertex_login_suggestion_follows_auth_and_location(
+    monkeypatch: pytest.MonkeyPatch,
+    flavour: str,
+    location: str,
+    expected: str,
+) -> None:
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", location)
+    assert plan_login_defaults(flavour, "", "").model_name == expected
 
 
 def test_resolve_hosting_model_no_hosting_raises_hosting_error(
@@ -279,7 +351,7 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
 #: configured pair (63) — are asserted against it. The branches whose length is the IDS'
 #: are not, because no copy change can bound them: measured, `openrouter/anthropic/
 #: claude-opus-5-20260101` puts the sentence at 84 and the repairing sentence
-#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-flash'`)
+#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-v4-pro'`)
 #: at 83, both of which wrap. That is a real, known wrap in a branch no alternative copy
 #: would fix, and it is recorded here rather than hidden by an assertion that would pass
 #: for the wrong reason.
@@ -424,8 +496,8 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     # The WRITE branch too: literal, and inside the same row budget. This is the
     # receipt that would otherwise be the silent one — the round-4 NIT's point is that
     # every branch of this copy is asserted against the bytes a user sees.
-    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-flash'."
-    assert len(write_receipt) == 61 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
+    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-v4-pro'."
+    assert len(write_receipt) == 62 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
 
 
 # ---------------------------------------------------------------------------
@@ -437,13 +509,19 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
 #: provider's own docs or live listing -- see the table's per-row comments.
 _OPERATOR_TARGETS = {
     "anthropic": "claude-opus-5-5",
-    "openai": "gpt-6-astra",
-    # DeepSeek's direct wire id for V4.1 Flash (its /models lists exactly this).
-    "deepseek": "deepseek-flash",
-    "zai": "glm-5.3",
-    "alibaba": "qwen3.8-max",
+    "openai": "gpt-6.2-sol",
+    # The direct API's Pro id, not the OpenRouter spelling.
+    "deepseek": "deepseek-v4-pro",
+    "zai": "glm-5.4",
+    "alibaba": "qwen4-max",
     "xai": "grok-4.7",
     "google": "gemini-3.8-flash",
+    "google-vertex": "gemini-2.5-flash",
+    "alibaba-token-plan": "qwen4-max",
+    "kimi": "kimi-k3.1-pro",
+    "mistral": "mistral-large-4",
+    "openrouter": "anthropic/claude-opus-5.5",
+    "radient": "auto",
 }
 
 
@@ -537,15 +615,15 @@ def test_default_model_names_is_derived_from_the_suggestions() -> None:
 
 
 def test_the_route_decides_the_kimi_spelling() -> None:
-    """Kimi's OAuth grant reaches the coding-plan host (``k3``); a key reaches
-    api.moonshot.cn (``kimi-k3``). Each must get the id its host serves."""
+    """Kimi's OAuth grant reaches the coding-plan host (``k3.1-pro``); a key reaches
+    api.moonshot.cn (``kimi-k3.1-pro``). Each must get the id its host serves."""
     from local_operator.providers.login_defaults import plan_login_defaults
 
-    assert plan_login_defaults("kimi", "", None).model_name == "k3"
-    assert plan_login_defaults("kimi", "", None, oauth=False).model_name == "kimi-k3"
+    assert plan_login_defaults("kimi", "", None).model_name == "k3.1-pro"
+    assert plan_login_defaults("kimi", "", None, oauth=False).model_name == "kimi-k3.1-pro"
     # Every other OAuth flavour serves the API-key id.
     assert plan_login_defaults("xai-oauth", "", None).model_name == "grok-4.7"
-    assert plan_login_defaults("zai-oauth", "", None).model_name == "glm-5.3"
+    assert plan_login_defaults("zai-oauth", "", None).model_name == "glm-5.4"
     assert plan_login_defaults("anthropic", "", None).model_name == "claude-opus-5-5"
 
 
@@ -562,13 +640,13 @@ def test_the_cli_plans_with_the_flavour_that_ran_not_the_storage_id(
 
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     auth_cli._apply_login_defaults("kimi", oauth=False)
-    assert ConfigManager(tmp_path).get_config_value("model_name") == "kimi-k3"
+    assert ConfigManager(tmp_path).get_config_value("model_name") == "kimi-k3.1-pro"
 
     other = tmp_path / "oauth"
     other.mkdir()
     monkeypatch.setenv(CONFIG_DIR_ENV, str(other))
     auth_cli._apply_login_defaults("kimi", oauth=True)
-    assert ConfigManager(other).get_config_value("model_name") == "k3"
+    assert ConfigManager(other).get_config_value("model_name") == "k3.1-pro"
 
 
 @pytest.mark.parametrize(
@@ -676,12 +754,12 @@ def test_a_stranded_default_is_replaced_by_the_provider_just_signed_in() -> None
     plan = plan_login_defaults("openai", "radient", "auto", oauth=False, accessible={"openai"})
 
     assert plan.hosting == "openai"
-    assert plan.model_name == "gpt-6-astra"
-    assert plan.model_label == "GPT-6 Astra"
+    assert plan.model_name == "gpt-6.2-sol"
+    assert plan.model_label == "GPT-6.2 Sol"
     # The wording says WHY in the session sentence's own vocabulary ("not signed
     # in"), because the two rows land two lines apart in the TUI and one
     # condition spelled two ways read as two causes (UX review U2 / design D4).
-    assert plan.receipt == ("Default moved to openai/gpt-6-astra — not signed in to radient.")
+    assert plan.receipt == ("Default moved to openai/gpt-6.2-sol — not signed in to radient.")
     # NOT the registry-repair flag: ``radient`` IS a provider this build owns,
     # and callers read that flag as "the stored id was not a provider at all".
     assert plan.repairing is False
@@ -721,7 +799,7 @@ def test_a_keyless_local_default_follows_the_configured_rule() -> None:
         "openai", "ollama", "llama3.1", oauth=False, accessible={"openai"}
     )
     assert unconfigured.hosting == "openai"
-    assert unconfigured.model_name == "gpt-6-astra"
+    assert unconfigured.model_name == "gpt-6.2-sol"
 
     configured = plan_login_defaults(
         "openai", "ollama", "llama3.1", oauth=False, accessible={"openai", "ollama"}
@@ -817,33 +895,22 @@ def test_the_stranded_receipt_fits_a_row_at_100_columns() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_openai_subscription_login_picks_the_subscription_latest_model() -> None:
-    """``openai``/``openai-device`` are OAuth arms; their target is GPT-6 Astra.
-
-    Both arms resolve to hosting ``openai`` and pass ``oauth=True`` into
-    ``suggested_model_for``; with no OAUTH override for this provider the
-    suggestion is the SHARED latest, which is also the id the ChatGPT/Codex
-    subscription route serves — ``model/defaults.py``'s own sourcing comment
-    ("The ChatGPT-subscription (Codex) route serves the same id, which is what
-    ``scripts/bench_openai_oauth_cache.py`` drives over OAuth") and
-    ``model/registry.py``'s ``gpt-6-astra`` row (``recommended=True``, "OpenAI's
-    most capable model"). Pinned per provider, because this is the model a
-    first-login re-home will put a conversation on.
-    """
+def test_the_openai_subscription_login_picks_sol() -> None:
+    """Codex browser/device sign-in and API keys use the same GPT-6.2 Sol id."""
     from local_operator.model.defaults import suggested_model_for
     from local_operator.providers.login_defaults import plan_login_defaults
 
     suggested = suggested_model_for("openai", oauth=True)
-    assert suggested is not None and suggested.id == "gpt-6-astra"
+    assert suggested is not None and suggested.id == "gpt-6.2-sol"
     for flavour in ("openai", "openai-device"):
         plan = plan_login_defaults(flavour, "", "", oauth=None, accessible={"openai"})
         assert plan.hosting == "openai"
-        assert plan.model_name == "gpt-6-astra", flavour
+        assert plan.model_name == "gpt-6.2-sol", flavour
 
     # The API-key arm agrees: one account, one latest id, whichever door the
     # credential came through (`store_credentials_as` puts both under `openai`).
     api_key_plan = plan_login_defaults("openai-api-key", "", "", oauth=None, accessible={"openai"})
-    assert api_key_plan.model_name == "gpt-6-astra"
+    assert api_key_plan.model_name == "gpt-6.2-sol"
 
 
 def test_the_anthropic_subscription_login_picks_the_subscription_latest_model() -> None:

@@ -82,10 +82,7 @@ class _Recorder:
 
 
 @pytest.mark.asyncio
-async def test_the_streamed_call_shape_and_the_decoded_asset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(rung_mod, "_default_host_model", lambda: "host-model")
+async def test_the_streamed_call_shape_and_the_decoded_asset() -> None:
     recorder = _Recorder()
     response = httpx.Response(
         200,
@@ -111,7 +108,7 @@ async def test_the_streamed_call_shape_and_the_decoded_asset(
         client=http,
     )
 
-    assert result.model == "host-model"
+    assert result.model == "gpt-6.2-sol"
     # Quota-funded (``cost_source`` unchanged) but carrying the labelled
     # API-equivalent amount, never a charge.
     assert result.cost_source == "subscription"
@@ -139,7 +136,7 @@ async def test_the_streamed_call_shape_and_the_decoded_asset(
     assert request.headers["accept"] == "text/event-stream"
     assert request.headers["openai-beta"] == rung_mod.CODEX_BETA_HEADER
     body = recorder.bodies[0]
-    assert body["model"] == "host-model"
+    assert body["model"] == "gpt-6.2-sol"
     # Review round 1 F2: the top-level instructions follow the chat client's
     # same-backend shape (tier: open risk until the live probe).
     assert body["instructions"] == rung_mod.OPENAI_SUB_INSTRUCTIONS

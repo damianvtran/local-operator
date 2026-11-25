@@ -33,6 +33,8 @@ what it picked instead of turning a one-field omission into a dead end.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import NamedTuple
 
 
@@ -52,8 +54,8 @@ class SuggestedModel(NamedTuple):
     name: str
 
 
-#: The suggested model per HOSTING id, with the source each was verified against
-#: (all read 2026-09-24). A hosting absent from this table has no suggestion:
+#: The suggested model per HOSTING id, with its route evidence below. A hosting
+#: absent from this table has no suggestion:
 #: local runtimes serve whatever the user pulled, and a decision-only provider
 #: (TypeSafe) cannot serve a chat at all.
 SUGGESTED_MODELS: dict[str, SuggestedModel] = {
@@ -70,45 +72,34 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # Bedrock prompt-caching docs list ``anthropic.claude-opus-5-5`` (read
     # 2026-11-18). A worker that needs data residency picks ``us.``/``eu.``.
     "bedrock": SuggestedModel("global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Bedrock)"),
-    # developers.openai.com/api/docs/models/gpt-6-astra: "our most capable
-    # model". The ChatGPT-subscription (Codex) route serves the same id, which is
-    # what scripts/bench_openai_oauth_cache.py drives over OAuth.
-    "openai": SuggestedModel("gpt-6-astra", "GPT-6 Astra"),
-    # DeepSeek's direct API names V4.1 Flash ``deepseek-flash`` -- its /models
-    # listing returns exactly ``deepseek-flash`` and ``deepseek-v4-pro``, and it
-    # answers HTTP 400 "The supported API model names are deepseek-flash,
-    # deepseek-v4-pro" to anything else (see ``configure``). The
-    # ``deepseek-v4.1-flash`` spelling exists only as OpenRouter's namespaced id.
-    "deepseek": SuggestedModel("deepseek-flash", "DeepSeek Flash"),
-    # models.dev's zai and zai-coding-plan catalogues: GLM-5.3 is the current
-    # flagship, served under this id to the API key and to the OAuth-minted key.
-    "zai": SuggestedModel("glm-5.3", "GLM-5.3"),
-    # alibabacloud.com/help/en/model-studio/qwen3-8-max (Model Studio,
-    # pay-as-you-go) and the Token Plan catalogue both serve ``qwen3.8-max``.
-    "alibaba": SuggestedModel("qwen3.8-max", "Qwen3.8 Max (Model Studio)"),
-    "alibaba-token-plan": SuggestedModel("qwen3.8-max", "Qwen3.8 Max"),
+    # OpenAI's API model page recommends Sol for everyday agent work; its
+    # GPT-6.2 launch announcement also lists Sol for ChatGPT subscribers in Codex.
+    "openai": SuggestedModel("gpt-6.2-sol", "GPT-6.2 Sol"),
+    # api-docs.deepseek.com lists the direct Pro id alongside the cheaper Flash
+    # tier. Do not substitute a dated/aggregator id on the direct API.
+    "deepseek": SuggestedModel("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    # docs.z.ai/guides/llm/glm-5.4: Coding Plan only at launch. Both lop Z.AI
+    # logins go to /api/coding/paas/v4, including the pasted-key login.
+    "zai": SuggestedModel("glm-5.4", "GLM-5.4"),
+    # Alibaba's qwen4-max and Token Plan product updates both list the stable
+    # id. Usage OAuth on Token Plan still sends the same inference key.
+    "alibaba": SuggestedModel("qwen4-max", "Qwen4 Max (Model Studio)"),
+    "alibaba-token-plan": SuggestedModel("qwen4-max", "Qwen4 Max"),
     # docs.x.ai/developers/models: "For everything else, including code, use
     # Grok 4.7. It is the most capable model we've built." Same id on the
     # API-key and the xai-oauth route (both store under ``xai``).
     "xai": SuggestedModel("grok-4.7", "Grok 4.7"),
-    # ai.google.dev pricing page: "Gemini 3.8 Flash ... our most intelligent
-    # Flash model, engineered for long-horizon software engineering, autonomous
-    # agents". Chosen over a Pro model at the operator's direction: it is the
-    # model an agent harness should start on for price/latency.
+    # AI Studio publishes Neon as paid-only. A Gemini API key doesn't disclose
+    # the project's billing tier, and lop has no consumer subscription route.
     "google": SuggestedModel("gemini-3.8-flash", "Gemini 3.8 Flash"),
-    # Vertex AI serves the same Gemini publisher model ids as Google AI Studio.
-    # The name carries the ``Vertex `` prefix its static picker row carries
-    # (model/registry.py), so "Default model set to <name>" matches the picker.
-    "google-vertex": SuggestedModel("gemini-3.8-flash", "Vertex Gemini 3.8 Flash"),
-    # The API-key host (api.moonshot.cn) spells Kimi K3 ``kimi-k3`` (models.dev,
-    # OpenRouter's moonshotai/kimi-k3). An OAuth sign-in reaches the coding-plan
-    # host instead, which spells it ``k3`` -- see OAUTH_SUGGESTED_MODELS.
-    "kimi": SuggestedModel("kimi-k3", "Kimi K3 (Moonshot API)"),
-    # docs.mistral.ai models overview: Mistral Medium 3.5 is "our frontier-class
-    # multimodal model optimized for agentic and coding use cases", and it is the
-    # named replacement for Magistral Medium and Medium 3 in the deprecation
-    # table. Large 3 is an open-weight general model and ranks below it here.
-    "mistral": SuggestedModel("mistral-medium-latest", "Mistral Medium 3.5"),
+    # Key auth uses the publisher-only endpoint (including Express Mode). The
+    # express-mode docs list 2.5 Flash but not Neon; Cloud login can use Neon.
+    "google-vertex": SuggestedModel("gemini-2.5-flash", "Vertex Gemini 2.5 Flash"),
+    # platform.kimi.com documents this id on the mainland API-key host; the
+    # Kimi Code subscription has a different wire spelling below.
+    "kimi": SuggestedModel("kimi-k3.1-pro", "Kimi K3.1 Pro (Moonshot API)"),
+    # The Mistral Large 4 launch names this exact hosted API id.
+    "mistral": SuggestedModel("mistral-large-4", "Mistral Large 4"),
     # An aggregator: the suggestion is the frontier model a new user most
     # plausibly came for, under OpenRouter's own namespaced id (verified in its
     # live /models listing). Any model it lists works; this is only a start.
@@ -118,15 +109,27 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     "radient": SuggestedModel("auto", "Automatic"),
 }
 
-#: Where an OAuth sign-in reaches a DIFFERENT host than an API key does, and that
-#: host spells the suggested model differently. Only Kimi does today: its OAuth
-#: grant is accepted only by the coding-plan host (``oauth_base_url``), whose
-#: catalogue names K3 ``k3``; ``kimi-k3`` there is not a model. Every other
-#: OAuth flavour serves the same ids as its API key (the comments above say so
-#: per provider), so it has no entry and falls through to SUGGESTED_MODELS.
+#: Overrides are for a different inference route, not just a different sign-in
+#: flow. Kimi Code documents ``k3.1-pro`` for the same plan tiers as ``k3``;
+#: Vertex uses the project/location endpoint for Cloud and service accounts.
 OAUTH_SUGGESTED_MODELS: dict[str, SuggestedModel] = {
-    "kimi": SuggestedModel("k3", "Kimi K3"),
+    "kimi": SuggestedModel("k3.1-pro", "Kimi K3.1 Pro"),
+    "google-vertex": SuggestedModel("gemini-4-neon", "Vertex Gemini 4 Neon"),
 }
+
+_VERTEX_NEON_LOCATIONS = frozenset({"global", "us", "eu"})
+_VERTEX_REGIONAL_SUGGESTION = SuggestedModel("gemini-3.8-flash", "Vertex Gemini 3.8 Flash")
+
+
+def vertex_location(stored: str = "") -> str:
+    """Vertex Cloud auth location precedence, shared by selection and dispatch."""
+    return (
+        stored.strip()
+        or os.environ.get("GOOGLE_CLOUD_LOCATION", "").strip()
+        or os.environ.get("VERTEX_LOCATION", "").strip()
+        or "global"
+    )
+
 
 #: The model id used when a provider is selected but no model is named -- the
 #: API-key-route suggestion, as a plain ``hosting -> id`` map. Kept under its old
@@ -143,7 +146,9 @@ def _canonical(hosting: str) -> str:
     return "test" if hosting == "noop" else hosting
 
 
-def suggested_model_for(hosting: str, *, oauth: bool = False) -> SuggestedModel | None:
+def suggested_model_for(
+    hosting: str, *, oauth: bool = False, vertex_locations: tuple[str, ...] = ()
+) -> SuggestedModel | None:
     """The suggested model for ``hosting``, or ``None`` when there is none.
 
     ``oauth`` selects the route-specific spelling where one exists (see
@@ -154,6 +159,13 @@ def suggested_model_for(hosting: str, *, oauth: bool = False) -> SuggestedModel 
     """
     canonical = _canonical(hosting)
     if oauth and canonical in OAUTH_SUGGESTED_MODELS:
+        if canonical == "google-vertex" and any(
+            vertex_location(location) not in _VERTEX_NEON_LOCATIONS
+            for location in (vertex_locations or ("",))
+        ):
+            # Keep the previous Cloud suggestion outside Neon's published
+            # locations. Never silently rewrite the user's inference region.
+            return _VERTEX_REGIONAL_SUGGESTION
         return OAUTH_SUGGESTED_MODELS[canonical]
     suggestion = SUGGESTED_MODELS.get(canonical)
     if suggestion is not None and (canonical, suggestion.id) in _KEYED_NAMES:
@@ -193,10 +205,36 @@ def _keyed_name(canonical: str, suggestion: SuggestedModel) -> str:
     return suggestion.name
 
 
-def default_model_for(hosting: str) -> str | None:
-    """The default model id for ``hosting``, or ``None`` when there is none.
+def default_model_for(hosting: str, *, config_dir: Path | None = None) -> str | None:
+    """Resolve an omitted model; only inspect auth for routes that disagree.
 
-    An unknown provider returns ``None`` so the caller can keep "no default, ask
-    the user" distinct from "the default is empty".
+    Start-up cannot run the streaming credential cascade (it can refresh or
+    borrow a key). Its first local tier is stored OAuth, ahead of pasted or env
+    keys. Inspect that tier read-only, using the caller's config root, and fall
+    back to the key suggestion if there is no local route evidence. For Vertex,
+    don't assume a specific OAuth row will win when several are available.
     """
-    return DEFAULT_MODEL_NAMES.get(_canonical(hosting))
+    canonical = _canonical(hosting)
+    if config_dir is not None and canonical in OAUTH_SUGGESTED_MODELS:
+        from local_operator.providers.auth_store import AuthStore
+
+        try:
+            store = AuthStore.open_read_only(config_dir / "auth.db")
+            try:
+                rows = [
+                    row
+                    for row in store.list_credentials(canonical)
+                    if row.credential_type == "oauth"
+                    and row.data.get("access")
+                    and not store.grant_is_dead(row.id)
+                ]
+            finally:
+                store.close()
+        except Exception:  # noqa: BLE001 — damaged auth metadata must not prevent startup
+            rows = []
+        if rows:
+            locations = tuple(str(row.data.get("location") or "") for row in rows)
+            suggestion = suggested_model_for(canonical, oauth=True, vertex_locations=locations)
+            if suggestion is not None:
+                return suggestion.id
+    return DEFAULT_MODEL_NAMES.get(canonical)
