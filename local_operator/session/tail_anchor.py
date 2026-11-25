@@ -4,8 +4,9 @@ The optional selection ledger shares this module's inode, complete-row boundary,
 digest, atomic publication and suffix-needle validation. It stores only the input
 to the existing selection fold, never a provider verdict. A writer can publish a
 selection-only record (checkpoint_absent=False); that is NOT permission to shorten
-replay. Version 2 absence-only records remain readable, and prewarm still owns
-building an absence proof. Missing evidence always falls back to the exact scan.
+replay. Older records are still readable, but each kind of evidence is trusted
+only if its version proved it. Prewarm still owns building an absence proof;
+missing evidence always falls back to the exact scan.
 
 A sidecar originally recorded that a journal carries NO frontend checkpoint row.
 
@@ -79,10 +80,10 @@ logger = logging.getLogger(__name__)
 #: Sidecar name, beside the journal it describes.
 ANCHOR_FILENAME = "tail-anchor.v1.json"
 
-#: Sidecar schema version. A file from another version is ignored.
+#: Sidecar schema version. Older evidence is trusted per proof, not per file.
 #:
 #: Version 3 adds selection evidence and an explicit checkpoint-absence flag.
-#: Version 2 remains readable as an absence-only proof; v1 is still refused.
+#: Version 2 is the original absence-only format; v1 is still refused.
 #: 2 since review round 2 (M1). Version 1 also carried a recorded offset for
 #: journals that DO hold the checkpoint row; this reader ignores fields it does not
 #: know, so such a record — which says "a row exists at N" — would be read as the
@@ -97,13 +98,17 @@ ANCHOR_FILENAME = "tail-anchor.v1.json"
 #: ``": "`` (import, sync, a hand edit — any writer but ``to_json``) was published
 #: as checkpoint-absent, and an unchanged-size record is trusted without a scan.
 #: Their ``checkpoint_absent`` claim is therefore read as ``False`` (see
-#: :func:`read_anchor`): the selection evidence they carry stays usable, the
-#: absence claim does not, and prewarm's selector sees the record as not current
-#: and rebuilds it with the pair-aware scan.
-ANCHOR_VERSION = 4
+#: :func:`read_anchor`): prewarm sees the record as not current and rebuilds it
+#: with the pair-aware scan.
+#:
+#: 5 retains automatic auth-route provenance in the selection projection (#4597
+#: Q4). Older projections cannot distinguish a dropped marker from a legacy pin;
+#: fall back to the journal for selection, independently of checkpoint absence.
+ANCHOR_VERSION = 5
 
 #: Versions whose ``checkpoint_absent`` was proven with today's spelling set.
-_ABSENCE_TRUSTED_VERSIONS = frozenset({ANCHOR_VERSION})
+_ABSENCE_TRUSTED_VERSIONS = frozenset({4, 5})
+_SELECTION_TRUSTED_VERSIONS = frozenset({5})
 
 #: The custom type this sidecar answers for. One type, deliberately: it is the one
 #: the cold open requires and cannot bound without.
@@ -183,7 +188,7 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
             raw = json.load(handle)
     except (OSError, ValueError):
         return None
-    if not isinstance(raw, dict) or raw.get("version") not in (2, 3, ANCHOR_VERSION):
+    if not isinstance(raw, dict) or raw.get("version") not in (2, 3, 4, ANCHOR_VERSION):
         return None
     if raw.get("custom_type") != ANCHOR_CUSTOM_TYPE:
         return None
@@ -207,6 +212,8 @@ def read_anchor(directory: str | Path) -> TailAnchor | None:
         not isinstance(payloads, list) or not all(isinstance(item, dict) for item in payloads)
     ):
         return None
+    if raw["version"] not in _SELECTION_TRUSTED_VERSIONS:
+        payloads = None
     mtime = raw.get("selection_mtime_ns")
     ctime = raw.get("selection_ctime_ns")
     return TailAnchor(
@@ -711,7 +718,7 @@ def _update_selection_after_commit(
             if kind == "selected_model":
                 reduced = {
                     key: details[key]
-                    for key in ("version", "selector", "effort", "boot", "fast")
+                    for key in ("version", "selector", "effort", "boot", "fast", "auth_route_default")
                     if key in details
                 }
             elif kind == ANCHOR_CUSTOM_TYPE:

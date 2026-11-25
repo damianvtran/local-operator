@@ -1,9 +1,17 @@
 """The expendable ledger is source evidence, never a cached registry verdict."""
 
+import json
+
 import pytest
 
 from local_operator.session import model_selection as selection
-from local_operator.session.tail_anchor import read_anchor
+from local_operator.session.tail_anchor import (
+    anchor_path,
+    build_anchor,
+    read_anchor,
+    read_selection_payloads,
+    validate_anchor,
+)
 from local_operator.session.transcript import Transcript
 
 
@@ -32,6 +40,70 @@ async def test_head_selection_ledger_equals_full_scan_without_backward_walk(tmp_
     )
     assert selection._read_selection(tmp_path) == expected
     transcript.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "marker",
+    [{"auth_route_default": True}, {}, {"auth_route_default": False}],
+    ids=["automatic", "legacy", "explicit"],
+)
+async def test_auth_route_provenance_matches_on_both_cold_readers(tmp_path, monkeypatch, marker):
+    transcript = Transcript(tmp_path)
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "test/default", **marker}
+    )
+    # Exercise an incremental ledger append after the snapshot has been persisted.
+    await transcript.append_custom("padding", {})
+    transcript.close()
+
+    expected = selection.selection_from_payloads(selection._forward_payloads(tmp_path))
+    assert expected is not None
+    assert expected.auth_route_default is (marker.get("auth_route_default") is True)
+    payloads = read_selection_payloads(tmp_path)
+    assert payloads is not None, "the persisted selection anchor must validate"
+    assert payloads[0]["details"].get("auth_route_default") is marker.get("auth_route_default")
+
+    with monkeypatch.context() as cached:
+        cached.setattr(selection, "_settled_selection", lambda *a, **k: pytest.fail("cache miss"))
+        cached.setattr(selection, "_forward_payloads", lambda *a, **k: pytest.fail("cache miss"))
+        assert selection.read_model_selection(tmp_path) == expected
+
+    anchor_path(tmp_path).unlink()
+    selection._reset_for_tests()  # Force a second cold process's read, not a memo hit.
+    assert selection.read_model_selection(tmp_path) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", [2, 3, 4])
+async def test_old_selection_projection_is_ignored_and_rebuilt_on_append(tmp_path, version):
+    transcript = Transcript(tmp_path)
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "test/default", "auth_route_default": True}
+    )
+    anchor_file = anchor_path(tmp_path)
+    record = json.loads(anchor_file.read_text())
+    proof = build_anchor(tmp_path)
+    assert proof is not None and proof.checkpoint_absent
+    # Same real journal generation, but projected by a writer that omitted the marker.
+    record["version"] = version
+    record["checkpoint_absent"] = proof.checkpoint_absent
+    record["selection_payloads"][0]["details"].pop("auth_route_default", None)
+    anchor_file.write_text(json.dumps(record))
+
+    loaded = read_anchor(tmp_path)
+    assert loaded is not None
+    assert (validate_anchor(tmp_path, loaded) is not None) is (version == 4)
+    assert read_selection_payloads(tmp_path) is None
+    stored = selection.read_model_selection(tmp_path)
+    assert stored is not None and stored.auth_route_default is True
+    assert json.loads(anchor_file.read_text())["version"] == version  # Never migrate on read.
+
+    await transcript.append_custom("padding", {})
+    transcript.close()
+    payloads = read_selection_payloads(tmp_path)
+    assert payloads is not None and payloads[0]["details"]["auth_route_default"] is True
+    assert (validate_anchor(tmp_path, read_anchor(tmp_path)) is not None) is (version == 4)
 
 
 @pytest.mark.asyncio
@@ -93,8 +165,6 @@ async def test_ledger_failure_does_not_fail_commit_and_truncate_falls_back(tmp_p
 @pytest.mark.asyncio
 async def test_ledger_concurrent_commits_compaction_and_missing_sidecar(tmp_path):
     import asyncio
-
-    from local_operator.session.tail_anchor import anchor_path
 
     transcript = Transcript(tmp_path)
     await asyncio.gather(
@@ -165,7 +235,7 @@ async def test_no_selection_and_torn_tail_are_exact(tmp_path):
 
 @pytest.mark.asyncio
 async def test_selection_only_record_never_grants_a_replay_cut(tmp_path):
-    from local_operator.session.tail_anchor import anchor_path, proves_absent
+    from local_operator.session.tail_anchor import proves_absent
     from local_operator.session.transcript import read_replay_suffix
 
     transcript = Transcript(tmp_path)
@@ -257,10 +327,7 @@ async def test_generation_proof_keeps_normal_writer_incremental(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_missing_generation_falls_back_and_recovered_state_survives_prewarm(tmp_path):
-    import json
-
     from local_operator.session.index_prewarm import write_tail_anchor
-    from local_operator.session.tail_anchor import anchor_path, read_selection_payloads
 
     directory = tmp_path / "sessions" / "recovered"
     transcript = Transcript(directory)
@@ -291,7 +358,6 @@ async def test_archived_session_answers_selection_without_a_ledger(tmp_path):
     """
     from local_operator.harness.types import Message
     from local_operator.session import compression
-    from local_operator.session.tail_anchor import read_selection_payloads
 
     transcript = Transcript(tmp_path)
     await transcript.append_custom(
