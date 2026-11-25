@@ -136,10 +136,17 @@ async def test_auth_route_default_survives_real_journal_resume(
             first.set_model(build_model_spec("kimi", cloud_id), explicit=True)
     finally:
         await first.dispose()
+    journal = Transcript(directory)
     if selection == "legacy":
-        await Transcript(directory).append_custom(
+        await journal.append_custom(
             "selected_model", {"version": 2, "selector": f"kimi/{cloud_id}"}
         )
+    details = journal.latest_custom("selected_model")
+    assert details is not None
+    if selection == "automatic":
+        assert details["auth_route_default"] is True
+    else:
+        assert "auth_route_default" not in details
     saved = read_model_selection(directory)
     assert saved is not None and saved.selector == f"kimi/{cloud_id}"
     provider, model_id, source = resolve_hosting_model_with_source(

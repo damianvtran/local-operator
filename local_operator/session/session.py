@@ -37761,9 +37761,6 @@ class Session:
         payload = {
             "version": 2,
             "selector": f"{model.provider}/{model.model_id}",
-            # A concrete ID keeps older readers compatible. Only a marked
-            # row says that ID is a preview rather than an explicit wire pin.
-            "auth_route_default": model.auth_route_default,
             # THE CHOICE FIRST (see ``_remember_effort_choice``): a route that
             # cannot express the chosen level carries ``None`` (or a clamp) on
             # its spec, and writing the spec's own level would let the trip
@@ -37780,6 +37777,10 @@ class Session:
             "fast": bool(model.fast_mode),
             "boot": self._boot_selector,
         }
+        # Keep the explicit snapshot unchanged. Only a marked row says its
+        # concrete ID is a preview rather than an explicit wire pin.
+        if model.auth_route_default is True:
+            payload["auth_route_default"] = True
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
         self._selection_needs_initial_write = False
         current = self._model
@@ -37797,7 +37798,7 @@ class Session:
             payload["selector"],
             payload["effort"],
             payload["fast"],
-            payload["auth_route_default"],
+            payload.get("auth_route_default", False),
         ):
             self._selected_model_dirty = False
         else:
