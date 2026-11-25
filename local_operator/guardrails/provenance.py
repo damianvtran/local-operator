@@ -1691,12 +1691,19 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
         return False
     if name in _OS_METADATA_FILES or name.startswith("._"):
         return stat.S_ISREG(st.st_mode)
-    # #4561 security review R1-MAJOR-1 kept by the #4565 rebase: a name whose
-    # witness is TYPE-bound (Next's stub is a regular file) is held when it
-    # has another type, even here; otherwise this branch would quietly undo
-    # that review for every finished tree. (A link was already judged above.)
+    # #4561 review R1-MAJOR-1 (kept by #4565): a name whose witness is
+    # TYPE-bound (Next's stub is a regular file) is held when it has another
+    # type, even here; otherwise this branch would quietly undo that review
+    # for every finished tree. (A link was already judged above.)
     if name == "next-env.d.ts":
         return stat.S_ISREG(st.st_mode)
+    parts = [p for p in entry.rstrip("/").split("/") if p]
+    if not any(_regenerable(p) for p in parts):
+        return False
+    # A FILE named like a tool cache directory (``.ruff_cache`` as notes) is
+    # not the tool's output: those names are only ever directories.
+    if name in _TOOL_CACHE_DIRS and not stat.S_ISDIR(st.st_mode):
+        return False
     if stat.S_ISDIR(st.st_mode):
         return _no_repository_below(physical)
     return stat.S_ISREG(st.st_mode)
@@ -2569,6 +2576,15 @@ def worktree_state(
             and ".." not in entry.split("/")
             and _next_env_types_file(real, entry)
         )
+        # Same content witness as the cleanup inventories (``_TOOL_CACHE_DIRS``):
+        # a child Git lists under a verified ``.ruff_cache`` is cache too.
+        cached = (
+            not os.path.isabs(entry)
+            and ".." not in entry.split("/")
+            and _verified_cache_dir(real, entry)
+        )
+        if cached:
+            continue
         if (
             not own
             and not linked
@@ -2799,8 +2815,55 @@ _CACHEDIR_TAG_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
 #: Bound on one ``__pycache__`` listing; a larger one is held (fail closed).
 _PYCACHE_SCAN_LIMIT = 20000
 
+#: Exact basenames of pure tooling caches whose CHILDREN Git may report one by
+#: one. WHY each is safe: the tool recreates it on its next run, so losing it
+#: costs one slower run, never user data — ``__pycache__`` (CPython bytecode),
+#: ``.pytest_cache`` (pytest's last-failed/node-id state), ``.ruff_cache``
+#: (ruff's per-file lint results) and ``.mypy_cache`` (mypy's incremental
+#: type data). The three tagged ones write a cachedir.org ``CACHEDIR.TAG``.
+#: Deliberately NOT here: ``.tox``/``.nox`` (virtualenvs that may carry
+#: hand-installed packages, #4528 R1-M1) and the generic ``.cache`` (any tool,
+#: or a person, writes there).
+#:
+#: Field case (guard 0.113.2, 2026-11-25, ``.worktrees/eval-budget-stop-cause``,
+#: PR #4580 merged, tracked tree clean): plain ``git worktree remove`` was held
+#: for "3 ignored entries the guard cannot prove regenerable". Ruff writes its
+#: own ``.gitignore`` holding ``*`` INSIDE ``.ruff_cache``, so when the repo does
+#: not ignore the directory itself, ``git status --ignored`` lists its children
+#: (``.ruff_cache/.gitignore``, ``.ruff_cache/0.17.6/``, ``.ruff_cache/CACHEDIR.TAG``)
+#: and none of those basenames or contents proves anything alone. The cache
+#: ROOT does, so :func:`_verified_cache_dir` judges the nearest ancestor with
+#: one of these names by the same content rules.
+_TOOL_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
+
 
 def _verified_cache_dir(real: str, entry: str) -> bool:
+    """The ignored ``entry`` is, or lies inside, a content-verified cache.
+
+    Exact basename only: the entry itself (any name, as before) or its
+    nearest in-tree ancestor on :data:`_TOOL_CACHE_DIRS` must pass
+    :func:`_verified_cache_root`. A FILE under a cache name fails there
+    (``lstat`` must be a directory), and the cache root's no-repository walk
+    covers the child. Paths are relative and ``..``-free (``_cleanup_status_path``).
+    """
+    if _verified_cache_root(real, entry):
+        return True
+    parts = [p for p in entry.rstrip("/").split("/") if p]
+    if ".." in parts or os.path.isabs(entry):
+        return False
+    for depth in range(len(parts) - 1, 0, -1):
+        if parts[depth - 1] in _TOOL_CACHE_DIRS:
+            root = "/".join(parts[:depth])
+            if not _verified_cache_root(real, root):
+                return False
+            # The child must stay inside that root after symlinks resolve.
+            child = os.path.realpath(os.path.join(real, entry.rstrip("/")))
+            base = os.path.realpath(os.path.join(real, root))
+            return child.startswith(base + os.sep)
+    return False
+
+
+def _verified_cache_root(real: str, entry: str) -> bool:
     """An ignored directory whose CONTENTS prove it is regenerable cache.
 
     Why (field case 2026-11-24, guard 0.112.7, disk-recovery session): plain
@@ -3038,6 +3101,12 @@ def _interrupted_cleanup_state(
         # base for foreign trees). A ledger-proven OWN tree sheds the same
         # regenerable names and links as plain removal (#4493 QA Q-R4-1).
         if _shared_dependencies_link(real, entry):
+            continue
+        # 2026-11-25 field case (``_TOOL_CACHE_DIRS``): a CONTENT-verified tool
+        # cache is a witness on every cleanup route, whoever made the tree,
+        # so ``--force`` agrees with plain removal for caches; the walk inside
+        # still refuses a nested repository, unreadable directory or overflow.
+        if _verified_cache_dir(real, entry):
             continue
         # 2026-11-24 field case: the ignored-symlink and ``next-env.d.ts``
         # witnesses are deliberately NOT added here for foreign trees, as with
