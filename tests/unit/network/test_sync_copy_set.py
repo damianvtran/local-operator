@@ -306,7 +306,7 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "It is never an entry of a session directory, so nothing under this name "
         "belongs in the session copy set.",
     ),
-    "local_operator/team_bridge/responders/credentials.py": (
+    "local_operator/team_bridge/responders/pinned_credentials.py": (
         2,
         "``RESPONDER_ROLE_NAME`` ('radient-responder-readonly') is an IAM role name and "
         "``SOURCE_PROFILE`` ('radient-prod-admin') an AWS CLI profile name: identifiers "

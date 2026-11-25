@@ -41,15 +41,8 @@ from typing import Any, Mapping
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.team_bridge.responders import credentials as creds_module
 from local_operator.team_bridge.responders import jail as jail_module
-from local_operator.team_bridge.responders.credentials import (
-    RESPONDER_ROLE_ARN,
-    STS_ENDPOINT,
-    CredentialPinError,
-    PinnedCredentials,
-    resolve_responder_credentials,
-)
+from local_operator.team_bridge.responders import pinned_credentials as creds_module
 from local_operator.team_bridge.responders.isolation import (
     IsolationAttestation,
     attest,
@@ -66,6 +59,13 @@ from local_operator.team_bridge.responders.materialize import (
     RepoNotAllowed,
     materialize_repo,
     pinned_repo_name,
+)
+from local_operator.team_bridge.responders.pinned_credentials import (
+    RESPONDER_ROLE_ARN,
+    STS_ENDPOINT,
+    CredentialPinError,
+    PinnedCredentials,
+    resolve_responder_credentials,
 )
 from local_operator.tools import builtin
 from local_operator.tools import confinement as confinement_module

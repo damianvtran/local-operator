@@ -21,9 +21,9 @@ import re
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from .credentials import EXPECTED_ASSUMED_ROLE_PREFIX, PinnedCredentials
 from .jail import ENV_ALLOWLIST, ResponderJail
 from .materialize import MaterializedRepo, RepoNotAllowed, pinned_repo_name
+from .pinned_credentials import EXPECTED_ASSUMED_ROLE_PREFIX, PinnedCredentials
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")

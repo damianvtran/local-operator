@@ -34,6 +34,12 @@ SSO session can edit the role's own policy. D's explicit Deny list and the
 session policy below bound silent widening; neither stops a deliberate admin.
 """
 
+# Module name: ``pinned_credentials``, never ``credentials``. The tree-wide
+# secrets guard (tests/unit/secrets/test_no_reader_resolves_the_plaintext_file.py)
+# forbids importing the deleted top-level ``credentials`` module and matches the
+# bare spelling, so a sibling ``from .credentials import ...`` read as that import.
+
+
 from __future__ import annotations
 
 import json

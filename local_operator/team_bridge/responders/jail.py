@@ -185,7 +185,7 @@ _WRITE_DEVICES: tuple[str, ...] = ("/dev/null", "/dev/stdout", "/dev/stderr")
 #: Environment keys a responder child may carry. Rebuilt, never inherited:
 #: anything not here is dropped (no ``LOCAL_OPERATOR_*``, no hub bearer, no
 #: ``AWS_PROFILE``, no ``GH_TOKEN``). The STS triple is added by the spawner
-#: from the pinned credential resolver (``credentials.py``).
+#: from the pinned credential resolver (``pinned_credentials.py``).
 ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH",
     "HOME",
