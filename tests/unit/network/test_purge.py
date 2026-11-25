@@ -83,6 +83,9 @@ def test_purge_deletes_the_networks_and_keeps_the_device_identity(root: Path) ->
     parked = store.audit_path(root).with_name("audit.jsonl.pending")
     parked.mkdir(exist_ok=True)
     (parked / "0-1-aa.jsonl").write_text("")
+    # Round 2 (R2-3): a set-aside entry lives in the same directory, so the purge's
+    # one rmtree of the literal directory removes it too.
+    (parked / "0-1-bb.jsonl.rejected").write_text("not json\n")
     assert store.audit_path(root).with_name("audit.jsonl.lock").is_file()
 
     result = relay.uninstall(purge=True, root=root, dry_run=True)

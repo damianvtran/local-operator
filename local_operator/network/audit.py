@@ -142,6 +142,18 @@ AUDIT_PENDING_SUFFIX = ".pending"
 _PENDING_READY_SUFFIX = ".jsonl"
 _PENDING_CLAIM_SUFFIX = ".draining"
 _PENDING_TEMP_SUFFIX = ".tmp"
+#: A parked entry the drainer would not read (not a regular file, over the cap, not
+#: audit rows) is renamed ``<name>.rejected`` and never read again - see
+#: :meth:`AuditLog._drain_pending`. Inside the pending directory, so ``uninstall
+#: --purge`` removes it with the directory.
+_PENDING_REJECTED_SUFFIX = ".rejected"
+#: The largest parked entry a drainer reads. A spill is ONE discarded instance's
+#: buffer: normally under :data:`AUDIT_BUFFER_BYTES` plus one row (a row's detail is
+#: capped at ``MAX_DETAIL_BYTES``, 2 KiB), i.e. ~18 KiB; it grows past that only
+#: while the lock stays contended. One full generation (8 MiB, ~450x the normal
+#: spill) bounds the read and the memory, and ``_spill_pending`` splits anything
+#: larger, so a legitimate spill is never over the cap.
+_PENDING_MAX_BYTES = AUDIT_MAX_BYTES
 #: How long one writer waits for another PROCESS's writer before giving up.
 #: MEASURED on the reference Linux node (2026-11-25, base a9ecde898, scratch
 #: script): the longest hold is a rotation of a full 8 MiB generation (gzip +
@@ -1336,6 +1348,12 @@ class AuditLog:
         #: rows this writer appended on behalf of a discarded writer (drained).
         self.rows_spilled = 0
         self.rows_drained = 0
+        #: Acquisitions REFUSED because a parked spill could not be appended (no
+        #: ``seq`` is assigned while a claim is unresolved - :meth:`_drain_pending`).
+        #: Not ``degraded``: the rows are still parked and the next holder retries.
+        self.drain_failures = 0
+        #: Parked entries set aside as ``<name>.rejected`` (malformed or hostile).
+        self.pending_rejected = 0
         #: The ONE remaining loss: ``close`` could neither take the lock nor write
         #: the spill file (a full or read-only disk). ``degraded`` is set with it.
         self.rows_dropped = 0
@@ -1854,6 +1872,9 @@ class AuditLog:
         file of its own, written as ``.tmp`` (never read), fsynced, then renamed to
         ``.jsonl`` and the directory fsynced, so a drainer sees a whole spill or none.
         Named by ``time_ns`` first so drainers append spills in the order they happened.
+        A buffer larger than :data:`_PENDING_MAX_BYTES` is split across several files
+        (consecutive stems, so they still drain in order), because the drainer sets
+        aside anything over that cap rather than reading it into memory.
         """
         from local_operator.procstate import O_BINARY
 
@@ -1863,82 +1884,207 @@ class AuditLog:
         if not stat.S_ISDIR(info.st_mode):
             raise OSError(f"{directory.name} is not a directory")
         os.chmod(directory, 0o700)
-        stem = f"{time.time_ns():020d}-{os.getpid()}-{os.urandom(8).hex()}"
-        temp = directory / (stem + _PENDING_TEMP_SUFFIX)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(temp, flags, 0o600)
-        try:
-            os.write(fd, "".join(lines).encode("utf-8"))
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(temp, directory / (stem + _PENDING_READY_SUFFIX))
+        chunks: list[bytes] = []
+        for line in lines:
+            encoded = line.encode("utf-8")
+            if chunks and len(chunks[-1]) + len(encoded) <= _PENDING_MAX_BYTES:
+                chunks[-1] += encoded
+            else:
+                chunks.append(encoded)
+        born = time.time_ns()
+        for index, payload in enumerate(chunks):
+            stem = f"{born + index:020d}-{os.getpid()}-{os.urandom(8).hex()}"
+            temp = directory / (stem + _PENDING_TEMP_SUFFIX)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temp, flags, 0o600)
+            try:
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temp, directory / (stem + _PENDING_READY_SUFFIX))
         _fsync_directory(directory)
 
-    def _drain_pending(self) -> None:
-        """Append every parked spill, oldest first; call ONLY right after taking the lock.
+    def _drain_pending(self) -> bool:
+        """Append every parked spill, oldest first; ``False`` = the lock must be REFUSED.
+
+        Call ONLY right after taking the lock, before anything else is numbered.
 
         EXACTLY ONCE ACROSS A CRASH, without a marker in the row (row bytes are
         pinned): each spill is RENAMED to ``<stem>.<first>-<last>.draining`` - the
         numbers it is about to take - and that rename is made durable BEFORE the
         append. A later lock holder that finds a claim compares it with the live
         file's highest ``seq``: at or past ``last`` the append happened (unlink the
-        claim); below ``first`` it did not (append it now); between, a torn append
-        (append the rest). That comparison is sound only because nothing else can
-        write between claim and append (we hold the lock) and recovery runs first
-        at every acquisition, before any other row - which is also why the drain
-        appends directly and never rotates: a rotation row numbered past the claim
-        would read as "already appended". The batch's own flush rotates afterwards.
+        claim); below ``first`` it did not (append it all); between, a torn append
+        (append the rest, under the claim's OWN numbers - the claim is never renamed
+        again, because its name must keep describing every row in it).
+
+        THE INVARIANT: NO ``seq`` IS EVER ASSIGNED WHILE AN UNRESOLVED CLAIM EXISTS.
+        The comparison above is sound only if nothing numbered past a claim before it
+        was resolved: a row numbered over ``first..last`` reads as "already appended"
+        and the claim's rows are deleted unwritten (agent review round 2, R2-1: an EIO
+        on the claim fsync, then the same holder appended its own row 1 over claim
+        ``1-1``). So any failure while a claim is open answers ``False`` and
+        :meth:`_enter_file_lock` releases the lock instead of granting it: every
+        caller already has a refusal path (buffered, refused, or parked by
+        ``close``, which spills without the lock, so it cannot recurse into a drain).
+        If provably nothing of the claim reached the log, the claim is renamed back
+        to its spill name; if any byte may have (a torn ``ENOSPC``), it stays a
+        claim for the next holder's recovery. This is also why the drain appends
+        directly and never rotates: a rotation row numbered past the claim would
+        read as "already appended". The batch's own flush rotates afterwards.
+
+        A HOSTILE OR MALFORMED ENTRY IS SET ASIDE, NOT FATAL (round 2, R2-3/Q2-1/
+        Q2-2): see :func:`_read_parked` for what is checked. It is renamed to
+        ``<name>.rejected`` (kept for forensics, ignored by every later drain,
+        removed by ``uninstall --purge`` with the directory), counted in
+        ``pending_rejected`` and reported on stderr - and ``degraded`` is NOT set:
+        those rows are not this writer's, ``degraded`` is sticky and refuses content
+        admission, so one torn or planted file would otherwise wedge every writer on
+        the device for good. Not degrading is the loud-but-alive choice.
         """
+        directory = self._pending_dir
         try:
-            names = sorted(os.listdir(self._pending_dir))
+            info = os.lstat(directory)
         except FileNotFoundError:
-            return
+            return True
         except OSError as exc:
             print(f"warning: parked audit rows could not be listed: {exc}", file=sys.stderr)
-            return
+            return False
+        if not stat.S_ISDIR(info.st_mode):
+            # Granted, not refused: ``_spill_pending`` refuses a non-directory (it
+            # lstat-checks the same name), so no spill and no claim can ever live
+            # behind a planted symlink or file - there is nothing to number past.
+            print(
+                f"warning: {directory.name} is not a directory; it is ignored",
+                file=sys.stderr,
+            )
+            return True
+        try:
+            names = sorted(os.listdir(directory))
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            # Refused: a claim may be in there, and the invariant cannot be checked.
+            print(f"warning: parked audit rows could not be listed: {exc}", file=sys.stderr)
+            return False
         claims = [name for name in names if name.endswith(_PENDING_CLAIM_SUFFIX)]
         ready = [name for name in names if name.endswith(_PENDING_READY_SUFFIX)]
         for name in claims + ready:
-            source = self._pending_dir / name
+            source = directory / name
+            claimed = name.endswith(_PENDING_CLAIM_SUFFIX)
+            first = last = 0
             try:
-                with source.open("r", encoding="utf-8") as handle:
-                    lines = [line if line.endswith("\n") else line + "\n" for line in handle]
-                if name.endswith(_PENDING_CLAIM_SUFFIX):
+                lines = _read_parked(source)
+                if claimed:
                     first, last = (int(part) for part in name.split(".")[-2].split("-"))
+                    if last - first + 1 != len(lines):
+                        raise ValueError(f"its range {first}-{last} does not match its rows")
+            except Exception as exc:  # noqa: BLE001 - per entry; the flock must be released
+                if not self._set_aside(source, exc) and claimed:
+                    return False  # an unresolved claim is still in place
+                continue
+            try:
+                if claimed:
                     on_disk = _last_sequence(self._path)
-                    if on_disk >= last:
-                        source.unlink()
-                        continue
-                    lines = lines[max(0, on_disk - first + 1) :]
-                self._append_drained(source, name.split(".")[0], lines)
-            except (OSError, ValueError) as exc:
-                # Left in place for the next lock holder: a spill is never deleted
-                # unless its rows are known to be in the live file.
-                self.degraded = True
-                self.degraded_reason = f"parked audit rows could not be appended: {exc}"
-                print(f"warning: {self.degraded_reason} ({name})", file=sys.stderr)
-                return
+                    if on_disk < last:
+                        skip = max(0, on_disk - first + 1)
+                        self._append_rows(
+                            [
+                                _restamp(line, first + skip + offset)
+                                for offset, line in enumerate(lines[skip:])
+                            ]
+                        )
+                        self.rows_drained += len(lines) - skip
+                    self._discard_resolved(source)
+                else:
+                    self._claim_and_append(source, name.split(".")[0], lines)
+            except Exception as exc:  # noqa: BLE001 - any failure refuses the lock
+                print(
+                    f"warning: parked audit rows could not be appended ({name}): {exc}",
+                    file=sys.stderr,
+                )
+                return False
+        return True
 
-    def _append_drained(self, source: Path, stem: str, lines: list[str]) -> None:
+    def _claim_and_append(self, source: Path, stem: str, lines: list[str]) -> None:
+        """Claim the numbers, make the claim durable, append; raises on any failure."""
+        if not lines:
+            self._discard_resolved(source)
+            return
         start = self._disk_sequence() + 1
         numbered = [_restamp(line, start + offset) for offset, line in enumerate(lines)]
-        if numbered:
-            claim = self._pending_dir / (
-                f"{stem}.{start}-{start + len(numbered) - 1}{_PENDING_CLAIM_SUFFIX}"
-            )
-            os.replace(source, claim)
+        claim = self._pending_dir / (
+            f"{stem}.{start}-{start + len(numbered) - 1}{_PENDING_CLAIM_SUFFIX}"
+        )
+        before = _size_or_none(self._path)
+        os.replace(source, claim)
+        try:
             _fsync_directory(self._pending_dir)
-            if not self._path.exists():
-                os.close(os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
-            with self._path.open("a", encoding="utf-8") as handle:
-                handle.write("".join(numbered))
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._sync_directories()
-            source = claim
-        source.unlink()
+            self._append_rows(numbered)
+        except BaseException:
+            # Undo only when NOTHING landed (same size as before, both readable):
+            # renaming a partly appended claim back would re-number and re-append its
+            # head. Left as a claim it is safe either way - the lock is refused, and
+            # recovery appends exactly the rows past the log's last ``seq``.
+            if before is not None and _size_or_none(self._path) == before:
+                try:
+                    os.replace(claim, source)
+                    _fsync_directory(self._pending_dir)
+                except OSError:
+                    pass
+            raise
         self.rows_drained += len(numbered)
+        self._discard_resolved(claim)
+
+    def _append_rows(self, numbered: list[str]) -> None:
+        """Append and fsync drained rows; raises. A torn tail gets a newline first.
+
+        A torn earlier append (``ENOSPC`` mid-line) leaves the live file without its
+        final newline; appending straight after it would glue the first recovered
+        row onto that fragment and make BOTH unparseable (round 2, R2-4). The
+        newline goes in the same write, so it is never on disk without its rows.
+        """
+        if not self._path.exists():
+            os.close(os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+        prefix = "\n" if _lacks_final_newline(self._path) else ""
+        with self._path.open("a", encoding="utf-8") as handle:
+            handle.write(prefix + "".join(numbered))
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._sync_directories()
+
+    def _discard_resolved(self, path: Path) -> None:
+        """Unlink a spill or claim whose rows are in the log (or that held none).
+
+        A failure here is reported, NOT refused: the rows are durably appended, so
+        the leftover claim's range is at or below the log's last ``seq`` and the
+        next holder's recovery unlinks it without appending anything.
+        """
+        try:
+            path.unlink()
+        except OSError as exc:
+            print(f"warning: a drained audit spill could not be removed: {exc}", file=sys.stderr)
+
+    def _set_aside(self, source: Path, exc: BaseException) -> bool:
+        """Rename a rejected entry to ``<name>.rejected``; ``False`` if even that failed."""
+        self.pending_rejected += 1
+        target = source.with_name(source.name + _PENDING_REJECTED_SUFFIX)
+        try:
+            os.replace(source, target)
+        except OSError as err:
+            print(
+                f"warning: parked audit rows in {source.name} are unreadable ({exc}) and "
+                f"could not be set aside: {err}",
+                file=sys.stderr,
+            )
+            return False
+        print(
+            f"warning: parked audit rows in {source.name} were NOT appended and were set "
+            f"aside as {target.name}: {exc}",
+            file=sys.stderr,
+        )
+        return True
 
     def sync(self) -> None:
         """``fsync`` the live file — durable events and rotation, nothing else.
@@ -2101,7 +2247,7 @@ class AuditLog:
                     self.lock_timeouts += 1
                     reason = (
                         f"another writer held {lock_path.name} for over "
-                        f"{AUDIT_LOCK_WAIT_S:g} s; the records stay buffered"
+                        f"{AUDIT_LOCK_WAIT_S:g} s; this attempt wrote nothing"
                     )
                     break
                 time.sleep(pause)
@@ -2118,7 +2264,21 @@ class AuditLog:
             return self._lock_refused(reason)
         self._file_lock_fd = fd
         self._file_lock_depth = 1
-        self._drain_pending()
+        try:
+            drained = self._drain_pending()
+        except Exception as exc:  # noqa: BLE001 - never leave the flock held
+            print(f"warning: parked audit rows could not be drained: {exc}", file=sys.stderr)
+            drained = False
+        if not drained:
+            # Refused, never granted: a claim may be unresolved, and numbering past
+            # it is the silent-loss bug (R2-1). Released before the caller's own
+            # refusal path runs, so ``close`` spills without holding it.
+            self.drain_failures += 1
+            self._exit_file_lock()
+            return self._lock_refused(
+                "parked rows ahead of this writer could not be appended, so nothing "
+                "newer was numbered; they stay parked for the next writer"
+            )
         return True
 
     def _exit_file_lock(self) -> None:
@@ -2649,6 +2809,83 @@ def _restamp(line: str, seq: int) -> str:
         return line
     row["seq"] = seq
     return json.dumps(row, separators=(",", ":"), ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def _read_parked(path: Path) -> list[str]:
+    """The rows of one parked entry, each validated; raises on anything off-shape.
+
+    The pending directory is 0700 and only this product writes it, but its entries
+    are read with the lock held, so a bad one must neither block, nor be followed,
+    nor blow up the drain (round 2, R2-3/Q2-1): ``O_NOFOLLOW`` (a planted symlink is
+    ``ELOOP``, never its target), ``O_NONBLOCK`` (a FIFO cannot park the opener),
+    then ``fstat`` must say a regular file within :data:`_PENDING_MAX_BYTES`, and
+    every row must parse as a JSON object with a non-empty ``event`` string and an
+    integer ``seq`` - the two fields the drain restamps and ``_last_sequence``
+    reads (older hand-written fixtures carry only those, so no more is required).
+    Split on ``"\\n"`` only, never ``splitlines``: a rendered value may hold U+2028.
+    """
+    from local_operator.procstate import O_BINARY
+
+    flags = (
+        os.O_RDONLY
+        | O_BINARY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        if info.st_size > _PENDING_MAX_BYTES:
+            raise ValueError(f"{info.st_size} bytes is over the {_PENDING_MAX_BYTES}-byte cap")
+        chunks: list[bytes] = []
+        remaining = _PENDING_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    if len(data) > _PENDING_MAX_BYTES:
+        raise ValueError(f"grew past the {_PENDING_MAX_BYTES}-byte cap while read")
+    lines: list[str] = []
+    for raw in data.decode("utf-8").split("\n"):
+        if not raw.strip():
+            continue
+        row = json.loads(raw)
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("event"), str)
+            or not row["event"]
+            or type(row.get("seq")) is not int
+        ):
+            raise ValueError("a row is not an audit record")
+        lines.append(raw + "\n")
+    return lines
+
+
+def _size_or_none(path: Path) -> int | None:
+    """The live file's size (0 if absent); ``None`` if it cannot be read at all."""
+    try:
+        return os.stat(path).st_size
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+
+
+def _lacks_final_newline(path: Path) -> bool:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            return False
+        handle.seek(-1, os.SEEK_END)
+        return handle.read(1) != b"\n"
 
 
 def _fsync_directory(path: Path) -> None:

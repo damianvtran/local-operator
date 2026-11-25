@@ -459,3 +459,181 @@ def test_an_existing_lock_leaf_is_checked_and_reset_to_0600(tmp_path: Path) -> N
     log.record(audit.AuditEvent(event="panic_raised"))
     assert log.degraded and "not a regular file" in log.degraded_reason
     assert not log._path.exists()
+
+
+# -- round 2: a failed drain refuses the lock (R2-1), hostile entries (R2-3/Q2-2) ----
+
+
+def _parsed(root: Path) -> tuple[list[dict[str, Any]], int]:
+    """Rows of the live file, plus how many lines did NOT parse (a torn fragment)."""
+    rows, torn = [], 0
+    for line in (root / "network" / "audit.jsonl").read_text().splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            torn += 1
+    return rows, torn
+
+
+def _park_one(root: Path, subject: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(audit, "AUDIT_LOCK_WAIT_S", 0.05)
+    held = _hold_lock(root)
+    try:
+        audit.write_event(root, event="member_removed", subject=subject)
+    finally:
+        wake_lock._unlock(held)
+        os.close(held)
+    (spill,) = _parked(root)
+    return spill
+
+
+def test_an_eio_on_the_claim_fsync_refuses_the_lock_and_undoes_the_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1 (a): nothing of the claim reached the log, so the rename is undone.
+
+    Before the fix the acquisition was GRANTED after the failed drain: the relay
+    numbered its own row 1 over the claim ``.1-1.draining``, and the next writer read
+    that claim as already appended and deleted it - the parked row was gone.
+    """
+    spill = _park_one(tmp_path, "PARKED", monkeypatch)
+    real = audit._fsync_directory
+    calls = {"n": 0}
+
+    def flaky(path: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EIO, "EIO (injected)")
+        real(path)
+
+    monkeypatch.setattr(audit, "_fsync_directory", flaky)
+    relay = _quiet(audit.AuditLog(tmp_path))
+    relay.record(audit.AuditEvent(event="panic_raised", subject="relay"))
+    monkeypatch.setattr(audit, "_fsync_directory", real)
+    assert calls["n"] == 2  # the failed claim fsync, then the undo's own
+    # Refused: the relay's durable row stays buffered, nothing was numbered.
+    assert not (tmp_path / "network" / "audit.jsonl").exists()
+    assert len(relay._buffer) == 1 and relay.drain_failures == 1
+    assert _parked(tmp_path) == [spill], "the claim rename was not undone"
+    audit.write_event(tmp_path, event="member_removed", subject="later")
+    relay.close()
+    rows, torn = _parsed(tmp_path)
+    assert torn == 0
+    assert [r.get("subject") for r in rows].count("PARKED") == 1
+    assert sorted(str(r.get("subject")) for r in rows) == ["PARKED", "later", "relay"]
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert _parked(tmp_path) == []
+
+
+def test_an_enospc_mid_append_refuses_and_recovery_appends_only_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1 (b) + R2-4: a torn drain keeps its claim; later writers finish it once.
+
+    Two torn drains in a row: the first leaves P1 plus half of P2 in the log, the
+    second (recovery) appends only P2 before failing again. Before the fix the first
+    holder numbered over the claim; and a recovery re-claim renamed the WHOLE file to
+    a narrower range, so the third writer re-appended rows already on disk. The
+    newline written before a recovery append keeps P2 off the torn fragment's line.
+    """
+    pending = tmp_path / "network" / "audit.jsonl.pending"
+    pending.mkdir(parents=True)
+
+    def row(subject: str) -> str:
+        record = {"schema": 1, "event": "member_removed", "seq": 0, "subject": subject}
+        return json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+
+    (pending / "00000000000000000001-1-aa.jsonl").write_text(row("P1") + row("P2") + row("P3"))
+    cuts: list[Any] = []
+    real_open = Path.open
+
+    def torn_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, mode, *args, **kwargs)
+        if self.name == "audit.jsonl" and "a" in mode and cuts:
+            cut = cuts.pop(0)
+            write = handle.write
+
+            def torn(payload: str) -> int:
+                write(payload[: cut(payload)])
+                handle.flush()
+                raise OSError(errno.ENOSPC, "ENOSPC (injected)")
+
+            handle.write = torn  # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(Path, "open", torn_open)
+    # First drain: P1 whole and half of P2.
+    cuts.append(lambda payload: len(payload.splitlines(keepends=True)[0]) + 10)
+    first = _quiet(audit.AuditLog(tmp_path))
+    first.record(audit.AuditEvent(event="panic_raised", subject="first"))
+    assert len(first._buffer) == 1 and first.drain_failures == 1, "the lock was granted"
+    rows, torn = _parsed(tmp_path)
+    assert [r.get("subject") for r in rows] == ["P1"] and torn == 1
+    # Second drain (recovery): only the leading newline and P2 land.
+    cuts.append(lambda payload: payload.index("\n", 1) + 1)
+    second = _quiet(audit.AuditLog(tmp_path))
+    second.record(audit.AuditEvent(event="panic_raised", subject="second"))
+    assert len(second._buffer) == 1 and second.drain_failures == 1
+    monkeypatch.setattr(Path, "open", real_open)
+    audit.write_event(tmp_path, event="member_removed", subject="later")
+    first.close()
+    second.close()
+    rows, torn = _parsed(tmp_path)
+    subjects = [r.get("subject") for r in rows]
+    for subject in ("P1", "P2", "P3", "first", "second", "later"):
+        assert subjects.count(subject) == 1, (subject, subjects)
+    assert subjects[:3] == ["P1", "P2", "P3"]
+    assert [r["seq"] for r in rows] == list(range(1, 7)) and torn == 1
+    assert _parked(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", ["nondict", "badjson", "symlink", "fifo", "dir", "huge"])
+def test_a_hostile_parked_entry_is_set_aside_and_the_lock_still_works(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    """R2-3/Q2-1/Q2-2: never followed, never blocks, never wedges or degrades the log."""
+    pending = tmp_path / "network" / "audit.jsonl.pending"
+    pending.mkdir(parents=True)
+    entry = pending / "00000000000000000001-1-aa.jsonl"
+    forged = tmp_path / "secret.txt"
+    forged.write_text(json.dumps({"event": "forged", "seq": 1}) + "\n")
+    if kind == "nondict":
+        entry.write_text("[1, 2]\n")
+    elif kind == "badjson":
+        entry.write_text("not json\n")
+    elif kind == "symlink":
+        entry.symlink_to(forged)
+    elif kind == "fifo":
+        os.mkfifo(entry)
+    elif kind == "dir":
+        entry.mkdir()
+    else:
+        monkeypatch.setattr(audit, "_PENDING_MAX_BYTES", 64)
+        entry.write_text(json.dumps({"event": "x", "seq": 0, "pad": "y" * 100}) + "\n")
+    log = audit.AuditLog(tmp_path)
+    log.record(audit.AuditEvent(event="panic_raised", subject="own"))
+    assert log._file_lock_depth == 0
+    assert not log.degraded and log.admits_required() and log.pending_rejected == 1
+    assert [(r["seq"], r["event"]) for r in _all_rows(tmp_path)] == [(1, "panic_raised")]
+    assert _parked(tmp_path) == [entry.name + ".rejected"]
+    assert "set aside" in capsys.readouterr().err
+    assert forged.read_text().startswith('{"event": "forged"')
+    audit.write_event(tmp_path, event="member_removed", subject="next")
+    assert [r["seq"] for r in _all_rows(tmp_path)] == [1, 2]
+
+
+def test_a_symlinked_pending_directory_is_not_followed(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "00000000000000000001-1-aa.jsonl").write_text(
+        json.dumps({"event": "forged", "seq": 0}) + "\n"
+    )
+    (tmp_path / "network").mkdir()
+    (tmp_path / "network" / "audit.jsonl.pending").symlink_to(elsewhere)
+    log = audit.AuditLog(tmp_path)
+    log.record(audit.AuditEvent(event="panic_raised"))
+    assert [r["event"] for r in _all_rows(tmp_path)] == ["panic_raised"]
+    assert sorted(os.listdir(elsewhere)) == ["00000000000000000001-1-aa.jsonl"]
