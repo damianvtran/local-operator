@@ -10017,10 +10017,11 @@ class RelayServer:
         about whether a boot is under way. A recycled pid fails the identity test
         and the row carries no boot claim.
 
-        THE AGE IS THE CLAIM FILE'S MTIME. ``acquire_session_lease`` writes the
-        claim once, at ``O_EXCL`` creation, and nothing rewrites or touches it
-        afterwards (release unlinks it; stale recovery replaces it with a NEW
-        file, i.e. a new acquisition), so its mtime is the acquisition time.
+        THE AGE COMES FROM ``launch.lease_claimed_at`` (the claim's acquisition
+        time; why that is the claim file's mtime is documented there). The relay
+        asks launch rather than statting the claim itself because it may not
+        import ``session_lease`` beyond ``lease_holder``
+        (``test_the_relay_never_becomes_a_session_owner``).
 
         THE BUDGET IS THE SENDER'S (``types.REMOTE_COLD_BOOT_BUDGET_S``, read at
         call time so a test can move it): past it the claim is ``not_responding``,
@@ -10046,14 +10047,13 @@ class RelayServer:
         cleanup) can read ``starting`` for that instant.
         """
         from local_operator.network import types as net_types
-        from local_operator.session.runtime.launch import _lease_holder
-        from local_operator.session_lease import LEASE_NAME
+        from local_operator.session.runtime.launch import lease_claimed_at
 
         try:
-            if _lease_holder(self.root, session_id) is None:
-                return {}
-            claimed = (self.root / "sessions" / session_id / LEASE_NAME).stat().st_mtime
+            claimed = lease_claimed_at(self.root, session_id)
         except Exception:  # noqa: BLE001 — a listing is not an error path
+            return {}
+        if claimed is None:
             return {}
         age = max(0.0, time.time() - claimed)
         state = (

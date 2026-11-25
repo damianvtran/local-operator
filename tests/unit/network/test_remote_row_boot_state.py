@@ -274,3 +274,32 @@ def test_row_words_ignore_a_boot_claim_on_a_live_row_or_an_unreadable_age() -> N
     assert words(state="stored", boot_state="starting", boot_age_s=-1) == "not running"
     assert words(state="stored", boot_state="bogus", boot_age_s=3) == "not running"
     assert words(state="stored", boot_state="starting", boot_age_s=3.9) == "starting · 3s"
+
+
+def test_lease_claimed_at_reads_the_claim_only_while_a_verified_holder_lives(root: Path) -> None:
+    """The relay's age source (PR #4588): the claim's mtime for a live holder, else None.
+
+    Lives in launch so the relay never imports ``session_lease`` beyond
+    ``lease_holder`` (``test_the_relay_never_becomes_a_session_owner``).
+    """
+    from local_operator.session.runtime.launch import lease_claimed_at
+    from local_operator.session_lease import LEASE_NAME, acquire_session_lease
+
+    directory = _seed(root)
+    assert lease_claimed_at(root, SESSION) is None  # no claim at all
+
+    lease = acquire_session_lease(directory)
+    try:
+        _backdate_claim(directory, 42.0)
+        claimed = lease_claimed_at(root, SESSION)
+        assert claimed == (directory / LEASE_NAME).stat().st_mtime
+        assert 41.0 < time.time() - claimed < 60.0
+    finally:
+        lease.release()
+    assert lease_claimed_at(root, SESSION) is None  # released
+
+    (directory / LEASE_NAME).write_text(
+        json.dumps({"schema": 1, "session_id": SESSION, "generation": "g", "pid": 2**22 + 7}),
+        encoding="utf-8",
+    )
+    assert lease_claimed_at(root, SESSION) is None  # a dead pid is no holder

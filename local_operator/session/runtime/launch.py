@@ -368,6 +368,38 @@ def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = Tru
     return claim.pid
 
 
+def lease_claimed_at(config_dir: Path, session_id: str) -> float | None:
+    """Epoch time the session's transcript lease was acquired, while a verified holder lives.
+
+    ``None`` when ``_lease_holder`` reports no live, identity-verified holder
+    (no claim, a dead pid, a recycled pid). Read-only, like ``_lease_holder``:
+    it never acquires, so probing cannot take the lease a booting runtime needs.
+
+    WHY IT LIVES HERE AND NOT IN THE RELAY. The relay's cold-row boot claim
+    (``RelayServer._boot_row_state``, PR #4572 QA Q6) needs the claim's age,
+    but the relay is structurally barred from importing ``session_lease``
+    beyond ``lease_holder`` (``test_the_relay_never_becomes_a_session_owner``:
+    a relay must never own a session). Asking launch, which already reads the
+    lease for the engage loop, keeps the claim's on-disk name out of the relay
+    and makes the listing and ``engage_runtime`` read "a boot is under way"
+    through the same probe, so they cannot disagree.
+
+    THE AGE IS THE CLAIM FILE'S MTIME. ``acquire_session_lease`` writes the
+    claim once, at ``O_EXCL`` creation, and nothing rewrites or touches it
+    afterwards (release unlinks it; stale recovery replaces it with a NEW file,
+    i.e. a new acquisition), so its mtime is the acquisition time.
+
+    An ``OSError`` from the stat (the claim released between the holder check
+    and the stat) propagates: the caller decides what a failed probe means.
+    The import stays lazy for the same reason ``_lease_holder``'s does.
+    """
+    from local_operator.session_lease import LEASE_NAME
+
+    if _lease_holder(config_dir, session_id) is None:
+        return None
+    return (_session_dir(config_dir, session_id) / LEASE_NAME).stat().st_mtime
+
+
 def _spawn_interpreter() -> str:
     """The interpreter a newly engaged runtime should run.
 
