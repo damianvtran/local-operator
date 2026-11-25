@@ -105,16 +105,21 @@ def test_ordinary_boot_leaves_org_chart_optional() -> None:
 import asyncio, json, sys
 from local_operator.tui.app import OperatorApp
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.conftest import await_session_boot
 
 async def main():
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:
-        for _ in range(40):
-            await pilot.pause()
-            if app._session is session:
-                break
-        assert app._session is session
+        # Wait on the boot worker, not a fixed count of pauses: adoption
+        # crosses a warm-up THREAD hop that pilot.pause() does not wait for,
+        # so 40 turns lost on loaded CI runners (main run 43726959431 job
+        # 132862940562; #4539 guards job 138383648578). The helper's 30 s
+        # guard bounds a wedged factory inside the 90 s subprocess timeout.
+        await await_session_boot(app)
+        assert app._session is session, (
+            'boot worker finished without adopting the FakeSession'
+        )
         assert app._editor().is_attached
         assert app._editor().display
         assert app._transcript_view().display
