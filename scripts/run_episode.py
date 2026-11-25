@@ -41,10 +41,13 @@ Inputs, all explicit:
   ``--max-wall-s`` supplies the lease and frontend wait basis, not the turn timer.
 
 Output: the ``EpisodeOutcome`` as a JSON object on stdout, plus
-``bundle_root``. Exit status is 0 only for ``completed``; ``failed``,
-``cancelled``, ``abandoned``, ``abandonment_failed`` and ``failed_pre_bundle``
-exit 1, and a missing secret (which fails BEFORE any allocation) exits 2 with
-the secret's NAME -- never a value -- on stderr.
+``bundle_root``. Exit status is 0 whenever the outcome carries a score whose
+status is ``scored``, whatever the episode status (a scored ``truncated`` or
+``agent_stop`` run is a result, not a failure); an unscored or failed outcome
+(``failed``, ``cancelled``, ``abandoned``, ``abandonment_failed``,
+``failed_pre_bundle``, an owner lost unverified) exits 1, and a missing
+secret (which fails BEFORE any allocation) exits 2 with the secret's NAME --
+never a value -- on stderr.
 
 The exact command the paid proof runs is in the adapter README under
 "Running one episode".
@@ -117,6 +120,38 @@ if TYPE_CHECKING:
 EXIT_OK = 0
 EXIT_EPISODE = 1
 EXIT_PREFLIGHT = 2
+
+
+# The outcome statuses whose scored episode is a valid benchmark datum.
+# ``truncated`` / ``agent_stop`` are session-arm endings (the step cap or the
+# agent ending its turn without finishing); ``completed`` is both arms' clean
+# close-out. ``failed`` and ``cancelled`` are deliberately absent: the reply arm
+# marks a scored run ``failed`` when its cleanup leaked a resource
+# (``rescue_required``) and the session arm marks a bridge-wedged run ``failed``
+# even when its scorer succeeded -- both still carry a ``scored`` score, and
+# both must stay a process failure.
+_EXIT_OK_STATUSES = frozenset({"completed", "truncated", "agent_stop"})
+
+
+def _episode_exit_code(status: Any, score: Any) -> int:
+    """``EXIT_OK`` only for a scored episode that ENDED cleanly.
+
+    A scored ``truncated`` or ``agent_stop`` episode is a valid benchmark
+    datum, not a process failure: exiting 1 for it put every capped run
+    under launchd's "last exit code 1" beside genuine infrastructure deaths,
+    so the exit code could not tell them apart. But a score alone is not
+    enough: a ``failed`` (leaked cleanup, wedged bridge) or ``cancelled``
+    outcome can still carry one, and exiting 0 for it would hide exactly the
+    deaths the exit code exists to surface. So both must hold: the outcome
+    ``status`` is in ``_EXIT_OK_STATUSES`` AND the score's status is
+    ``scored``. ``score`` is the typed ``ScoreArtifact`` or its JSON dump (the
+    owner frontend reads the sealed ``outcome.json``); ``status`` is the
+    outcome's own status string from either source.
+    """
+
+    scored = score.get("status") if isinstance(score, dict) else getattr(score, "status", None)
+    return EXIT_OK if scored == "scored" and status in _EXIT_OK_STATUSES else EXIT_EPISODE
+
 
 # The harness identity this script seals into a manifest is read from the
 # INSTALL that is executing, never from a file beside the script: see
@@ -1390,7 +1425,7 @@ async def _run_session_arm(
         # Same contract as the reply arm: name the ref, keep the value out.
         print(diagnostic, file=sys.stderr)
         return EXIT_PREFLIGHT
-    return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
+    return _episode_exit_code(outcome.status, outcome.score)
 
 
 #: How much wall time the frontend waits past the episode's own wall budget
@@ -1906,8 +1941,10 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
 
     Terminal status is written AFTER the seal on a completed close-out, so
     the outcome file is the answer; when it cannot be read the status itself
-    is printed so the caller still gets a truthful shape. The failed/complete
-    exit contract stays the same as the foreground used to provide.
+    is printed so the caller still gets a truthful shape. The exit contract is
+    the foreground's (``_episode_exit_code``: 0 only for a scored
+    ``completed``/``truncated``/``agent_stop`` outcome), read from the sealed
+    outcome's own ``status`` and ``score``.
     """
     if status.phase == "ended" and status.receipt.get("session_effort_preflight_refused") is True:
         # An invalid effort has no outcome bundle to read. Keep the foreground
@@ -1925,7 +1962,7 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
                 final = json.loads(body)
             except ValueError:
                 final = {}
-            return EXIT_OK if final.get("status") == "completed" else EXIT_EPISODE
+            return _episode_exit_code(final.get("status"), final.get("score"))
     print(
         json.dumps(
             {
@@ -2332,7 +2369,7 @@ async def run(
         # anything can run, hence the preflight exit code.
         print(diagnostic, file=sys.stderr)
         return EXIT_PREFLIGHT
-    return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
+    return _episode_exit_code(outcome.status, outcome.score)
 
 
 def main(
