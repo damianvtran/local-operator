@@ -94,19 +94,20 @@ key could otherwise reach a log line from here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import httpx
 from pydantic import SecretStr
 
 from local_operator.classification.accounting import note_post
-from local_operator.classification.advisory import ADVISORY_VENDORS, AdvisoryVendor
+from local_operator.classification.advisory import GOOGLE_VERTEX, AdvisoryVendor
 from local_operator.classification.types import (
     Answer,
     DecisionRequest,
@@ -488,7 +489,7 @@ async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | 
         store = shared_auth_store(
             (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
         )
-        local = await store.get_api_key(storage, read_only=True)
+        local = await store.get_api_key(storage, read_only=True, offload_static_key=True)
         if local:
             return local
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
@@ -609,7 +610,9 @@ class _HttpDecisionVendor:
                     return SecretStr(stored), index
                 continue
 
-            stored_key = provider_secret_value(tier, base=config_dir)
+            # Secret/broker access is synchronous and may stall; the turn
+            # and the decision deadline must remain cancellable.
+            stored_key = await asyncio.to_thread(provider_secret_value, tier, base=config_dir)
             if stored_key:
                 return SecretStr(stored_key), index
             # An exported variable is a real instruction and is not what PR2a
@@ -713,14 +716,14 @@ class _HttpDecisionVendor:
         request: DecisionRequest,
         *,
         timeout_s: float,
-        check_radient: Callable[[], None] | None = None,
+        check_radient: Callable[[], Awaitable[None]] | None = None,
     ) -> DecisionResponse:
         # A native leg can suspend for credentials too, including between
         # POSTs after a refusal. Guard each send, not just entry to the leg.
         async def resolve_key() -> SecretStr | None:
             key = await self.credential(self._config_dir)
             if check_radient is not None:
-                check_radient()
+                await check_radient()
             return key
 
         key = await resolve_key()
@@ -1096,8 +1099,8 @@ def build_vendor(
     session_id: str | None = None,
 ) -> DecisionVendor:
     """Construct a native leg or a private, auto-only structured hint leg."""
-    if name in ADVISORY_VENDORS:
+    if name == GOOGLE_VERTEX:
         return AdvisoryVendor(
-            name, config_dir, client=client, auth_store=auth_store, session_id=session_id
+            config_dir, client=client, auth_store=auth_store, session_id=session_id
         )
     return VENDOR_CLASSES[name](config_dir, model=model, client=client)

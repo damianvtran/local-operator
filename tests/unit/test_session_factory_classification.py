@@ -2111,3 +2111,164 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
         candidate.description for candidate in classifier.requests[0].candidates
     )
     assert "vault" not in request_text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["disabled", "no-vertex", "early", "blocked", "oauth", "native"])
+async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatch, route):
+    import statistics
+    import time
+
+    import httpx
+
+    from local_operator import analytics
+    from local_operator.classification.service import ClassificationService
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        ToolResult,
+    )
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setattr(analytics, "record_tool_call", lambda *args, **kwargs: None)
+    if route == "native":
+        monkeypatch.setenv("RADIENT_API_KEY", "fixture-radient")
+    cold, warm = [], []
+    for run in range(5):
+        root = tmp_path / str(run)
+        root.mkdir()
+        oauth_started, request_started, release = (asyncio.Event() for _ in range(3))
+        posts, prompts, dispatches = [], [], []
+
+        class Auth:
+            async def get_oauth_access(self, *_args, **_kwargs):
+                oauth_started.set()
+                if route == "oauth":
+                    await release.wait()
+                return OAuthAccess(
+                    access_token="fixture-vertex",
+                    credential_id=1,
+                    kind="oauth",
+                    raw={"project_id": "fixture-project", "location": "global"},
+                )
+
+        async def advisory_transport(request: httpx.Request) -> httpx.Response:
+            posts.append(request.url.host)
+            request_started.set()
+            if route == "blocked":
+                await release.wait()
+            if route == "native":
+                return httpx.Response(
+                    200,
+                    json={"answers": {"recommend_skill": {"choice": "alpha", "confidence": 1}}},
+                )
+            import json
+
+            body = json.loads(request.content)
+            config = body["generationConfig"]
+            assert config["thinkingConfig"] == {"thinkingLevel": "minimal"}
+            choices = config["responseSchema"]["properties"]
+            answer = json.dumps(
+                {
+                    name: "alpha" if "alpha" in prop["enum"] else "none"
+                    for name, prop in choices.items()
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {"parts": [{"text": answer}]},
+                        }
+                    ]
+                },
+            )
+
+        classifier = ClassificationService(config_dir=root)
+        classifier._http = httpx.AsyncClient(transport=httpx.MockTransport(advisory_transport))
+        if route not in {"disabled", "no-vertex"}:
+            classifier.bind_advisory_route(Auth(), "synthetic")
+        hooks = _hooks(classifier=None if route == "disabled" else classifier)
+        transcript = Transcript(root / "session")
+
+        async def tool(call_id, *_args, **_kwargs):
+            return ToolResult(tool_call_id=call_id)
+
+        tools = [AgentTool(name="read", description="read", execute=tool)]
+        step = 0
+
+        def stream(request, _signal):
+            nonlocal step
+            step += 1
+            dispatches.append(time.perf_counter())
+            prompts.append("\n".join([*request.system_blocks, *(m.text for m in request.messages)]))
+
+            async def events():
+                if step == 1:
+                    if route == "early":
+                        # Arrange an answer between chat steps, not before
+                        # first dispatch. Unlike product, the fixture may wait.
+                        await request_started.wait()
+                        result = await hooks.classification_outstanding[0].task
+                        assert result.resources
+                    elif route == "blocked":
+                        await request_started.wait()
+                    elif route == "oauth":
+                        await oauth_started.wait()
+                    yield StreamToolCallDelta(
+                        index=0, id="fixture-read", name="read", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="toolUse")
+                else:
+                    yield StreamTextDelta(delta="fixture response")
+                    yield StreamEndEvent(stop_reason="stop")
+
+            return events()
+
+        session = Session(
+            model=ModelSpec(
+                provider="anthropic", model_id="claude-sonnet-4-6", context_window=100_000
+            ),
+            stream_fn=stream,
+            tools=tools,
+            transcript=transcript,
+            system_blocks_provider=session_factory._make_system_blocks_provider(
+                tools, transcript, hooks
+            ),
+            has_ui=True,
+        )
+        try:
+            async with asyncio.timeout(4):
+                start = time.perf_counter()
+                await session.prompt("find alpha skill")
+                cold.append((dispatches[0] - start) * 1000)
+                assert len(dispatches) == 2 and not release.is_set()
+                assert ("<resource_recommendations>" in prompts[0]) == (route == "native")
+                if route == "early":
+                    assert "<resource_recommendations>" in prompts[1]
+                elif route != "native":
+                    assert "<resource_recommendations>" not in prompts[1]
+                if route == "native":
+                    assert posts == ["api.radienthq.com"] and not oauth_started.is_set()
+                if route in {"disabled", "no-vertex", "oauth"}:
+                    assert posts == []
+                release.set()
+                start = time.perf_counter()
+                await session.prompt("another alpha skill")
+                warm.append((dispatches[2] - start) * 1000)
+        finally:
+            release.set()
+            await classifier.aclose()
+            await session.dispose()
+    print(
+        f"dispatch {route}: n={len(cold)} cold ms median={statistics.median(cold):.1f} "
+        f"range={min(cold):.1f}–{max(cold):.1f}; warm ms median={statistics.median(warm):.1f} "
+        f"range={min(warm):.1f}–{max(warm):.1f}"
+    )

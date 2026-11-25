@@ -11,8 +11,7 @@ import json
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Mapping
-from functools import lru_cache
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -31,9 +30,8 @@ if TYPE_CHECKING:
 
     from local_operator.providers.auth_store import OAuthAccess
 
-OPENAI_SUBSCRIPTION = "openai-subscription"
 GOOGLE_VERTEX = "google-vertex"
-ADVISORY_VENDORS = (OPENAI_SUBSCRIPTION, GOOGLE_VERTEX)
+VERTEX_HINT_MODEL = "gemini-3.1-flash-lite"
 
 
 class RadientCredentialsChanged(Exception):
@@ -45,13 +43,12 @@ _StoreStamp = tuple[_FileStamp, _FileStamp]
 RadientStamp = tuple[bool, _StoreStamp, tuple[str, float] | None]
 
 
-@lru_cache(maxsize=1)  # Only the last observed on-disk generation can be reused.
 def _radient_provider_row(
-    config_dir: Path | None, files: _StoreStamp
+    config_dir: Path | None, files: _StoreStamp, *, deadline: float
 ) -> tuple[str, float] | None:
     # A TypeSafe/OpenRouter key read writes its usage audit to the same DB.
-    # File changes trigger a metadata read, but only the Radient row's own
-    # generation invalidates a negative result. Never retain or log a key.
+    # Only the Radient row's own generation invalidates a negative result.
+    # Never retain or log a key.
     if files[0] is None:
         return None
     from local_operator.secrets.access import open_store
@@ -59,7 +56,7 @@ def _radient_provider_row(
     from local_operator.secrets.store import provider_secret_name
 
     try:
-        record = open_store(config_dir).describe(
+        record = open_store(config_dir, deadline=deadline).describe(
             provider_secret_name("RADIENT_API_KEY"), role="provider"
         )
     except SecretNotFound:
@@ -67,7 +64,7 @@ def _radient_provider_row(
     return record.record_id, record.updated_at
 
 
-def radient_stamp(config_dir: Path | None) -> RadientStamp:
+def radient_stamp(config_dir: Path | None, *, deadline: float) -> RadientStamp:
     """Invalidate a negative Radient probe after a local login or key write.
 
     Check main files AND WALs: SQLite can commit without touching the main
@@ -89,7 +86,7 @@ def radient_stamp(config_dir: Path | None) -> RadientStamp:
 
     auth = config_dir / "auth.db" if config_dir is not None else default_db_path()
     try:
-        row = _radient_provider_row(config_dir, db_stamp(store_path(config_dir)))
+        row = _radient_provider_row(config_dir, db_stamp(store_path(config_dir)), deadline=deadline)
     except (SecretStoreError, OSError, sqlite3.Error, TypeError, ValueError):
         # Match native eligibility for an absent/locked/unreadable key store;
         # unlike a confirmed miss this failure is not memoized.
@@ -133,20 +130,18 @@ async def resolve_advisory_access(
 
 
 class AdvisoryVendor:
-    """One of two fixed inference routes, neither of which accepts an API key."""
+    """A fixed Vertex inference route that accepts only a local OAuth grant."""
 
     def __init__(
         self,
-        name: str,
         config_dir: Path | None,
         *,
         client: httpx.AsyncClient | None,
         auth_store: AdvisoryAuthSource | None,
         session_id: str | None,
     ) -> None:
-        self.name = name
-        self._provider = "openai" if name == OPENAI_SUBSCRIPTION else GOOGLE_VERTEX
-        self.model_id = "gpt-6-luna" if name == OPENAI_SUBSCRIPTION else "gemini-3.1-flash-lite"
+        self.name = GOOGLE_VERTEX
+        self.model_id = VERTEX_HINT_MODEL
         self._config_dir = config_dir
         self._client = client
         self._auth_store = auth_store
@@ -155,7 +150,7 @@ class AdvisoryVendor:
     async def _access(self, config_dir: Path | None) -> OAuthAccess | None:
         try:
             access = await resolve_advisory_access(
-                self._provider,
+                GOOGLE_VERTEX,
                 self.model_id,
                 config_dir,
                 auth_store=self._auth_store,
@@ -167,14 +162,11 @@ class AdvisoryVendor:
             return None
         if access is None or access.kind != "oauth" or not access.access_token:
             return None
-        if self.name == OPENAI_SUBSCRIPTION and not access.org_id:
-            return None  # Without account identity the chat client would use the paid API path.
-        if self.name == GOOGLE_VERTEX:
-            # The chat client can use an ambient billing project. An automatic
-            # hint can only bill the project the operator selected at login.
-            project = (access.raw or {}).get("project_id")
-            if not isinstance(project, str) or not project.strip():
-                return None
+        # The chat client can use an ambient billing project. An automatic
+        # hint can only bill the project the operator selected at login.
+        project = (access.raw or {}).get("project_id")
+        if not isinstance(project, str) or not project.strip():
+            return None
         return access
 
     async def credential(self, config_dir: Path | None) -> SecretStr | None:
@@ -186,7 +178,7 @@ class AdvisoryVendor:
         request: DecisionRequest,
         *,
         timeout_s: float,
-        check_radient: Callable[[], None] | None = None,
+        check_radient: Callable[[], Awaitable[None]] | None = None,
     ) -> DecisionResponse:
         if not request.questions or any(q.kind != "choice" for q in request.questions):
             raise VendorError("structured hints require choice questions", kind="response")
@@ -194,8 +186,11 @@ class AdvisoryVendor:
         # Even a miss can follow a suspended lookup. Do not let it fall
         # through to another inference provider after a concurrent login.
         if check_radient is not None:
-            check_radient()
-        if access is None:
+            await check_radient()
+        # Auth DB/WAL changes are checked by the fence. Mesh owner policy is
+        # separate session state and may have changed while the fence awaited.
+        permitted = getattr(self._auth_store, "permits_local_oauth", None)
+        if access is None or (permitted is not None and not permitted(GOOGLE_VERTEX)):
             raise VendorError("no eligible OAuth sign-in", kind="auth")
         started = time.monotonic()
         if self._client is None:
@@ -209,7 +204,7 @@ class AdvisoryVendor:
             answers=_answers(request, text),
             input_tokens=usage[0],
             output_tokens=usage[1],
-            cost_usd=None,  # Neither route reports an actual amount for this request.
+            cost_usd=None,  # Vertex does not report an actual amount for this request.
             latency_s=time.monotonic() - started,
         )
 
@@ -237,8 +232,6 @@ class AdvisoryVendor:
         props = {q.id: {"type": "string", "enum": list(q.criteria)} for q in request.questions}
         schema = {"type": "object", "properties": props, "required": list(props)}
         try:
-            if self.name == OPENAI_SUBSCRIPTION:
-                return await self._codex(client, access, instructions, data, schema, timeout_s)
             return await self._vertex(client, access, instructions, data, schema, timeout_s)
         except httpx.HTTPError as exc:
             raise VendorError(
@@ -252,78 +245,6 @@ class AdvisoryVendor:
             raise VendorError(
                 f"{self.name} returned an invalid structured hint", kind="response"
             ) from None
-
-    async def _codex(
-        self,
-        client: httpx.AsyncClient,
-        access: OAuthAccess,
-        instructions: str,
-        data: str,
-        schema: dict[str, Any],
-        timeout_s: float,
-    ) -> tuple[str, tuple[int | None, int | None]]:
-        from local_operator.providers.clients import (
-            CODEX_RESPONSES_URL,
-            OpenAICompatClient,
-        )
-
-        # Native /v1/decisions accepts some ChatGPT OAuth tokens, but does not
-        # establish plan billing. Use only the Codex route that reports plan quota.
-        headers = OpenAICompatClient(
-            base_url="https://api.openai.com/v1", http_client=client
-        )._headers(None, access)
-        body = {
-            "model": self.model_id,
-            "instructions": instructions,
-            "input": [{"role": "user", "content": data}],
-            "store": False,
-            "stream": True,
-            # Luna supports `none`; a short categorical hint needs no extra
-            # reasoning tokens or their latency under the fixed call deadline.
-            "reasoning": {"effort": "none"},
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "advisory_choices",
-                    "strict": True,
-                    "schema": {**schema, "additionalProperties": False},
-                }
-            },
-        }
-        accounting.note_post()
-        async with client.stream(
-            "POST",
-            CODEX_RESPONSES_URL,
-            headers=headers,
-            json=body,
-            timeout=timeout_s,
-            follow_redirects=False,
-        ) as resp:
-            _check_status(resp)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:") or line[5:].strip() == "[DONE]":
-                    continue
-                event = json.loads(line[5:])
-                if event.get("type") in {"error", "response.failed", "response.incomplete"}:
-                    break
-                if event.get("type") == "response.completed":
-                    final = event["response"]
-                    if final.get("status") != "completed":
-                        break
-                    parts = [
-                        part
-                        for item in final["output"]
-                        if item.get("type") == "message"
-                        for part in item["content"]
-                    ]
-                    if len(parts) == 1 and parts[0].get("type") == "output_text":
-                        usage = final.get("usage") or {}
-                        return parts[0]["text"], (
-                            _count(usage, "input_tokens"),
-                            _count(usage, "output_tokens"),
-                        )
-                    break
-        raise VendorError("Codex did not complete a structured choice", kind="response")
 
     async def _vertex(
         self,
@@ -356,6 +277,8 @@ class AdvisoryVendor:
                 "generationConfig": {
                     "responseMimeType": "application/json",
                     "responseSchema": schema,
+                    # Flash-Lite supports the Gemini 3 lowest thinking tier.
+                    "thinkingConfig": {"thinkingLevel": "minimal"},
                 },
             },
         )

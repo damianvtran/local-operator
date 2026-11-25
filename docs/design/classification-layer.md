@@ -52,19 +52,18 @@ separate decisions with their own gates; this change builds the substrate they w
 The three native vendors accept the same request body — TypeSafe's native shape — and return the
 same answer shape. Typed consumers always use that cascade.
 
-Automatic **resource suggestions** can also use an existing OpenAI or Google Vertex sign-in when
-no Radient credential can be resolved. A local Radient sign-in or key added mid-session takes
-precedence before the next fallback request. The session's signed-in provider is tried first
-when both are available. Automatic hints use already-fresh local OAuth only, not borrowed,
-synced or delegated mesh credentials. If the bearer needs renewal on the first turn, that hint
-skips the OAuth leg; ordinary chat can still renew it for subsequent turns. OpenAI uses
-ChatGPT's subscription Responses route, never an OpenAI API key.
-Vertex uses Gemini 3.1 Flash-Lite in the project stored with the login (never an ambient billing
-project), subject to that project's Vertex quota and billing; it does not use a Gemini Developer
-API key. These routes return only a listed resource (or `none`), with no generated confidence
-or probability. They cannot answer the typed `decide` API, and their failures do not trip its
-native circuit breaker. Explicit classifier vendor/model settings and the native roll-forward
-after a Radient request failure are unchanged.
+Automatic **resource suggestions** can use an existing Google Vertex sign-in when no native
+provider (Radient, TypeSafe or OpenRouter) is available. Vertex runs in the background: neither
+its credentials nor inference extend the model step's wait. A completed hint can be picked up on
+a later step of the same task. A native request failure keeps the native roll-forward; it does not
+authorize Vertex. Explicit classifier vendor/model settings also keep their native routes.
+
+Vertex uses Gemini 3.1 Flash-Lite with minimal thinking in the project chosen at login, subject to
+that project's quota and billing. It accepts only fresh local OAuth, never an API key, an ambient
+project, a borrowed or delegated sign-in, or OAuth from a different provider. If the bearer needs
+renewal, the hint is skipped; ordinary chat can still renew it. A newly available Radient login
+or key is rechecked before a fallback can send. Vertex returns only a listed resource (or `none`),
+not calibrated confidence or probabilities, and cannot answer the typed `decide` API.
 
 ```jsonc
 // POST <endpoint>,  Authorization: Bearer <key>,  Content-Type: application/json

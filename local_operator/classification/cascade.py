@@ -33,13 +33,13 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from local_operator.classification.advisory import ADVISORY_VENDORS, GOOGLE_VERTEX
+from local_operator.classification.advisory import GOOGLE_VERTEX
 from local_operator.classification.types import DecisionVendor
 from local_operator.classification.vendors import VENDOR_CLASSES, build_vendor
 
@@ -192,16 +192,14 @@ def leg_order(
     settings: Mapping[str, Any] | None,
     *,
     advisory: bool = False,
-    preferred_provider: str = "",
 ) -> tuple[str, ...]:
-    """Only unpinned resource hints may use structured inference after Radient."""
+    """Only unpinned resource hints may use structured inference after every native leg."""
     pin = pinned_vendor(settings)
     if pin in VENDOR_ORDER:
         return (pin,)
     if not advisory or model_override(settings):
         return VENDOR_ORDER
-    signed_in = ADVISORY_VENDORS[::-1] if preferred_provider == GOOGLE_VERTEX else ADVISORY_VENDORS
-    return (VENDOR_ORDER[0], *signed_in, *VENDOR_ORDER[1:])
+    return (*VENDOR_ORDER, GOOGLE_VERTEX)
 
 
 async def resolve_vendor_with_trace(
@@ -212,8 +210,7 @@ async def resolve_vendor_with_trace(
     order: tuple[str, ...] | None = None,
     auth_store: AdvisoryAuthSource | None = None,
     session_id: str | None = None,
-    on_probe: Callable[[str], None] | None = None,
-    after_probe: Callable[[], None] | None = None,
+    after_probe: Callable[[], Awaitable[None]] | None = None,
 ) -> VendorResolution:
     """Resolve the first usable leg AND record every preferred leg skipped before it.
 
@@ -234,8 +231,6 @@ async def resolve_vendor_with_trace(
     model = model_override(settings)
     skipped: list[dict[str, str]] = []
     for name in order if order is not None else leg_order(settings):
-        if on_probe is not None:
-            on_probe(name)
         vendor = build_vendor(
             name,
             config_dir,
@@ -248,19 +243,19 @@ async def resolve_vendor_with_trace(
             credential = await vendor.credential(config_dir)
         except Exception as exc:  # noqa: BLE001 — a leg that cannot resolve is not this leg
             if after_probe is not None:
-                after_probe()
+                await after_probe()
             logger.warning("classification: %s credential resolution failed", name, exc_info=True)
             skipped.append(_raised_skip(name, exc))
             continue
         # Resolving Radient itself can refresh and change the stamp. If it
         # won, there is no lower-priority selection to discard.
         if after_probe is not None and (name != "radient" or not credential):
-            after_probe()
+            await after_probe()
         if credential:
             return VendorResolution(vendor=vendor, skipped=tuple(skipped))
         # These OAuth legs do not get the native decision vendors' separate mesh
         # trace; a missing sign-in is ordinary absence, not a failed key borrow.
-        if name not in ADVISORY_VENDORS:
+        if name != GOOGLE_VERTEX:
             skipped.append(_skip_row(config_dir, name))
         logger.debug("classification: %s has no credential here", name)
     return VendorResolution(vendor=None, skipped=tuple(skipped))

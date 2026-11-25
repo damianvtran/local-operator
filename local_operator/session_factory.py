@@ -3334,6 +3334,20 @@ async def _classification_recommendation(
     # requirement on the seam.
     probe = getattr(service, "provider_available", None)
 
+    vertex_enabled = getattr(service, "vertex_hint_enabled", False) is True
+
+    async def _recommend(*, vertex: bool = False) -> Any:
+        try:
+            request = _classification_request(hooks, query)
+        except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
+            logger.warning("classification: could not build the request", exc_info=True)
+            return None
+        if not vertex_enabled:
+            return await _classification_call(service, request)
+        recommendation = await service.recommend_resources(request, automatic=vertex)
+        _log_classification_cost(recommendation)
+        return recommendation
+
     async def _probe_then_call() -> Any:
         if probe is not None:
             try:
@@ -3342,16 +3356,21 @@ async def _classification_recommendation(
                 logger.debug("classification: provider probe failed", exc_info=True)
                 available = True
             if not available:
-                logger.debug(
-                    "classification: no recommender provider has a credential; nothing to ask"
-                )
+                if vertex_enabled:
+                    # The foreground waited ONLY for the original native path.
+                    # Vertex resolution and inference are never awaited by a
+                    # model step; use the existing same-task late-answer slot.
+                    detached = asyncio.create_task(_recommend(vertex=True))
+                    hooks.classification_outstanding.append(
+                        _OutstandingClassification(detached, task_id)
+                    )
+                    _prune_outstanding(hooks)
+                else:
+                    logger.debug(
+                        "classification: no recommender provider has a credential; nothing to ask"
+                    )
                 return _NO_PROVIDER
-        try:
-            request = _classification_request(hooks, query)
-        except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
-            logger.warning("classification: could not build the request", exc_info=True)
-            return None
-        return await _classification_call(service, request)
+        return await _recommend()
 
     wait_s = _classification_wait_s(hooks, service)
     task = asyncio.create_task(_probe_then_call())
@@ -7170,7 +7189,7 @@ async def create_session(
     if plan.knowledge_hooks is not None:
         bind_route = getattr(plan.knowledge_hooks.classifier, "bind_advisory_route", None)
         if callable(bind_route):
-            bind_route(plan.auth_store, session.session_id, lambda: session.model.provider)
+            bind_route(plan.auth_store, session.session_id)
     attach_classification_spend(session, plan.knowledge_hooks)
     attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])

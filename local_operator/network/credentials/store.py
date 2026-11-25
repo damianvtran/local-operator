@@ -548,6 +548,10 @@ class MeshAwareAuthStore:
         self._note_borrow_serve(provider, grant, session_id)
         return grant.access_token
 
+    def permits_local_oauth(self, provider: str) -> bool:
+        """Recheck owner policy after an advisory caller's asynchronous fences."""
+        return not self._owner_policy_skips_local(self._binding_for(provider))
+
     async def get_oauth_access(
         self,
         provider: str,
@@ -570,11 +574,12 @@ class MeshAwareAuthStore:
         if local_oauth_only:
             # A read-only normal resolve can still borrow and change which
             # account pays. Automatic hints must never enter that branch.
-            if self._owner_policy_skips_local(self._binding_for(provider)):
+            if not self.permits_local_oauth(provider):
                 return None
-            return await self._local.get_oauth_access(
+            access = await self._local.get_oauth_access(
                 provider, session_id, read_only=True, model_id=model_id, local_oauth_only=True
             )
+            return access if self.permits_local_oauth(provider) else None
         access = await self._local.get_oauth_access(
             provider,
             session_id,
