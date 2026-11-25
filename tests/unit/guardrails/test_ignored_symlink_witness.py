@@ -207,3 +207,36 @@ async def test_critical_controls_unchanged(home: Path, command: str) -> None:
     outcome = await _check(home, command, judge)
     assert outcome is not None and outcome.blocked, command
     assert judge.prompts == [], command
+
+
+@pytest.fixture
+def branch_wt(home: Path, repo: Path) -> Path:
+    """A NON-detached, pushed branch tree, so the finished-tree route applies.
+
+    Security review R1-MAJOR-1 (PR #4561): the detached fixture never reaches
+    ``_merged_tree_sheds``, which is why a name-only ``next-env.d.ts`` entry in
+    ``_REGENERABLE`` slipped past the directory test.
+    """
+    wt = repo / ".worktrees" / "feat-wt"
+    _git("worktree", "add", "-q", "-b", "feat/wt", str(wt), "origin/main", cwd=repo)
+    _git("push", "-q", "origin", "feat/wt", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    assert prov.recorded_creators(str(wt)) == []
+    return wt
+
+
+def test_next_env_directory_holds_on_finished_branch_tree(
+    home: Path, repo: Path, branch_wt: Path
+) -> None:
+    (branch_wt / "next-env.d.ts").mkdir()
+    (branch_wt / "next-env.d.ts" / "data.txt").write_text("not Next's\n")
+    assert prov.worktree_state(str(branch_wt), own=False, session_id=ME) == "dirty"
+    _assert_held(home, repo, branch_wt)
+
+
+def test_next_env_regular_file_sheds_on_finished_branch_tree(
+    home: Path, repo: Path, branch_wt: Path
+) -> None:
+    (branch_wt / "next-env.d.ts").write_text('/// <reference types="next" />\n')
+    assert prov.worktree_state(str(branch_wt), own=False, session_id=ME) == "clean"
+    _assert_low(home, repo, branch_wt)

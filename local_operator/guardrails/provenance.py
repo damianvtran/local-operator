@@ -1569,11 +1569,10 @@ _REGENERABLE = frozenset(
         # same standing as ``build``/``dist`` (only ever matched when Git
         # itself reports the entry IGNORED).
         "out",
-        # Added 2026-11-24 (guard 0.113.0 field case, session 045831e8588c,
-        # minerva-nexus QA worktree): Next.js rewrites ``next-env.d.ts`` on
-        # every ``next build``/``next dev``. Exact basename only; see
-        # :func:`_next_env_types_file` for the any-tree witness.
-        "next-env.d.ts",
+        # ``next-env.d.ts`` is deliberately NOT here (security review
+        # R1-MAJOR-1, PR #4561): this list matches a NAME, so it would shed a
+        # DIRECTORY that happened to bear that name. Next's stub is accepted
+        # only by type, in :func:`_next_env_types_file`.
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -2500,9 +2499,17 @@ def worktree_state(
             and ".." not in entry.split("/")
             and _ignored_symlink(real, entry)
         )
+        # Same field case, by TYPE and never by name (review R1-MAJOR-1):
+        # a directory called ``next-env.d.ts`` is not Next's stub.
+        next_env = (
+            not os.path.isabs(entry)
+            and ".." not in entry.split("/")
+            and _next_env_types_file(real, entry)
+        )
         if (
             not own
             and not linked
+            and not next_env
             and not _regenerable(name)
             and not _only_regenerable(os.path.join(real, entry))
         ):
