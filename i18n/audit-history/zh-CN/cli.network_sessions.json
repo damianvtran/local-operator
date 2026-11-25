@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.network_sessions",
+  "history_sha256": "7238ebd5b92ad65e15c4cd62a5bc0314c085ec823fc65e08d09df7cddb37a7ca",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.network_sessions",
+      "source_sha256": "708e6844069a8a325b61489992a278cca8cec53815d89791bdde3b0a8494f369",
+      "translator": {
+        "agent": "i18n translator (lopdev team `task` agent, session bc8e8836e24d; TRANSLATOR.md receipt)",
+        "session": "bc8e8836e24d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer agent (lopdev team, session/job b6f8f687b150; independent of the translator)",
+        "session": "b6f8f687b150",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Target zh-CN/cli.network_sessions.json sha256 0f9aecc169b51a3be6db8b54e57ee8d13fe02ba1085a2eb48badf0fb29c62025 (3/3 keys). Round 1 passed: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167015910. Pass retained in round 2 by byte identity: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167516072. Non-gating findings: T2 nit, deferred. Independent LLM audit per round on the same model family as the translator; no cross-model, native-speaker or visual RTL/overflow audit claimed."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}: đang hiển thị {shown, number} trên {total, number} kết quả khớp — trang tiếp theo: {command}} other {{peer}: đang hiển thị {shown, number} trên {total, number} — trang tiếp theo: {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}: bản dựng của thiết bị đó cũ hơn tính năng tìm kiếm từ xa, nên việc tìm kiếm không chạy trên đó — không có hàng nào từ thiết bị đó} other {{peer}: bản dựng của thiết bị đó cũ hơn tính năng phân trang từ xa, nên đây không phải toàn bộ danh sách của nó}}",
+  "cli.network_sessions.relay_unpaged": "dịch vụ chuyển tiếp đang chạy trên thiết bị này là bản dựng cũ, chưa có phân trang và tìm kiếm từ xa, nên không thiết bị nào được phân trang hay tìm kiếm — hãy khởi động lại dịch vụ chuyển tiếp để phân trang hoặc tìm kiếm"
+}

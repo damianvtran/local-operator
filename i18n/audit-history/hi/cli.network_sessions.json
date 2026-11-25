@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.network_sessions",
+  "history_sha256": "a88c63afe3838b4da22ea6860fd7b055902d9810fbe8c43b256fec41b9676c59",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.network_sessions",
+      "source_sha256": "708e6844069a8a325b61489992a278cca8cec53815d89791bdde3b0a8494f369",
+      "translator": {
+        "agent": "i18n translator (lopdev team task agent, session ebe2a0115d58, next_page delta; retains other keys from bc8e8836e24d)",
+        "session": "ebe2a0115d58",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer agent (lopdev team, round-2 delta; independent of translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Target hi/cli.network_sessions.json sha256 498189122b47757399a1f3f2250d6c9469aac56d9ff15d8ca9569a855a4236fd (3/3 keys). Round 2 passed the next_page delta (only changed key) and retained round 1 on unchanged keys: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167015910; delta audit: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167516072. Round 2 rendered both select arms, confirmed matching-count semantics, and checked argument names, order and kinds against English; the previous hi/ru/ur files failed its negative control. Non-gating findings: none. Independent LLM audit per round on the same model family as the translator; no cross-model, native-speaker or visual RTL/overflow audit claimed."
+    }
+  ]
+}

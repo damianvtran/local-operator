@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}: se muestran {shown, number} de {total, number} coincidencias — página siguiente: {command}} other {{peer}: se muestran {shown, number} de {total, number} — página siguiente: {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}: su compilación es anterior a la búsqueda remota, así que la búsqueda no se ejecutó allí — no hay filas de ese dispositivo} other {{peer}: su compilación es anterior a la paginación remota, así que este no es su listado completo}}",
+  "cli.network_sessions.relay_unpaged": "el relé en ejecución en este dispositivo es anterior a la paginación y la búsqueda remotas, así que no se paginó ni se buscó en ningún dispositivo — reinicia el relé para paginar o buscar"
+}

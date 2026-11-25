@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}：已显示{shown, number}条，共{total, number}条匹配结果——下一页：{command}} other {{peer}：已显示{shown, number}条，共{total, number}条——下一页：{command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}：其构建版本早于远程搜索功能，因此搜索未在该设备上运行——该设备没有返回任何条目} other {{peer}：其构建版本早于远程分页功能，因此这不是它的完整列表}}",
+  "cli.network_sessions.relay_unpaged": "本设备正在运行的中继版本早于远程分页与搜索功能，因此没有对任何设备进行分页或搜索——请重启中继以进行分页或搜索"
+}

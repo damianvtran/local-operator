@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}: {shown, number} دکھائے گئے، کل {total, number} مماثل نتائج — اگلا صفحہ: {command}} other {{peer}: {shown, number} دکھائے گئے، کل {total, number} — اگلا صفحہ: {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}: اس کا بلڈ ریموٹ تلاش سے پرانا ہے، اس لیے وہاں تلاش نہیں چلی — اس سے کوئی قطار نہیں ملی} other {{peer}: اس کا بلڈ ریموٹ صفحہ بندی سے پرانا ہے، اس لیے یہ اس کی پوری فہرست نہیں}}",
+  "cli.network_sessions.relay_unpaged": "اس ڈیوائس پر چلنے والا ریلے ریموٹ صفحہ بندی اور تلاش سے پرانا ہے، اس لیے کسی بھی ڈیوائس کی نہ صفحہ بندی ہوئی نہ تلاش — صفحہ بندی یا تلاش کے لیے ریلے کو ری اسٹارٹ کریں"
+}
