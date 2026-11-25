@@ -11,7 +11,6 @@ truncated history. Design brief: compaction-suffix-load.md (T1-T8, NC1-NC5).
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
@@ -21,7 +20,7 @@ from typing import Any
 import pytest
 
 from local_operator.session import transcript as transcript_module
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import Transcript, TranscriptEntry
 
 
 def _row(entry_id: str, entry_type: str, payload: dict[str, Any], ts: float = 1.0) -> str:
@@ -205,6 +204,11 @@ def test_t2_entries_returns_every_row_and_counts(journal: Path) -> None:
 # -- T3 projection parity -----------------------------------------------------
 
 
+def _entry_id(entry: TranscriptEntry | None) -> str | None:
+    """``entry.id``, or None when the slot is empty (parity compares both sides)."""
+    return entry.id if entry is not None else None
+
+
 def _projections(transcript: Transcript) -> dict[str, Any]:
     return {
         "all_usage_rows": transcript.all_usage_rows(),
@@ -217,9 +221,9 @@ def _projections(transcript: Transcript) -> dict[str, Any]:
         "entry_ids": transcript.entry_ids(),
         "admitted": transcript.has_admitted_command("command-1"),
         "has_entry_u0": transcript.has_entry("u0"),
-        "latest_user": transcript.latest_user_entry().id,
+        "latest_user": _entry_id(transcript.latest_user_entry()),
         "latest_custom": transcript.latest_custom("selected_model"),
-        "latest_prune": transcript.latest_entry("prune").id,
+        "latest_prune": _entry_id(transcript.latest_entry("prune")),
         "usages_since": transcript.usages_since_compaction(),
         "recent": [e.id for e in transcript.recent_entries(3)],
     }
@@ -282,6 +286,7 @@ async def test_t4_resume_never_materialises_the_prefix(
 ) -> None:
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
+    from local_operator.session.session import Session
     from local_operator.session_factory import create_session
 
     root = tmp_path / "config"
@@ -298,6 +303,9 @@ async def test_t4_resume_never_materialises_the_prefix(
     session = await create_session(
         _resume_args(session_id), ConfigManager(root), AgentRegistry(root)
     )
+    # create_session returns the protocol; this test inspects the concrete
+    # session's transcript, so narrow to it (a hosted session would fail here).
+    assert isinstance(session, Session)
     try:
         transcript = session.transcript
         assert transcript.has_prefix
@@ -306,10 +314,7 @@ async def test_t4_resume_never_materialises_the_prefix(
         assert len(transcript.live_entries()) >= len(rows) - suffix_start
         assert transcript.prefix_rows == suffix_start
     finally:
-        if asyncio.iscoroutinefunction(session.dispose):
-            await session.dispose()
-        else:
-            session.dispose()
+        await session.dispose()
         session.transcript.close()
         # create_session opens the process-wide shared auth store on this
         # config root (auth.db + WAL/SHM); dispose() deliberately leaves it to
@@ -334,7 +339,7 @@ def _sha(path: Path, end: int) -> str:
 
 async def _compactable(journal: Path) -> tuple[Transcript, int, str]:
     lazy = Transcript(journal)
-    assert lazy.has_prefix
+    assert lazy.has_prefix and lazy._prefix is not None
     prefix_end = lazy._prefix.prefix_end
     before = _sha(journal / "transcript.jsonl", prefix_end)
     big = "z" * 4000

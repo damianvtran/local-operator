@@ -13,7 +13,7 @@ import hashlib
 import hmac
 import json
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeGuard
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Sequence, TypeGuard
 
 from pydantic import (
     AliasChoices,
@@ -867,7 +867,9 @@ def _carried_entry_times(
     whose open scan kept a ``ts`` for every prefix row (no re-read). Doubles
     without the method keep the old resident-list join.
     """
-    resolve = getattr(transcript, "entry_times_for", None)
+    resolve: Callable[[Iterable[str]], dict[str, float]] | None = getattr(
+        transcript, "entry_times_for", None
+    )
     if not callable(resolve):
         return _entry_time_join(transcript._entries, messages)
     return resolve(str(getattr(message, "id", "")) for message in messages)

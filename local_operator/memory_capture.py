@@ -1991,7 +1991,7 @@ def recovery_text(transcript: Any, marker: Any) -> str:
     size = 0
     # Streaming where available: the pre-cut rows are exactly the dropped
     # prefix, read back one row at a time instead of as a list.
-    rows = getattr(transcript, "iter_entries", None)
+    rows: Callable[[], Iterable[Any]] | None = getattr(transcript, "iter_entries", None)
     for entry in rows() if callable(rows) else transcript.entries():
         if entry.id in (marker.id, kept):
             break

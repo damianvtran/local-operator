@@ -4434,7 +4434,9 @@ class Transcript:
             if number in skip:
                 if sink is not None and not self._open_folded:
                     position += length
-                    if number < cut:
+                    # ``cut is not None`` restates what ``sink`` already
+                    # implies, so the type checker can narrow ``cut``.
+                    if cut is not None and number < cut:
                         sink.skip_bytes += length
                 continue
             if sink is not None and number == cut:
@@ -4453,7 +4455,7 @@ class Transcript:
                     command_id = _admitted_command_id(entry)
                     if command_id is not None:
                         self._admitted_command_ids.add(command_id)
-                    if sink is not None and number < cut:
+                    if sink is not None and cut is not None and number < cut:
                         sink.observe(entry, position, length)
                     else:
                         self._entries.append(entry)
@@ -5281,8 +5283,14 @@ class Transcript:
             # by the still-running replace worker.
             # The prefix argument only when there is a prefix: the eager call
             # shape (one argument) is unchanged for patched replacements.
-            replace_args = (payload, prefix_end) if prefix_end else (payload,)
-            worker = asyncio.create_task(asyncio.to_thread(self._replace_file, *replace_args))
+            # Two typed calls rather than a ``(str, int)`` / ``(str,)`` tuple
+            # splat, which the type checker could only see as ``str | int``.
+            replace = (
+                asyncio.to_thread(self._replace_file, payload, prefix_end)
+                if prefix_end
+                else asyncio.to_thread(self._replace_file, payload)
+            )
+            worker = asyncio.create_task(replace)
             cancelled = False
             while True:
                 try:
@@ -6553,7 +6561,9 @@ def resident_entries(transcript: Any) -> list[TranscriptEntry]:
     or after the newest compaction's anchor (newest user row, current tool
     call, the compaction marker itself).
     """
-    method = getattr(transcript, "live_entries", None)
+    method: Callable[[], Iterable[TranscriptEntry]] | None = getattr(
+        transcript, "live_entries", None
+    )
     return list(method()) if callable(method) else list(transcript.entries())
 
 
@@ -6579,7 +6589,9 @@ def projection_entries(transcript: Any) -> list[TranscriptEntry]:
     folds over custom rows, receipts, taint latches and spend. Falls back to
     ``entries()`` for doubles. Not for readers needing message BODIES.
     """
-    method = getattr(transcript, "history_projection", None)
+    method: Callable[[], Iterable[TranscriptEntry]] | None = getattr(
+        transcript, "history_projection", None
+    )
     return list(method()) if callable(method) else list(transcript.entries())
 
 
