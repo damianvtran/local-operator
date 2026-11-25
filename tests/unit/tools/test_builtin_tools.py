@@ -180,6 +180,15 @@ _GNU_SED = "sed -i 's/a/b/' f"
             'sed: 1: "s/a -i b\n": unterminated substitute pattern\n',
             None,
         ),
+        # `-i` here is `-e`'s script, so BSD complains about the script `-`,
+        # not about in-place (round 3, M1).
+        ("darwin", "sed -e -i f", 'sed: 1: "-i\n": invalid command code -\n', None),
+        # Flags around `-i` that must keep hinting under the M1 lookahead.
+        ("darwin", "sed -E -i 's/a/b/' f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -n -e p -i f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -f s.sed -i f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        # Past the length cap the hint is skipped rather than risk the loop.
+        ("darwin", _GNU_SED + " " * builtin._SED_HINT_MAX_COMMAND, _BSD_SED_STDERR, None),
     ],
 )
 def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
@@ -187,6 +196,33 @@ def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
 ) -> None:
     monkeypatch.setattr(builtin.sys, "platform", platform)
     assert builtin._bsd_sed_hint(command, stderr) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 3 (M1): overlapping option branches made these 2^n -- >1 s,
+        # >20 s and >100 s respectively -- synchronously on the event loop.
+        "sed" + " -e" * 30 + " x",
+        "sed" + " -e -n" * 24 + " x",
+        "sed" + " -e" * 3333,
+        "sed" + " -e -n" * 1600 + " x",
+    ],
+    ids=["e-x30", "e-n-x24", "e-10KB", "e-n-x1600"],
+)
+def test_gnu_sed_inplace_regex_is_linear_on_option_runs(monkeypatch, command) -> None:
+    # The regex itself, not via _bsd_sed_hint: the hint's length cap would
+    # short-circuit the 10 KB rows and hide a regressed regex.
+    started = time.perf_counter()
+    matched = builtin._GNU_SED_INPLACE_CMD_RE.search(command)
+    elapsed = time.perf_counter() - started
+    assert matched is None
+    assert elapsed < 0.05, f"{elapsed * 1000:.1f} ms on a {len(command)}-char command"
+    monkeypatch.setattr(builtin.sys, "platform", "darwin")
+    started = time.perf_counter()
+    hint = builtin._bsd_sed_hint(command, 'sed: 1: "-e\n": invalid command code -\n')
+    assert hint is None
+    assert time.perf_counter() - started < 0.05
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="needs the real BSD sed")

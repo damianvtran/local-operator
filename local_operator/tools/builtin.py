@@ -4613,15 +4613,28 @@ _BSD_SED_INPLACE_RE = re.compile(
 #:   gets no in-place advice, while ``sed -e 's/a/b/' -i f`` still does.
 #:   A token is quote-aware (``'…'`` / ``"…"`` count as one span), so a script
 #:   holding spaces is never split into fake option tokens.
+#:
+#: Round 3 (M1): every option token must have exactly ONE parse. The generic
+#: ``-…`` branch used to accept ``-e``/``-f`` too, so ``-e -n`` read either as
+#: one option-plus-argument or as two bare options; on a command with no ``-i``
+#: to find, the engine retried every split of the run -- 2^n. ``sed`` + ``-e -n``
+#: x24 took >20 s and a 10 KB run of `` -e`` >100 s, synchronously inside
+#: ``execute_bash`` on the event loop. The lookahead bars the generic branch
+#: from a letters-only flag ending in ``e``/``f``, so such a flag can only take
+#: its argument, and each token now has one reading: the scan is linear. A side
+#: effect is also the correct BSD reading: in ``sed -e -i f`` the ``-i`` is
+#: ``-e``'s script, not a flag, so it gets no in-place advice.
 _SED_TOKEN = r"""(?:[^\s|;&'"]|'[^']*'|"[^"]*")+"""
 _GNU_SED_INPLACE_CMD_RE = re.compile(
     r"(?:^|[\s;&|(`\"'/])sed"
-    rf"(?:\s+(?:-[A-Za-z]*[ef]\s+{_SED_TOKEN}|-{_SED_TOKEN}))*?"
+    rf"(?:\s+(?:-[A-Za-z]*[ef]\s+{_SED_TOKEN}|-(?![A-Za-z]*[ef](?:\s|$)){_SED_TOKEN}))*?"
     r"\s+-[A-Za-z]*i(?:''|\"\")?\s+(?!''|\"\")\S"
 )
 #: One line, not a man page: the fix is a single argument and the model already
 #: knows ``sed``.
 BSD_SED_INPLACE_HINT = "macOS BSD sed: `-i` takes a suffix argument; use `sed -i '' …`."
+#: Commands longer than this get no sed hint (see :func:`_bsd_sed_hint`).
+_SED_HINT_MAX_COMMAND = 4096
 
 
 def _bsd_sed_hint(command: str, stderr: str) -> str | None:
@@ -4634,6 +4647,16 @@ def _bsd_sed_hint(command: str, stderr: str) -> str | None:
     however many matching lines stderr holds.
     """
     if sys.platform != "darwin" or not stderr:
+        return None
+    # Belt and braces for M1 (round 3): the regex is linear now, but it still
+    # runs synchronously on the event loop for every failed bash call, so a
+    # future edit that reintroduces an ambiguous branch must not be able to
+    # freeze the TUI on a huge command. The substring precheck skips the regex
+    # for the overwhelmingly common failure with no ``sed`` in it, and the
+    # length cap bounds the worst case; a GNU-form ``sed -i`` one-liner is far
+    # below it, and a command past it just loses a one-line hint. No ``"-i"``
+    # precheck: a flag cluster (``sed -Ei``) holds no ``-i`` substring.
+    if len(command) > _SED_HINT_MAX_COMMAND or "sed" not in command:
         return None
     if not _GNU_SED_INPLACE_CMD_RE.search(command):
         return None
