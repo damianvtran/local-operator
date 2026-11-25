@@ -186,16 +186,18 @@ def _run_rig(
 def _outcome(
     completed: subprocess.CompletedProcess[str], expect_status: str = "completed"
 ) -> dict[str, Any]:
-    # ``run_episode`` exits 0 for any outcome carrying a ``scored`` score --
-    # a scored ``truncated``/``agent_stop`` ending included -- and
-    # ``EXIT_EPISODE`` (1) otherwise; it always prints the outcome JSON, so
-    # the code is checked against the payload's own score.
+    # ``run_episode`` exits 0 only for a ``scored`` score on a
+    # ``completed``/``truncated``/``agent_stop`` outcome, and ``EXIT_EPISODE``
+    # (1) otherwise -- a scored ``failed``/``cancelled`` included; it always
+    # prints the outcome JSON, so the code is checked against the payload's own
+    # status and score.
     text = completed.stdout.strip()
     start = text.find("{")
     assert start != -1, (text[-2000:], completed.stderr[-4000:])
     outcome: dict[str, Any] = json.loads(text[start:])
     scored = (outcome.get("score") or {}).get("status") == "scored"
-    assert completed.returncode == (0 if scored else 1), completed.stderr[-4000:]
+    clean = outcome.get("status") in {"completed", "truncated", "agent_stop"}
+    assert completed.returncode == (0 if scored and clean else 1), completed.stderr[-4000:]
     assert outcome["status"] == expect_status, outcome
     return outcome
 
