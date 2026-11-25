@@ -3140,7 +3140,10 @@ def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
 
 
 _ARTIFACT_MAX_BYTES = 128 * 1024 * 1024
-_ARTIFACT_DOWNLOAD_S = 30.0
+# A 19.2 MiB macOS wheel took ~65s from PyPI on the affected connection.
+# Leave room for slow, progressing transfers within the desktop's 15-minute
+# install budget; the separate 5s read timeout still cuts off stalled reads.
+_ARTIFACT_DOWNLOAD_S = 240.0
 
 
 def _candidate_artifact(generation: Path, built: PublicationEvidence) -> Path:
