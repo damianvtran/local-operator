@@ -825,7 +825,11 @@ DEFAULT_CONFIG = Config(
             # moves to 1h after one of its turns streamed >= 240 s, because
             # that call outlived its own 5m prefix; see
             # `SUBAGENT_LONG_CALL_1H_THRESHOLD_S`). An explicit subagent size
-            # opt-in (the key below) still applies.
+            # opt-in (the key below) still applies. A `lop exec` / SDK main
+            # thread is 5m on every credential until two of its turn requests
+            # are >= 240 s apart, then follows these rules; workstream and
+            # team-led runs are not marked. Measured solo runs' calls follow
+            # within seconds (`AUTOMATION_LONG_GAP_1H_THRESHOLD_S`).
             #
             # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
             # the same size gate for DELEGATED turns (subagents), on any
