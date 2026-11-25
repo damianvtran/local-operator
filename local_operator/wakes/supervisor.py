@@ -1219,6 +1219,11 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
         if await asyncio.to_thread(_monitor_entry_is_parked, config_dir, session_id)
         else "cold monitors"
     )
+    # Probe wall time is LOGGED (round 1, R2): every runtime-less monitor is now
+    # probed before any engage, so a probe holds one of the shared engage slots
+    # and delays a real change by its duration. The distribution has to be read
+    # from these lines before any cap or slot split is set.
+    probe_started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -1275,7 +1280,7 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
     # that matters — real servers such as Slack's — cannot be measured in
     # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
-        "%s %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        "%s %s: %s (%s, %s checked, %.1fs, maxrss self=%s KiB children=%s KiB)",
         label,
         session_id,
         (
@@ -1285,6 +1290,7 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
         ),
         verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
+        time.monotonic() - probe_started,
         maxrss.get("self", "?"),
         maxrss.get("children", "?"),
     )
@@ -2330,11 +2336,12 @@ class _Sweeper:
         moment: int,
         *,
         schedule_id: str = "",
-        parked: bool = False,
+        probe_first: bool = False,
     ) -> bool:
         """Start one engagement in the background. False when already running.
 
-        ``parked`` (monitor rows only; the name predates the widening): the
+        ``probe_first`` (monitor rows only; renamed from ``parked`` when the
+        probe widened past parked sessions, round 1 R4): the
         session's due checks are first run by :func:`_parked_monitors_quiet`
         outside the session — for any session with no live runtime, parked or
         not — and the engagement happens only when one is not quiet. Shares
@@ -2389,7 +2396,7 @@ class _Sweeper:
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
-                if is_monitor and parked:
+                if is_monitor and probe_first:
                     # Inside the try so the in-flight key is popped by the
                     # ``finally`` below on every path, quiet or not.
                     async with self._semaphore:
@@ -2546,7 +2553,13 @@ class _Sweeper:
             probe = bool(origin and monitors)
             engaged = (
                 self.engage(
-                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=probe
+                    config_dir,
+                    session_id,
+                    cwd,
+                    due_ms,
+                    moment,
+                    schedule_id=origin,
+                    probe_first=probe,
                 )
                 if origin
                 else self.engage(config_dir, session_id, cwd, due_ms, moment)

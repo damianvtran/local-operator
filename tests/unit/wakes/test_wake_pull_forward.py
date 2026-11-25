@@ -24,6 +24,7 @@ import pytest
 
 from local_operator.harness.wake import (
     COLD_BOOT_DELIVERY_MS,
+    LOAD_GRACE_MS,
     WAKE_COALESCE_WINDOW_MS,
     WakeSchedule,
     WakeScheduler,
@@ -133,6 +134,70 @@ async def test_a_pulled_recurring_row_keeps_its_cadence_and_ledger() -> None:
     finally:
         pulled.close()
         on_time.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger_every", [None, 30 * MIN], ids=["one-shot", "recurring"])
+async def test_a_recurring_trigger_opens_the_pull_forward_like_a_one_shot(
+    trigger_every: int | None,
+) -> None:
+    """Round 1, Q1: the common agent wake (recurring, seconds overdue) must pull too.
+
+    A recurring row overdue by less than one period skips nothing, so it never
+    entered ``missed``, and keying the trigger on ``missed`` pulled nothing.
+    Every row's ledger is pinned: one-shots retire, recurring rows (trigger
+    included) advance from their OWN due time, the out-of-window row is untouched.
+    """
+    extra = {"every_ms": trigger_every} if trigger_every else {}
+    runtime = _Runtime(T + 12_000)  # booted for w1, 12 s after it came due
+    try:
+        missed = await runtime.boot(
+            [
+                _row("w1", T, **extra),
+                _row("w2", T + 2 * MIN, every_ms=30 * MIN),  # recurring sibling
+                _row("w3", T + 10 * MIN),  # one-shot sibling
+                _row("w4", T + 20 * MIN, every_ms=30 * MIN),  # outside the window
+            ],
+            pull=True,
+        )
+        assert sorted((m["schedule"].id, bool(m.get("early"))) for m in missed) == [
+            ("w1", False),
+            ("w2", True),
+            ("w3", True),
+        ]
+        assert sorted(runtime.delivered) == ["w1", "w2", "w3"]
+        # Every row's next due, relative to T.
+        expected = {"w2": 32 * MIN, "w4": 20 * MIN}
+        if trigger_every:
+            expected["w1"] = 30 * MIN  # its own due + period, NOT load time + period
+        assert {wid: r.next_due_at - T for wid, r in runtime.rows().items()} == expected
+        # ONE turn: the catch-up names all three and none as missed.
+        text = Session._format_missed_wake_catchup(missed, T + 12_000)
+        assert all(f"- {wid} (due " in text for wid in ("w1", "w2", "w3"))
+        assert "missed while the session was down" not in text
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_recurring_trigger_without_the_supervisor_stamp_pulls_nothing() -> None:
+    """Negative control for Q1: an interactive resume keeps today's behaviour."""
+    runtime = _Runtime(T + 12_000)
+    try:
+        missed = await runtime.boot(
+            [_row("w1", T, every_ms=30 * MIN), _row("w2", T + 2 * MIN, every_ms=30 * MIN)],
+            pull=False,
+        )
+        assert missed == []
+        assert runtime.delivered == ["w1"]
+        # Load-time phase on an ordinary resume (pre-existing, unchanged): the
+        # re-armed due (load + LOAD_GRACE_MS) plus one period.
+        assert {wid: r.next_due_at - T for wid, r in runtime.rows().items()} == {
+            "w1": 12_000 + LOAD_GRACE_MS + 30 * MIN,
+            "w2": 2 * MIN,
+        }
+    finally:
+        runtime.close()
 
 
 @pytest.mark.asyncio

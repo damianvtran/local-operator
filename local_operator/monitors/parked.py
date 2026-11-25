@@ -637,6 +637,15 @@ async def _check_one(
     _normalized, new_hash = check_hash(str(comparable), spec, settings)
     if new_hash != str(counters.get("content_hash") or ""):
         return ENGAGE, "changed"
+    if not monitor_state.snapshot_exists(config_dir, session_id, spec.id):
+        # BLOB HEAL PARITY (round 1, R3). On a quiet tick the in-session
+        # scheduler re-writes a lost snapshot blob (§7.2, blob-only loss) via
+        # ``MonitorScheduler._write_snapshot``, which owns the size cap and the
+        # write-failure rule. Rather than fork that logic here, a quiet tick
+        # with no blob boots the session: its scheduler re-runs this check,
+        # finds it quiet and heals the blob, so the pair (hash, blob) is never
+        # left half-written by the probe. Rare (a lost file), so the boot is cheap.
+        return ENGAGE, "snapshot missing; the session heals it"
     commit_quiet_tick(counters, spec, now, handle=handle or None, uniform=uniform)
     # COMPARE BEFORE COMMIT (review round 1, R1-2). ``counters`` was read before
     # ``tool.execute``, which can take up to ``run_timeout_ms``. If the session

@@ -95,11 +95,21 @@ WAKE_COALESCE_WINDOW_MS = 15 * 60 * 1000
 #: than a fire MISSED while the session was down: the supervisor's engage
 #: deadline (``WAKE_DEADLINE_S`` = 180 s) plus one re-read slice (``SLICE_S``
 #: = 10 s). A supervisor-raised runtime always loads its wake overdue (by the
-#: engage + boot latency: median 11.4 s, p99 119.3 s over 2,878 boots), and
-#: labelling that "missed while the session was down" told the model a
-#: punctual fire had been missed (session 316765a40496: 85 such notices in
-#: 3.57 days, every one a distinct on-time wake). A test pins this sum against
-#: the supervisor's constants.
+#: engage + boot latency, the supervisor log's ``took``: n = 2,878 cold boots
+#: 2026-11-21..24, median 11.4 s, p99 119.6 s, MAX 173.8 s — the bound sits
+#: 16.2 s above the observed max; the engage deadline caps ``took`` at 180 s
+#: and a sweep picks a due row up within one slice, so a PUNCTUAL supervisor
+#: delivery stays inside it), and labelling that "missed while the session was
+#: down" told the model a punctual fire had been missed (session 316765a40496:
+#: 85 such notices in 3.57 days, every one a distinct on-time wake). A test pins
+#: this sum against the supervisor's constants.
+#:
+#: APPLIES TO EVERY SESSION LOAD, not only supervisor-started runtimes (round 1,
+#: R1): an operator opening a session whose single wake came due < 190 s ago
+#: also reads "delivered at this start". That is deliberate — no runtime was
+#: running, the wake is delivered within the same latency a supervisor boot
+#: has, and nothing was skipped. Anything later, or a recurring row that
+#: skipped an occurrence, keeps the "missed while the session was down" text.
 COLD_BOOT_DELIVERY_MS = 180_000 + 10_000
 
 
@@ -1106,6 +1116,10 @@ class WakeScheduler:
         adopted: list[WakeSchedule] = []
         missed: list[MissedWakeOccurrence] = []
         overdue_ids: set[str] = set()
+        #: id -> (original due, pre-re-arm row) of every overdue row: the
+        #: pull-forward trigger set and, in a pull-forward boot, each row's
+        #: cadence anchor (see below).
+        overdue: dict[str, tuple[int, WakeSchedule]] = {}
         self._pulled_from = {}
         for schedule in schedules:
             # Persisted rows are untrusted input: a hand-edited or truncated
@@ -1127,12 +1141,20 @@ class WakeScheduler:
                             "due": due_while_down(copy, now),
                         }
                     )
+                overdue[copy.id] = (copy.next_due_at, copy.model_copy(deep=True))
                 copy = copy.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
                 overdue_ids.add(copy.id)
             adopted.append(copy)
-        # Triggered by a VISIBLE overdue row (the one the boot was paid for):
+        # Triggered by a VISIBLE OVERDUE row (the one the boot was paid for):
         # a hidden timer alone opens no visible catch-up to fold into.
-        if pull_forward_ms > 0 and any(_visible(entry["schedule"]) for entry in missed):
+        #
+        # OVERDUE, NOT "IN ``missed``" (round 1, Q1). A RECURRING row overdue by
+        # less than one period skips no occurrence (``due_while_down`` == 0), so
+        # it never enters ``missed`` — and that is exactly the common agent wake
+        # the supervisor cold-boots for (seconds overdue, every 30 min). Keying
+        # the trigger on ``missed`` made every recurring-triggered boot pull
+        # nothing, so its siblings paid their own boots minutes later.
+        if pull_forward_ms > 0 and any(_visible(row) for _due, row in overdue.values()):
             horizon = now + pull_forward_ms
             # Rows load() just re-armed to now + grace are OVERDUE ones, already
             # folded above (or deliberately left out of the fold): never pull them.
@@ -1151,6 +1173,29 @@ class WakeScheduler:
                     )
                     self._pulled_from[row.id] = row.next_due_at
                     adopted[index] = row.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
+            pulled_any = bool(self._pulled_from)
+            folded = {entry["schedule"].id for entry in missed}
+            for wake_id, (due, row) in overdue.items():
+                if not _visible(row):
+                    # Internal/hidden timers are mechanisms other code times
+                    # against: neither folded nor re-phased.
+                    continue
+                if pulled_any and wake_id not in folded:
+                    # ONE TURN: an overdue visible row that skipped nothing (a
+                    # recurring trigger, seconds late) joins the catch-up its
+                    # pulled siblings are folded into, instead of firing its own
+                    # turn beside it. ``due`` 0 is the honest count (nothing came
+                    # due strictly before now but this occurrence), which the
+                    # catch-up renders as a cold-boot delivery.
+                    missed.append({"schedule": row, "occurrences": 0, "due": 0})
+                # CADENCE ANCHOR for the overdue rows too, in every supervisor-
+                # started boot (round 1, Q1). The re-arm to now + grace phased a
+                # recurring row to LOAD time (next due = due + every + the boot
+                # latency, ~12 s more drift per cold boot; pre-existing on main).
+                # The supervisor delivered it punctually, so it advances from its
+                # own due time, like the rows pulled with it. Ordinary resumes
+                # keep the long-standing load-time phase: out of this scope.
+                self._pulled_from[wake_id] = due
         adopted.sort(key=lambda s: s.created_at)
         self._schedules = adopted
         # A RELOADED SNAPSHOT CARRIES NO HOLD, by construction: pending is a
