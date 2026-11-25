@@ -766,6 +766,12 @@ class DesktopAuth:
             self._lingering.add(task)
             task.add_done_callback(self._lingering.discard)
 
+    def idle_update_busy(self) -> bool:
+        """A sign-in can still write credentials after its HTTP kickoff returns."""
+        return any(not task.done() for task in self._lingering) or any(
+            op.task is not None and not op.task.done() for op in self.operations.values()
+        )
+
     async def close(self) -> None:
         # Under the start lock (review round 2, MINOR 3): without it a start
         # could create its op between this iteration and the ``clear()``, and

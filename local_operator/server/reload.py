@@ -114,6 +114,9 @@ PENDING_ATTR = "serve_reload_pending"
 ADMISSION_ATTR = "serve_reload_admission_closed"
 REQUESTS_ATTR = "serve_reload_owned_requests"
 FENCE_ATTR = "serve_reload_request_fence"
+# Present only with a private desktop update channel. Made here because the
+# request middleware, not a sampled list of sockets, knows which feeds replay.
+UPDATE_STREAMS_ATTR = "serve_idle_update_streams"
 ROLLING_CONTRACT = "local-work-v1"
 
 
@@ -208,14 +211,45 @@ class ReloadAdmissionMiddleware:
                 remaining = int(getattr(state, REQUESTS_ATTR, 0)) - 1
                 setattr(state, REQUESTS_ATTR, remaining if remaining > 0 else 0)
 
+        streams = getattr(state, UPDATE_STREAMS_ATTR, None) if replayable else None
+        stream_scope = None
+        if streams is not None:
+            from anyio import CancelScope
+
+            stream_scope = CancelScope()
+        finished = False
+
         async def relay(message: Message) -> None:
-            if replayable and message["type"] == "http.response.start":
+            nonlocal finished
+            if stream_scope is None and replayable and message["type"] == "http.response.start":
                 release()
             await send(message)
+            if (
+                stream_scope is not None
+                and message["type"] == "http.response.start"
+                and message["status"] == 200
+            ):
+                # Do not treat errors or headers still in flight as a standing
+                # feed: only successful, established streams can be ended.
+                streams.add(stream_scope)
+                release()
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                finished = True
 
         try:
-            await self.app(scope, receive, relay)
+            if stream_scope is None:
+                await self.app(scope, receive, relay)
+            else:
+                # Uvicorn otherwise waits forever for a live SSE body on clean
+                # shutdown. Stop only these two replayable feeds, not the server's
+                # other streams; finish HTTP framing after cooperative teardown.
+                with stream_scope:
+                    await self.app(scope, receive, relay)
+                if stream_scope.cancel_called and not finished:
+                    await send({"type": "http.response.body", "body": b"", "more_body": False})
         finally:
+            if stream_scope is not None:
+                streams.discard(stream_scope)
             release()
 
 
@@ -449,6 +483,8 @@ class ReloadWatch:
                 "local-work-safe reload capability is unavailable; still serving old build"
             )
         state = self.app.state
+        if getattr(state, ADMISSION_ATTR, False):
+            raise ReloadRefusal("another daemon transition owns admission")
         scheduler = getattr(state, "scheduler_service", None)
         hub = state.hub_sync
         setattr(state, ADMISSION_ATTR, True)

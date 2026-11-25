@@ -1174,6 +1174,9 @@ def build_cli_parser() -> LocalizedArgumentParser:
         help=(_sv.listener_fd().envelope(locale=help_locale)["text"]),
     )
 
+    # Private desktop spawn contract; never a user-facing stop option.
+    serve_parser.add_argument("--desktop-idle-update-fd", type=int, help=argparse.SUPPRESS)
+
     # Mobile command: the phone-facing control plane (daemon + supervision).
     # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
     # uvicorn only when a mobile command actually runs.
@@ -13032,19 +13035,38 @@ def arm_adopted_boot_deadline(
     return done
 
 
-def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
+def serve_command(
+    host: str,
+    port: int,
+    reload: bool,
+    *,
+    listener_fd: int | None = None,
+    idle_update_control: Any = None,
+) -> int:
     # Install before importing the server or uvicorn: startup diagnostics must
     # not inherit the CLI's synchronous stderr handler. No other CLI changes.
     from local_operator.serve_logging import configure_serve_logging
 
     handler = configure_serve_logging()
     try:
-        return _serve_command(host, port, reload, listener_fd=listener_fd)
+        if idle_update_control is None:
+            return _serve_command(host, port, reload, listener_fd=listener_fd)
+        with idle_update_control.socket:
+            return _serve_command(
+                host, port, reload, listener_fd=listener_fd, idle_update_control=idle_update_control
+            )
     finally:
         handler.close()
 
 
-def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
+def _serve_command(
+    host: str,
+    port: int,
+    reload: bool,
+    *,
+    listener_fd: int | None = None,
+    idle_update_control: Any = None,
+) -> int:
     """Start the FastAPI server using uvicorn.
 
     The bind address is refused unless it is loopback-only, with no override
@@ -13266,6 +13288,10 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         )
         serve_ref["server"] = server
         serve_ref["owner"] = asgi_app.state.listener_owner
+        if idle_update_control is not None and listener_fd is None:
+            from local_operator.server import desktop_idle_update
+
+            desktop_idle_update.bind(asgi_app, idle_update_control, server)
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -19356,11 +19382,29 @@ def main() -> int:
             print(str(tr("cli.exec_runtime")(_er.temporary_conflicts_resume())), file=sys.stderr)
             return 2
 
-        # macOS: replace this process with a branded image so Activity Monitor
-        # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
-        # a no-op everywhere else. Placed after the parse so `--version` and
-        # `--help` (which argparse exits from inside `parse_args`) never pay it.
-        _maybe_brand_process(args)
+        idle_update_control = None
+        update_fd = getattr(args, "desktop_idle_update_fd", None)
+        if update_fd is not None:
+            from local_operator.server import desktop, desktop_idle_update
+
+            idle_update_control = desktop_idle_update.adopt(update_fd)
+            # Never keep control on supervised/adopted launches or across the
+            # compatibility bearer re-exec. A valid but disabled descriptor is
+            # closed here, not left inheritable by the old startup path.
+            if idle_update_control is not None and (
+                args.reload
+                or args.listener_fd is not None
+                or args.install_service
+                or os.environ.get(desktop.TOKEN_FD_ENV) != "0"
+                or desktop.TOKEN_ENV in os.environ
+            ):
+                idle_update_control.socket.close()
+                idle_update_control = None
+        # The direct owned launch can choose its own branded binary. Re-exec
+        # here would discard its now close-on-exec channel. Ordinary launches
+        # keep the same branding and compatibility bearer behavior.
+        if idle_update_control is None:
+            _maybe_brand_process(args)
 
         if args.subcommand == "serve" and not getattr(args, "reload", False):
             # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
@@ -19373,6 +19417,12 @@ def main() -> int:
             from local_operator.server.desktop import adopt_spawn_bearer
 
             adopt_spawn_bearer()
+            if idle_update_control is not None:
+                from local_operator.server.desktop import has_adopted_spawn_bearer
+
+                if not has_adopted_spawn_bearer():
+                    idle_update_control.socket.close()
+                    idle_update_control = None
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all
@@ -19893,6 +19943,14 @@ def main() -> int:
 
             standby.enable_warming(daemon=True)
             # Use the provided host, port, and reload options for serving the API.
+            if idle_update_control is not None:
+                return serve_command(
+                    args.host,
+                    args.port,
+                    args.reload,
+                    listener_fd=args.listener_fd,
+                    idle_update_control=idle_update_control,
+                )
             return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
         elif args.subcommand == "hub":
             if args.hub_command == "status":

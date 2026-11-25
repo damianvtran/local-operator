@@ -903,6 +903,7 @@ class AttestService:
         table: AttestationTable | None = None,
         token_of: Callable[[socket.socket], bytes] = peer_audit_token,
         validator: FrameValidator | None = None,
+        admitting: Callable[[], bool] | None = None,
     ) -> None:
         # ``session_id`` doubles as the LISTENER NAME (``<name>.sock``): a runtime
         # passes its session id; a non-session consumer (``lop serve``'s mesh-pairing
@@ -918,6 +919,9 @@ class AttestService:
         self._token_of = token_of
         self._server: asyncio.AbstractServer | None = None
         self._connections = 0
+        # A warm socket is not work; verification and a frame's reply are.
+        self._admitting = admitting
+        self.in_flight = 0
         self._writers: set[asyncio.StreamWriter] = set()
         self._ident: tuple[int, int] = (0, 0)
         self.path: Path | None = None
@@ -982,7 +986,9 @@ class AttestService:
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        if self._connections >= MAX_CONNECTIONS:
+        if self._connections >= MAX_CONNECTIONS or (
+            self._admitting is not None and not self._admitting()
+        ):
             writer.close()
             return
         self._connections += 1
@@ -990,23 +996,31 @@ class AttestService:
         try:
             sock = writer.get_extra_info("socket")
             token = self._token_of(sock)
-            verdict = await self._verdict(token)
-            logger.info(
-                "attest: peer=%s verdict=%s reason=%s",
-                verdict.pid,
-                "ok" if verdict.ok else "refused",
-                verdict.reason,
-            )
-            if not verdict.ok:
-                await self._reply(writer, {"ok": False, "reason": verdict.reason})
-                return
-            await self._reply(writer, {"ok": True})
+            self.in_flight += 1
+            try:
+                verdict = await self._verdict(token)
+                logger.info(
+                    "attest: peer=%s verdict=%s reason=%s",
+                    verdict.pid,
+                    "ok" if verdict.ok else "refused",
+                    verdict.reason,
+                )
+                if not verdict.ok:
+                    await self._reply(writer, {"ok": False, "reason": verdict.reason})
+                    return
+                await self._reply(writer, {"ok": True})
+            finally:
+                self.in_flight -= 1
             while True:
                 line = await reader.readline()
-                if not line:
+                if not line or (self._admitting is not None and not self._admitting()):
                     return
-                reply = await self._frame(token, line)
-                await self._reply(writer, reply)
+                self.in_flight += 1
+                try:
+                    reply = await self._frame(token, line)
+                    await self._reply(writer, reply)
+                finally:
+                    self.in_flight -= 1
                 if not reply.get("ok") and reply.get("reason", "").startswith("peer:"):
                     return
         except (ConnectionError, asyncio.IncompleteReadError, ValueError, OSError):
