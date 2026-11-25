@@ -442,6 +442,12 @@ class SendTargetCard(Container):
             classes="projects-send-hints",
         )
 
+    def on_unmount(self) -> None:
+        # Leave the locale-refresh registry with the DOM: a dead card has no
+        # chrome to repaint, and the registry must not outlive the app that
+        # owned it (see the attachment guard in ``_refresh_copy``).
+        _cards.discard(self)
+
     def on_mount(self) -> None:
         self._refresh_copy()
         self._repaint()
@@ -644,7 +650,13 @@ class SendTargetCard(Container):
         self._bindings = (
             merged if merged is not None else BindingsMap(SendTargetCard.BINDINGS)
         ).copy()
-        if not self.is_mounted:
+        # ``is_mounted`` alone is not enough: Textual never clears it on
+        # unmount, so a card whose app exited (or that was removed while
+        # something still holds it) reads as mounted with its children already
+        # pruned, and the query below raised ``NoMatches`` from inside an
+        # unrelated ``set_active_locale`` call (full-suite shard 5, PR #4555).
+        # Only a card still linked to a live DOM has chrome to repaint.
+        if not self.is_mounted or not self.is_attached:
             return
         self.query_one(".projects-send-title", Static).update(_t(copy.send_title()))
         self.query_one("#projects-send-filter", Input).placeholder = _t(copy.send_filter())

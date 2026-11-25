@@ -4498,6 +4498,12 @@ def _make_system_blocks_provider(
     # semantics. Production providers opt into Session's persisted-prefix
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
+    # The session-agnostic head (persona + tool inventory) ahead of the env
+    # block: the Anthropic wire puts a cache marker there so another session
+    # or subagent reuses it. See ``prompts_api.STABLE_HEAD_BLOCK_COUNT``.
+    from local_operator.prompts_api import STABLE_HEAD_BLOCK_COUNT
+
+    setattr(provider, "stable_head_blocks", STABLE_HEAD_BLOCK_COUNT)
     setattr(provider, "session_notify_membership", True)
     # Asks the owning Session to install ``live_tools`` (see ``provider``).
     setattr(provider, "session_tool_membership", True)
