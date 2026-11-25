@@ -133,7 +133,8 @@ def open_ask_ids(directory: Path) -> set[str]:
     """
     from local_operator.asks import store as ask_store
 
-    records = ask_store.fold(ask_store.read_events(directory), _now_ms())
+    # STRICT: an unreadable log must not read as "no open asks" (review R1-2).
+    records = ask_store.fold(ask_store.read_events(directory, strict=True), _now_ms())
     return {str(r.get("ask_id", "")) for r in ask_store.outstanding_asks(records)}
 
 
@@ -1727,7 +1728,11 @@ class BrowserResource:
             self.record.pop(SURFACE_ORIGIN_FIELD, None)
         self._save()
 
-    def _live_handoffs(self, open_ids: set[str]) -> list[dict[str, Any]]:
+    def _live_handoffs(self, open_ids: set[str] | None) -> list[dict[str, Any]]:
+        """Bindings that still hold. ``open_ids=None`` means the ask log could not
+        be read: every binding on the same tab and origin is kept, because the
+        safe failure for a tab a person may be using is to keep it (its own
+        deadline still bounds the hold), never to close it on a guess."""
         surface = str(self.record.get("surface_id", ""))
         origin = str(self.record.get(SURFACE_ORIGIN_FIELD, ""))
         if not surface:
@@ -1736,7 +1741,7 @@ class BrowserResource:
             b
             for b in self.record.get(ASK_HANDOFFS_FIELD, [])
             if isinstance(b, dict)
-            and b.get("ask_id") in open_ids
+            and (open_ids is None or b.get("ask_id") in open_ids)
             and b.get("surface_id") == surface
             # Origin isolation: a binding made for origin A never holds the tab
             # once the agent has seen it on origin B (or lost track of where it
@@ -1759,18 +1764,19 @@ class BrowserResource:
         * Bindings that can never hold again (ask settled, other tab, other
           origin) are pruned so a later ask cannot revive them.
 
-        An unreadable ask log adds nothing (the old close behaviour) and keeps
-        an existing hold (its expiry still bounds it).
+        An unreadable ask log keeps (or writes) the hold for bindings on the
+        same tab and origin — a read failure never looks like an empty log.
         """
         current = self.record.get("retention")
         if current and not is_ask_hold(current):
             return
         if not current and not self.record.get(ASK_HANDOFFS_FIELD):
             return
+        open_ids: set[str] | None
         try:
             open_ids = open_ask_ids(self.directory)
         except (OSError, ValueError):
-            return
+            open_ids = None
         live = self._live_handoffs(open_ids)
         if live != self.record.get(ASK_HANDOFFS_FIELD):
             if live:

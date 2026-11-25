@@ -31932,6 +31932,16 @@ async def _execute_browser_owned(
                     _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
                 )
             if action in ("retain", "release"):
+                if action == "release":
+                    # An explicit release outranks every ask handoff on this
+                    # scope: dropping the bindings here is what stops this run's
+                    # disposal from re-adding the hold (QA Q2). Persisted by the
+                    # `_save` each release path below ends with.
+                    from local_operator.browser_bridge.resources import (
+                        ASK_HANDOFFS_FIELD,
+                    )
+
+                    resource.record.pop(ASK_HANDOFFS_FIELD, None)
                 reason = str(args.get("text", "")).strip()
                 if action == "retain" and not reason:
                     # Caught HERE because `text` defaults to "", so omitting it
@@ -38190,7 +38200,9 @@ class AskParams(BaseModel):
     # and only until that ask settles — never "any open ask holds any tab".
     browser_handoff: bool = Field(
         default=False,
-        description="true if the user must act in your open browser tab; keeps it open until answered.",
+        description=(
+            "true if the user must act in your open browser tab; keeps it open until answered."
+        ),
     )
 
     @model_validator(mode="after")

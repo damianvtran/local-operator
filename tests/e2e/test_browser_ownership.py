@@ -1288,3 +1288,19 @@ async def test_another_session_cannot_reach_a_tab_held_for_a_handoff(
     finally:
         await other.dispose()
     assert _control(protocol_peer)["tabs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_release_stays_released_through_disposal(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """QA Q2: after the owner's `release`, disposal must not re-add the hold."""
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+        released = await _tool(session, "synthetic-release", "browser", {"action": "release"})
+        assert not released.is_error, released.text
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0

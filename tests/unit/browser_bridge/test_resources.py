@@ -1009,3 +1009,37 @@ async def test_cleanup_refuses_a_live_handoff_hold_and_closes_a_lapsed_one(
     result = await cleanup_exact(tmp_path, record["generation"])
     assert result.state == "closed", result
     assert _methods(bridge)[-2:] == ["owner_release", "owner_finish"]
+
+
+@pytest.mark.asyncio
+async def test_the_hold_label_and_deadline_are_the_bound_asks_own(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Review: an unrelated 2 h ask must not stretch a 10-minute sign-in hold,
+    and the label names the ask being served, not the newest one."""
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin", expires_in_ms=600_000)
+    deadline = resource.record[resources.ASK_HANDOFFS_FIELD][0]["expires_at"]
+    _queue_ask(tmp_path, "a-later-preference", expires_in_ms=7_200_000)
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+    record = json.loads(resource.path.read_text())
+    assert record["retention"] == "pending ask a-signin"
+    assert record[resources.ASK_HOLD_EXPIRES_FIELD] == deadline
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_ask_log_never_reads_as_no_open_asks(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """R1-2: a read failure keeps the bound tab (bounded by its own deadline)
+    instead of closing it as if every ask had settled."""
+    from local_operator.asks import store
+
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin")
+    log = store.asks_log_path(tmp_path)
+    log.unlink()
+    log.mkdir()  # read_bytes() now raises IsADirectoryError, an OSError
+    with pytest.raises(OSError):
+        resources.open_ask_ids(tmp_path)
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
