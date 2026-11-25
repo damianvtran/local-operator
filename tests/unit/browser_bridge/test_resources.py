@@ -1128,3 +1128,17 @@ async def test_a_hold_settled_by_its_ask_spends_the_reference_but_a_vanished_tab
     tab_gone.record[resources.ASK_HANDOFFS_FIELD] = [{"ask_id": "a-1"}]
     await tab_gone._refresh_ask_hold(may_add=False)
     assert resources.HANDOFF_REFS_FIELD not in tab_gone.record
+
+
+def test_origin_only_text_keeps_the_surrounding_delimiters() -> None:
+    """Review N4-2: the URL pattern swallowed a closing quote or bracket."""
+    from local_operator.tools.builtin import _origin_only_text
+
+    text = (
+        "'https://h.test:8443/p/tok?x=1#f' failed (url=https://h.test:8443/a?c=1). "
+        "See https://h.test/y, or [https://h.test/z?q=2] and <https://h.test/w>"
+    )
+    assert _origin_only_text(text) == (
+        "'https://h.test:8443' failed (url=https://h.test:8443). "
+        "See https://h.test, or [https://h.test] and <https://h.test>"
+    )

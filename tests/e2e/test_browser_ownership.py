@@ -1592,3 +1592,60 @@ async def test_release_clears_references_on_disk_even_when_the_rpc_fails(
         monkeypatch.setattr(backend.HostClient, "call", original)
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["snapshot", "read"])
+async def test_replayed_read_after_reopen_carries_no_credential_bytes(
+    protocol_peer: tuple[int, str],
+    headless_tui_env: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Review M4-1: a REPLAYED read reported the page's live URL the ordinary
+    way, and right after a reopen that is the recorded, token-bearing URL."""
+    from local_operator.browser_bridge import backend
+
+    tokens = ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99")
+    secret_url = (
+        "https://alice:" + tokens[1] + "@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, secret_url)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+    # The in-memory fixture reports no page URL; a real browser reports the
+    # live one, which right after the reopen IS the recorded secret URL. Add
+    # exactly that to the replayed action's real wire reply.
+    original = backend.HostClient.call
+
+    async def live_url(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await original(client, method, params)
+        if method == action and isinstance(result, dict):
+            result = {**result, "url": secret_url, "title": "Sign in"}
+        return result
+
+    monkeypatch.setattr(backend.HostClient, "call", live_url)
+    caplog.clear()
+    caplog.set_level("DEBUG")
+    successor = _asking_session(headless_tui_env)
+    try:
+        replayed = await _tool(successor, f"synthetic-{action}", "browser", {"action": action})
+        print(f"M4-{action}-TEXT:", replayed.text.replace("\n", " | "))
+        print(f"M4-{action}-DETAILS:", json.dumps(replayed.details, sort_keys=True))
+        assert not replayed.is_error, replayed.text
+        assert replayed.details["reopened_handoff"] == ask_id
+        assert "not_run" not in replayed.details  # it WAS replayed
+        assert replayed.details["reopened_origin"] == "https://signin.example.test:8443"
+        blob = replayed.text + json.dumps(replayed.details) + caplog.text
+        leaked = [token for token in tokens if token in blob]
+        print(f"M4-{action}-LEAKED:", leaked)
+        assert leaked == []
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()

@@ -31766,18 +31766,50 @@ async def _reopen_handoff_if_gone(
             f"{note} Your '{action}' was NOT run on it: snapshot the page first, then act.",
         )
     retried = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
-    details = dict(retried.details or {})
+    # The replayed read reports the page's live URL the ordinary way, and right
+    # after a reopen that IS the recorded URL, tokens and all (review M4-1): cut
+    # every URL in its reply and details to its origin, like the reopen reply.
+    # Only this one replayed call; later actions are ordinary page reads.
+    details = _origin_only_value(dict(retried.details or {}))
     details["reopened_handoff"] = str(ref["ask_id"])
-    # Origin only, for the same reason as the reopen reply above.
     details["reopened_origin"] = url_origin_for_copy(str((reopened.details or {}).get("url", "")))
-    retried = retried.model_copy(update={"details": details})
+    content = [
+        TextContent(text=_origin_only_text(block.text)) if isinstance(block, TextContent) else block
+        for block in retried.content
+    ]
+    retried = retried.model_copy(update={"details": details, "content": content})
     return _append_result_text(retried, note)
+
+
+#: A URL in prose: a scheme, then everything up to whitespace, a quote or an
+#: angle bracket. Compiled once (review N4-3).
+_PROSE_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+#: Trailing characters that close the SURROUNDING text, not the URL: kept out of
+#: the rewrite so `(url=…)` or a sentence's full stop stays balanced (N4-2).
+_PROSE_URL_TAIL = ".,;:!?)]}"
 
 
 def _origin_only_text(text: str) -> str:
     """``text`` with every URL in it cut down to its origin (no userinfo, path,
     query or fragment): a failed reopen's host error may echo the page it tried."""
-    return re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", lambda m: url_origin_for_copy(m.group(0)), text)
+
+    def origin(match: re.Match[str]) -> str:
+        url = match.group(0)
+        bare = url.rstrip(_PROSE_URL_TAIL)
+        return url_origin_for_copy(bare) + url[len(bare) :]
+
+    return _PROSE_URL.sub(origin, text)
+
+
+def _origin_only_value(value: Any) -> Any:
+    """:func:`_origin_only_text` over every string inside a details payload."""
+    if isinstance(value, str):
+        return _origin_only_text(value)
+    if isinstance(value, dict):
+        return {k: _origin_only_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_origin_only_value(v) for v in value]
+    return value
 
 
 def url_origin_for_copy(url: str) -> str:
