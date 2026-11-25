@@ -31,11 +31,17 @@ from PIL import Image
 from rich.cells import cell_len
 
 from local_operator import imaging, procstate
+from local_operator.harness.replay_bound import (
+    READ_REPLAY_BOUND_CHARS,
+    REPLAY_RESULT_HEADROOM_CHARS,
+    bound_replay_payloads,
+)
 from local_operator.harness.types import (
     FAULT_KEY,
     AbortSignal,
     AgentTool,
     ImageContent,
+    Message,
     TextContent,
     ToolContext,
     ToolResult,
@@ -124,22 +130,54 @@ async def test_bash_echo_and_streams(tools, context) -> None:
 _BSD_SED_STDERR = 'sed: 1: "f\n": invalid command code f\n'
 
 
+_GNU_SED = "sed -i 's/a/b/' f"
+
+
 @pytest.mark.parametrize(
-    ("platform", "stderr", "expected"),
+    ("platform", "command", "stderr", "expected"),
     [
-        ("darwin", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
-        ("darwin", 'sed: 1: "x\n": extra characters at the end of x command\n', builtin.BSD_SED_INPLACE_HINT),
-        ("darwin", 'sed: 1: "f": invalid command code f\n', builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", _GNU_SED, _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", _GNU_SED, 'sed: 1: "x\n": extra characters at the end of x command\n', builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", _GNU_SED, 'sed: 1: "f": invalid command code f\n', builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -Ei 's/a/b/' f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
         # GNU sed words it differently; Linux never gets BSD advice.
-        ("darwin", "sed: -e expression #1, char 1: unknown command: `f'\n", None),
-        ("darwin", "grep: invalid command code\n", None),
-        ("darwin", "", None),
-        ("linux", _BSD_SED_STDERR, None),
+        ("darwin", _GNU_SED, "sed: -e expression #1, char 1: unknown command: `f'\n", None),
+        ("darwin", _GNU_SED, "grep: invalid command code\n", None),
+        ("darwin", _GNU_SED, "", None),
+        ("linux", _GNU_SED, _BSD_SED_STDERR, None),
+        # The same BSD complaint without a GNU-form -i is a different mistake
+        # (round 1, m2): no -i at all, an empty suffix, or an attached suffix.
+        ("darwin", "echo a | sed 'foo'", 'sed: 1: "foo\n": invalid command code f\n', None),
+        ("darwin", "sed -i '' 's/a' f", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
+        ("darwin", "sed -i.bak 's/a' f", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
+        ("darwin", "sed 's/a' f; grep -i x y", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
     ],
 )
-def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(monkeypatch, platform, stderr, expected) -> None:
+def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
+    monkeypatch, platform, command, stderr, expected
+) -> None:
     monkeypatch.setattr(builtin.sys, "platform", platform)
-    assert builtin._bsd_sed_hint(stderr) == expected
+    assert builtin._bsd_sed_hint(command, stderr) == expected
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs the real BSD sed")
+@pytest.mark.parametrize(
+    "name",
+    # One file per distinct BSD message: BSD parses FILE as the script, so its
+    # first character picks the complaint (round 1, m1).
+    ["f", "x.py", "src/main.py", "app.py", "config.py", "index.ts", "tests/x.py",
+     "yarn.lock", "README.md", "./x.py", "lib/a.py", "requirements.txt", ":x.py"],
+)
+def test_bsd_sed_hint_matches_real_failures_for_every_first_letter(tmp_path, name) -> None:
+    target = tmp_path / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("a\n")
+    command = f"sed -i 's/a/b/' {name}"
+    ran = subprocess.run(
+        ["/bin/sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert ran.returncode != 0, ran
+    assert builtin._bsd_sed_hint(command, ran.stderr) == builtin.BSD_SED_INPLACE_HINT, ran.stderr
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the hint is Darwin-only by design")
@@ -941,35 +979,74 @@ def _source_lines(count: int) -> list[str]:
     return [f"    value_{i:05d} = compute(alpha, beta, gamma)  # note {i:05d}" for i in range(1, count + 1)]
 
 
+def _on_the_wire(result: ToolResult) -> str:
+    """``result`` as the model receives it: through the replay bound that
+    ``harness/loop.py`` applies to every request, the current turn included."""
+    row = Message(
+        role="tool",
+        content=[TextContent(text=result.text)],
+        tool_call_id="c1",
+        tool_name="read",
+    )
+    (sent,) = bound_replay_payloads([row])
+    block = sent.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def test_the_ranged_read_budget_fits_the_read_replay_bound() -> None:
+    # harness must not import tools, so the two literals are pinned here: a
+    # ranged result (body + clamp footer) larger than the read replay bound is
+    # middle-elided before the model sees it (PR #4566 round 1, M1).
+    assert (
+        builtin.READ_RANGE_OUTPUT_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+        <= READ_REPLAY_BOUND_CHARS
+    )
+
+
 @pytest.mark.asyncio
-async def test_read_explicit_range_returns_a_22k_span_whole(tools, context, tmp_path) -> None:
+async def test_read_explicit_range_returns_a_15k_span_whole(tools, context, tmp_path) -> None:
     # An explicit range is an explicit request: a span over the 8 KiB whole-
     # file clamp but under READ_RANGE_OUTPUT_LIMIT_CHARS comes back whole, with
-    # no continuation footer to page on.
+    # no continuation footer to page on, and reaches the model uncut.
     lines = _source_lines(2000)
     (tmp_path / "mod.txt").write_text("\n".join(lines))
-    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-330"}, context)
+    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-230"}, context)
     assert result.is_error is False
-    assert 20 * 1024 < len(result.text) < 24 * 1024
+    assert 14 * 1024 < len(result.text) < builtin.READ_RANGE_OUTPUT_LIMIT_CHARS
     assert "truncated at" not in result.text
-    assert result.text.splitlines()[-1].endswith(lines[329])
+    wire = _on_the_wire(result)
+    assert wire == result.text
+    assert "elided on replay" not in wire
+    assert wire.splitlines()[-1].endswith(lines[229])
 
 
 @pytest.mark.asyncio
-async def test_read_explicit_range_clamps_a_40k_span_at_32k(tools, context, tmp_path) -> None:
+async def test_read_explicit_range_clamps_a_40k_span_consistently(tools, context, tmp_path) -> None:
+    # The ~40 KiB case was worse than base at 32 KiB: the replay bound cut a
+    # gap mid-body while the footer pointed past it. Now the tool clamp is the
+    # only cut, so the delivered lines run contiguously from the start and the
+    # footer resumes at exactly the next undelivered line.
     lines = _source_lines(2000)
     (tmp_path / "mod.txt").write_text("\n".join(lines))
     result = await _call(tools, "read", {"path": "mod.txt", "range": "1-620"}, context)
     assert result.is_error is False
-    body, _, footer = result.text.partition("\n\n[truncated at ")
+    wire = _on_the_wire(result)
+    assert wire == result.text
+    assert "elided on replay" not in wire
+    body, _, footer = wire.partition("\n\n[truncated at ")
     assert footer.startswith(f"{builtin.READ_RANGE_OUTPUT_LIMIT_CHARS} chars;")
     assert 8 * 1024 < len(body) <= builtin.READ_RANGE_OUTPUT_LIMIT_CHARS
-    assert 'read(path="' in footer and 'range="' in footer
+    numbers = [int(line.split("|", 1)[0]) for line in body.splitlines()]
+    assert numbers == list(range(1, len(numbers) + 1))
+    next_line = numbers[-1] + 1
+    assert f'range="{next_line}-{next_line + 200}"' in footer
+    assert f"{2000 - next_line + 1} of 2000 lines not shown" in footer
 
 
 @pytest.mark.asyncio
 async def test_read_without_range_keeps_the_8k_clamp(tools, context, tmp_path) -> None:
-    # The 32 KiB budget is range-only; a whole-file read is still 8 KiB.
+    # The ranged budget is range-only; a whole-file read is still 8 KiB.
     (tmp_path / "mod.txt").write_text("\n".join(_source_lines(2000)))
     result = await _call(tools, "read", {"path": "mod.txt"}, context)
     assert f"[truncated at {builtin.READ_OUTPUT_LIMIT_CHARS} chars;" in result.text

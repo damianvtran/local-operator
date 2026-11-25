@@ -420,12 +420,26 @@ READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
 #: clipping that span at 8 KiB only buys a paging call (on the long-coding
 #: bench, 5/5 truncated file reads were paged on within 3 calls). Measured over
 #: the fixture repos' non-test sources rendered with line numbers: 21/49 exceed
-#: 8 KiB, 3/49 exceed 32 KiB (p50 5.3k, p90 24.6k, max 188k), so 32 KiB returns
-#: nearly every requested span whole while still bounding a ``range="1-"``.
+#: 8 KiB (p50 5.3k, p90 24.6k, max 188k), so doubling the budget returns most
+#: requested spans whole while still bounding a ``range="1-"``.
+#:
+#: DELIBERATELY 16 KiB, not 32, for two reasons that both bind:
+#:
+#: * It must fit ``harness.replay_bound.READ_REPLAY_BOUND_CHARS`` (16 KiB +
+#:   1 KiB footer room). That bound middle-elides every ``read`` result on
+#:   EVERY request, the current turn included, so a 32 KiB span arrived cut in
+#:   the middle with the clamp footer pointing past the gap (PR #4566 round 1,
+#:   M1/Q1). A unit test pins this budget plus footer under that bound.
+#: * A delivered result is re-sent on every later turn until compaction, and a
+#:   ``range`` rides in the result's details, so reads of different spans of
+#:   one file are never superseded. On a long session a 32 KiB span re-sent
+#:   per turn (~8k tokens) costs far more than the one ~2k-token paging call it
+#:   saves; 16 KiB halves that standing cost and still removes the common page.
+#:
 #: Whole-file reads keep :data:`READ_OUTPUT_LIMIT_CHARS` (and ``.py`` its
 #: structural summary); bash keeps its 8 KiB clamp, whose log-tail rationale is
 #: unchanged.
-READ_RANGE_OUTPUT_LIMIT_CHARS = 32 * 1024
+READ_RANGE_OUTPUT_LIMIT_CHARS = 16 * 1024
 
 #: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
 #: before it is shaped into a map. DELIBERATELY 16 KiB rather than
@@ -4546,34 +4560,66 @@ def _bash_output_summary(stdout: str, stderr: str) -> str:
     return "\n".join(parts)
 
 
-#: BSD sed's two complaints when handed GNU's ``sed -i 's/a/b/' f``: BSD reads
-#: the script as ``-i``'s backup suffix, then parses the FILE as the script.
-#: ``invalid command code`` and ``extra characters at the end of`` are the two
-#: renderings measured in the long-coding bench, where both LOP and Claude Code
-#: re-sent the same failing GNU form once before switching (one wasted call per
-#: occurrence). Anchored on BSD's ``sed: <n>: `` prefix so GNU sed's own
-#: wording (``sed: -e expression #1``) and unrelated stderr never match.
+#: BSD sed's complaints when handed GNU's ``sed -i 's/a/b/' FILE``: BSD reads
+#: the script as ``-i``'s backup suffix, then parses FILE as the script, so the
+#: message depends on FILE's first character, read as a sed command. Measured
+#: with real ``sed -i 's/a/b/' <file>`` runs on macOS (PR #4566 round 1, m1):
+#:
+#: * ``invalid command code`` -- ``README.md``, ``Makefile``, ``./x.py``, ``util.js``
+#: * ``extra characters at the end of`` -- ``x.py``, ``lib/a.py``, ``docs/b.md``,
+#:   ``package.json``, absolute paths
+#: * ``unterminated substitute pattern`` -- ``src/main.py``, ``s.py``
+#: * ``command a|c|i expects`` -- ``app.py``, ``config.py``, ``index.ts``
+#: * ``undefined label`` -- ``tests/x.py``, ``bin.sh``
+#: * ``unterminated transform source string`` -- ``yarn.lock``
+#: * ``unused label`` -- ``:x.py``
+#: * ``-I or -i may not be used with stdin`` -- ``requirements.txt``, ``w.py``
+#:   (``r``/``w``/``#`` consume the rest as a filename or comment)
+#:
+#: In the long-coding bench both LOP and Claude Code re-sent the failing GNU
+#: form once before switching (one wasted call per occurrence). Anchored on
+#: BSD's ``sed: `` prefix so GNU sed's wording (``sed: -e expression #1``)
+#: and unrelated stderr never match; the command gate
+#: (:data:`_GNU_SED_INPLACE_CMD_RE`) is what makes a list this wide safe, since
+#: several of these messages also follow an ordinary bad script.
 #: BSD echoes the script it parsed in quotes WITH sed's appended newline, so the
 #: real complaint spans two lines (``sed: 1: "f\n": invalid command code f``);
 #: ``[^"]*`` crosses that newline where ``.*`` would not, which is why a
 #: single-line fixture once passed while real output never matched.
 _BSD_SED_INPLACE_RE = re.compile(
-    r'^sed: \d+: "[^"]*": (invalid command code|extra characters at the end of)',
+    r'^sed: (?:\d+: "[^"]*": (?:invalid command code|extra characters at the end of'
+    r"|unterminated substitute pattern|unterminated transform source string"
+    r"|command [aci] expects|undefined label|unused label)"
+    r"|-I or -i may not be used with stdin)",
     re.MULTILINE,
+)
+#: A ``sed`` invocation whose ``-i`` (alone or ending a flag cluster such as
+#: ``-Ei``) is followed by a separate argument that is not an empty suffix:
+#: GNU's form. ``sed -i '' …`` and an attached suffix (``-i.bak``) are BSD-
+#: correct and never match, and neither does a sed with no ``-i`` at all, so
+#: ``echo a | sed 'foo'`` failing with ``invalid command code`` gets no
+#: in-place advice (round 1, m2). Stops at a shell separator so a later
+#: command's ``-i`` is not attributed to this sed.
+_GNU_SED_INPLACE_CMD_RE = re.compile(
+    r"(?:^|[\s;&|(`])sed\s(?:[^|;&\n]*?\s)?-[A-Za-z]*i\s+(?!''|\"\")\S"
 )
 #: One line, not a man page: the fix is a single argument and the model already
 #: knows ``sed``.
 BSD_SED_INPLACE_HINT = "macOS BSD sed: `-i` takes a suffix argument; use `sed -i '' …`."
 
 
-def _bsd_sed_hint(stderr: str) -> str | None:
+def _bsd_sed_hint(command: str, stderr: str) -> str | None:
     """The BSD ``sed -i`` hint for this result, or ``None``.
 
     Darwin only, because the hint is only true where ``sed`` is BSD's; a Linux
     host's GNU sed takes ``-i`` with no argument, and the advice would be wrong
-    there. Returned once per result however many matching lines stderr holds.
+    there. Needs BOTH a GNU-form ``-i`` in ``command`` and a BSD complaint in
+    ``stderr``: either alone is a different mistake. Returned once per result
+    however many matching lines stderr holds.
     """
     if sys.platform != "darwin" or not stderr:
+        return None
+    if not _GNU_SED_INPLACE_CMD_RE.search(command):
         return None
     return BSD_SED_INPLACE_HINT if _BSD_SED_INPLACE_RE.search(stderr) else None
 
@@ -6368,7 +6414,7 @@ async def execute_bash(
         # Under the exit code, not last: the tool card keeps the HEAD of a
         # result, and this line is an instruction the agent must act on.
         parts.insert(1, worktree_notice)
-    sed_hint = _bsd_sed_hint(stderr)
+    sed_hint = _bsd_sed_hint(params.command, stderr)
     if sed_hint:
         # Same head slot as worktree_notice, for the same reason: the tool card
         # keeps the head, and the line is the one action that ends the retry.
@@ -6733,7 +6779,7 @@ class ReadParams(BaseModel):
         default=None,
         description=(
             "Optional 1-based inclusive line range 'start-end' (e.g. '10-40') "
-            "or 'start-' to read to the end. Applies to files and to "
+            "or 'start[-]' to the end. Applies to files and to "
             "spill:// handles; on a spill search ('?q=') it selects which "
             "MATCHES to return, not which lines. Ignored for other internal URLs."
         ),
@@ -36843,7 +36889,7 @@ class HubParams(BaseModel):
     range: str | None = Field(
         default=None,
         description=(
-            "op='peek': transcript steps to read, as 'start-end' or 'start-' "
+            "op='peek': transcript steps to read, as 'start-end' or 'start[-]' "
             "(1-based, stable across peeks); steps= reads the last N."
         ),
     )

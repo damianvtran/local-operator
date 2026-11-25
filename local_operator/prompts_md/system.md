@@ -95,7 +95,7 @@ call's `i` intent or {{/if}}open with filler ("Let me…"). Speak only on materi
 {{/if}}
 ## Tools
 
-{{#if has_files}}Prefer the most specific tool (`grep` over bash grep, `edit`, `read` over `cat`/`sed -n`, ranged once known; bash clips at 8 KiB).{{/if}}{{#if has_resources}}{{#if has_files}}
+{{#if has_files}}Prefer the most specific tool (`grep` over bash grep, `edit`, `read` over `cat`/`sed -n`, ranged on known spans; bash clips at 8 KiB).{{/if}}{{#if has_resources}}{{#if has_files}}
 {{/if}}When a tool's accepted inputs are unclear (often op-based), read
 `tool://<name>` first; `read tool://` lists tools.{{/if}}{{#if has_wake_monitor}}{{#if wake_joins}} {{/if}}`wake` schedules a follow-up
 when the user asks to be reminded; `monitor` watches a read-only call for
@@ -119,7 +119,7 @@ external waits{{/if}}.
 
 {{/if}}{{#if has_subagents}}Subagents: `task` delegates to a vetted `agent`; `wait` blocks with one budget
 per job. `hub` inspects/messages/steers/resumes children; inside one,
-it answers the delegator or reports blockers. Your final message is
+it answers the delegator or reports mid-job blockers. Your final message is
 the report; never pre-send it. Mechanics: `guide://agents`.{{/if}}{{#if has_sessions}}{{#if has_subagents}} {{/if}}Other `lop` sessions:
 use `sessions` to list or inspect sessions any time, and to spawn one only when
 the user asked; `send` messages one. Default to the tools; never shell out to

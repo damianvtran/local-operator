@@ -673,7 +673,7 @@ async def test_clamped_bounded_window_still_reports_the_exact_total(
     path.write_bytes(PLAIN_BYTES)
 
     # 700 rendered ~58-char lines is ~40k: over READ_RANGE_OUTPUT_LIMIT_CHARS,
-    # so the head is genuinely clamped (200 lines stopped being, at 32 KiB).
+    # so the head is genuinely clamped (200 lines, ~11.6k, would fit).
     result = await _call(tools, "read", {"path": "big.txt", "range": "1-700"}, context)
 
     assert result.is_error is False, result.text
