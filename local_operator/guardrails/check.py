@@ -1667,8 +1667,34 @@ def _ask_block(
         and a.answered_at
         and _exact_firm_ask(a, path, home=home, cwd=cwd)
     ]
+    # WHY newest-first (field 2026-11-25): walking in store order returned the
+    # FIRST blocking ask, so an older ask's decline or narrower pick (a-e630)
+    # vetoed the operator's newer exact approval of the same path (a-ba0f) and
+    # the refusal cited the stale one. The operator's latest word on a path is
+    # their decision, so an ask's recency is when it was last answered (its
+    # creation when never answered), and an exact firm approval supersedes every
+    # ANSWERED ask older than it — for THIS path only. Boundary: supersession
+    # needs ``_exact_firm_ask`` on this literal path, so a newer answer naming a
+    # different path approves nothing here; an ask answered after the approval
+    # is newer and still blocks; a never-answered ask is not an answer to
+    # supersede and keeps the narrower timeout rule below; untrusted yeses stay
+    # last (the caller's QA R2 Q3 order) so a real refusal is the one named.
+    def recency(a: Any) -> int:
+        return int(a.answered_at or a.created_at or 0)
+
+    newest_exact = max((recency(b) for b in superseding), default=0)
+    ordered = sorted(
+        lapsed, key=lambda a: (bool(getattr(a, "untrusted_yes", False)), -recency(a))
+    )
     judge_only = None
-    for a in lapsed:
+    for a in ordered:
+        if (
+            newest_exact
+            and a not in superseding
+            and a.answered_at
+            and a.answered_at < newest_exact
+        ):
+            continue
         # Expired can also contain a late answer: only genuine silence is
         # displaced, and only by an independently verified later answer.
         if (

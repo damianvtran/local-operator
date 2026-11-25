@@ -1363,7 +1363,11 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
         session_id=S,
         env=_env(deep),
     )
-    if mode in ("brace", "revision-approval", "same-ask-revision"):
+    # ``expired-answer`` (2026-11-25): the expired ask's late decline is 8 days
+    # older than the exact approval, so the newest answer decides. It is still
+    # never displaced as SILENCE; a late decline newer than the approval holds
+    # (``test_expired_late_decline_newer_than_approval_still_holds``).
+    if mode in ("brace", "revision-approval", "same-ask-revision", "expired-answer"):
         assert hit is None
     else:
         assert hit is not None, mode
@@ -1741,3 +1745,122 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
     )
     assert "background-started runtime has none" not in notes
     assert "restart" not in notes.lower()
+
+
+# -- 10. newest answered ask wins (field 2026-11-25: a-e630 vetoed a-ba0f) --------
+
+
+def _answered_at(
+    home: Path, ask_id: str, question: str, labels: list[str], *, answer: str, ago_ms: int
+) -> None:
+    """One desktop-answered ask whose answer landed ``ago_ms`` ago."""
+    now = int(time.time() * 1000) - ago_ms
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now - 60_000,
+            "created_at": now - 60_000,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "questions": [
+                {
+                    "id": "q",
+                    "question": question,
+                    "options": [{"label": label} for label in labels],
+                    "multi": False,
+                    "question_id": "",
+                }
+            ],
+        },
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": ask_id,
+            "at": now,
+            "by": {"surface": "desktop"},
+            "answers": {"q": [answer]},
+        },
+    ]
+    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def _block(home: Path, rel: str) -> Any:
+    from local_operator.guardrails.check import _ask_block
+
+    return _ask_block(
+        prov.unanswered_asks(S),
+        str(home / rel),
+        home=str(home),
+        cwd=str(home),
+        stop=(),
+        escalating=True,
+        session_id=S,
+        env=_env(home),
+    )
+
+
+BUILD_Q = "Delete ~/hyperplane-cpp/build?"
+
+
+@pytest.mark.asyncio
+async def test_newest_exact_approval_beats_older_decline_and_narrower_pick(deep: Path) -> None:
+    """Three answered asks name one path; the newest (exact yes) decides.
+
+    Store order puts the older decline first, which is what the field refusal
+    cited. Neither it nor the older narrower pick may veto the newer answer.
+    """
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=600_000)
+    _answered_at(
+        deep,
+        "a-narrow",
+        "Delete ~/hyperplane-cpp/build or only ~/hyperplane-cpp/build/obj?",
+        ["Delete only ~/hyperplane-cpp/build/obj", "Keep"],
+        answer="Delete only ~/hyperplane-cpp/build/obj",
+        ago_ms=300_000,
+    )
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=10_000)
+    assert _block(deep, "hyperplane-cpp/build") is None
+    judge = _Judge("BLOCK")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is None or not result.blocked, result and result.text
+    assert not judge.prompts
+
+
+@pytest.mark.asyncio
+async def test_newest_answer_naming_another_path_does_not_approve_this_one(deep: Path) -> None:
+    """Supersession is per path: a newer yes to ~/other/x leaves the decline."""
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=600_000)
+    _answered_at(
+        deep, "a-ba0f", "Delete ~/other/x?", ["Approve", "Keep"], answer="Approve", ago_ms=10_000
+    )
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == "a-e630"
+    judge = _Judge("ALLOW ask=a-ba0f")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is not None and result.blocked
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_decline_answered_after_the_approval_still_holds(deep: Path) -> None:
+    """Control: recency cuts both ways; the operator's later "Keep" wins."""
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=600_000)
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=10_000)
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == "a-e630"
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", _Judge("ALLOW ask=a-ba0f"))
+    assert result is not None and result.blocked
+
+
+def test_expired_late_decline_newer_than_approval_still_holds(deep: Path) -> None:
+    """An expired ask carrying a late "Keep" answered AFTER the approval wins."""
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=600_000)
+    _deep_ask(deep, answer="Keep everything", expired=True)
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == DEEP_ASK

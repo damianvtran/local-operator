@@ -1359,7 +1359,13 @@ def _git_env() -> dict[str, str]:
         for k, v in os.environ.items()
         if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
     }
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    # GIT_NO_LAZY_FETCH (2026-11-25): ~/local-operator-ui is a blob:none
+    # partial clone, so ``cat-file --batch-check`` on a blob it lacks asks the
+    # promisor remote, ~30 s per object; a remnant with 1,164 foreign blobs ran
+    # into the timeout. A guard check must not touch the network, and an
+    # object only the remote holds is not "already in Git here": missing is
+    # the fail-closed answer.
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0", GIT_NO_LAZY_FETCH="1")
     return env
 
 
@@ -1489,6 +1495,15 @@ def _removed_worktree_remnant(path: str) -> bool:
     repo = _former_worktree_repo(real)
     if repo is None:
         return False
+    # A live owner holds (2026-11-25, probe on the orphan-ask-cascade shape):
+    # a process whose cwd or open files sit in the tree may still be writing
+    # into it, so "every byte is in Git" is only true for this instant. The
+    # content rule never asked, and a ``sleep`` running inside an empty
+    # remnant ranked LOW. Unknown (``None``) fails closed like ``True``.
+    from local_operator.guardrails import provenance as _prov
+
+    if _prov._live_cwd_inside(real) is not False:
+        return False
     files: list[str] = []
 
     def _fail(err: OSError) -> None:
@@ -1500,6 +1515,15 @@ def _removed_worktree_remnant(path: str) -> bool:
             # ``kept.txt\r`` would hash as its committed sibling ``kept.txt``
             # (#4536 R2-M1). Any name with a line break holds.
             if any("\n" in n or "\r" in n for n in (*dirs, *names)):
+                return False
+            # A nested repository below the root holds (2026-11-25): its
+            # history is not this repo's to vouch for, and an EMPTY ``.git``
+            # directory (or a pointer file) contributes no file to hash, so
+            # the content check alone passed it as lossless. Only the root's
+            # own dangling pointer is the remnant's ``.git``.
+            if root != real and ".git" in (*dirs, *names):
+                return False
+            if root == real and ".git" in dirs:
                 return False
             for name in dirs:
                 if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):

@@ -361,3 +361,87 @@ def test_remnant_review_minors(repo: Path, monkeypatch: pytest.MonkeyPatch) -> N
     deep = gone / "deep.tsbuildinfo"
     deep.write_text("[" * 200_000 + "]" * 200_000)
     assert c._removed_worktree_remnant(str(gone)) is False
+
+
+# -- 2026-11-25: the orphan-ask-cascade shape ---------------------------------------
+# ``~/local-operator-ui/.worktrees/orphan-ask-cascade``: a dangling one-line
+# ``.git`` pointer, no admin dir, no registration. Synthetic copy plus the
+# controls the remnant rule must still hold.
+
+
+def _orphan(repo: Path, name: str = "orphan-ask-cascade") -> Path:
+    wt = repo / ".worktrees" / name
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/{name}\n")
+    return wt
+
+
+def _rank(repo: Path, wt: Path):
+    from local_operator.guardrails.classify import classify_bash
+
+    return classify_bash(
+        f"rm -rf {wt}",
+        cwd=str(repo),
+        env={"HOME": str(repo.parent)},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    ).targets[0]
+
+
+def test_orphan_with_dangling_pointer_and_empty_tree_ranks_low(repo: Path) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
+    wt = _orphan(repo)
+    (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    assert _removed_worktree_remnant(str(wt))
+    t = _rank(repo, wt)
+    assert t.risk is Risk.LOW and t.reason == REMNANT_REASON, t.reason
+
+
+@pytest.mark.parametrize("nested", ["git-dir", "empty-git-dir", "pointer-file", "root-git-dir"])
+def test_orphan_holding_a_nested_repository_keeps_the_rank(repo: Path, nested: str) -> None:
+    """An empty ``.git`` dir has no file to hash; it passed as lossless before."""
+    wt = _orphan(repo, f"nested-{nested}")
+    if nested == "git-dir":
+        _git("init", "-q", str(wt / "sub"), cwd=repo)
+    elif nested == "empty-git-dir":
+        (wt / "sub" / ".git").mkdir(parents=True)
+    elif nested == "pointer-file":
+        (wt / "sub").mkdir()
+        (wt / "sub" / ".git").write_text("gitdir: /elsewhere\n")
+    else:
+        (wt / ".git").unlink()
+        (wt / ".git").mkdir()
+    assert not _removed_worktree_remnant(str(wt))
+
+
+def test_orphan_with_a_live_owner_keeps_the_rank(repo: Path) -> None:
+    wt = _orphan(repo, "owned")
+    proc = subprocess.Popen(["sleep", "30"], cwd=wt, start_new_session=True)
+    try:
+        from local_operator.guardrails import provenance as prov
+
+        prov._cwd_entries(fresh=True)  # a cached miss from an earlier test is reused
+        assert not _removed_worktree_remnant(str(wt))
+    finally:
+        os.killpg(proc.pid, 9)
+        proc.wait()
+
+
+@pytest.mark.parametrize("extra", ["untracked", "node-modules-link"])
+def test_orphan_with_content_git_does_not_hold_keeps_the_rank(repo: Path, extra: str) -> None:
+    """The real remnant's shape: pnpm symlinks and blobs Git never had."""
+    wt = _orphan(repo, f"content-{extra}")
+    if extra == "untracked":
+        (wt / "notes.md").write_text("never committed\n")
+    else:
+        (wt / "node_modules").mkdir()
+        (wt / "node_modules" / "zod").symlink_to(".pnpm/zod@3/node_modules/zod")
+    assert not _removed_worktree_remnant(str(wt))
+
+
+def test_guard_git_never_lazy_fetches() -> None:
+    """A partial clone must answer "missing" locally, never ask the promisor."""
+    from local_operator.guardrails.classify import _git_env
+
+    assert _git_env()["GIT_NO_LAZY_FETCH"] == "1"
