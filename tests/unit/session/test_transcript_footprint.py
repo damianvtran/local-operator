@@ -980,3 +980,216 @@ async def test_fold_on_open_preserves_crlf_bytes(tmp_path):
     assert path.read_bytes() == "".join(survivors).encode()
     assert len(_checkpoint_rows(reopened)) == 1
     reopened.close()
+
+
+# -- todo_snapshot / wake_schedules: full snapshots, newest-wins (incident 2026-11-24)
+#
+# Session 1375449bf925's 820 MB journal carried 4,425 ``todo_snapshot`` rows
+# (403 MB) and 3,028 ``wake_schedules`` rows (27 MB), every one but the newest
+# superseded, and all of them were parsed on every cold open. These tests pin
+# the two types into the fold and prove each reader's answer is unchanged.
+
+_TODO = "todo_snapshot"
+_WAKES = "wake_schedules"
+
+
+def test_the_collapsible_allowlist_names_the_todo_and_wake_snapshot_types():
+    """Both literals are restated inline (leaf module); a rename upstream fails here."""
+    from local_operator.harness.wake import WAKE_SCHEDULES_CUSTOM_TYPE
+    from local_operator.session.session import TODO_SNAPSHOT_CUSTOM_TYPE
+    from local_operator.session.transcript import _COLLAPSIBLE_CUSTOM_TYPES
+
+    assert TODO_SNAPSHOT_CUSTOM_TYPE == _TODO
+    assert WAKE_SCHEDULES_CUSTOM_TYPE == _WAKES
+    assert {TODO_SNAPSHOT_CUSTOM_TYPE, WAKE_SCHEDULES_CUSTOM_TYPE} <= _COLLAPSIBLE_CUSTOM_TYPES
+
+
+def _todo_details(index: int, pad: int) -> dict[str, Any]:
+    return {
+        "items": [
+            {"phase": f"p{index}", "items": [{"text": f"task {index}", "done": False}]},
+            {"phase": "pad", "items": [{"text": "x" * pad, "done": True}]},
+        ]
+    }
+
+
+def _wake_details(index: int, pad: int) -> dict[str, Any]:
+    return {"schedules": [{"id": f"w{index}", "message": "y" * pad, "due_ms": 1000 + index}]}
+
+
+async def _journal_with_snapshots(directory: Path, *, copies: int, pad: int) -> list[str]:
+    """Messages interleaved with ``copies`` todo and wake snapshots; returns texts."""
+    transcript = Transcript(directory)
+    for index in range(copies):
+        await transcript.append_message(Message.user(f"turn {index}"))
+        await transcript.append_custom(_TODO, _todo_details(index, pad))
+        await transcript.append_custom(_WAKES, _wake_details(index, pad))
+    texts = [m.text for m in transcript.build_llm_history() if isinstance(m, Message)]
+    transcript.close()
+    return texts
+
+
+def _rows_of(transcript: Transcript, custom_type: str) -> list[Any]:
+    return [e for e in transcript.entries() if e.payload.get("custom_type") == custom_type]
+
+
+def _reader_answers(directory: Path, transcript: Transcript) -> dict[str, Any]:
+    """Every newest-wins entry point the audited readers use, for both types."""
+    from local_operator.network.carry import latest_custom_details
+    from local_operator.session.transcript import read_latest_custom, read_latest_custom_entry
+
+    answers: dict[str, Any] = {}
+    for custom_type in (_TODO, _WAKES):
+        entry = transcript.latest_custom_entry(custom_type)
+        file_entry = read_latest_custom_entry(directory, custom_type)
+        answers[custom_type] = (
+            transcript.latest_custom(custom_type),
+            (entry.id, entry.ts, entry.payload) if entry else None,
+            read_latest_custom(directory, custom_type),
+            (file_entry.id, file_entry.ts, file_entry.payload) if file_entry else None,
+            latest_custom_details(directory, custom_type),
+        )
+    return answers
+
+
+@pytest.mark.asyncio
+async def test_owning_open_folds_todo_and_wake_snapshots_to_the_newest(tmp_path):
+    """N snapshots of each type fold to ONE each on open; every reader answers the same."""
+    directory = tmp_path / "sess"
+    copies = 6
+    texts = await _journal_with_snapshots(directory, copies=copies, pad=40 * 1024)
+    path = directory / "transcript.jsonl"
+    size_before = path.stat().st_size
+
+    # Negative control: before the open folds, the journal really holds N of each.
+    raw = _journal_lines(path)
+    assert sum(f'"custom_type":"{_TODO}"' in line for line in raw) == copies
+    assert sum(f'"custom_type":"{_WAKES}"' in line for line in raw) == copies
+    before = _reader_answers(directory, Transcript(directory, read_only=True))
+
+    reopened = Transcript(directory)
+    assert path.stat().st_size < size_before, "an owning open above threshold must fold"
+    assert len(_rows_of(reopened, _TODO)) == 1
+    assert len(_rows_of(reopened, _WAKES)) == 1
+    assert reopened.latest_custom(_TODO) == _todo_details(copies - 1, 40 * 1024)
+    assert reopened.latest_custom(_WAKES) == _wake_details(copies - 1, 40 * 1024)
+    assert _reader_answers(directory, reopened) == before
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
+    assert reopened.reclaimable_bytes() == 0
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_compact_file_folds_todo_and_wake_snapshots_to_the_newest(tmp_path):
+    """Below the open-time threshold ``compact_file`` drops them, priced exactly."""
+    directory = tmp_path / "sess"
+    copies = 5
+    texts = await _journal_with_snapshots(directory, copies=copies, pad=16)
+    path = directory / "transcript.jsonl"
+    size_before = path.stat().st_size
+
+    transcript = Transcript(directory)
+    assert path.stat().st_size == size_before, "below the threshold the open must not rewrite"
+    before = _reader_answers(directory, transcript)
+    expected = transcript.reclaimable_bytes()
+    assert expected > 0
+    assert await transcript.compact_file(min_reclaim_bytes=0) == expected
+    assert path.stat().st_size == size_before - expected
+    assert len(_rows_of(transcript, _TODO)) == 1
+    assert len(_rows_of(transcript, _WAKES)) == 1
+    assert _reader_answers(directory, transcript) == before
+    transcript.close()
+
+    reopened = Transcript(directory)
+    assert [e.payload.get("custom_type") for e in reopened.entries() if e.type == "custom"] == [
+        _TODO,
+        _WAKES,
+    ]
+    assert _reader_answers(directory, reopened) == before
+    assert [m.text for m in reopened.build_llm_history() if isinstance(m, Message)] == texts
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_todos_and_wakes_restore_identically_after_the_fold(tmp_path):
+    """The Session loaders' inputs survive the fold: todo restore and wake re-arm.
+
+    ``Session._load_todo_snapshot`` feeds ``latest_custom(todo_snapshot)["items"]``
+    to ``restore_todos``; the wake restore re-arms from ``latest_custom_entry``
+    and gates on that entry's ``ts`` against the fork instant — so the entry's
+    ts must be the newest row's, unchanged.
+    """
+    from local_operator.harness.wake_types import WakeSchedule
+    from local_operator.tools.builtin import TODO_STORE, restore_todos, todo_snapshot
+
+    directory = tmp_path / "sess"
+    transcript = Transcript(directory)
+    newest_schedule = WakeSchedule(id="w-new", message="check CI", next_due_at=1_900_000_000_000)
+    for index in range(4):
+        await transcript.append_custom(
+            _TODO, {"items": [{"name": "Work", "items": [{"text": f"t{index}", "done": False}]}]}
+        )
+    # The older wake row holds a schedule the newest no longer contains: a fold
+    # that kept the wrong row would resurrect a cancelled wake.
+    cancelled = WakeSchedule(id="w-cancelled", message="old", next_due_at=1_800_000_000_000)
+    await transcript.append_custom(_WAKES, {"schedules": [cancelled.model_dump()]})
+    await transcript.append_custom(_WAKES, {"schedules": [newest_schedule.model_dump()]})
+    entry_before = transcript.latest_custom_entry(_WAKES)
+    todo_before = transcript.latest_custom(_TODO)
+    assert await transcript.compact_file(min_reclaim_bytes=0) > 0
+    transcript.close()
+
+    reopened = Transcript(directory)
+    entry_after = reopened.latest_custom_entry(_WAKES)
+    assert (entry_after.id, entry_after.ts) == (entry_before.id, entry_before.ts)
+    schedules = entry_after.payload["details"]["schedules"]
+    assert [WakeSchedule.model_validate(row) for row in schedules] == [newest_schedule]
+    assert len(_rows_of(reopened, _WAKES)) == 1
+    assert len(_rows_of(reopened, _TODO)) == 1
+
+    assert reopened.latest_custom(_TODO) == todo_before
+    probe = "fold-restore-probe"
+    TODO_STORE.pop(probe, None)
+    try:
+        restore_todos(probe, list(reopened.latest_custom(_TODO)["items"]))
+        restored = todo_snapshot(probe)
+    finally:
+        TODO_STORE.pop(probe, None)
+    assert [item["text"] for phase in restored for item in phase["items"]] == ["t3"]
+    reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_torn_newest_todo_and_wake_rows_never_supersede_the_last_valid_copy(tmp_path):
+    """R1 holds for the new members: a torn newest row keeps the last VALID one."""
+    directory = tmp_path / "sess"
+    copies = 6
+    await _journal_with_snapshots(directory, copies=copies, pad=40 * 1024)
+    path = directory / "transcript.jsonl"
+    lines = _journal_lines(path)
+    valid_todo, valid_wake = lines[-2], lines[-1]
+    assert f'"custom_type":"{_TODO}"' in valid_todo and f'"custom_type":"{_WAKES}"' in valid_wake
+    from local_operator.session.transcript import TranscriptEntry
+
+    def torn(custom_type: str, details: dict[str, Any]) -> str:
+        row = TranscriptEntry(
+            id=f"torn-{custom_type}", ts=98.0, type="custom",
+            payload={"custom_type": custom_type, "details": details},
+        ).to_json()
+        return row[: len(row) // 2]  # crash mid-row, no newline
+
+    after = TranscriptEntry(
+        id="after-crash", ts=99.0, type="message",
+        payload=encode_message_payload(Message.user("after the crash")),
+    ).to_json()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(torn(_TODO, _todo_details(99, 40 * 1024)) + after + "\n")
+        handle.write(torn(_WAKES, _wake_details(99, 40 * 1024)) + after.replace(
+            "after-crash", "after-crash-2") + "\n")
+
+    reopened = Transcript(directory)
+    assert reopened.latest_custom(_TODO) == _todo_details(copies - 1, 40 * 1024)
+    assert reopened.latest_custom(_WAKES) == _wake_details(copies - 1, 40 * 1024)
+    on_disk = _journal_lines(path)
+    assert valid_todo in on_disk and valid_wake in on_disk, "the last VALID rows must survive"
+    reopened.close()
