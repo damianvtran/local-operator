@@ -7952,8 +7952,40 @@ def _cmd_stop_if_idle(args: argparse.Namespace, *, peer: str, target: str) -> in
         )
     outcome = str(_reported(detail, "outcome", verb="stop") or "")
     return _emit(
-        args, {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail}, [str(detail.get("detail") or "")]
+        args,
+        {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail},
+        [_stop_if_idle_line(detail)],
     )
+
+
+def _stop_if_idle_line(detail: dict[str, Any]) -> str:
+    """The human line for an idle-only stop receipt, keyed on the owner's ``reason``.
+
+    The owner's own ``detail`` line for a refusal is one generic sentence for
+    busy, wake-due, old owner and unanswered, but their next steps are opposite
+    ("try again later" vs "retrying will not change that"), so the CLI picks the
+    same reason-keyed sentence the sessions tool shows (UX round 1 U5 / QA QF3).
+    Only the human line changes: ``--json`` keeps the owner's ``detail`` and
+    ``reason`` verbatim. Any other outcome, or an unknown reason, prints the
+    owner's line, which is also the degrade path when catalogues are missing.
+    """
+    from local_operator.i18n.keys import wire_sessions as _ws
+    from local_operator.i18n.text import tr
+    from local_operator.session.runtime import control
+
+    line = str(detail.get("detail") or "")
+    if str(detail.get("method") or detail.get("rung") or "") != "refused":
+        return line
+    build = {
+        control.REASON_BUSY: _ws.stop_refused_busy,
+        control.REASON_WAKE: _ws.stop_refused_wake,
+        control.REASON_OLD_OWNER: _ws.stop_refused_old_owner,
+        control.REASON_UNANSWERED: _ws.stop_refused_unanswered,
+    }.get(str(detail.get("reason") or ""))
+    if build is None:
+        return line
+    name = str(detail.get("name") or detail.get("session_id") or "")
+    return tr("wire.sessions")(build(name=name)) or line
 
 
 #: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
@@ -9698,14 +9730,23 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     EVERY VERB HERE ASKS AND WAITS: none of them has a local spelling of its own
     op (the session lives on another device and only this device's relay can ask
     it), so none of them may take ``allow_no_answer`` and none of them may read a
-    missing answer as a result (Q-R4-1). ``ok`` is a claim about a NAMED field the
-    peer reported — never about the absence of one.
+    missing answer as a result (Q-R4-1). The one exception is ``--stop-if-idle``
+    (``_cmd_stop_if_idle``): it takes ``allow_no_answer`` only to turn a missing
+    answer into ``stop_idle_unconfirmed``, never into an outcome. ``ok`` is a
+    claim about a NAMED field the peer reported — never about the absence of one.
     """
     from local_operator.network.types import MeshRefusal, unattended_fallback_notice
 
     peer = str(getattr(args, "peer", "") or "")
     session_id = str(getattr(args, "stop", "") or "")
     engage = str(getattr(args, "engage", "") or "")
+
+    # ``--stop-if-idle --force`` gets ITS OWN sentence, so it is decided before the
+    # generic ``--force`` check below, which would otherwise answer first with a
+    # sentence about ``--stop`` (QA round 1 QF1 / UX U6). Same rc 2, nothing sent.
+    if bool(getattr(args, "force", False)) and getattr(args, "stop_if_idle", ""):
+        print("--stop-if-idle never forces; --force applies to --stop only", file=sys.stderr)
+        return 2
 
     if bool(getattr(args, "force", False)) and not session_id:
         # A USAGE error, not a refusal (the guide's rc 2): ``--force`` means one
@@ -9775,12 +9816,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
 
     # THE IDLE-ONLY STOP IS DECIDED ALONE, before every other act: beside any other
     # act one of the two would be silently dropped, and beside ``--force`` it would
-    # promise an escalation it never sends. Both are usage errors (rc 2).
+    # promise an escalation it never sends (refused above). Both are usage errors
+    # (rc 2).
     stop_if_idle = str(getattr(args, "stop_if_idle", "") or "")
     if stop_if_idle:
-        if bool(getattr(args, "force", False)):
-            print("--stop-if-idle never forces; --force applies to --stop only", file=sys.stderr)
-            return 2
         clash = next(
             (name for name in acts if name != "stop_if_idle" and getattr(args, name, None)), ""
         )

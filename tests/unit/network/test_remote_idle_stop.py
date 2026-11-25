@@ -320,8 +320,9 @@ def test_ctl_sends_exactly_one_idle_only_frame_and_passes_the_receipt(
     [
         # Sent, no reply: the owner MAY have acted — never "not asked", never retried.
         (None, "stop_idle_unconfirmed"),
-        # An owner that does not know the op ran nothing: unsupported.
-        ({"op": "error", "code": "unknown_op", "message": "x"}, "stop_idle_unsupported"),
+        # An owner that does not know the op ran nothing — but the frame WAS sent,
+        # so it is not "unsupported" (whose receipt says nothing was sent): R2.
+        ({"op": "error", "code": "unknown_op", "message": "x"}, "stop_idle_not_served"),
         # Any other refusal is the owner's own, passed through.
         ({"op": "error", "code": "not_authorised", "message": "view-only"}, "not_authorised"),
     ],
@@ -335,6 +336,36 @@ def test_ctl_never_falls_back_or_retries(
     reply = _ctl(server_a)
     assert reply["op"] == "error" and reply["code"] == code, reply
     assert [frame["op"] for frame in link.frames] == ["net_session_stop_idle"]
+
+
+def test_ctl_sends_on_the_link_it_checked_not_a_re_resolved_one(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-dial between check and send must not move the frame onto a link that
+    never negotiated the feature (agent review round 1 R1)."""
+    server_a, _b, _h, _p = peer_pair
+    checked = _Link(wire.LINK_CAPABILITIES, {"op": "ack", "detail": {"intent": "stop_if_idle"}})
+    plain = _Link(tuple(c for c in wire.LINK_CAPABILITIES if c != wire.SESSION_STOP_IDLE_V1), None)
+    links = iter([checked, plain, plain])
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: next(links))
+    reply = _ctl(server_a)
+    assert reply["op"] == "ack", reply
+    assert [frame["op"] for frame in checked.frames] == ["net_session_stop_idle"]
+    assert plain.frames == []
+
+
+def test_ctl_unknown_op_after_sending_is_not_served_not_unsent(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-send ``unknown_op`` sentence never claims nothing was sent (R2)."""
+    server_a, _b, _h, _p = peer_pair
+    link = _Link(wire.LINK_CAPABILITIES, {"op": "error", "code": "unknown_op", "message": "x"})
+    _wire_link(server_a, monkeypatch, link)
+    reply = _ctl(server_a)
+    assert reply["code"] == "stop_idle_not_served", reply
+    assert "nothing was stopped" in reply["message"]
+    assert "nothing was sent" not in reply["message"]
 
 
 def test_ctl_does_not_fall_back_when_the_link_raises(
@@ -474,6 +505,53 @@ def test_cli_stop_if_idle_is_exclusive_and_never_forced(
     calls = _cli_seams(monkeypatch, capabilities=wire.LINK_CAPABILITIES, answer={})
     assert _run(["sessions", "--peer", "b", "--stop-if-idle", SESSION, *extra]) == 2
     assert calls == []
+
+
+def test_cli_stop_if_idle_with_force_names_the_never_forces_rule(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The specific sentence wins over the generic ``--force`` one (QA QF1 / UX U6)."""
+    calls = _cli_seams(monkeypatch, capabilities=wire.LINK_CAPABILITIES, answer={})
+    assert _run(["sessions", "--peer", "b", "--stop-if-idle", SESSION, "--force"]) == 2
+    assert "--stop-if-idle never forces" in capsys.readouterr().err
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("busy", "is working right now"),
+        ("wake", "a scheduled wake is due"),
+        ("old_owner", "Retrying will not change that"),
+        ("unanswered", "did not answer"),
+    ],
+)
+def test_cli_refusal_line_names_the_owners_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reason: str,
+    expected: str,
+) -> None:
+    """The human line is reason-keyed (UX U5 / QA QF3); ``--json`` keeps the
+    owner's own ``detail`` and ``reason`` verbatim."""
+    answer = {
+        "intent": "stop_if_idle",
+        "outcome": "refused",
+        "rung": "refused",
+        "method": "refused",
+        "reason": reason,
+        "name": "worker",
+        "session_id": SESSION,
+        "detail": "refused (owner fallback)",
+    }
+    _cli_seams(monkeypatch, capabilities=wire.LINK_CAPABILITIES, answer=dict(answer))
+    assert _run(["sessions", "--peer", "b", "--stop-if-idle", SESSION]) == 1
+    out = capsys.readouterr().out
+    assert expected in out and '"worker"' in out and "owner fallback" not in out
+    _cli_seams(monkeypatch, capabilities=wire.LINK_CAPABILITIES, answer=dict(answer))
+    assert _run(["sessions", "--json", "--peer", "b", "--stop-if-idle", SESSION]) == 1
+    doc = _doc(capsys)
+    assert doc["detail"] == "refused (owner fallback)" and doc["reason"] == reason
 
 
 def test_cli_stop_if_idle_needs_a_peer(

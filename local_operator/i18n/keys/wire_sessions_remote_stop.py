@@ -9,11 +9,22 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def approval_stop_peer_force(*, address: str, peer: str) -> Msg:
+    return Msg(
+        "wire.sessions_remote_stop.approval_stop_peer_force",
+        {"address": address, "peer": peer},
+    )
+
+
 def approval_stop_peer_idle(*, address: str, peer: str) -> Msg:
     return Msg(
         "wire.sessions_remote_stop.approval_stop_peer_idle",
         {"address": address, "peer": peer},
     )
+
+
+def dormant_hint(*, peer: str, address: str) -> Msg:
+    return Msg("wire.sessions_remote_stop.dormant_hint", {"peer": peer, "address": address})
 
 
 def force_refused() -> Msg:
@@ -22,6 +33,21 @@ def force_refused() -> Msg:
 
 def not_running(*, name: str, peer: str) -> Msg:
     return Msg("wire.sessions_remote_stop.not_running", {"name": name, "peer": peer})
+
+
+def not_served(*, peer: str) -> Msg:
+    return Msg("wire.sessions_remote_stop.not_served", {"peer": peer})
+
+
+def pending(*, name: str, peer: str, seconds: str) -> Msg:
+    return Msg(
+        "wire.sessions_remote_stop.pending",
+        {"name": name, "peer": peer, "seconds": seconds},
+    )
+
+
+def refused_unanswered(*, name: str, peer: str) -> Msg:
+    return Msg("wire.sessions_remote_stop.refused_unanswered", {"name": name, "peer": peer})
 
 
 def relay_restart() -> Msg:

@@ -1,8 +1,13 @@
 {
+  "wire.sessions_remote_stop.approval_stop_peer_force": "arrêter {address} sur {peer} en forçant : toujours refusé — le forçage n’est jamais envoyé à un autre appareil, donc rien ne sera envoyé",
   "wire.sessions_remote_stop.approval_stop_peer_idle": "arrêter {address} sur {peer} s’il y est inactif : son appareil ne l’arrête qu’après avoir confirmé qu’il est inactif, sans jamais envoyer de signal ; refusé tant qu’il travaille",
+  "wire.sessions_remote_stop.dormant_hint": "Ses réveils et ses surveillances sur {peer} sont EN SOMMEIL jusqu’à la réouverture de la session sur cet appareil. Pour les réarmer, rouvrez-la avec `sessions op=resume session={address} peer={peer}`.",
   "wire.sessions_remote_stop.force_refused": "Depuis ici, une session sur un autre appareil ne peut être arrêtée que si elle est inactive : le forçage n’est jamais envoyé à un pair, donc rien n’a été envoyé. L’opérateur peut forcer son arrêt sur cet appareil.",
   "wire.sessions_remote_stop.not_running": "« {name} » ne s’exécute pas sur {peer}, il n’y avait donc rien à arrêter.",
-  "wire.sessions_remote_stop.relay_restart": "Le relais de cet appareil est plus ancien que ce build et ne peut pas envoyer d’arrêt réservé aux sessions inactives, donc rien n’a été envoyé. Redémarrez-le avec `lop network restart`, puis réessayez.",
-  "wire.sessions_remote_stop.unconfirmed": "Non confirmé : l’arrêt réservé aux sessions inactives a pu atteindre {peer} ou non, et rien n’a été retenté. Vérifiez avec `sessions op=list peer={peer}` avant de réessayer.",
+  "wire.sessions_remote_stop.not_served": "{peer} n’a pas exécuté l’arrêt réservé aux sessions inactives qui lui a été envoyé, donc rien n’a été arrêté. Mettez cet appareil à jour, ou demandez à l’opérateur d’y arrêter la session.",
+  "wire.sessions_remote_stop.pending": "L’arrêt a été accepté par « {name} » sur {peer}, mais la session n’était pas encore sortie après {seconds} s. Aucun signal n’a été envoyé — vérifiez avec `sessions op=list peer={peer}` avant de réessayer.",
+  "wire.sessions_remote_stop.refused_unanswered": "« {name} » n’a pas répondu sur {peer}, donc un arrêt réservé aux sessions inactives n’a pas pu être confirmé et aucun signal n’a été envoyé. Vérifiez d’abord avec `sessions op=list peer={peer}` — elle a peut-être déjà disparu.",
+  "wire.sessions_remote_stop.relay_restart": "Le relais de cet appareil est plus ancien que ce lop et ne peut pas envoyer d’arrêt réservé aux sessions inactives, donc rien n’a été envoyé et rien n’a été arrêté. Redémarrez-le avec `lop network restart`, puis réessayez.",
+  "wire.sessions_remote_stop.unconfirmed": "Non confirmé : la session a pu être arrêtée sur {peer} ou non, et rien n’a été retenté. Vérifiez avec `sessions op=list peer={peer}` avant de réessayer.",
   "wire.sessions_remote_stop.unsupported": "{peer} exécute un build sans arrêt réservé aux sessions inactives, donc rien n’a été envoyé et rien n’a été arrêté. Mettez cet appareil à jour, ou demandez à l’opérateur d’y arrêter la session."
 }

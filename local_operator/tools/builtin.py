@@ -19258,9 +19258,17 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         return _sessions_copy(_ws.approval_park_local(address=address))
     if op == "stop":
         if peer:
-            # The remote form is the owner's idle-only stop (force is refused
-            # before anything is sent), so the prompt carries the same idle-only,
-            # no-signal promise as the local one, naming the deciding device.
+            if args.get("force") is True:
+                # Force never crosses devices: ``_sessions_stop_peer_idle`` refuses
+                # it before anything is sent, so the prompt says that instead of
+                # promising an idle-only stop that will not be asked for (UX round
+                # 1 U3 / QA QF2). The tier is unchanged (``_sessions_tier``).
+                return _sessions_remote_stop_copy(
+                    _wrs.approval_stop_peer_force(address=address, peer=peer)
+                )
+            # The remote form is the owner's idle-only stop, so the prompt carries
+            # the same idle-only, no-signal promise as the local one, naming the
+            # deciding device.
             return _sessions_remote_stop_copy(
                 _wrs.approval_stop_peer_idle(address=address, peer=peer)
             )
@@ -20895,7 +20903,7 @@ async def _sessions_stop_peer_idle(
         refusal_code = str(payload.get("code") or "")
         details = {**base, "outcome": "refused", "code": refusal_code, "mesh": payload}
         # The two refusals after which NOTHING was sent to the owner, so the
-        # receipt may say "nothing was stopped" with certainty.
+        # receipt may say "nothing was sent" with certainty.
         if refusal_code == "stop_idle_unsupported":
             return _error(
                 tool_call_id,
@@ -20908,6 +20916,15 @@ async def _sessions_stop_peer_idle(
                 tool_call_id,
                 "sessions",
                 _sessions_remote_stop_copy(_wrs.relay_restart()),
+                details=details,
+            )
+        if refusal_code == "stop_idle_not_served":
+            # SENT, but the owner did not know the op: nothing was stopped, yet the
+            # receipt must not claim nothing was sent (agent review round 1 R2).
+            return _error(
+                tool_call_id,
+                "sessions",
+                _sessions_remote_stop_copy(_wrs.not_served(peer=peer)),
                 details=details,
             )
         if refusal_code == "stop_idle_unconfirmed":
@@ -20940,23 +20957,33 @@ async def _sessions_stop_peer_idle(
             details=details,
         )
     # THE OWNER'S OUTCOME, IN THE LOCAL STOP'S WORDS: the same ``StopOutcome``
-    # fields cross the wire, so the same keyed receipt (busy / wake / old owner /
-    # unanswered / pending) is chosen; the owner's English line is the fallback.
-    receipt = _sessions_receipt(
-        SimpleNamespace(
-            method=method,
-            name=name,
-            reason=reason,
-            line=str(payload.get("detail") or ""),
-        ),
-        control.DEFAULT_TIMEOUT_S,
-    )
+    # fields cross the wire, so the same keyed receipt (busy / wake / old owner)
+    # is chosen; the owner's English line is the fallback. The two whose remedy
+    # is "read the session list" get peer-scoped variants, because a local
+    # listing does not show the owner's state (UX round 1 U2).
+    if method == "pending":
+        receipt = _sessions_remote_stop_copy(
+            _wrs.pending(name=name, peer=peer, seconds=f"{control.DEFAULT_TIMEOUT_S:g}")
+        )
+    elif method == "refused" and reason == control.REASON_UNANSWERED:
+        receipt = _sessions_remote_stop_copy(_wrs.refused_unanswered(name=name, peer=peer))
+    else:
+        receipt = _sessions_receipt(
+            SimpleNamespace(
+                method=method,
+                name=name,
+                reason=reason,
+                line=str(payload.get("detail") or ""),
+            ),
+            control.DEFAULT_TIMEOUT_S,
+        )
     ended = payload.get("ok") is True
     lines = [receipt or f"the stop of {address} on {peer} reported {outcome or 'no outcome'}"]
     if ended and (details["wakes_dormant"] or details["monitors_dormant"]):
-        # Same cost note as the local stop. Its park remedy is local-only today,
-        # but naming the dormant schedules is the fact the caller needs.
-        lines.append(_sessions_copy(_ws.stop_dormant_hint()))
+        # The local stop's cost note names ``op='park'``, which is refused with a
+        # peer (UX round 1 U1), so the remote note names only what works: reopen
+        # it on that device (``resume`` with ``peer`` engages it there).
+        lines.append(_sessions_remote_stop_copy(_wrs.dormant_hint(peer=peer, address=address)))
     render = _text if ended or method == "pending" else _error
     return render(tool_call_id, "sessions", "\n".join(lines), details=details)
 

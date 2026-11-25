@@ -17235,7 +17235,7 @@ class RelayServer:
         back is ``stop_idle_unconfirmed`` (the owner may or may not have acted),
         distinct from "never asked", so the caller says so honestly. An owner that
         answers ``unknown_op`` despite advertising (a build race across a
-        re-dial) is re-labelled unsupported: the op was not run there.
+        re-dial) is ``stop_idle_not_served``: the frame left, the op did not run.
 
         The hop uses the default budget (``engage_hop_bound_s``), well above the
         owner's own ``control.DEFAULT_TIMEOUT_S`` wait for the idle exit; there is
@@ -17261,22 +17261,40 @@ class RelayServer:
                 f"{self._peer_label(peer)} runs a build without the idle-only stop, so "
                 "nothing was sent and nothing was stopped",
             )
-        try:
-            return self._local_peer_call("net_session_stop_idle", peer, session_id=session_id)
-        except _PeerNoReply:
+        # SENT ON THE LINK THAT WAS CHECKED. ``_local_peer_call`` resolves the link
+        # again, and a re-dial between the two resolutions could hand it one that
+        # never negotiated the feature (agent review round 1 R1), so the frame is
+        # built here and goes out on ``link`` itself — the same frame shape and
+        # hop budget ``_local_peer_call`` uses, with one ``request`` and no retry.
+        reply = link.request(
+            {
+                "op": "net_session_stop_idle",
+                "req": self._next_relay_req(),
+                "locality": "remote",
+                "session_id": session_id,
+            },
+            timeout=engage_hop_bound_s(self.settings.op_wait_s),
+        )
+        if reply is None:
             raise MeshRefusal(
                 "stop_idle_unconfirmed",
                 f"{self._peer_label(peer)} stopped answering after the idle-only stop was "
                 "sent, so whether it acted is unknown; nothing was retried",
-            ) from None
-        except MeshRefusal as refusal:
-            if refusal.code == "unknown_op":
+            )
+        if reply.get("op") == "error":
+            code = str(reply.get("code") or "peer_refused")
+            if code == "unknown_op":
+                # SENT, BUT NOT SERVED — its own code, never ``stop_idle_unsupported``:
+                # that one promises nothing left this device, and here the frame did
+                # (agent review round 1 R2). The owner ran nothing, so nothing stopped.
                 raise MeshRefusal(
-                    "stop_idle_unsupported",
-                    f"{self._peer_label(peer)} does not serve the idle-only stop, so "
-                    "nothing was stopped",
-                ) from None
-            raise
+                    "stop_idle_not_served",
+                    f"{self._peer_label(peer)} did not run the idle-only stop it was "
+                    "sent, so nothing was stopped",
+                )
+            raise MeshRefusal(code, str(reply.get("message") or "that device refused"))
+        detail = reply.get("detail")
+        return detail if isinstance(detail, dict) else {"value": detail}
 
     def _ctl_peer_history(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Fetch one page of a peer's STORED journal, for this device's own viewer.
