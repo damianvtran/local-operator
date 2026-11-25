@@ -957,6 +957,44 @@ def api(rig, monkeypatch):
     return config_dir, store, owner, call
 
 
+@pytest.mark.parametrize(("word", "outcome"), [("deliver", "admitted"), ("discard", "rejected")])
+def test_routes_keep_verified_closed_holds_in_history(api, monkeypatch, word, outcome) -> None:
+    config_dir, store, owner, call = api
+    server, wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    params = {"expected_account_id": "acc_recv"}
+    path = "/v1/desktop/team-bridge/holds"
+    before = call("GET", path, params=params).json()["result"]
+    (live,) = before["items"]
+    assert live["actionable"] is True
+
+    assert call("POST", f"{path}/{MESSAGE_ID}/{word}", json=_body()).status_code == 200
+    pending = call("GET", path, params=params).json()["result"]
+    assert pending.get("history", []) == []
+    assert run()["action"] == ("delivered" if word == "deliver" else "rejected")
+    assert len(server.admits) == 1 and len(wakes) == (word == "deliver")
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == outcome
+    closed = call("GET", path, params=params)
+    assert closed.status_code == 200
+    assert closed.json()["result"]["items"] == []
+    (item,) = closed.json()["result"].get("history", [])
+    assert item["message_id"] == MESSAGE_ID and item["conversation_id"] == CONVERSATION_ID
+    assert item["decision"]["word"] == word and item["decision"]["outcome"] == outcome
+    assert item["seq"] is None and item["thread_root_id"] is None
+    no_controls = ("actionable", "releasable", "can_deliver", "can_discard")
+    assert all(item[key] is False for key in no_controls)
+    assert item.get("discard_receipt") is None and item["deliver_until"] is None
+    assert not {"body", "body_sha256", "signature", "envelope_digest", "categories"} & item.keys()
+    assert call("GET", path, params=params, auth=False).status_code == 401
+    assert call("GET", path, params={"expected_account_id": "acc_other"}).status_code == 409
+
+    # Changing even metadata covered by the signature must remove the row, not
+    # leave a forged conversation link or borrow it from an unsigned source.
+    with store._connect() as conn:
+        conn.execute("UPDATE owner_releases SET conversation_id = 'bcv_forged12'")
+    assert call("GET", path, params=params).json()["result"]["history"] == []
+
+
 def _body(**overrides: Any) -> dict[str, Any]:
     body = {
         "expected_account_id": "acc_recv",
@@ -1653,6 +1691,14 @@ def test_an_expired_unconfirmable_discard_settles_locally_with_an_audit_row(
     (after,) = _listed(call)
     assert after["actionable"] is False and after["discard_receipt"] is None
     assert after["decision"]["outcome"] == LOCAL_TERMINAL
+    # The local-only result is already history even if its old hold has not
+    # been cleared by the connector. The additive listing does not change it.
+    (history,) = call("GET", HOLDS, params={"expected_account_id": "acc_recv"}).json()[
+        "result"
+    ]["history"]
+    assert history["message_id"] == MESSAGE_ID and history["actionable"] is False
+    assert history["decision"]["outcome"] == LOCAL_TERMINAL
+    assert "discard_receipt" not in history
     # Idempotent: the same Discard answers the same row; one audit row.
     again = call(
         "POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"])

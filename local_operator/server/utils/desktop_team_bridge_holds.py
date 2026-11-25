@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from local_operator.team_bridge.store import (
 from local_operator.team_bridge.types import (
     CONVERSATION_FEED_KIND,
     CONVERSATION_FEED_TYPE,
+    CONVERSATION_ID_PATTERN,
     is_conversation_message_id,
     parse_conversation_ref_value,
 )
@@ -68,6 +70,10 @@ _SCREENING_KIND = frozenset(
 #: outcome (``refused:<code>``) is shown as ``refused``. ``pending`` is the
 #: only non-final one: the local terminal is final for the person's purposes.
 _OUTCOME_WORDS = frozenset({"pending", "admitted", "rejected", OWNER_RELEASE_LOCAL_TERMINAL})
+
+#: One desktop audit page, like the adjacent owner-audit lists (max 100).
+#: Bounds signature checks and response size, not persistence or hold expiry.
+_HISTORY_LIMIT = 100
 
 
 class HoldRefused(Exception):
@@ -182,7 +188,7 @@ def _iso(seconds: float | None) -> str | None:
 
 
 def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dict[str, Any]:
-    """``GET …/holds``: every conversation hold on this machine, metadata only."""
+    """``GET …/holds``: active conversation holds and recent settled decisions."""
 
     store = Store(config_dir)
     now = time.time() if now is None else float(now)
@@ -308,7 +314,69 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         "enabled": enabled,
         "key_protection": hr.key_protection(config_dir),
         "items": items,
+        "history": _hold_history(store, owner),
     }
+
+
+def _hold_history(store: Store, owner: Any) -> list[dict[str, Any]]:
+    """Project the signed decision, never another delivery or discard capability.
+
+    The signature binds the owner, conversation, message and decision, not the
+    connector's outcome; the latter is a closed local-store status, not proof
+    of hub delivery. The release does not bind a thread, sequence or original
+    hold time. Do not reconstruct those from unverified refs or guess them.
+    """
+
+    releases = store.owner_release_history(owner, limit=_HISTORY_LIMIT)
+    if not releases:
+        return []
+    spki, _ = hr.anchor_spki(store.config_dir)
+    if spki is None:
+        return []
+    items: list[dict[str, Any]] = []
+    for release in releases:
+        bare = str(release["message_id"])
+        conversation_id = str(release["conversation_id"])
+        code = str(release["hold_code"])
+        word = release["word"]
+        if (
+            not is_conversation_message_id(bare)
+            or re.fullmatch(CONVERSATION_ID_PATTERN, conversation_id) is None
+            or code not in hr.RELEASABLE_HOLD_CODES
+            or word != ("deliver" if release["outcome"] == "admitted" else "discard")
+        ):
+            continue
+        try:
+            if not hr.verify_row(release, spki):
+                continue
+            decided_at = _iso(release["decided_at"])
+        except (ValueError, TypeError, OverflowError, OSError):
+            # Damaged rows have no projection, even when other history is valid.
+            continue
+        items.append(
+            {
+                "message_id": bare,
+                "conversation_id": conversation_id,
+                "seq": None,
+                "thread_root_id": None,
+                "held_at": None,
+                "first_held_at": None,
+                "kind": "owner_decision",
+                "hold_code": code,
+                "releasable": False,
+                "can_deliver": False,
+                "can_discard": False,
+                "actionable": False,
+                "unscreened": not release["screener_model"] and not release["screener_verdict"],
+                "deliver_until": None,
+                "decision": {
+                    "word": word,
+                    "decided_at": decided_at,
+                    "outcome": _outcome_word(release),
+                },
+            }
+        )
+    return items
 
 
 def _outcome_word(release: dict[str, Any]) -> str:

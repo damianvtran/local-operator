@@ -11365,6 +11365,33 @@ class Store:
         row["owner_key"] = _owner_key(owner)
         return row
 
+    def owner_release_history(self, owner: OwnerSnapshot, *, limit: int) -> list[dict[str, Any]]:
+        """Recent settled releases for this exact live owner, without reading hold rows.
+
+        Connector settlement removes the temporary hold but keeps the signed
+        release. Pending and refused attempts can still move, so they are not
+        history. The enrollment check is part of the SELECT, so an old owner
+        snapshot cannot read a preceding generation's releases.
+        """
+
+        return self._work_scope_rows(
+            "SELECT r.* FROM owner_releases r WHERE r.owner_key = ? "
+            "AND r.creator_generation = ? AND r.outcome IN ('admitted', 'rejected', ?) "
+            "AND EXISTS (SELECT 1 FROM enrollments e WHERE e.owner_key = r.owner_key "
+            "AND e.credential_id = ? AND e.tenant_id = ? AND e.endpoint_id = ? "
+            "AND e.enrollment_generation = r.creator_generation AND e.state = 'committed') "
+            "ORDER BY r.decided_at DESC, r.message_id LIMIT ?",
+            (
+                _owner_key(owner),
+                owner.enrollment_generation,
+                OWNER_RELEASE_LOCAL_TERMINAL,
+                owner.credential_id,
+                owner.tenant_id,
+                owner.endpoint_id,
+                limit,
+            ),
+        )
+
     def record_owner_release(self, owner: OwnerSnapshot, row: Mapping[str, Any]) -> dict[str, Any]:
         """WRITE-ONCE per (owner, message). Same word again → the existing row;
         the other word → ``already_decided``. The caller verified the signature."""
