@@ -11,8 +11,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import secrets
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -23,6 +26,7 @@ from uuid import uuid4
 
 from smoke_wheel import (
     INDEX_URL,
+    REAP_KILL_WAIT_SECONDS,
     SmokeError,
     _clean_env,
     _free_loopback_port,
@@ -55,6 +59,70 @@ ATTACHMENT_CODE = "unresolved_attachment"
 ATTACHMENT_MESSAGE = "The attached profile or team could not be restored."
 # Same cold runtime/server startup allowance as the wheel startability smoke.
 RUNTIME_TIMEOUT = 90
+OWNER_ENV = "LOCAL_OPERATOR_UPGRADE_SMOKE_OWNER"
+
+
+@contextlib.contextmanager
+def cleanup_after(cleanup):
+    # A teardown failure is useful evidence, but must not replace the send or
+    # persistence failure that caused teardown to run in the first place.
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            cleanup()
+        except Exception as error:
+            primary.add_note(f"Smoke teardown also failed: {error}")
+        raise
+    else:
+        cleanup()
+
+
+def owned_processes(owner):
+    """Find exact fixture descendants even before they publish a registry row."""
+    stamp = f"{OWNER_ENV}={owner}"
+    if sys.platform == "linux":
+        # /proc preserves environment-entry boundaries and works independently
+        # of argv (the runtime can rename itself). Zombies have no environment.
+        needle = stamp.encode()
+        owned = set()
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdecimal():
+                try:
+                    if needle in (entry / "environ").read_bytes().split(b"\0"):
+                        owned.add(int(entry.name))
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    pass
+        return owned
+    if sys.platform == "darwin":
+        # BSD ps exposes argv followed by environment. The unguessable value is
+        # passed only in the fixture environment, never on a command line.
+        rows = subprocess.run(
+            ["ps", "-Eww", "-axo", "pid=,command="],
+            timeout=REAP_KILL_WAIT_SECONDS,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=True,
+        ).stdout.splitlines()
+        return {int(fields[0]) for row in rows if stamp in (fields := row.split())[1:]}
+    raise SmokeError(f"no fixture ownership discovery on {sys.platform}")
+
+
+def reap_owned(owner):
+    # Ingress is already down. Sweep again after signaling, in case one of the
+    # detached children was still forking when we took the first snapshot.
+    deadline = time.monotonic() + REAP_KILL_WAIT_SECONDS
+    while pids := owned_processes(owner):
+        for pid in pids:
+            # Recheck ownership immediately before signaling; never target an
+            # unrelated lop, process group, or PID from a stale registry row.
+            if pid in owned_processes(owner):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        if time.monotonic() >= deadline:
+            raise SmokeError(f"fixture-owned processes still alive after teardown: {sorted(pids)}")
+        time.sleep(0.05)
 
 
 def require(condition, detail):
@@ -78,6 +146,8 @@ class Device:
         self.root = root
         self.lop = lop
         self.env = _clean_env(root)
+        self.owner = secrets.token_hex(16)
+        self.env[OWNER_ENV] = self.owner
         self.config = Path(self.env["LOCAL_OPERATOR_CONFIG_DIR"])
         settings = "values:\n  hosting: test\n  model_name: mock-model\n"
         if relay_port is not None:
@@ -117,13 +187,13 @@ class Device:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        try:
-            yield proc
-        except Exception:
-            print(f"{label} log:\n{_tail(log_path.read_text(errors='replace'))}", flush=True)
-            raise
-        finally:
-            _reap(proc)
+        with cleanup_after(lambda: _reap(proc)):
+            try:
+                yield proc
+            except Exception as error:
+                with contextlib.suppress(OSError):
+                    error.add_note(f"{label} log:\n{_tail(log_path.read_text(errors='replace'))}")
+                raise
 
     @contextlib.contextmanager
     def server(self, label):
@@ -178,10 +248,10 @@ class Device:
     def session_dir(self, sid):
         return self.config / "sessions" / sid
 
-    def stop_sessions(self):
-        # The CLI scopes discovery to this synthetic config; owned runtimes
-        # detach, so reaping the HTTP/relay process group alone is not enough.
-        self.cli("stop", "--all", "--yes")
+    def cleanup(self):
+        # Enter BEFORE any ingress. Unwinding closes HTTP/relay first, so a
+        # stalled request cannot launch a new runtime after the exact-PID sweep.
+        return cleanup_after(lambda: reap_owned(self.owner))
 
 
 def send(device, port, sid, text):
@@ -197,15 +267,41 @@ def transcript(device, sid):
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
-def wait_for_reply(device, sid, text, old_reply_count):
-    def replied():
-        body = transcript(device, sid)
-        return text in body and body.count(MOCK_REPLY) > old_reply_count
+def persisted_reply(device, sid, prompt):
+    # Each send uses a distinct prompt. Match its user turn, then assistant
+    # text in the same turn; custom, tool and pre-upgrade rows prove nothing.
+    # Drop only a partial tail while the writer is appending the next row.
+    waiting_for_assistant = False
+    for line in transcript(device, sid).splitlines(keepends=True):
+        if not line.endswith("\n"):
+            break
+        record = json.loads(line)
+        payload = record.get("payload", {})
+        if record.get("type") != "message" or payload.get("kind") != "message":
+            continue
+        # The journal omits the default TextContent discriminator.
+        text = "".join(
+            block["text"]
+            for block in payload.get("content", [])
+            if block.get("type", "text") == "text"
+        )
+        if payload.get("role") == "user":
+            waiting_for_assistant = text == prompt
+        elif payload.get("role") == "assistant" and waiting_for_assistant and MOCK_REPLY in text:
+            return True
+    return False
 
-    until(f"{sid} deterministic reply to {text!r}", replied)
+
+def wait_for_reply(device, sid, text):
+    until(f"{sid} deterministic reply to {text!r}", lambda: persisted_reply(device, sid, text))
 
 
 def seed(device):
+    with device.cleanup():
+        return seed_sessions(device)
+
+
+def seed_sessions(device):
     device.cli("teams", "create", TEAM, "--manager", "manager")
     first = "First operator turn before upgrading"
     with device.server("legacy") as port:
@@ -220,12 +316,10 @@ def seed(device):
         )
         require(status == 200, f"create operator chat: {status} {result}")
         operator_sid = result["result"]["session_id"]
-        try:
-            status, result = send(device, port, operator_sid, first)
-            require(status == 200, f"legacy operator admission: {status} {result}")
-            wait_for_reply(device, operator_sid, first, 0)
-        finally:
-            device.stop_sessions()
+        status, result = send(device, port, operator_sid, first)
+        require(status == 200, f"legacy operator admission: {status} {result}")
+        wait_for_reply(device, operator_sid, first)
+        device.cli("stop", operator_sid, "--json")
 
     work = "First workstream turn before upgrading"
     # A terminal owner's --workstream is not marked as delegated. Use the
@@ -253,14 +347,14 @@ def seed(device):
         if kind == "workstream":
             origin = json.loads((directory / "origin.json").read_text())
             require(origin["origin"] == "agent-workstream", f"not a workstream: {origin}")
-        require(MOCK_REPLY in transcript(device, sid), f"{kind} did not complete on the baseline")
+        prompt = first if kind == "operator" else work
+        require(persisted_reply(device, sid, prompt), f"{kind} did not complete on the baseline")
         print(f"BASELINE {kind}: {sid} attached to {TEAM}; reply persisted; no binding", flush=True)
     return {"operator": operator_sid, "workstream": work_sid}
 
 
 def resume(device, port, cases, *, expect_broken):
     for kind, sid in cases.items():
-        before = transcript(device, sid)
         follow_up = f"First {kind} follow-up after upgrading"
         status, result = send(device, port, sid, follow_up)
         if expect_broken:
@@ -279,7 +373,7 @@ def resume(device, port, cases, *, expect_broken):
                 status == 200 and result["result"]["status"] == "admitted",
                 f"{kind}: follow-up failed: HTTP {status} {result}",
             )
-            wait_for_reply(device, sid, follow_up, before.count(MOCK_REPLY))
+            wait_for_reply(device, sid, follow_up)
             require(
                 (device.session_dir(sid) / "local-team-binding.json").is_file(),
                 f"{kind}: continued without restoring the team binding",
@@ -334,7 +428,6 @@ def enroll(owner, viewer):
 
 def resume_over_mesh(owner, viewer, owner_id, cases):
     for kind, sid in cases.items():
-        before = transcript(owner, sid)
         text = f"First authorized mesh follow-up for {kind}"
         receipt = json.loads(
             viewer.cli(
@@ -347,7 +440,7 @@ def resume_over_mesh(owner, viewer, owner_id, cases):
             and receipt["session_id"] == sid,
             f"mesh {kind}: unexpected send receipt {receipt}",
         )
-        wait_for_reply(owner, sid, text, before.count(MOCK_REPLY))
+        wait_for_reply(owner, sid, text)
         require(
             (owner.session_dir(sid) / "local-team-binding.json").is_file(),
             f"mesh {kind}: team was not restored",
@@ -407,29 +500,20 @@ def run(python, lop, root, wheel):
     candidate = Device(root / "candidate", lop)
     candidate_cases = seed(candidate)
     owner = Device(root / "owner", lop, relay_port=_free_loopback_port())
-    with owner.relay():
-        viewer = Device(root / "viewer", lop, relay_port=_free_loopback_port())
+    viewer = Device(root / "viewer", lop, relay_port=_free_loopback_port())
+    with owner.cleanup(), viewer.cleanup(), owner.relay():
         owner_id = enroll(owner, viewer)
-        mesh_cases = seed(owner)
+        mesh_cases = seed_sessions(owner)
 
     install(python, negative, BROKEN, "0.113.0")
-    with negative.server("negative") as port:
-        try:
-            resume(negative, port, negative_cases, expect_broken=True)
-        finally:
-            negative.stop_sessions()
+    with negative.cleanup(), negative.server("negative") as port:
+        resume(negative, port, negative_cases, expect_broken=True)
 
     install(python, candidate, str(wheel), wheel.name.split("-")[1])
-    with candidate.server("candidate") as port:
-        try:
-            resume(candidate, port, candidate_cases, expect_broken=False)
-        finally:
-            candidate.stop_sessions()
-    with owner.relay(), viewer.relay():
-        try:
-            resume_over_mesh(owner, viewer, owner_id, mesh_cases)
-        finally:
-            owner.stop_sessions()
+    with candidate.cleanup(), candidate.server("candidate") as port:
+        resume(candidate, port, candidate_cases, expect_broken=False)
+    with owner.cleanup(), viewer.cleanup(), owner.relay(), viewer.relay():
+        resume_over_mesh(owner, viewer, owner_id, mesh_cases)
 
 
 def main():
