@@ -697,17 +697,204 @@ def test_a_refusal_after_sealing_leaves_no_snapshot_directory(serving, monkeypat
     assert _version_dirs(serving.lane) == []
 
 
-@pytest.mark.parametrize("condition", ["ambiguous", "unknown"])
-def test_owner_account_state_is_generic_before_p1(serving, monkeypatch, condition):
-    """S1-2: before P1, the peer cannot learn the owner's login inventory."""
-    if condition == "ambiguous":
-        _login_b(serving.lane.rig)
-    else:
+def _unapprove(rig):
+    """One usable login, and no approval slot at all for any requester."""
+    path = F._path(rig.root)
+    path.rename(path.with_name("set-aside-approvals.json"))
+
+
+def _revoke(rig):
+    # Real signed revoke, as the reader's own revocation test does.
+    revocation = binding_tests.approval_tests.request(rig, action="revoke")
+    binding_tests.approval_tests.approve(rig, revocation)
+    F.revoke(revocation["approval_id"], F.expected(revocation), rig.root)
+
+
+@pytest.mark.parametrize(
+    "condition", ["zero", "ambiguous", "unknown", "no_slot", "revoked", "account_unverified"]
+)
+def test_owner_account_state_is_generic_before_p1(serving, monkeypatch, caplog, condition):
+    """S1-2/S2-2: before P1, the peer learns nothing of the owner's logins.
+
+    ``no_slot``, ``revoked`` and ``account_unverified`` are refusals P1 itself
+    raises, reachable only with exactly one usable login, so they must answer
+    exactly as 0, 2 or unknown logins do.
+    """
+    rig = serving.lane.rig
+    if condition == "zero":
+        _disable(rig, rig.row.id)
+    elif condition == "ambiguous":
+        _login_b(rig)
+    elif condition == "unknown":
         monkeypatch.setattr(AuthStore, "native_oauth_inventory", staticmethod(lambda path: None))
+    elif condition == "no_slot":
+        _unapprove(rig)
+    elif condition == "revoked":
+        _revoke(rig)
+    else:
+        rig.observed["error"] = RuntimeError("synthetic /me outage")
+    caplog.set_level("WARNING", logger=_serve_module().__name__)
     with pytest.raises(MeshRefusal) as refused:
         _call(serving)
     assert _code(refused) == "mentioned_file_unavailable"
     assert refused.value.sentence == "the owner cannot prepare this file"
+    # The owner keeps the typed reason.
+    assert any(
+        "answered to the peer as mentioned_file_unavailable" in record.getMessage()
+        for record in caplog.records
+    )
+    assert _version_dirs(serving.lane) == [] and _held_count(serving) == 0
+
+
+def test_an_unapproved_peer_cannot_tell_whether_the_named_file_changed(serving, no_reads):
+    """S2-1: no proof lookup before P1, so file drift is not observable."""
+    _unapprove(serving.lane.rig)
+    answers = []
+    for changed in (False, True):
+        if changed:
+            with serving.lane.target.open("ab") as handle:
+                handle.write(b" appended after the mention")
+        with pytest.raises(MeshRefusal) as refused:
+            _call(serving)
+        answers.append((_code(refused), refused.value.sentence))
+        # The oracle itself: no proof lookup may run before P1 refuses.
+        assert no_reads["proof"] == 0, (changed, answers)
+    assert answers[0] == answers[1], answers
+    assert answers[0] == ("mentioned_file_unavailable", "the owner cannot prepare this file")
+    assert no_reads["read_span"] == 0
+    assert read_tests.rows(serving.lane) == [] and _version_dirs(serving.lane) == []
+
+
+def test_a_changed_file_restat_drops_the_held_version(serving):
+    """Q2-1: a held version that no longer prepares is removed, even when
+    its re-establishment is refused too."""
+    _call(serving)
+    assert len(_version_dirs(serving.lane)) == 1
+    with serving.lane.target.open("ab") as handle:
+        handle.write(b" appended after the stat")
+    with pytest.raises(MeshRefusal):
+        _call(serving)
+    assert _version_dirs(serving.lane) == []
+    assert _held_count(serving) == 0
+
+
+def test_restat_after_relogin_is_named_relogin_once_verified(serving):
+    """S2-5: a verified requester's re-stat after a relogin says relogin."""
+    _call(serving)
+    rig = serving.lane.rig
+    rig.auth._conn.execute(
+        "UPDATE auth_credentials SET login_incarnation = 'relogged' WHERE id = ?", (rig.row.id,)
+    )
+    rig.auth._conn.commit()
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving)
+    assert _code(refused) == "mentioned_file_owner_relogin"
+    assert _version_dirs(serving.lane) == [] and _held_count(serving) == 0
+
+
+def _readers_alive():
+    return [t for t in threading.enumerate() if t.name == "mesh-mentioned-file" and t.is_alive()]
+
+
+def _drain(serving, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while (_readers_alive() or _version_dirs(serving.lane)) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def gated_reads(monkeypatch):
+    """Every source/snapshot read blocks until ``gate`` is set (a stalled mount)."""
+    gate = threading.Event()
+    entered: list[threading.Thread] = []
+    real_span = files._read_span
+
+    def span(*args, **kwargs):
+        entered.append(threading.current_thread())
+        gate.wait(30)
+        return real_span(*args, **kwargs)
+
+    monkeypatch.setattr(files, "_read_span", span)
+    try:
+        yield SimpleNamespace(gate=gate, entered=entered)
+    finally:
+        gate.set()
+        deadline = time.monotonic() + 30
+        while _readers_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+
+def test_abandoned_readers_stay_within_the_reader_cap(serving, monkeypatch, gated_reads):
+    """R2-1: timed-out readers keep their slot until done; extras are refused busy."""
+    serve_module = _serve_module()
+    cap = 2
+    # raising=False so the unfixed module (no cap at all) fails on the counts.
+    monkeypatch.setattr(serve_module, "_READERS", threading.BoundedSemaphore(cap), raising=False)
+    monkeypatch.setattr(serve_module, "MENTIONED_FILE_OP_TIMEOUT_S", 0.05)
+    codes, peak = [], 0
+    for _ in range(cap * 3):
+        with pytest.raises(MeshRefusal) as refused:
+            _call(serving)
+        codes.append(_code(refused))
+        peak = max(peak, len(_readers_alive()))
+    assert peak <= cap, (peak, codes)
+    assert codes == ["mentioned_file_owner_timeout"] * cap + ["mentioned_file_owner_busy"] * (
+        cap * 2
+    )
+    gated_reads.gate.set()
+    _drain(serving)
+    assert _readers_alive() == [] and _version_dirs(serving.lane) == []
+    assert _held_count(serving) == 0
+    slots = serve_module._READERS
+    taken = [slots.acquire(blocking=False) for _ in range(cap)]
+    for _ in range(sum(taken)):
+        slots.release()
+    assert all(taken), "every reader slot came back"
+
+
+def test_a_spent_budget_refuses_before_any_work(serving, monkeypatch, no_reads):
+    """R2-3: a request that queued past its budget starts nothing."""
+    serve_module = _serve_module()
+    monkeypatch.setattr(
+        serve_module, "slow_op_remaining_s", lambda: serve_module.SLOW_REPLY_MARGIN_S - 1
+    )
+    with pytest.raises(MeshRefusal) as refused:
+        _call(serving)
+    assert _code(refused) == "mentioned_file_owner_timeout"
+    _drain(serving)
+    assert no_reads == {"read_span": 0, "accessor": 0, "proof": 0}
+    assert read_tests.rows(serving.lane) == [] and _version_dirs(serving.lane) == []
+
+
+def test_concurrent_stats_of_one_row_share_one_version(serving, gated_reads):
+    """R2-2: a second concurrent stat reuses the first's version, never evicts it."""
+    results: dict[int, Any] = {}
+
+    def stat(index):
+        try:
+            results[index] = _call(serving)
+        except MeshRefusal as refusal:
+            results[index] = refusal.code
+
+    workers = [threading.Thread(target=stat, args=(index,)) for index in range(2)]
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + 10
+    while len(_readers_alive()) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # Unfixed, both reach the stalled read; fixed, the second waits its turn.
+    deadline = time.monotonic() + 1
+    while len({t.ident for t in gated_reads.entered}) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    gated_reads.gate.set()
+    for worker in workers:
+        worker.join(timeout=30)
+    assert all(isinstance(results.get(i), dict) for i in range(2)), results
+    assert results[0]["version"] == results[1]["version"]
+    for index in range(2):
+        fetch = _call(serving, phase="fetch", file_version=results[index]["version"], length=4)
+        assert fetch["bytes"] == 4
+    assert len(_version_dirs(serving.lane)) == 1 and _held_count(serving) == 1
 
 
 def test_relogin_between_stat_and_fetch_is_named_relogin(serving):

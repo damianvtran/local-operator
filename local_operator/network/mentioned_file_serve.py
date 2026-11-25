@@ -8,8 +8,11 @@ is re-made on each phase: P1's live account/device binding
 any lookup, (2) derives the OWNER-side account inputs through
 ``file_device_approval._owner_serving_account`` — never from the approval slot,
 see that function for the trap — (3) runs the reader on its own event loop, off
-the relay's shared page loop, and (4) keeps at most one sealed version per
-transcript row per link, removing the ones it supersedes.
+the relay's shared page loop, (4) keeps at most one sealed version per
+transcript row per link, removing the ones it supersedes or that stop
+preparing, with one establishment in flight per row per link, and (5) caps the
+reader threads alive in this process at the relay's own slow-op bound, counted
+until each thread's work truly ends (a timed-out reader keeps its slot).
 
 REACHABILITY. ``files.install`` imports this module only when the operator set
 ``mentioned_file_serving: true``; with the shipped default nothing here, and
@@ -29,10 +32,16 @@ live file, and a stat/mtime stamp cannot name that). Requests follow
 fetch spelling); both mean the same, and naming two different values is refused.
 
 WHAT A PEER LEARNS BEFORE P1. Until this link has a sealed version, the
-requester has not been verified by P1, so every OWNER-ACCOUNT condition (no
-native login, several, unknown inventory, a relogin) is answered with the same
-generic ``mentioned_file_unavailable``; the typed code goes to the owner's log.
-Once the link holds a version (P1 verified it), a relogin is answered typed.
+requester has not been verified by P1, so EVERY refusal from the account
+accessor, the reader or P1 itself (no native login, several, unknown inventory,
+a relogin, no approval slot, revoked, ``/me`` failing) is answered with the same
+generic ``mentioned_file_unavailable``; the typed code goes to the owner's log
+(PR #4563 S1-2, S2-2). No proof lookup runs before P1 either, so whether the
+named file changed since it was mentioned is not observable (S2-1). Once the
+link holds a version (P1 verified it), refusals are answered typed. The only
+typed answers before P1 are ``mentioned_file_owner_timeout`` and
+``mentioned_file_owner_busy``: they describe the owner's load, never its
+accounts or files.
 """
 
 from __future__ import annotations
@@ -58,7 +67,11 @@ from local_operator.network import file_device_approval as F
 from local_operator.network import files
 from local_operator.network import mentioned_file_read as M
 from local_operator.network import sync
-from local_operator.network.relay import SLOW_REPLY_MARGIN_S, slow_op_remaining_s
+from local_operator.network.relay import (
+    SLOW_OP_MAX_PENDING,
+    SLOW_REPLY_MARGIN_S,
+    slow_op_remaining_s,
+)
 from local_operator.network.types import MeshRefusal
 from local_operator.session import file_provenance as P
 
@@ -78,6 +91,18 @@ OP = "net_mentioned_file"
 #: derived from the bound ``net_file_get`` runs under for the same work. The
 #: remaining slow-op budget lowers it further when the request queued.
 MENTIONED_FILE_OP_TIMEOUT_S = files.FILE_OP_DEADLINE_S - SLOW_REPLY_MARGIN_S
+
+#: Reader threads alive in this process (PR #4563 R2-1). The relay's slow-op
+#: slots bound HANDLERS, and a handler returns at its wait budget while a reader
+#: stalled in file IO (a hung network mount, a failing disk) keeps running with
+#: an open source fd, an AuthStore connection and a half-written snapshot. So a
+#: retrying peer could grow those without bound. A slot is taken BEFORE the
+#: thread starts and given back only when its coroutine has really ended, so
+#: abandoned readers count until they are done. Not a new measured cap: it is
+#: the relay's own ``SLOW_OP_MAX_PENDING``, the bound ``net_file_get`` already
+#: runs under for the same work. Process-wide on purpose: threads, fds and disk
+#: are process resources, whichever relay instance started them.
+_READERS = threading.BoundedSemaphore(SLOW_OP_MAX_PENDING)
 
 _HEX32 = re.compile(r"[a-f0-9]{32}\Z")
 _DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
@@ -111,16 +136,18 @@ def _generic_refusal() -> MeshRefusal:
 
 
 def _owner_refusal(refusal: MeshRefusal, *, typed: bool) -> MeshRefusal:
-    """An owner-account refusal as the PEER may see it (S1-2).
+    """A refusal as the PEER may see it (S1-2, S2-2).
 
-    Before P1 has verified this requester, the typed code would tell any view
-    member how many native logins the owner has and whether a relogin is under
-    way. It is kept in the owner's log, and the peer gets the generic refusal.
+    Before P1 has verified this requester, a typed code would tell any view
+    member how many native logins the owner has, whether a relogin is under
+    way, whether any approval slot exists, or whether the owner's ``/me`` check
+    is failing: exactly one usable login is the only state that reaches P1.
+    It is kept in the owner's log, and the peer gets the generic refusal.
     """
     if typed:
         return refusal
     logger.warning(
-        "%s: owner account refusal %s answered to the peer as mentioned_file_unavailable",
+        "%s: refusal %s before P1 answered to the peer as mentioned_file_unavailable",
         OP,
         refusal.code,
     )
@@ -300,6 +327,11 @@ class MentionedFileServing:
         self.server = server
         self._lock = threading.Lock()
         self._versions: dict[str, tuple[Any, dict[_Key, _Held]]] = {}
+        # One stat per (link, row) at a time (R2-2). Without it two concurrent
+        # stats both establish and the second supersedes, and so removes, the
+        # version the first had just handed its peer. A waiting stat then finds
+        # the first one's version held and reuses it.
+        self._flights: dict[tuple[str, _Key], concurrent.futures.Future[None]] = {}
 
     def forget_link(self, link: "PeerLink", _reason: str = "") -> None:
         with self._lock:
@@ -325,6 +357,43 @@ class MentionedFileServing:
             if held is None or held[0] is not link:
                 return None
             return held[1].get(key)
+
+    async def _take_flight(
+        self, link: "PeerLink", key: _Key, abandoned: threading.Event
+    ) -> concurrent.futures.Future[None]:
+        """Become the one stat of ``key`` on ``link``, waiting out any other first."""
+        while True:
+            with self._lock:
+                flight = self._flights.get((link.link_id, key))
+                if flight is None:
+                    flight = concurrent.futures.Future()
+                    self._flights[(link.link_id, key)] = flight
+                    return flight
+            await asyncio.wrap_future(flight)
+            if abandoned.is_set():
+                # Its peer was already told it timed out: do no work for nobody.
+                raise _generic_refusal()
+
+    def _land(self, link: "PeerLink", key: _Key, flight: concurrent.futures.Future[None]) -> None:
+        with self._lock:
+            if self._flights.get((link.link_id, key)) is flight:
+                del self._flights[(link.link_id, key)]
+        flight.set_result(None)
+
+    def _drop(self, link: "PeerLink", key: _Key, entry: _Held) -> None:
+        """Stop holding ``entry`` (it no longer prepares) and remove its directory.
+
+        Q2-1: otherwise a re-stat whose re-establishment is refused (the file
+        changed, so the proof no longer matches) left the dead copy held and on
+        disk until the link closed. Only the exact entry still held is dropped,
+        through the same identity-checked removal every other path uses.
+        """
+        with self._lock:
+            held = self._versions.get(link.link_id)
+            if held is None or held[0] is not link or held[1].get(key) is not entry:
+                return
+            del held[1][key]
+        _remove_version(entry.version)
 
     def _install(self, link: "PeerLink", key: _Key, entry: _Held) -> None:
         """Hold ``entry`` as the link's ONE version for ``key``; remove what it replaces."""
@@ -367,6 +436,18 @@ class MentionedFileServing:
         itself, never under running work (R1-3). Cancelling it is not attempted:
         it is inside synchronous file IO and could not be interrupted anyway.
         """
+        # R2-3: a request that queued past its budget would be refused at once
+        # anyway; starting it would still run the whole audited establishment.
+        budget = _wait_budget()
+        if budget <= 0:
+            coroutine.close()
+            raise F._refuse("mentioned_file_owner_timeout")
+        # R2-1: bound live readers, abandoned ones included (see _READERS). The
+        # same semaphore object is released, even if the module global moves.
+        slots = _READERS
+        if not slots.acquire(blocking=False):
+            coroutine.close()
+            raise F._refuse("mentioned_file_owner_busy")
         outcome: concurrent.futures.Future[Any] = concurrent.futures.Future()
 
         def _late(done: concurrent.futures.Future[Any]) -> None:
@@ -376,7 +457,13 @@ class MentionedFileServing:
 
         def _drive() -> None:
             try:
-                result = asyncio.run(coroutine)
+                try:
+                    result = asyncio.run(coroutine)
+                finally:
+                    # The reader's work, fds and store are finished here, timed
+                    # out or not; released before the waiter can see the result
+                    # so back-to-back requests never read a stale "busy".
+                    slots.release()
             except BaseException as error:  # noqa: BLE001 — handed to the waiter
                 outcome.set_exception(error)
             else:
@@ -386,10 +473,11 @@ class MentionedFileServing:
         try:
             runner.start()
         except BaseException:
+            slots.release()
             coroutine.close()
             raise
         try:
-            return outcome.result(timeout=_wait_budget())
+            return outcome.result(timeout=budget)
         except concurrent.futures.TimeoutError:
             # The peer is told now; a late establishment must not then hold a
             # version nobody was given (``_serve`` removes it instead).
@@ -461,6 +549,24 @@ class MentionedFileServing:
         entry: _Held | None,
         abandoned: threading.Event,
     ) -> dict[str, Any]:
+        if entry is not None:
+            return await self._answer(link, root, request, read, key, entry, abandoned)
+        flight = await self._take_flight(link, key, abandoned)
+        try:
+            return await self._answer(link, root, request, read, key, entry, abandoned)
+        finally:
+            self._land(link, key, flight)
+
+    async def _answer(
+        self,
+        link: "PeerLink",
+        root: Path,
+        request: dict[str, Any],
+        read: B.ReadBinding,
+        key: _Key,
+        entry: _Held | None,
+        abandoned: threading.Event,
+    ) -> dict[str, Any]:
         reuse = self._held(link, key) if entry is None else None
         # A held version means P1 verified this requester on this link already.
         verified_before = entry is not None or reuse is not None
@@ -475,9 +581,12 @@ class MentionedFileServing:
                 raise _owner_refusal(refusal, typed=verified_before) from None
             if entry is not None and account.login_incarnation != entry.incarnation:
                 raise F._refuse("mentioned_file_owner_relogin")
-            if reuse is not None and account.login_incarnation != reuse.incarnation:
-                # A relogin since this was sealed: never reuse it; a fresh
+            relogged = reuse is not None and account.login_incarnation != reuse.incarnation
+            if reuse is not None and relogged:
+                # A relogin since this was sealed: never reuse it, and stop
+                # holding it (it can never prepare again); a fresh
                 # establishment re-verifies P1 under the new login.
+                self._drop(link, key, reuse)
                 reuse = None
             reader = M.OwnerMentionedFileReader(
                 incoming_link=link,
@@ -493,15 +602,24 @@ class MentionedFileServing:
                 if entry is not None:
                     held, prepared = entry, await reader.prepare(entry.version, read)
                 else:
-                    held, prepared, fresh = await self._stat(reader, root, read, reuse, account)
-            except MeshRefusal:
+                    held, prepared, fresh = await self._stat(
+                        link, key, reader, root, read, reuse, account
+                    )
+            except MeshRefusal as refusal:
                 # A relogin mid-request surfaces inside verify_live as a
                 # generic no-active-slot refusal; name it for what it is.
                 try:
                     account.require_unchanged(auth, root)
                 except MeshRefusal as moved:
                     raise _owner_refusal(moved, typed=verified_before) from None
-                raise
+                if relogged:
+                    # S2-5: this requester was verified on this link, and the
+                    # login it was verified under is gone; say so, as fetch and
+                    # verify of the old version do.
+                    raise F._refuse("mentioned_file_owner_relogin") from None
+                # S2-2: before P1, P1's own refusals are as revealing as the
+                # accessor's (they exist only when exactly one login is usable).
+                raise _owner_refusal(refusal, typed=verified_before) from None
             try:
                 account.require_unchanged(auth, root)
             except MeshRefusal as moved:
@@ -517,6 +635,8 @@ class MentionedFileServing:
 
     async def _stat(
         self,
+        link: "PeerLink",
+        key: _Key,
         reader: M.OwnerMentionedFileReader,
         root: Path,
         read: B.ReadBinding,
@@ -536,19 +656,23 @@ class MentionedFileServing:
             try:
                 return reuse, await reader.prepare(reuse.version, again), False
             except MeshRefusal:
-                pass  # no longer prepares: establish afresh, which supersedes it
-        # Before establishing, so a proof that cannot name the file refuses
-        # before any admission row or snapshot exists (S1-4). The reader then
-        # re-verifies this same proof under P1 before it reads a byte.
-        name = self._name(root, read)
+                # No longer prepares: drop it now, whatever the fresh
+                # establishment below then answers (Q2-1).
+                self._drop(link, key, reuse)
         initial = M.begin_establishment(read)
         version: Any = None
         try:
             version, prepared = await reader.establish(initial)
             mtime_ns = self._sealed_mtime(version)
+            # AFTER establish, whose first step is P1 (S2-1): a proof lookup
+            # before it told an unapproved peer whether the named file changed
+            # since it was mentioned. A refusal here still strands nothing
+            # (S1-4): the cleanup below removes this call's directory.
+            name = self._name(root, read)
         except BaseException:
-            # A failed establishment leaves a pending (or, after _describe, a
-            # sealed) directory nothing will ever load. It is this call's own.
+            # A failed establishment leaves a pending (or, when _sealed_mtime
+            # or _name refuses, a sealed) directory nothing will ever load. It
+            # is this call's own.
             _remove_version_directory(
                 root / "sessions" / read.session_id / M._DIRECTORY / initial.nonce,
                 initial.nonce,

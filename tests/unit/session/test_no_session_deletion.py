@@ -79,21 +79,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # the shape, not the location: the nonce must be 32 hex and equal the leaf
     # name, the parent must be named ``mentioned-file-versions``, the parent is
     # opened no-follow from the anchor, the leaf is lstat'ed (a link or non-dir
-    # refuses) and must match the seal's recorded (dev, ino); the unlinks are of
+    # refuses) and, when a seal exists, must match its recorded (dev, ino);
+    # otherwise (a failed establishment) the leaf is the exact nonce directory
+    # that call minted with ``secrets.token_hex`` and created itself; the unlinks are of
     # that directory's plain entries via its own fd (a subdirectory refuses the
     # whole removal), and the rmdir is non-recursive. It can never name a
     # session directory or anything above the nonce.
     (
         "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
         "os.unlink",
-        "Unlinks only plain entries (snapshot, seal.json) of one identity-checked "
-        "mentioned-file-versions/<nonce>/ directory, by dir_fd; never a directory",
+        "Unlinks only plain entries (snapshot, seal.json) of one "
+        "mentioned-file-versions/<nonce>/ directory, by dir_fd; identity-checked when "
+        "a seal exists, else the exact nonce dir its failed establishment created; "
+        "never a directory",
     ),
     (
         "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
         "os.rmdir",
-        "Non-recursive rmdir of one identity-checked mentioned-file-versions/<nonce>/ "
-        "directory this op created, by dir_fd; never a session directory",
+        "Non-recursive rmdir of one mentioned-file-versions/<nonce>/ directory this op "
+        "created, by dir_fd; identity-checked when a seal exists, else the exact nonce "
+        "dir its failed establishment created; never a session directory",
     ),
     (
         "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
