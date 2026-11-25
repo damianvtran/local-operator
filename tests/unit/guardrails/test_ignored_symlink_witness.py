@@ -126,7 +126,9 @@ def _assert_low(home: Path, repo: Path, wt: Path) -> None:
 
 
 def _assert_held(home: Path, repo: Path, wt: Path) -> None:
-    assert prov.plain_cleanup_ignored_inventory(str(wt)).unverified_ignored >= 1
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None
+    assert inventory.unverified_ignored >= 1
     for command in _commands(repo, wt):
         ranked = _rank(home, command)
         assert ranked.risk is not Risk.LOW, (command, ranked.reasons)
