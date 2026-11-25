@@ -1477,28 +1477,54 @@ def _exact_firm_ask(
                             return True
                 return False
 
-            # SEC-R2-B2: an option the operator did NOT pick that names this
-            # path means the choice was between paths; the pick did not choose
-            # this one, whatever the question listed.
-            unpicked = [
-                f"{o.get('label') or ''}\n{o.get('description') or ''}"
-                for o in (q.get("options") or [])
-                if isinstance(o, Mapping) and str(o.get("label") or "").strip() != label
-            ]
-            if any(
-                names(text)
-                or (
+            def literal_target(word: str) -> str | None:
+                match = prov._PATHISH.fullmatch(word)
+                if (
+                    match is None
+                    or match[1] != word
+                    or prov._GLOBISH.search(word)
+                    or "{" in word
+                    or "}" in word
+                    or any(part in (".", "..") for part in word.split("/"))
+                ):
+                    return None
+                expanded = prov._expand_word(word, home, cwd)
+                return os.path.realpath(expanded) if expanded is not None else None
+
+            # SEC-R2-B2: an unpicked overlapping option normally represents a
+            # competing target. Only in the compatibility check, a literal
+            # Delete X / Keep X pair is a choice of action, not of target. It
+            # preserves existing exact consent but cannot grant it. Descriptions
+            # and distinct overlapping options still contribute to the veto.
+            pick_names_target = names(words.firm)
+            picked_parent = None
+            if compatible_parent is not None and label_delete is not None and pick_names_target:
+                picked_parent = literal_target(label[label_delete.end() :].strip())
+
+            def competing_option(option: Mapping[str, Any]) -> bool:
+                unpicked = str(option.get("label") or "").strip()
+                if unpicked == label:
+                    return False
+                keep = re.match(r"(?i)^keep\s+", unpicked)
+                if (
+                    picked_parent is not None
+                    and keep is not None
+                    and literal_target(unpicked[keep.end() :]) == picked_parent
+                ):
+                    unpicked = ""
+                text = f"{unpicked}\n{option.get('description') or ''}"
+                return names(text) or (
                     compatible_parent is not None
                     and prov.ask_reach(text, path, home=home, cwd=cwd, protected=compatible_parent)
                     is not None
                 )
-                for text in unpicked
-            ):
+
+            if any(competing_option(o) for o in q.get("options") or [] if isinstance(o, Mapping)):
                 continue
             # A pick that names paths authorises exactly those. Only a pick
             # that names none ("Approve removing all 33 ...", "Remove them",
             # a bare yes) refers back to the paths its question lists.
-            if names(words.firm):
+            if pick_names_target:
                 return True
             # A pick that carries ANY stand-alone path word other than this
             # path narrowed the question ("only <repo>/.worktrees/*/node_modules",
