@@ -5230,8 +5230,13 @@ class Session:
         # its lineage warning exists only at the live context tail and is
         # consumed once, so resume never accumulates synthetic transcript rows.
         from local_operator.fork import consume_fork_boundary
+        from local_operator.network.move_team import seal_unbound_arrival
 
-        fork_boundary = consume_fork_boundary(transcript.directory)
+        # Before the consume below erases the only marker that this unbound
+        # session arrived (fork/recovery), so legacy grandfathering refuses it.
+        # A failed seal keeps the boundary: it is then the only refusal left.
+        sealed = seal_unbound_arrival(transcript.directory)
+        fork_boundary = consume_fork_boundary(transcript.directory) if sealed else ""
         if fork_boundary:
             replayed_messages.append(
                 CustomMessage(
@@ -9618,6 +9623,10 @@ class Session:
             and not self.active_agent
             and not self.active_team_name
             and needs_reauthorization(directory)
+            # Pre-binding sessions created HERE are stamped on first load
+            # (see move_team "Legacy-local grandfathering"); anything that
+            # arrived, or whose team does not resolve exactly, still refuses.
+            and not self._grandfather_legacy_team(directory, stored.team)
         ):
             # Recovery preserves the attachment bytes as a hint, not a grant.
             # Leave the journal intact so merely setting a goal cannot certify it.
@@ -9649,6 +9658,25 @@ class Session:
             self._apply_stored_attachment(stored)
         finally:
             self._restoring_attachment = False
+
+    def _grandfather_legacy_team(self, directory: Path, team: str) -> bool:
+        """Stamp a pre-binding local team session on first load, or refuse.
+
+        The registry completeness check runs FIRST: a binding written while an
+        installed definition was skipped as corrupt would journal a seed
+        fallback as this session's authority. See move_team's
+        "Legacy-local grandfathering" for the threat analysis and residual.
+        """
+        from local_operator.network.move_team import grandfather_legacy_local
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        complete = getattr(self.agent_registry, "require_complete_metadata", None)
+        try:
+            if complete is not None:
+                complete()
+        except ProfileRegistryUnavailable:
+            return False
+        return grandfather_legacy_local(directory, team, self.team_registry, self.agent_registry)
 
     def _apply_stored_attachment(self, stored: "SessionAttachment") -> None:
         """Re-apply one parsed attachment; see :meth:`_restore_attachment`.

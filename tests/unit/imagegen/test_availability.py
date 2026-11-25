@@ -18,7 +18,7 @@ import pytest
 from local_operator.imagegen import availability
 from local_operator.providers.auth_store import AuthStore
 
-ENV_VARS = ("RADIENT_API_KEY", "FAL_API_KEY", "OPENAI_API_KEY")
+ENV_VARS = ("RADIENT_API_KEY", "FAL_API_KEY", "FAL_KEY", "OPENAI_API_KEY")
 
 
 @pytest.fixture()
@@ -80,6 +80,18 @@ def test_fal_reads_the_exported_key_when_nothing_is_stored(
     config_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert availability.fal_key(config_root) is None
+    monkeypatch.setenv("FAL_API_KEY", "exported-key")
+    assert availability.fal_key(config_root) == "exported-key"
+
+
+def test_fal_reads_fals_own_sdk_env_name_last(
+    config_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``FAL_KEY`` is the name FAL's SDKs and docs use: an operator who
+    exported it that way gets the FAL rung instead of a silent skip, and
+    ``FAL_API_KEY`` still wins when both are set."""
+    monkeypatch.setenv("FAL_KEY", "sdk-key")
+    assert availability.fal_key(config_root) == "sdk-key"
     monkeypatch.setenv("FAL_API_KEY", "exported-key")
     assert availability.fal_key(config_root) == "exported-key"
 

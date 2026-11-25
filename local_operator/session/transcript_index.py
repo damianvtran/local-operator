@@ -286,6 +286,28 @@ _FIRST_PAINT_WAIT_S = 0.2
 #: scan can land inside it.
 _FIRST_PAINT_SCAN_BYTES_PER_S = 24 << 20
 
+#: How fast a cold ``refresh_index`` DECODES the index document (one
+#: ``json.loads`` plus typing), as opposed to scanning journal rows. The paint
+#: hold converts hydration bytes to scan-rate-equivalent bytes with this before
+#: summing them under the one :func:`scan_payable_in_budget` budget
+#: (:func:`_paint_refresh_cost`).
+#:
+#: MEASURED, THE FAST END ON PURPOSE (first-paint S1, 2026-11-24). Observed
+#: decode rates of real indexes: 58.5 MB/s (90 MB in 1,539 ms, installed
+#: v0.112.9, architect spike), ~63 MB/s (19 MB, 302 ms loop stall, same spike)
+#: and 50.5 MB/s (19.13 MB in 379 ms on a loaded host, #3111). The asymmetry
+#: argued at :data:`_FIRST_PAINT_SCAN_BYTES_PER_S` applies here too: set too
+#: high, a decode that misses the wait is not deferred and the open pays it
+#: exactly as before this rate existed; set too LOW, a fallback whose decode
+#: would have landed inside the wait is deferred and its ``ready`` frame becomes
+#: ``building`` -- the "stranded fallback" #3111 forbade
+#: (``test_disk_fallback_keeps_original_admission_and_derives_all_facts``).
+#: Pricing hydration at the 24 MB/s SCAN rate did exactly that to 6 MB indexes,
+#: so this is the fastest observed figure, rounded up: with nothing to rederive
+#: an index defers only above ~12.8 MB, a size whose decode (>= ~200 ms at every
+#: measured rate) cannot fit the first-paint wait.
+_HYDRATION_DECODE_BYTES_PER_S = 64 << 20
+
 
 # ---------------------------------------------------------------------------
 # Records
@@ -1906,6 +1928,26 @@ def _read_resume_head(
 ) -> tuple[dict[str, Any], ScanState, str, int] | None:
     """``(sig, scan, journal_generation, document_bytes)`` from the first bytes.
 
+    See :func:`_resume_head_and_identity`, which also returns the head's
+    ``(ino, size, mtime_ns)`` from the same descriptor.
+    """
+    return _resume_head_and_identity(config_dir, session_id)[0]
+
+
+def _resume_head_and_identity(
+    config_dir: str | Path, session_id: str
+) -> tuple[tuple[dict[str, Any], ScanState, str, int] | None, tuple[int, int, int] | None]:
+    """``(head, identity)``: :func:`_read_resume_head`'s tuple plus the head file's
+    ``(ino, size, mtime_ns)`` from the SAME ``fstat``.
+
+    The identity is what the parse memo (``_PARSED``) is keyed by, so the paint
+    hold can tell "this process already holds this exact publication parsed"
+    (hydration costs nothing) from "a refresh would decode the whole document"
+    without a second path lookup on the event loop (see
+    ``test_the_paint_cost_does_not_stat_the_cache``). ``identity`` is ``None``
+    only when the file could not be opened; ``head`` is ``None`` whenever the
+    head cannot be vouched for, as documented below.
+
     ``document_bytes`` comes from the SAME open descriptor's ``fstat``. The paint
     hold runs on the event loop, so the hydration charge it needs must not cost a
     second path lookup (``stat``) on that loop: the bounded head read is already
@@ -1926,10 +1968,12 @@ def _read_resume_head(
     """
     try:
         with index_path(config_dir, session_id).open("rb") as handle:
-            size = os.fstat(handle.fileno()).st_size
+            st = os.fstat(handle.fileno())
             head = handle.read(_RESUME_HEAD_BYTES)
     except OSError:
-        return None
+        return None, None
+    size = st.st_size
+    identity = (st.st_ino, st.st_size, st.st_mtime_ns)
     # A cut multibyte character can only sit at the END of the read, past the
     # fields this decodes; ``ignore`` keeps the prefix intact.
     text = head.decode("utf-8", errors="ignore")
@@ -1939,13 +1983,13 @@ def _read_resume_head(
     try:
         for expected in _HEAD_KEYS:
             if position < 0:
-                return None
+                return None, identity
             key, position = decoder.raw_decode(text, position)
             if key != expected or text[position : position + 1] != ":":
-                return None
+                return None, identity
             values[key], position = decoder.raw_decode(text, position + 1)
             if text[position : position + 1] != ",":
-                return None
+                return None, identity
             position += 1
         # A store head names its snapshot and committed delta right after the
         # resume head; a cold refresh decodes all three, so that is the
@@ -1956,7 +2000,7 @@ def _read_resume_head(
                 store, position = decoder.raw_decode(text, position + 1)
                 size = _hydration_bytes(size, store)
     except ValueError:
-        return None
+        return None, identity
     sig = values["sig"]
     scan = ScanState.from_payload(values["scan"])
     generation = values["journal_generation"]
@@ -1966,8 +2010,8 @@ def _read_resume_head(
         or scan is None
         or not isinstance(generation, str)
     ):
-        return None
-    return sig, scan, generation, size
+        return None, identity
+    return (sig, scan, generation, size), identity
 
 
 def _rederive_bytes(
@@ -2006,13 +2050,70 @@ def _cached_refresh_cost(
     A validated resident HIT bypasses refresh in the consumers; charging it here
     as resident would exempt work that ``refresh_index`` actually still does.
     """
-    head = _read_resume_head(config_dir, session_id)
+    return _refresh_cost_and_identity(config_dir, session_id, journal)[:3]
+
+
+def _refresh_cost_and_identity(
+    config_dir: str | Path, session_id: str, journal: os.stat_result
+) -> tuple[bool, int | None, int, tuple[int, int, int] | None]:
+    """:func:`_cached_refresh_cost` plus the head identity its one read saw."""
+    head, identity = _resume_head_and_identity(config_dir, session_id)
     if head is None:
         # No head means no document this build can vouch for; the pre-head rule
         # (whatever a fresh reader sees) is the caller's fallback, not ours.
-        return _stat_or_none(index_path(config_dir, session_id)) is not None, None, 0
+        return _stat_or_none(index_path(config_dir, session_id)) is not None, None, 0, None
     rederive = _rederive_bytes(journal, *head[:3])
-    return True, rederive, head[3]
+    return True, rederive, head[3], identity
+
+
+def _paint_refresh_cost(
+    config_dir: str | Path, session_id: str, journal: os.stat_result
+) -> tuple[bool, int | None, int]:
+    """``(has_previous, rederive_bytes, hydration_bytes)`` for the paint hold.
+
+    ``hydration_bytes`` is 0 on a parse-memo hit, else the document's decode
+    expressed in scan-rate bytes (:data:`_HYDRATION_DECODE_BYTES_PER_S`).
+
+    WHY (first-paint S1, 2026-11-24). ``refresh_index`` decodes the whole index
+    document (``_read_indexed`` -> ``_read_raw`` -> one ``json.loads``) unless
+    this process's parse memo already holds the publication on disk. That decode
+    is a single C call: it holds the GIL for its whole length even in a worker
+    thread, so it cannot pause for an open the way the row scan does. Measured on
+    the installed v0.112.9: a 90 MB index parsed in 1,539 ms and froze the event
+    loop 1,653 ms under ``asyncio.to_thread``; a 19 MB one, 302 ms. An ACTIVE
+    conversation's index is republished by its live runtime (another process)
+    after every turn, so the desktop server's memo goes stale between visits and
+    the next open's refresh re-decoded it beside the first frame -- ``index_wait``
+    (bounded at 120 ms) measured 1,150 ms on the 463 MB conversation. The three
+    paint-hold decisions used to compute this hydration figure and drop it.
+
+    WHY ONLY ON A MEMO MISS. A memo hit (the head's ``(ino, size, mtime_ns)`` is
+    the one this process last parsed or wrote) is served by ``_read_indexed``
+    without reading the document, so charging it would defer refreshes that cost
+    almost nothing -- trading a ``ready`` frame for nothing. The identity comes
+    from the SAME ``fstat`` as the head read, so this adds no ``stat`` on the
+    loop; the memo lookup is one dict get under ``_PARSED_LOCK``, the same thing
+    :func:`_store_state` already does on the loop.
+
+    Kept apart from :func:`_cached_refresh_cost`, which deliberately prices the
+    refresh's disk read regardless of what is resident (its callers price the
+    document, not this process's memo).
+    """
+    has_previous, rederive, hydration, identity = _refresh_cost_and_identity(
+        config_dir, session_id, journal
+    )
+    if hydration and identity is not None:
+        with _PARSED_LOCK:
+            memo = _PARSED.get(str(index_path(config_dir, session_id)))
+        if memo is not None and memo[0] == identity:
+            return has_previous, rederive, 0
+    # Express the decode in scan-rate bytes so it shares the ONE budget with
+    # rederivation (see _HYDRATION_DECODE_BYTES_PER_S for why not 1:1).
+    return (
+        has_previous,
+        rederive,
+        hydration * _FIRST_PAINT_SCAN_BYTES_PER_S // _HYDRATION_DECODE_BYTES_PER_S,
+    )
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -3930,8 +4031,9 @@ def scan_payable_in_budget(
     resume head) or chose not to (the manifest wager -- see the note at its call
     in :func:`checkpoints_view`), preserving the old unknown-rederivation
     allowance. Callers that have proven a complete request projection can use
-    ``hydration_bytes`` to account its avoided disk work. Generic shared-flight
-    predicates deliberately retain original admission (see _defer_for_paint).
+    ``hydration_bytes`` to account its avoided disk work. The paint-hold
+    predicates pass it only for a parse-memo miss (see :func:`_paint_refresh_cost`
+    and the note in :func:`_defer_for_paint`).
     """
     # Hydration and rederivation spend ONE budget, not two independent wagers.
     # Use the existing planning rate for both; this is a scheduling estimate,
@@ -4161,13 +4263,17 @@ def _yield_to_other_opens(
             if journal is None:
                 unpayable = False
             else:
-                has_previous, rederive, _hydration = _cached_refresh_cost(
+                # Hydration counts here too (memo miss only), so this pause and
+                # ``refresh_paused_for_paint`` -- which mirrors it -- keep
+                # agreeing with ``_defer_for_paint`` about what is unpayable.
+                has_previous, rederive, hydration = _paint_refresh_cost(
                     config_dir, session_id, journal
                 )
                 unpayable = not scan_payable_in_budget(
                     journal.st_size,
                     has_previous=has_previous,
                     rederive_bytes=rederive,
+                    hydration_bytes=hydration,
                     wait_s=_FIRST_PAINT_WAIT_S,
                 )
         return unpayable
@@ -4267,11 +4373,12 @@ def refresh_paused_for_paint(config_dir: str | Path, session_id: str) -> bool:
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return False
-    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
+    has_previous, rederive, hydration = _paint_refresh_cost(config_dir, session_id, journal)
     return not scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
         rederive_bytes=rederive,
+        hydration_bytes=hydration,
         wait_s=_FIRST_PAINT_WAIT_S,
     )
 
@@ -4293,17 +4400,34 @@ def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event |
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return None
-    # Keep ORIGINAL fallback admission here. Hydration is real work (reported
-    # separately by the cost helper), but this shared flight does not know which
-    # complete facts its callers acquired. A summary/previous successful read is
-    # not enough to strand a later corrupt/stale fallback behind its own hold.
-    # Ready projection consumers return their materialized result WITHOUT
-    # scheduling hydration; only that request has the capability proof.
-    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
+    # HYDRATION COUNTS, BUT ONLY WHEN THIS PROCESS WOULD ACTUALLY DECODE
+    # (first-paint S1, 2026-11-24). #3111 left this admission on rederivation
+    # alone: ready read-model consumers never reach here (they answer WITHOUT
+    # scheduling a refresh), so this flight serves only FALLBACKS -- missing,
+    # stale or corrupt projections -- and #3111's rule was that readiness is
+    # never traded for latency: a fallback must keep the original admission
+    # and wait, never be stranded behind a hold deferred for a request that
+    # failed. That rule still holds here, because the deferral below remains
+    # "unpayable by ``scan_payable_in_budget``", the same predicate the frame's
+    # wait is planned with, with the decode priced at its FASTEST measured rate
+    # (:data:`_HYDRATION_DECODE_BYTES_PER_S`): a refresh it refuses could not
+    # have landed inside the first-paint wait, so that frame was ``building``
+    # either way (#3111's own HIT cells answered ``building`` 6/6 after paying
+    # the wait), while a decode that could land is still admitted and waited
+    # for (``test_disk_fallback_keeps_original_admission_and_derives_all_facts``). What
+    # changes is who pays the decode: the open no longer loses its event loop
+    # to a GIL-holding ``json.loads`` (1.6 s on a 90 MB index); the fallback
+    # serves ``building`` at once and the refresh starts when the snapshot is
+    # written, bounded by :data:`_PAINT_HOLD_CEILING_S` like any deferral.
+    # A memo HIT charges nothing (see :func:`_paint_refresh_cost`), so a
+    # refresh this process can serve from its parse keeps the original
+    # admission exactly.
+    has_previous, rederive, hydration = _paint_refresh_cost(config_dir, session_id, journal)
     if scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
         rederive_bytes=rederive,
+        hydration_bytes=hydration,
         wait_s=_FIRST_PAINT_WAIT_S,
     ):
         return None

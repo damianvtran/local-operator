@@ -2324,6 +2324,73 @@ async def test_hydration_and_rederivation_cost_sum_without_stranding_fallback(tm
         release()
 
 
+def _stale_large_index(root: Path) -> None:
+    """A witnessed journal whose index document is >= 20 MB and NOT this
+    process's parse: the shape of an active conversation whose live runtime (in
+    another process) republished the index since this server last decoded it.
+    Padding rewrites the head's identity exactly as a republish does."""
+    write_rows(root, [user("u1", 1.0), assistant("a1", 1.1)])
+    refreshed(root)
+    with ti.index_path(root, SID).open("a", encoding="utf-8") as handle:
+        handle.write(" " * (20 << 20))
+
+
+@pytest.mark.asyncio
+async def test_a_stale_parse_of_a_large_index_is_deferred_past_the_paint(tmp_path, monkeypatch):
+    """First-paint S1: a refresh that must re-decode a large index waits for paint.
+
+    The decode is one GIL-holding ``json.loads`` (1.6 s loop stall on a 90 MB
+    index, installed v0.112.9), so it cannot pause for the open the way a scan
+    does. Before the fix all three admission sites dropped the hydration figure
+    and this refresh started inside the open.
+    """
+    _stale_large_index(tmp_path)
+    _has_previous, rederive, hydration = ti._paint_refresh_cost(
+        tmp_path, SID, journal_path(tmp_path).stat()
+    )
+    assert rederive == 0 and hydration > 0, "an exact journal HIT: only the decode is left"
+    reads: list[bool] = []
+    real_read = ti._read_raw
+
+    def read_spy(*args, **kwargs):
+        reads.append(True)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ti, "_read_raw", read_spy)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and ti.refresh_deferred(tmp_path, SID)
+        assert ti.refresh_paused_for_paint(tmp_path, SID)
+        await asyncio.sleep(0.1)
+        assert reads == [] and not task.done(), "the index was decoded under a live paint hold"
+    finally:
+        release()
+    # After paint the decode still happens, bounded by the hold ceiling.
+    assert await asyncio.wait_for(task, 30) is not None
+    assert reads and not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_a_valid_parse_memo_charges_no_hydration(tmp_path):
+    """The same large index, already parsed by this process: nothing to decode,
+    so the refresh keeps the original admission and runs inside the open."""
+    _stale_large_index(tmp_path)
+    refreshed(tmp_path)  # an exact HIT: memoises the padded publication, no write
+    journal = journal_path(tmp_path).stat()
+    _has_previous, _rederive, document = ti._cached_refresh_cost(tmp_path, SID, journal)
+    _has_previous, _rederive, hydration = ti._paint_refresh_cost(tmp_path, SID, journal)
+    assert document > (20 << 20), "the refresh cost still prices the document itself"
+    assert hydration == 0, "a memo hit was charged a decode it never performs"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+    finally:
+        release()
+
+
 @pytest.mark.asyncio
 async def test_a_large_resident_hit_keeps_ready_facts_without_hydrating(tmp_path, monkeypatch):
     previous = _padded_disk_hit(tmp_path)
