@@ -237,6 +237,7 @@ PACKAGING_SCRIPTS = frozenset(
         "scripts/slim_wheel.py",
         "scripts/check_dist_size.py",
         "scripts/smoke_wheel.py",
+        "scripts/smoke_team_session_upgrade.py",
     }
 )
 
