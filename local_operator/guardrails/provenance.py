@@ -1220,6 +1220,33 @@ def _holds_git(directory: str) -> bool:
     return _git_inside(directory) is not None
 
 
+def _ignored_entry_holds_git(physical: str, name: str) -> bool:
+    """``worktree_state``'s nested-repository check for one ignored entry.
+
+    Field case (guard 0.113.0, 2026-11-24, core-svc
+    ``.worktrees/deploy-preserve-digest-pin``): a merged, clean tree whose
+    only ignored entry was a Rust ``target/`` of 51,744 entries read
+    ``dirty``, because :func:`_holds_git`'s walk (depth 4, 20,000 entries)
+    ran out and an exhausted walk counts as "holds a repository". Every
+    finished-tree proof (``finished_foreign_worktree`` → ``state-dirty``)
+    then failed, and the sibling subagent cleaning up its task's tree was
+    refused for "1 ignored entry the guard cannot prove regenerable".
+
+    Constraint: only a walk that RAN OUT is re-asked, and only for an entry
+    whose basename is on :data:`_REGENERABLE` (``target``, ``node_modules``):
+    it then gets :func:`_no_repository_below`, the full-depth walk name-only
+    shedding already relies on, bounded at :data:`_MERGED_WALK_ENTRIES`
+    (300,000) and failing closed on any ``.git``, unreadable directory or
+    overflow. A ``.git`` actually found, or any other name, keeps the hold.
+    """
+    inside = _git_inside(physical)
+    if inside is None:
+        return False
+    if inside.exhausted and _regenerable(name):
+        return not _no_repository_below(physical)
+    return True
+
+
 class GitInside(NamedTuple):
     """What :func:`_git_inside` found: ``path`` holds a ``.git`` when
     ``exhausted`` is False; when True the bounded walk ran out under ``path``
@@ -2466,7 +2493,7 @@ def worktree_state(
         # repository's commits may exist nowhere else. ``owned_record``'s
         # ``_foreign_inside`` also refuses such a tree, but this check must
         # not depend on that caller having run first.
-        if _holds_git(os.path.join(real, entry)):
+        if _ignored_entry_holds_git(os.path.join(real, entry), name):
             return "dirty"
     # A detached HEAD whose commit no ref contains is lost with the tree.
     if _git(["symbolic-ref", "-q", "HEAD"], real) is None:

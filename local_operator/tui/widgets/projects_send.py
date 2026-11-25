@@ -442,12 +442,6 @@ class SendTargetCard(Container):
             classes="projects-send-hints",
         )
 
-    def on_unmount(self) -> None:
-        # Leave the locale-refresh registry with the DOM: a dead card has no
-        # chrome to repaint, and the registry must not outlive the app that
-        # owned it (see the attachment guard in ``_refresh_copy``).
-        _cards.discard(self)
-
     def on_mount(self) -> None:
         self._refresh_copy()
         self._repaint()
@@ -473,6 +467,9 @@ class SendTargetCard(Container):
         # the picker has been closed and not yet collected; in CI it surfaced as teardown
         # errors in tests/unit/tui/test_provider_state.py whenever a
         # tests/unit/tui/test_projects_send.py test ran earlier in the shard.
+        # A dead card has no chrome to repaint, and the registry must not
+        # outlive the app that owned it (see the attachment guard in
+        # ``_refresh_copy``, the backstop if a discard is ever missed).
         _cards.discard(self)
 
     def on_resize(self) -> None:
