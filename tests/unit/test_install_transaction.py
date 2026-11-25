@@ -420,6 +420,60 @@ def test_real_downloader_checks_hash_before_uv(
     assert not list((other / "artifact").iterdir())
 
 
+@pytest.mark.parametrize("duration", [65, 241], ids=["slow-progress", "over-deadline"])
+def test_real_downloader_bounds_progressing_transfer(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, duration: int
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import httpx
+
+    elapsed = 0
+    chunk = b"wheel data"
+
+    @contextmanager
+    def stream(*args: Any, **kwargs: Any):
+        assert kwargs["timeout"] == 5.0
+        assert kwargs["follow_redirects"] is False
+
+        class Response:
+            def raise_for_status(self) -> None:
+                pass
+
+            def iter_bytes(self):
+                nonlocal elapsed
+                # One chunk per second keeps making progress well inside the
+                # read timeout, while total elapsed time can exceed the deadline.
+                for elapsed in range(1, duration + 1):
+                    yield chunk
+
+        yield Response()
+
+    monkeypatch.setattr(update, "time", SimpleNamespace(monotonic=lambda: 1000 + elapsed))
+    monkeypatch.setattr(httpx, "stream", stream)
+    candidate = isolated / "candidate"
+    candidate.mkdir()
+    payload = chunk * duration
+    evidence = update.PublicationEvidence(
+        "0.70.7",
+        "exact",
+        "tiny.whl",
+        "https://files.pythonhosted.org/test.whl",
+        hashlib.sha256(payload).hexdigest(),
+        0,
+    )
+    if duration == 65:
+        path = _REAL_DOWNLOAD(candidate, evidence)
+        assert path.read_bytes() == payload
+        assert list(path.parent.iterdir()) == [path]
+    else:
+        with pytest.raises(update.UpdateError, match="time/size bound"):
+            _REAL_DOWNLOAD(candidate, evidence)
+        assert elapsed == duration
+        assert not list((candidate / "artifact").iterdir())
+
+
 def test_real_downloader_size_bound_is_fail_closed(
     isolated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
