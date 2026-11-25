@@ -763,6 +763,14 @@ async def _build_session(
             )
         return session
 
+    # A programmatically driven session: same TTL reasoning as exec
+    # (``exec_session.run_session``). A caller that idles between deliveries
+    # trips the long-gap rule once and is back on the main-thread 1h. A
+    # ``workstream`` spec is excluded for the same measured reason as exec's.
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
+
+    if not spec.workstream:
+        mark_automation_session(session)
     if team is not None:
         session.attach_team(team)
     if spec.profile:

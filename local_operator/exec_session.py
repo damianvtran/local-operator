@@ -83,8 +83,22 @@ def session_cwd(session: Any) -> str:
 
 async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     from local_operator.headless_print import run_print_mode
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
     from local_operator.session.runtime.exec_control import start_exec_control
 
+    # An exec run's calls follow each other within seconds and it ends at the
+    # turn's end, so its main thread keeps the 5m prompt-cache TTL (see
+    # ``AUTOMATION_LONG_GAP_1H_THRESHOLD_S``). Covers the foreground run and the
+    # ``--background`` worker, which both land here.
+    #
+    # NOT a ``--workstream`` run: that is a long-lived, listed session an agent
+    # manages and the operator engages later, so it idles like a main thread.
+    # Replayed on this machine's ledger (600 agent-workstream sessions, 128,990
+    # turn calls): the first >= 240 s gap is a median 834 s and 283 sessions hit
+    # one, so 5m-until-the-gap saves ~33.8M base-equivalent tokens of 1h writes
+    # but costs ~44.9M in rewrites at the gap. Plain exec runs never latched.
+    if not getattr(args, "workstream", False):
+        mark_automation_session(session)
     control = None
     try:
         apply_startup(session, args, team)
