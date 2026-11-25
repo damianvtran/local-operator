@@ -15,10 +15,20 @@
   "web_search.meaning.auto_radient": "मुफ़्त चरणों और किसी भी नेटिव प्लान चरण के बाद आज़माया जाता है; आपके Radient क्रेडिट से बिल होता है",
   "web_search.meaning.radient_refused": "क्रेडिट जोड़ने तक छोड़ा जाता है; Radient 5 मिनट के भीतर फिर से आज़माया जाता है",
   "web_search.meaning.auto_native_plan": "आपके मॉडल प्लान की बिल्ट-इन सर्च, मुफ़्त चरणों के बाद आज़माई जाती है",
-  "web_search.meaning.auto_native_paid": "आपकी मॉडल API कुंजी की बिल्ट-इन सर्च, हर सर्च पर बिल",
+  "web_search.meaning.auto_native_paid": "आपके मॉडल प्रदाता की बिल्ट-इन सर्च, हर सर्च पर बिल; Radient के बाद आज़माई जाती है",
   "web_search.meaning.auto_free_then_key": "पहले मुफ़्त टियर; आपकी API कुंजी Radient के बाद आज़माई जाती है",
   "web_search.meaning.enabled_then_key": "आपके प्राथमिकता क्रम में मुफ़्त टियर पर; आपकी API कुंजी Radient के बाद आज़माई जाती है",
   "web_search.marker.plan": "(प्लान)",
   "web_search.marker.credits": "(क्रेडिट)",
-  "web_search.marker.no_credits": "(क्रेडिट नहीं)"
+  "web_search.marker.no_credits": "(क्रेडिट नहीं)",
+  "web_search.native.access_key": "API कुंजी",
+  "web_search.native.access_plan_key": "प्लान साइन-इन / API कुंजी",
+  "web_search.native.access_key_signin": "API कुंजी / साइन-इन",
+  "web_search.native.detail_key": "{vendor} की बिल्ट-इन वेब सर्च; आपके {vendor} क्रेडेंशियल पर प्रति सर्च शुल्क और एक मॉडल टर्न का बिल लगता है",
+  "web_search.native.detail_claude_signin_off": "{vendor} की बिल्ट-इन वेब सर्च; अपने साइन-इन के लिए /settings → वेब सर्च में “Claude साइन-इन सर्च (सशुल्क)” चालू करें",
+  "web_search.native.detail_plan_key": "{vendor} की बिल्ट-इन वेब सर्च; पहले आपका {plan} प्लान आज़माया जाता है, फिर आपकी API कुंजी (प्रति सर्च शुल्क और एक मॉडल टर्न)",
+  "web_search.native.no_credential": "{vendor} सर्च के पास इस चरण के लिए कोई उपयोगी क्रेडेंशियल नहीं है; फिर से साइन इन करें या {vendor} API कुंजी सहेजें।",
+  "web_search.native.access_plan": "प्लान साइन-इन / प्लान कुंजी",
+  "web_search.native.detail_plan": "{vendor} की बिल्ट-इन वेब सर्च, आपके {plan} में शामिल; कोई अतिरिक्त शुल्क नहीं",
+  "web_search.native.detail_search_api": "{vendor} का सर्च API (कोई मॉडल टर्न नहीं); आपकी {vendor} कुंजी पर प्रति सर्च छोटा शुल्क लगता है"
 }

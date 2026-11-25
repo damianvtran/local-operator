@@ -639,5 +639,17 @@
     "tone": "terse",
     "width": "short section header",
     "note": "The section for what a local update does with older install generations on THIS device; not the mesh roll (that is 'Mesh updates')."
+  },
+  "wire.settings.web_search_claude_subscription_search.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). The cost word (paid) must survive: this toggle is where the user opts in to spending Claude extra usage on search (PR #4569 design D1). Claude is a brand name."
+  },
+  "wire.settings.web_search_claude_subscription_search.help": {
+    "role": "settings row help line",
+    "tone": "plain",
+    "maxCells": 80,
+    "note": "Lead with the cost: each search is billed to Claude extra usage at the API price, and the leg is tried after Radient. Must fit 80 columns unclipped (design D1). Claude/Radient/API stay Latin."
   }
 }

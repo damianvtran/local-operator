@@ -67,10 +67,13 @@ class WebSearchParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(description="Search query.", min_length=1)
-    max_results: int = Field(default=5, ge=1, le=20, description="Maximum results to return.")
+    # Field descriptions are billed on every turn (scripts/bench_context_budget.py):
+    # the schema already carries default/min/max and optionality, so the text
+    # says only what the schema cannot.
+    max_results: int = Field(default=5, ge=1, le=20, description="Results to return.")
     provider: SearchProviderId | None = Field(
         default=None,
-        description="Optional enabled provider to use instead of load balancing.",
+        description="Use one enabled provider instead of load balancing.",
     )
 
 
@@ -566,14 +569,22 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
         name="web_search",
         label="Web Search",
         description=(
-            "Search the public web with load balancing and automatic fallback. "
+            # "load balancing" lives only in the ``provider`` parameter's
+            # description, which names it as the default that parameter
+            # overrides; repeating it here cost ~10 billed tokens per turn.
+            "Search the public web with automatic provider fallback. "
             # "with `query`" carries the web_fetch passage steer to the moment
             # a search result is about to be opened; kept to three words
             # because this string is billed on every turn.
             "Results include bounded snippets and source URLs; use `web_fetch` with "
-            "`query` (or `read <url>`) to read a result's full page. Use provider only for a "
-            "specific enabled source. Running several independent searches? Issue "
-            "the calls in one turn — they run in parallel."
+            "`query` (or `read <url>`) for a result's full page. Run independent "
+            "searches in one turn, in parallel."
+            # No provider sentence here: the ``provider`` parameter's own
+            # description already says it forces one enabled source instead of
+            # load balancing. Dropping the duplicate (-77 chars) pays for the
+            # nine native vendor ids PR #4569 adds to that enum, so the start
+            # context stays under scripts/bench_context_budget.py's ceiling;
+            # the second trim (-41 chars) restores headroom after main grew.
         ),
         parameters=WebSearchParams.model_json_schema(),
         approval_tier="read",

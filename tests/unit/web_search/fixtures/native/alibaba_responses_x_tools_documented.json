@@ -1,0 +1,56 @@
+{
+ "_note": "DOCUMENTED SHAPE, not a live capture: Alibaba's Qwen3.x Responses examples report the billed search count at usage.x_tools.web_search.count (the shipped qwen3.8-flash host), not top-level tool_usage; one web_search_call item, three billed searches",
+ "object": "response",
+ "output": [
+  {
+   "type": "web_search_call",
+   "id": "ws_REDACTED",
+   "status": "completed",
+   "action": {
+    "type": "search",
+    "query": "latest stable Python release",
+    "sources": [
+     {
+      "type": "url",
+      "url": "https://www.python.org/downloads/"
+     },
+     {
+      "type": "url",
+      "url": "https://www.python.org/downloads/release/python-3150/"
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "output_text",
+     "text": "Python 3.15.0 is the latest stable release.",
+     "annotations": [
+      {
+       "type": "url_citation",
+       "url": "https://www.python.org/downloads/release/python-3150/",
+       "title": "Python Release Python 3.15.0",
+       "start_index": 0,
+       "end_index": 10
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": {
+  "input_tokens": 8000,
+  "input_tokens_details": {
+   "cached_tokens": 2000
+  },
+  "output_tokens": 120,
+  "x_tools": {
+   "web_search": {
+    "count": 3
+   }
+  }
+ }
+}

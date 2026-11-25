@@ -1,0 +1,14 @@
+{
+  "_note": "DOCUMENTED SHAPE, not a live capture (no credential on the probe machine 2026-11-24); JSON-RPC tools/call envelope with webSearchPrime rows per docs.z.ai /paas/v4/web_search WebSearchObjectResponse (the MCP text is a JSON-encoded string)",
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "\"[{\\\"title\\\": \\\"Download Python\\\", \\\"link\\\": \\\"https://www.python.org/downloads/\\\", \\\"content\\\": \\\"The official home of Python.\\\", \\\"media\\\": \\\"Python.org\\\", \\\"icon\\\": \\\"\\\", \\\"refer\\\": \\\"ref_1\\\", \\\"publish_date\\\": \\\"2026-10-25\\\"}, {\\\"title\\\": \\\"Python 3.15.2 release\\\", \\\"link\\\": \\\"https://www.python.org/downloads/release/python-3152/\\\", \\\"content\\\": \\\"Release notes.\\\", \\\"media\\\": \\\"Python.org\\\", \\\"icon\\\": \\\"\\\", \\\"refer\\\": \\\"ref_2\\\", \\\"publish_date\\\": \\\"\\\"}]\""
+      }
+    ],
+    "isError": false
+  }
+}

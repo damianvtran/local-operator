@@ -3596,6 +3596,14 @@ def web_search_title() -> Msg:
     return Msg("wire.settings.web_search.title", {})
 
 
+def web_search_claude_subscription_search_help() -> Msg:
+    return Msg("wire.settings.web_search_claude_subscription_search.help", {})
+
+
+def web_search_claude_subscription_search_label() -> Msg:
+    return Msg("wire.settings.web_search_claude_subscription_search.label", {})
+
+
 def web_search_deepseek_evidence_help() -> Msg:
     return Msg("wire.settings.web_search_deepseek_evidence.help", {})
 

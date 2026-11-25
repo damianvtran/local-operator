@@ -1,0 +1,55 @@
+{
+  "_note": "DOCUMENTED SHAPE, not a live capture (no credential on the probe machine 2026-11-24); ai.google.dev Grounding with Google Search response shape",
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "Python 3.15.2 is the latest stable release."
+          }
+        ]
+      },
+      "groundingMetadata": {
+        "webSearchQueries": [
+          "latest stable Python release"
+        ],
+        "groundingChunks": [
+          {
+            "web": {
+              "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA",
+              "title": "python.org"
+            }
+          },
+          {
+            "web": {
+              "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/BBB",
+              "title": "blog.python.org"
+            }
+          }
+        ],
+        "groundingSupports": [
+          {
+            "segment": {
+              "startIndex": 0,
+              "endIndex": 43,
+              "text": "Python 3.15.2 is the latest stable release."
+            },
+            "groundingChunkIndices": [
+              0,
+              1
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 12,
+    "toolUsePromptTokenCount": 900,
+    "candidatesTokenCount": 40,
+    "thoughtsTokenCount": 60,
+    "totalTokenCount": 1012
+  },
+  "responseId": "resp-REDACTED"
+}

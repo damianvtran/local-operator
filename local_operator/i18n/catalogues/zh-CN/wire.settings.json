@@ -880,6 +880,8 @@
   "wire.settings.web_fetch_timeout_seconds.label": "超时（秒）",
   "wire.settings.web_search.description": "search工具的提供商与负载均衡。",
   "wire.settings.web_search.title": "网页搜索",
+  "wire.settings.web_search_claude_subscription_search.help": "每次搜索按API价格从Claude额外用量中计费；在Radient之后尝试。",
+  "wire.settings.web_search_claude_subscription_search.label": "Claude登录搜索（收费）",
   "wire.settings.web_search_deepseek_evidence.help": "在DeepSeek搜索后，为每个页面附加摘录与相关性评分。",
   "wire.settings.web_search_deepseek_evidence.label": "DeepSeek页面证据",
   "wire.settings.web_search_enabled.choice.false.description": "search已禁用",
