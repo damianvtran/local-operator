@@ -324,9 +324,7 @@ _KIMI_K3 = EffortSupport(("low", "high", "max"))
 # tiers. A provider listing or models.dev still outranks the offline table.
 _GOOGLE_NATIVE_HOSTINGS = frozenset({"google", "google-vertex"})
 _GEMINI_3_PLUS = EffortSupport(("low", "medium", "high"), hostings=_GOOGLE_NATIVE_HOSTINGS)
-_GEMINI_4_NEON = EffortSupport(
-    ("low", "medium", "high", "xhigh"), hostings=_GOOGLE_NATIVE_HOSTINGS
-)
+_GEMINI_4_NEON = EffortSupport(("low", "medium", "high", "xhigh"), hostings=_GOOGLE_NATIVE_HOSTINGS)
 
 #: First match wins, so the narrower Anthropic generations are listed before the
 #: forward-reading ``5 and above`` arm. Patterns are ``search``ed against the

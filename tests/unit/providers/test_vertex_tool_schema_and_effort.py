@@ -359,9 +359,7 @@ def test_build_model_spec_falls_back_to_the_table_offline(
     assert spec.reasoning_effort is None
 
 
-@pytest.mark.parametrize(
-    "model_id", ["gemini-3.8-flash", "gemini-5-x", "models/gemini-3-pro"]
-)
+@pytest.mark.parametrize("model_id", ["gemini-3.8-flash", "gemini-5-x", "models/gemini-3-pro"])
 def test_offline_table_covers_gemini_3_and_later(model_id: str) -> None:
     assert supported_efforts(model_id) == ("low", "medium", "high")
     assert default_effort(model_id) is None
