@@ -1305,6 +1305,14 @@ class StatusLine:
     event they are handling actually knows.
     """
 
+    #: Whether the approvals alarm paints its mode word (``! auto``) or the bare
+    #: glyph. Declared on the class, not only in ``__init__``, because the render
+    #: path reads it and some callers build a band without running the
+    #: constructor (``StatusLine.__new__`` in the fork-band tests, which render
+    #: a band with just the fields they need). A per-instance flip in
+    #: ``_render`` shadows this default; it never mutates the class.
+    _alarm_with_word: bool = True
+
     def __init__(self, dock: Static, *, clock: Callable[[], float] = time.monotonic) -> None:
         # A `Static`, not a bare `Widget`: the band is repainted by handing
         # it a rich renderable, which only content widgets accept.
@@ -1391,10 +1399,9 @@ class StatusLine:
         # session-wide mode with no persistent indicator is how a disarmed gate
         # gets forgotten about.
         self._approvals_auto: bool = False
-        #: Whether the alarm paints its mode word (`! auto`) or the bare glyph.
-        #: Flipped per render when the wider form costs the name its floor; see
-        #: ``_render``.
-        self._alarm_with_word: bool = True
+        # Flipped per render when the wider alarm costs the name its floor (see
+        # ``_render``); the class default above covers constructor-less bands.
+        self._alarm_with_word = True
         # True while the turn is parked on something the USER owes (currently
         # the tool-approval prompt). Only the terminal title reads it; see
         # :meth:`set_attention` for why it is not inferred from `_streaming`.
