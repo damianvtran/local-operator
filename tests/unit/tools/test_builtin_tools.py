@@ -119,6 +119,51 @@ async def test_bash_echo_and_streams(tools, context) -> None:
     assert "exit code: 0" in result.text
 
 
+#: BSD sed's real stderr for GNU's ``sed -i 's/a/b/' f``, captured on macOS:
+#: the quoted script carries sed's appended newline, so it spans two lines.
+_BSD_SED_STDERR = 'sed: 1: "f\n": invalid command code f\n'
+
+
+@pytest.mark.parametrize(
+    ("platform", "stderr", "expected"),
+    [
+        ("darwin", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", 'sed: 1: "x\n": extra characters at the end of x command\n', builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", 'sed: 1: "f": invalid command code f\n', builtin.BSD_SED_INPLACE_HINT),
+        # GNU sed words it differently; Linux never gets BSD advice.
+        ("darwin", "sed: -e expression #1, char 1: unknown command: `f'\n", None),
+        ("darwin", "grep: invalid command code\n", None),
+        ("darwin", "", None),
+        ("linux", _BSD_SED_STDERR, None),
+    ],
+)
+def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(monkeypatch, platform, stderr, expected) -> None:
+    monkeypatch.setattr(builtin.sys, "platform", platform)
+    assert builtin._bsd_sed_hint(stderr) == expected
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the hint is Darwin-only by design")
+@pytest.mark.asyncio
+async def test_bash_result_carries_the_bsd_sed_hint_once(tools, context, tmp_path) -> None:
+    # The REAL failure, not a fabricated stderr: the fabricated one-line form
+    # once passed while macOS's two-line rendering never matched.
+    (tmp_path / "f").write_text("a\n")
+    command = "echo out; sed -i 's/a/b/' f"
+    result = await _call(tools, "bash", {"command": command}, context)
+    assert "invalid command code f" in result.text
+    assert result.text.count(builtin.BSD_SED_INPLACE_HINT) == 1
+    # Its own line under the exit code; both stream bodies untouched.
+    assert result.text.splitlines()[1] == builtin.BSD_SED_INPLACE_HINT
+    assert "--- stdout ---\nout\n" in result.text
+    assert f"--- stderr ---\n{_BSD_SED_STDERR}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_result_without_sed_failure_has_no_hint(tools, context) -> None:
+    result = await _call(tools, "bash", {"command": "echo 'sed: fine' >&2; exit 1"}, context)
+    assert builtin.BSD_SED_INPLACE_HINT not in result.text
+
+
 @pytest.mark.asyncio
 async def test_bash_nonzero_exit_reported(tools, context) -> None:
     result = await _call(tools, "bash", {"command": "exit 3"}, context)

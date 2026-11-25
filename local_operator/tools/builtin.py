@@ -4535,6 +4535,38 @@ def _bash_output_summary(stdout: str, stderr: str) -> str:
     return "\n".join(parts)
 
 
+#: BSD sed's two complaints when handed GNU's ``sed -i 's/a/b/' f``: BSD reads
+#: the script as ``-i``'s backup suffix, then parses the FILE as the script.
+#: ``invalid command code`` and ``extra characters at the end of`` are the two
+#: renderings measured in the long-coding bench, where both LOP and Claude Code
+#: re-sent the same failing GNU form once before switching (one wasted call per
+#: occurrence). Anchored on BSD's ``sed: <n>: `` prefix so GNU sed's own
+#: wording (``sed: -e expression #1``) and unrelated stderr never match.
+#: BSD echoes the script it parsed in quotes WITH sed's appended newline, so the
+#: real complaint spans two lines (``sed: 1: "f\n": invalid command code f``);
+#: ``[^"]*`` crosses that newline where ``.*`` would not, which is why a
+#: single-line fixture once passed while real output never matched.
+_BSD_SED_INPLACE_RE = re.compile(
+    r'^sed: \d+: "[^"]*": (invalid command code|extra characters at the end of)',
+    re.MULTILINE,
+)
+#: One line, not a man page: the fix is a single argument and the model already
+#: knows ``sed``.
+BSD_SED_INPLACE_HINT = "macOS BSD sed: `-i` takes a suffix argument; use `sed -i '' …`."
+
+
+def _bsd_sed_hint(stderr: str) -> str | None:
+    """The BSD ``sed -i`` hint for this result, or ``None``.
+
+    Darwin only, because the hint is only true where ``sed`` is BSD's; a Linux
+    host's GNU sed takes ``-i`` with no argument, and the advice would be wrong
+    there. Returned once per result however many matching lines stderr holds.
+    """
+    if sys.platform != "darwin" or not stderr:
+        return None
+    return BSD_SED_INPLACE_HINT if _BSD_SED_INPLACE_RE.search(stderr) else None
+
+
 def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tuple[int, int]:
     """Split ``budget`` chars between stdout and stderr, stderr first.
 
@@ -6325,6 +6357,12 @@ async def execute_bash(
         # Under the exit code, not last: the tool card keeps the HEAD of a
         # result, and this line is an instruction the agent must act on.
         parts.insert(1, worktree_notice)
+    sed_hint = _bsd_sed_hint(stderr)
+    if sed_hint:
+        # Same head slot as worktree_notice, for the same reason: the tool card
+        # keeps the head, and the line is the one action that ends the retry.
+        # Its own line, so stdout/stderr bodies stay byte-for-byte what ran.
+        parts.insert(1, sed_hint)
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     if pad_exceeded:
