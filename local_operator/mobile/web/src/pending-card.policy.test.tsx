@@ -170,7 +170,7 @@ afterEach(() => {
 describe("the pending card's approval-policy links", () => {
 	it("loosens this session without answering the pending approval", async () => {
 		await renderCard();
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve this session" }));
 		await waitFor(() => expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(1));
 		expect(mocks.sendCommandWithProof.mock.calls[0][1]).toMatchObject({
 			op: "slash_result",
@@ -191,9 +191,27 @@ describe("the pending card's approval-policy links", () => {
 		expect(said.textContent).toContain("This call still needs your answer.");
 	});
 
+	it("offers Always ask while the session is auto, sends the plain tighten, and answers nothing", async () => {
+		await renderCard(approval({ approval_mode: "auto", approval_provenance: "session" }));
+		expect(screen.queryByRole("button", { name: "Auto-approve this session" })).toBeNull();
+		expect(screen.getByText("Guardrail refusals and dangerous-delete review still apply.")).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "Always ask" }));
+		await waitFor(() => expect(mocks.sendCommand).toHaveBeenCalledTimes(1));
+		expect(mocks.sendCommand.mock.calls[0][1]).toMatchObject({
+			op: "slash_result",
+			command: "approvals",
+			args: "ask",
+		});
+		// Tightening needs no proof, and a mode change is never an answer.
+		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
+		expect(answerFrames()).toHaveLength(0);
+		const said = await screen.findByRole("status");
+		expect(said.textContent).toContain("This call still needs your answer.");
+	});
+
 	it("sends the global default, proven, from the card too", async () => {
 		await renderCard();
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for all sessions" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve all sessions" }));
 		await waitFor(() => expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(1));
 		expect(mocks.sendCommandWithProof.mock.calls[0][1]).toMatchObject({
 			op: "slash_result",
@@ -227,7 +245,7 @@ describe("the pending card's approval-policy links", () => {
 				"(tool_approval_mode); other conversations with their own choice keep it",
 		});
 		await renderCard();
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for all sessions" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve all sessions" }));
 		const said = await screen.findByRole("status");
 		expect(said.textContent).toContain("other conversations with their own choice keep it");
 		expect(said.textContent).toContain("This call still needs your answer.");
@@ -240,7 +258,7 @@ describe("the pending card's approval-policy links", () => {
 			refused: true,
 		});
 		await renderCard();
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve this session" }));
 		const refusal = await screen.findByRole("alert");
 		expect(refusal.textContent).toContain("cannot set the default");
 		expect(screen.queryByRole("status")).toBeNull();
@@ -254,7 +272,7 @@ describe("the pending card's approval-policy links", () => {
 		mocks.sendCommandWithProof.mockRejectedValueOnce(
 			new HttpError(422, "only the operator can allow it", "operator_authority_required"),
 		);
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve this session" }));
 		// The runtime's own sentence, inline — and NOT the card-wide `error`,
 		// which would make every control inert (D7) on a request still waiting
 		// for its decision.
@@ -271,7 +289,7 @@ describe("the pending card's approval-policy links", () => {
 		mocks.operatorFieldsFor.mockRejectedValueOnce(new NotPairedError());
 		await renderCard();
 		render(<PairingSheetHost />);
-		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		fireEvent.click(screen.getByRole("button", { name: "Auto-approve this session" }));
 		// The sheet is the explanation...
 		await screen.findByText("Pair this phone to approve from here");
 		// ...so the card carries no line that would outlive the pairing.
@@ -300,8 +318,8 @@ describe("the pending card's approval-policy links", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 		await screen.findByRole("button", { name: /blue/ });
-		expect(screen.queryByRole("button", { name: "Set auto for this session" })).toBeNull();
-		expect(screen.queryByRole("button", { name: "Set auto for all sessions" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Auto-approve this session" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Auto-approve all sessions" })).toBeNull();
 	});
 });
 

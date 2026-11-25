@@ -96,7 +96,7 @@ from local_operator.harness.approval import (
     signature_target,
 )
 from local_operator.mobile.projection import ProjectionFold
-from local_operator.mobile.types import SessionProjection
+from local_operator.mobile.types import PROJECTION_TRANSCRIPT_LIMIT, SessionProjection
 from local_operator.network import origin as mesh_origin
 from local_operator.operator import report_operator_authority
 from local_operator.operator import verify as operator_verify
@@ -115,7 +115,13 @@ from local_operator.session.attachments import AttachmentStore
 # subscriber fold; it lives in a zero-import leaf so neither side re-spells it.
 from local_operator.session.delta_merge import mergeable_frame_key
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.runtime import stall_watchdog
+from local_operator.session.runtime.inline_ui_egress import (
+    inline_ui_retractions,
+    without_inline_ui,
+    without_live_inline_ui,
+)
 from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
@@ -123,6 +129,7 @@ from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_ACTIVITY_CAPABILITY,
     ATTACH_MAX_CLIENTS,
+    BUSY_DELIVERY_CAPABILITY,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
     DOCUMENT_ATTACHMENTS_CAPABILITY,
@@ -736,6 +743,15 @@ def _strip_input_from_relay_frame(frame: dict[str, Any]) -> dict[str, Any]:
     return frame
 
 
+def _without_sync_inline_ui(payload: dict[str, Any]) -> dict[str, Any]:
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        clean = without_live_inline_ui(snapshot)
+        if clean is not snapshot:
+            return {**payload, "snapshot": clean}
+    return payload
+
+
 def _map_tool_results(
     value: Any, transform: Callable[[dict[str, Any]], dict[str, Any]]
 ) -> tuple[Any, int]:
@@ -871,6 +887,28 @@ def fit_frame_for_wire(frame: dict[str, Any], cap_bytes: int) -> dict[str, Any]:
     if original <= cap_bytes:
         return frame
     op = frame.get("op", "frame")
+    data = frame.get("data")
+    if isinstance(data, dict):
+        if op == "event" and isinstance(sidecar := data.get("inline_ui"), dict):
+            # Exact text and widget offsets are all-or-nothing. Try the base
+            # frame before externalizing attachments or degrading an event.
+            # Prefer tiny explicit retractions if there is even that much room.
+            base = {**frame, "data": without_inline_ui(data)}
+            retracted = {
+                **base,
+                "data": {**base["data"], "inline_ui": inline_ui_retractions(sidecar)},
+            }
+            if _frame_line_bytes(retracted) <= cap_bytes:
+                return retracted
+            frame = base
+            if _frame_line_bytes(frame) <= cap_bytes:
+                return frame
+        elif op == "frontend_update" and isinstance(changes := data.get("changes"), dict):
+            clean = without_live_inline_ui(changes)
+            if clean is not changes:
+                frame = {**frame, "data": {**data, "changes": clean}}
+                if _frame_line_bytes(frame) <= cap_bytes:
+                    return frame
     referenced, moved = _reference_image_payloads(
         frame, AttachmentStore(), key=ATTACHMENT_KEY, floor=_ATTACHMENT_FLOOR_BYTES
     )
@@ -2044,6 +2082,31 @@ def _takes_input_mode(handle: Any) -> bool:
     return True
 
 
+def _takes_delivery(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``delivery`` keyword.
+
+    Same literal-parameter rule as :func:`_takes_input_mode` and for the same
+    reason: the dispatch passes the keyword only when the literal parameter
+    name is present, so a ``**kwargs``-only method would silently DROP the
+    mode and must not be advertised. BOTH OPS ARE PROBED because the prompt
+    arm is the busy-session fallback that steers under the same command id:
+    a handle that took ``delivery`` on ``steer`` alone would advertise a
+    ``prompt`` that hands the mode to a fallback which ignores it. An
+    unreadable or missing method answers no, the conservative side.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "delivery" not in parameters:
+            return False
+    return True
+
+
 def _takes_ask_attachments(handle: Any) -> bool:
     """Whether ``handle``'s ``ask_respond`` takes the ``attachments`` keyword.
 
@@ -2220,6 +2283,8 @@ class _ConnectionAuthority:
     #: connection's facts. ``""`` is no connection at all (a direct
     #: ``_dispatch``), which leaves the handle's in-process default.
     input_surface: str = ""
+    #: Presentation negotiation only; never grants permission to run an op.
+    inline_ui: bool = False
 
     def mesh_origin(self) -> dict[str, Any] | None:
         """The G5 stamp for a row or answer this connection writes, or ``None``.
@@ -2662,6 +2727,12 @@ class _ClientConn:
     #: message (nulls included) and a pre-carriage viewer's ``Message`` forbids
     #: extras, so an unstripped frame is a failed attach, not a degrade.
     input_metadata: bool = False
+    #: This socket opted into live inline widgets; absence keeps the legacy shape.
+    inline_ui: bool = False
+    # Optional daemon sidecars are latest-by-row, not append-only events. Keep
+    # tombstones here too: filling the base FIFO cannot strand a stale card.
+    pending_inline_ui: dict[str, Any] = field(default_factory=dict)
+    pending_inline_ui_reset: bool = False
     #: This viewer negotiated ``supplements-v1`` (``contract.negotiated``): the owner
     #: advertised it AND the viewer declared ``supplements`` on its auth frame. Only
     #: then may the runtime send it ``supplement_progress`` events or project
@@ -2950,7 +3021,7 @@ def _accepts_keyword(fn: Any, name: str) -> bool:
         return False
 
 
-def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> None:
+def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> Any:
     """Swap in the bounded page for a NON-LOCAL viewer whose exact page escalated.
 
     ``full_required`` means "replay the transcript locally": exact for a viewer
@@ -2962,12 +3033,25 @@ def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: st
     so a local viewer's frame is byte-for-byte what it was. The caller's strip
     helpers run after this, so capability gating applies to the swapped page too.
     """
-    if locality == "local":
-        return
     bounded = getattr(sync, "_peer_display_history", None)
-    if bounded is None:
+    if locality != "local" and bounded is not None:
+        payload["display_history"] = bounded.model_dump(mode="json")
+        return bounded
+    return sync.display_history
+
+
+def _fit_sync_history_inline_ui(frame: dict[str, Any], window: Any) -> None:
+    sidecar = getattr(window, "_sync_inline_ui", None)
+    if not sidecar:
         return
-    payload["display_history"] = bounded.model_dump(mode="json")
+    page = frame["data"].get("display_history")
+    if not isinstance(page, dict) or page.get("status") != "ok":
+        return
+    # Optional widgets must not cause loss of a page that fits without them.
+    # Measure the actual push or RPC envelope, after all capability strips.
+    page["inline_ui"] = sidecar
+    if _frame_line_bytes(frame) > _MAX_LINE_BYTES:
+        del page["inline_ui"]
 
 
 def _is_site_decide_target(request_id: str) -> bool:
@@ -3117,6 +3201,7 @@ class RuntimeServer:
                 logger.debug("could not install the interactivity probe", exc_info=True)
         seed = handle.session_projection_seed
         seed.kind = kind
+        self._goal_recovery_enabled = kind != "exec"
         # The projection fold is an OPTIONAL, injected collaborator. A caller
         # that already owns a fold may hand it in and the runtime uses it
         # as-is — only tests do today; every production constructor call
@@ -3235,6 +3320,7 @@ class RuntimeServer:
                 # code (see the constant), and the connector reads the string
                 # to decide whether it may route a Team Bridge message here.
                 + [TEAM_BRIDGE_ROUTED_INBOX_CAPABILITY]
+                + [INLINE_UI_V1]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -3307,6 +3393,13 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # BUSY-SEND DELIVERY MODES, gated on the handle that would HONOUR
+                # the mode rather than advertised unconditionally: the reader of
+                # this string (the mobile stream, the desktop admit path) must
+                # never send `queue`/`both` to an owner whose prompt/steer would
+                # silently drop them — that is a silent downgrade to an urgent
+                # steer. See ``_takes_delivery``.
+                + ([BUSY_DELIVERY_CAPABILITY] if _takes_delivery(handle) else [])
                 # DOCUMENTS, on the same gated-on-the-handle rule: the string
                 # is the sender's licence to send ``Prompt.files``, and an
                 # owner whose dispatch would drop the key must not advertise
@@ -4509,7 +4602,7 @@ class RuntimeServer:
             # Probed, not required — a handle without the capability (a third-
             # party or reduced host) simply has no goal judge to re-arm.
             rearm_goal_judge = getattr(self._handle, "rearm_goal_judge", None)
-            if callable(rearm_goal_judge):
+            if self._goal_recovery_enabled and callable(rearm_goal_judge):
                 try:
                     await self._handle_call_on_session_loop(rearm_goal_judge)
                 except Exception:  # noqa: BLE001 — additive, never a boot gate
@@ -4537,7 +4630,13 @@ class RuntimeServer:
                         subscribe_events,
                     )
                     self._unsubscribe_events = await self._handle_call_on_session_loop(
-                        subscribe, self._relay_event
+                        subscribe,
+                        self._relay_event,
+                        **(
+                            {"inline_ui_sidecars": True}
+                            if _accepts_kw(subscribe, "inline_ui_sidecars")
+                            else {}
+                        ),
                     )
                 except Exception:  # noqa: BLE001 — relay is additive, never a gate
                     logger.debug("event relay subscribe failed", exc_info=True)
@@ -4890,6 +4989,9 @@ class RuntimeServer:
                     logger.debug("could not record the serving tick's death", exc_info=True)
                 continue
             try:
+                tick_goal_recovery = getattr(self._handle, "tick_goal_recovery", None)
+                if self._goal_recovery_enabled and callable(tick_goal_recovery):
+                    tick_goal_recovery()
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
                 # ``on_turn_settled`` hook), and this only bounds how stale a
@@ -5158,11 +5260,14 @@ class RuntimeServer:
             # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
             # already had rather than gaining a second.
             async def bind(on_update: Callable[[Any], None]) -> Any:
-                outcome = (
-                    subscribe_frontend(on_update, display_window=True)
-                    if window_requested
-                    else subscribe_frontend(on_update)
-                )
+                options = {}
+                if window_requested:
+                    options["display_window"] = True
+                    if conn.inline_ui and _accepts_keyword(
+                        subscribe_frontend, "inline_ui_sidecars"
+                    ):
+                        options["inline_ui_sidecars"] = True
+                outcome = subscribe_frontend(on_update, **options)
                 if inspect.isawaitable(outcome):
                     outcome = await outcome
                 return outcome
@@ -5265,8 +5370,10 @@ class RuntimeServer:
             # Trajectories are stripped here and re-fetched per job through
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
-            sync_payload = sync_wire_payload(sync)
-            _serve_peer_bounded_history(sync_payload, sync, conn.locality)
+            sync_payload = sync_wire_payload(sync, inline_ui_capable=conn.inline_ui)
+            if not conn.inline_ui:
+                sync_payload = _without_sync_inline_ui(sync_payload)
+            served_window = _serve_peer_bounded_history(sync_payload, sync, conn.locality)
             # The sync frame carries the FIRST display page, so it is one of
             # the THREE places the audit fields reach the wire (the others are
             # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
@@ -5350,6 +5457,8 @@ class RuntimeServer:
                     "replaced by an error frame at the write",
                     oversize,
                 )
+            if oversize is None and conn.inline_ui:
+                _fit_sync_history_inline_ui(sync_frame, served_window)
             await self._send_to(conn, sync_frame)
             conn.frontend_ready = True
             for pending in conn.frontend_pending:
@@ -5735,6 +5844,12 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            # Do not inherit a request or relay's truthy substitute for the viewer's opt-in.
+            inline_ui=(
+                kind in {"attach", "daemon"}
+                and frame.get("inline_ui") is True
+                and INLINE_UI_V1 in self._record.capabilities
+            ),
             cwd_adoption=cwd_adoption,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
@@ -5794,6 +5909,10 @@ class RuntimeServer:
             # are untouched. What moved is only the moment this gate opens, because
             # that is the part that has to be ordered after the sync frame: a
             # joiner receiving events first would fail its own gap check.
+            conn.events_ready = True
+        elif conn.kind == "daemon" and conn.inline_ui:
+            # Sidecars are supplemental to the welcome projection, never a
+            # replacement for it or an opt-in to the raw attach event stream.
             conn.events_ready = True
         # A FLOOR on the bytes discarded by the CURRENT oversized line, not the
         # exact figure — see where it is incremented. Doubles as the "already
@@ -8062,6 +8181,7 @@ class RuntimeServer:
                     entry_times_capable=conn.entry_times,
                     peer_cycle_capable=conn.peer_cycle_records,
                     input_capable=conn.input_metadata,
+                    inline_ui_capable=conn.inline_ui,
                     capabilities=conn.capabilities,
                     # Whether THIS connection PROVED it may loosen the gate,
                     # or ``None`` for "it has not said" (design round 2 D10, UX
@@ -9294,6 +9414,7 @@ class RuntimeServer:
                     locality=conn.locality,
                     surface=conn.surface,
                 ),
+                inline_ui=conn.inline_ui,
             )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
@@ -9391,6 +9512,13 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape (the client that sent a mode has already
+            # refused against this owner on the capability, so nothing the
+            # dispatch drops can downgrade a queued send).
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # The audio door rides the same probe. A frame that omits the key
             # answers ``None`` (no recording), so every legacy send stays
             # byte-identical, and a handle that predates this keyword never
@@ -9433,6 +9561,14 @@ class RuntimeServer:
                 # connection, probed like ``owner_typed``; a handle without the
                 # keyword keeps its exact old call shape.
                 fields["input_surface"] = authority.input_surface
+            # A terminal behind a socket isn't the in-process TUI. Pass an
+            # explicit False for a legacy attach to suppress the local default.
+            if "inline_ui" in parameters and authority.input_surface in {
+                "desktop",
+                "mobile",
+                "tui",
+            }:
+                fields["inline_ui"] = authority.inline_ui and frame.get("inline_ui") is True
             receipt = await h.prompt(frame["text"], **fields)
             if not honours_wait:
                 return receipt
@@ -9455,6 +9591,11 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The busy-send delivery mode rides the same probe: absent is the
+            # legacy steer, and a handle that predates the keyword keeps its
+            # exact old call shape.
+            if "delivery" in parameters:
+                fields["delivery"] = frame.get("delivery")
             # ...and the recording rides it like an image does: a mid-turn
             # audio send lands its blocks on the queued row rather than
             # dropping them at a handle that cannot take the keyword.
@@ -9486,6 +9627,12 @@ class RuntimeServer:
                 # Same rule as the prompt op above: a phone steer into a
                 # desk-started run makes that run mobile-origin.
                 fields["input_surface"] = authority.input_surface
+            if "inline_ui" in parameters and authority.input_surface in {
+                "desktop",
+                "mobile",
+                "tui",
+            }:
+                fields["inline_ui"] = authority.inline_ui and frame.get("inline_ui") is True
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -10135,6 +10282,7 @@ class RuntimeServer:
         audit_capable: bool = False,
         entry_times_capable: bool = False,
         input_capable: bool = False,
+        inline_ui_capable: bool = False,
         capabilities: frozenset[str] = frozenset(),
         may_loosen: bool | None = None,
         peer_cycle_capable: bool = False,
@@ -10429,13 +10577,18 @@ class RuntimeServer:
             capture = getattr(h, "subscribe_frontend", None)
             if not callable(capture):
                 raise ValueError("canonical history refresh is unavailable")
-            outcome = capture(lambda _update: None, display_window=True)
+            options = {"display_window": True}
+            if inline_ui_capable and _accepts_keyword(capture, "inline_ui_sidecars"):
+                options["inline_ui_sidecars"] = True
+            outcome = capture(lambda _update: None, **options)
             subscription = cast(
                 FrontendSubscription, await outcome if inspect.isawaitable(outcome) else outcome
             )
             try:
-                payload = sync_wire_payload(subscription.sync)
-                _serve_peer_bounded_history(payload, subscription.sync, locality)
+                payload = sync_wire_payload(subscription.sync, inline_ui_capable=inline_ui_capable)
+                if not inline_ui_capable:
+                    payload = _without_sync_inline_ui(payload)
+                served_window = _serve_peer_bounded_history(payload, subscription.sync, locality)
                 # The THIRD wire route, and the one an old viewer uses most:
                 # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
@@ -10500,6 +10653,8 @@ class RuntimeServer:
                         )
                     if oversized_frame_report(response, _MAX_LINE_BYTES) is not None:
                         raise ValueError("canonical refresh exceeds the transport frame limit")
+                elif inline_ui_capable:
+                    _fit_sync_history_inline_ui(response, served_window)
                 return payload
             finally:
                 subscription.unsubscribe()
@@ -10511,14 +10666,16 @@ class RuntimeServer:
                 raise ValueError("invalid history page request")
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
+            options = {}
             if locality != "local" and _accepts_keyword(fetch, "bound_oversized"):
                 # A NON-LOCAL VIEWER cannot perform the local replay a
                 # ``full_required`` page asks for, so an oversized older group
                 # rides bounded and marked instead (see
                 # ``_serve_peer_bounded_history``).
-                result = fetch(before, anchor, bound_oversized=True)
-            else:
-                result = fetch(before, anchor)
+                options["bound_oversized"] = True
+            if inline_ui_capable and _accepts_keyword(fetch, "inline_ui_sidecars"):
+                options["inline_ui_sidecars"] = True
+            result = fetch(before, anchor, **options)
             payload = await result if inspect.isawaitable(result) else result
             # Same contract as the sync frame: a viewer that did not negotiate
             # the audit capability must not be handed fields its page model
@@ -10531,6 +10688,8 @@ class RuntimeServer:
                     strip_peer_cycle_fields,
                 )
 
+                if not inline_ui_capable:
+                    payload.pop("inline_ui", None)
                 strip_audit_fields(payload, audit_capable=audit_capable)
                 strip_entry_time_fields(payload, entry_times_capable=entry_times_capable)
                 strip_peer_cycle_fields(payload, peer_cycle_capable=peer_cycle_capable)
@@ -10616,9 +10775,8 @@ class RuntimeServer:
         frame with it, so the caller must NOT write it anywhere else either
         way. ``False`` is reachable only with ``drop_on_overflow=False`` and
         means the FIFO stayed full even after a lossless fold: the frame was
-        NOT queued and the caller owns delivering it another way. That switch
-        exists for the one receipt that must not be lost — a chunk is cosmetic,
-        a receipt is the answer — and no other caller wants it.
+        NOT queued. The aside receipt must then be sent another way; a daemon
+        sidecar can be skipped without disrupting its ordinary projections.
         """
         # THE chokepoint for both relay frame types: ``frontend_update`` and
         # ``event`` both arrive here, so guarding once covers both and no
@@ -10634,6 +10792,18 @@ class RuntimeServer:
         # ``_strip_input_from_relay_frame``.
         if not conn.input_metadata:
             frame = _strip_input_from_relay_frame(frame)
+        if not conn.inline_ui:
+            data = frame.get("data")
+            if isinstance(data, dict):
+                op = frame.get("op")
+                if op == "event":
+                    clean_data = without_inline_ui(data)
+                    if clean_data is not data:
+                        frame = {**frame, "data": clean_data}
+                elif op == "frontend_update" and isinstance(changes := data.get("changes"), dict):
+                    clean_changes = without_live_inline_ui(changes)
+                    if clean_changes is not changes:
+                        frame = {**frame, "data": {**data, "changes": clean_changes}}
         # The fit pass sits in front of the guard so the guard is the last
         # resort rather than the normal path for a payload-bearing frame.
         frame = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
@@ -10808,8 +10978,8 @@ class RuntimeServer:
         follower cannot delay healthy peers or accumulate tasks indefinitely,
         while a healthy follower receives every frame in emission order.
 
-        Daemon connections are never in the recipient set: the phone's
-        projection path is byte-identical to v3 by construction.
+        A daemon can opt in to the validated sidecar alone; it never receives
+        raw events and its existing projection stream is unchanged.
         """
         if self._closed.is_set():
             return
@@ -10828,9 +10998,14 @@ class RuntimeServer:
         # about the VIEWER; a runtime with no negotiated viewer still journals every row,
         # which is the half that must never depend on who is watching.
         supplement_event = event_type == "supplement_progress"
+        clients = list(self._clients.values())
+        if isinstance(sidecar := data.get("inline_ui"), dict):
+            for conn in clients:
+                if conn.kind == "daemon" and conn.inline_ui and conn.events_ready:
+                    self._enqueue_inline_ui(conn, sidecar["messages"])
         recipients = [
             conn
-            for conn in list(self._clients.values())
+            for conn in clients
             if conn.kind == "attach"
             and conn.wants_events
             and conn.events_ready
@@ -11061,6 +11236,8 @@ class RuntimeServer:
                     json.dumps(str(data.get("delta", ""))).encode()
                 )
                 if frame_bytes + prior_delta_bytes <= _MAX_LINE_BYTES:
+                    # The new head owns cumulative fields (including inline_ui);
+                    # only delta is append-only, so never copy the prior sidecar.
                     merged = dict(data)
                     merged["delta"] = str(prior.get("delta", "")) + str(data.get("delta", ""))
                     compacted[-1] = _merged_frame_head(frame, merged)
@@ -11086,13 +11263,60 @@ class RuntimeServer:
             conn.event_queue.put_nowait(frame)
         return len(compacted) < len(frames)
 
+    def _enqueue_inline_ui(self, conn: _ClientConn, messages: dict[str, Any]) -> None:
+        pending = conn.pending_inline_ui
+        for message_id, row in messages.items():
+            pending.pop(message_id, None)
+            pending[message_id] = row
+        # Bound the side state to the daemon's display window plus one row.
+        # A catch-up event can touch older rows out of order, so eviction is
+        # not proof an old tombstone is irrelevant. In that extreme case reset
+        # the receiving overlay cache, then restore the retained latest rows.
+        while len(pending) > PROJECTION_TRANSCRIPT_LIMIT + 1:
+            pending.pop(next(iter(pending)))
+            conn.pending_inline_ui_reset = True
+        if conn.event_queue.empty():
+            # Only a wake signal, never a wire frame. If the FIFO isn't empty,
+            # its existing work already guarantees the writer a wakeup.
+            self._enqueue_client_frame(conn, {"op": "inline_ui_tick"})
+
+    async def _flush_inline_ui(self, conn: _ClientConn) -> None:
+        pending, conn.pending_inline_ui = conn.pending_inline_ui, {}
+        if conn.pending_inline_ui_reset:
+            conn.pending_inline_ui_reset = False
+            await self._send_to(
+                conn,
+                {
+                    "op": "inline_ui",
+                    "data": {"version": 1, "messages": {}, "reset": True},
+                },
+            )
+        # Each admitted row was already bounded to the sidecar budget. Send
+        # rows separately rather than building an unbounded combined frame if
+        # a busy provider has completed several since the last socket drain.
+        for message_id, row in pending.items():
+            if id(conn.writer) not in self._clients:
+                return
+            if message_id in conn.pending_inline_ui:
+                continue  # A newer revision arrived during a previous socket await.
+            await self._send_to(
+                conn,
+                {
+                    "op": "inline_ui",
+                    "data": {"version": 1, "messages": {message_id: row}},
+                },
+            )
+
     async def _drain_event_queue(self, conn: _ClientConn) -> None:
         """Drain one follower's raw event FIFO until it is dropped."""
         try:
             while id(conn.writer) in self._clients and not self._closed.is_set():
                 frame = await conn.event_queue.get()
                 try:
-                    await self._send_to(conn, frame)
+                    if frame.get("op") != "inline_ui_tick":
+                        await self._send_to(conn, frame)
+                    if conn.pending_inline_ui:
+                        await self._flush_inline_ui(conn)
                 finally:
                     conn.event_queue.task_done()
                 if id(conn.writer) not in self._clients:

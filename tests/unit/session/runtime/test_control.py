@@ -2076,3 +2076,104 @@ async def test_the_sigterm_rung_marker_pairs_to_a_deliberate_receipt(
     assert entry["stop_marker"]["rung"] == "sigterm"
     assert entry["stop_marker"]["sweep_id"] == "swp000000001"
     assert signal_receipt.stop_class_of(entry) == "deliberate"
+
+
+# --- the forced ladder's SIGKILL birth re-proof (PR #4519 round 1, R4) ---------------
+
+
+def _forced_ladder_seams(monkeypatch: pytest.MonkeyPatch, birth: bool | None) -> mock.AsyncMock:
+    """Drive ``stop_session(force=True)`` to rung 3 with no OS signal delivered:
+    the socket never answers, identity is confirmed, SIGTERM "does not land"."""
+    from local_operator.session.runtime import runtime_memory
+
+    sent = mock.AsyncMock(return_value=False)
+    monkeypatch.setattr(control, "_exchange", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(control, "_signal_and_confirm", sent)
+    monkeypatch.setattr(control, "_confirmed_session_id", mock.AsyncMock(return_value=(True, "")))
+    monkeypatch.setattr(registry, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(control, "_write_stop_marker", mock.Mock())
+    monkeypatch.setattr(control, "_withdraw_staged_stop_marker", mock.Mock())
+    monkeypatch.setattr(runtime_memory, "birth_matches", lambda _record: birth)
+    return sent
+
+
+def _armed_session(root: Path, session_id: str) -> None:
+    from local_operator.wakes import store as wake_store
+
+    control.session_dir(root, session_id).mkdir(parents=True)
+    due = int(time.time() * 1000) + 600_000
+    wake_store.write_entry(
+        root, session_id, cwd="/tmp", schedules=[{"id": "w1", "due_ms": due, "every_s": 600}]
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pid_handed_on_in_the_grace_gets_no_sigkill_and_the_stop_still_goes_dormant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime exited inside the SIGTERM grace and a stranger now holds its pid
+    (birth proof ``False``): no SIGKILL, and the session that DID stop has its
+    wakes stamped dormant like any other completed stop — before R4 it returned
+    "gone" with them still armed for a cold-boot wake."""
+    from local_operator.wakes import store as wake_store
+
+    record = _bare_record(kind="daemon")
+    _armed_session(tmp_path, record.session_id)
+    sent = _forced_ladder_seams(monkeypatch, birth=False)
+    outcome = await control.stop_session(record, _root=tmp_path, force=True)
+    assert outcome.method == "gone"
+    assert sent.await_count == 1, "SIGKILL was sent to the pid's new owner"
+    assert outcome.wakes_dormant == 1
+    entry = wake_store.read_entry(tmp_path, record.session_id) or {}
+    assert control.STOP_MARKER in entry and entry.get("schedules")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("birth", [True, None])
+async def test_negative_control_a_proven_or_unknown_birth_still_gets_sigkill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, birth: bool | None
+) -> None:
+    """Only a POSITIVE mismatch withholds: the same ladder with the birth proved,
+    or unanswerable, escalates as before."""
+    record = _bare_record(kind="daemon")
+    _armed_session(tmp_path, record.session_id)
+    sent = _forced_ladder_seams(monkeypatch, birth=birth)
+    outcome = await control.stop_session(record, _root=tmp_path, force=True)
+    assert outcome.method == "sigkill"
+    assert sent.await_count == 2
+    assert sent.await_args_list[-1].args[1] == control.procstate.hard_kill_signal()
+
+
+# --- the caller's own spelling of the escalation (PR #4519 round 1, U8) --------------
+
+
+def test_the_tool_caller_reads_force_true_and_the_cli_reads_the_flag() -> None:
+    record = _bare_record(kind="daemon")
+    tool = control._stopped_line(
+        record, "sigterm", 0, forced=True, flag=control._force_flag("sessions tool --force")
+    )
+    assert "(force=true: identity confirmed from its record)" in tool
+    assert "--force" not in tool
+    # Negative control: the CLI and the TUI keep the flag, byte-identical to before.
+    for command in ("lop stop", "/stop"):
+        line = control._stopped_line(
+            record, "sigterm", 0, forced=True, flag=control._force_flag(command)
+        )
+        assert "(--force: identity confirmed from its record)" in line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "remedy"),
+    [("sessions tool", "stop it with force=true"), ("lop stop", "or --force to signal")],
+)
+async def test_the_busy_skip_names_the_escalation_in_the_callers_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, remedy: str
+) -> None:
+    record = _bare_record(kind="daemon", busy=True)
+    _forced_ladder_seams(monkeypatch, birth=True)
+    outcome = await control.stop_session(record, _root=tmp_path, _command=command)
+    assert outcome.method == "busy"
+    assert remedy in outcome.line
+    if command.startswith("sessions tool"):
+        assert "--force" not in outcome.line

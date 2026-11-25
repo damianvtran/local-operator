@@ -285,6 +285,11 @@ def test_spec_field_surface_is_pinned() -> None:
         # The first-prompt MCP readiness bound (additive; applied post-open
         # through ``Session.set_first_turn_mcp_wait``, never the namespace).
         "mcp_ready_timeout_s",
+        # The default-off public research evidence policy (PR #4429; additive,
+        # ``None`` keeps the ordinary path). Applied post-open through
+        # ``Session.set_public_research`` in ``open_session(mode="own")``,
+        # never the namespace; attach and spawn refuse a non-None value.
+        "public_research",
     }
 
 

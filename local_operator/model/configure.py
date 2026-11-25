@@ -30,6 +30,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime
@@ -38,6 +39,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
 
+from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -4134,6 +4136,7 @@ class SessionStreamFn:
         *,
         wrap_client: Callable[[Any], Any] | None = None,
         http_client: Any | None = None,
+        use_auto_effort: bool = True,
         _transport: _SessionTransport | None = None,
         _child_request_counter: _ChildModelRequestCounter | None = None,
         _counts_as_child_request: bool = False,
@@ -4145,6 +4148,9 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Store the startup intent separately from live/reloaded settings: a
+        # classifier must not silently replace an explicit SDK effort choice.
+        self._use_auto_effort = use_auto_effort
         # Bound by Session after construction; keeping these on the stream lets
         # every turn read the latest CLI/resolver state without rebuilding
         # clients. Only the parent's spawn value lives here: the session choice
@@ -4188,6 +4194,18 @@ class SessionStreamFn:
         # the constant). Instance state, so a fork starts clean: a child's
         # workload says nothing about its parent's.
         self._had_long_call = False
+        # Automation TTL state (``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S``).
+        # ``_automation`` is set by the entry point that KNOWS the run is
+        # non-interactive (``mark_automation``: ``lop exec`` and the SDK), never
+        # inferred here, because this stream cannot tell an exec run from a
+        # viewer-less interactive runtime. ``_last_turn_started`` is the
+        # monotonic start of the previous turn request, and ``_had_long_gap``
+        # latches once two of them were far enough apart for a 5m prefix to
+        # have expired in between. Instance state like ``_had_long_call``: a
+        # fork starts clean, and the policy ignores it for subagents anyway.
+        self._automation = False
+        self._last_turn_started: float | None = None
+        self._had_long_gap = False
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -4206,6 +4224,7 @@ class SessionStreamFn:
         # by the subagent fork site, ``None`` for root-owned requests.
         self._observation_root: SessionStreamFn | None = None
         self._request_observers: RequestSubscriberHolder | None = None
+        self._request_admission: RequestAdmission | None = None
         self._request_job_id: str | None = None
         self._request_actor_role: str | None = None
         # The identity this session's PROVIDER CACHE is keyed under, which is
@@ -5036,6 +5055,23 @@ class SessionStreamFn:
             root._request_observers = holder
         return holder.subscribe(handler)
 
+    def install_request_admission(self, policy: RequestAdmission) -> Callable[[], None]:
+        # Use the same root reference as observation so preforked children see
+        # a late install and a subtree cannot replace the tree's spend authority.
+        root = getattr(self, "_observation_root", None) or self
+        if getattr(root, "_request_admission", None) is not None:
+            raise RuntimeError("request admission is already installed on this session tree")
+        root._request_admission = policy
+        active = True
+
+        def uninstall() -> None:
+            nonlocal active
+            if active:
+                root._request_admission = None
+                active = False
+
+        return uninstall
+
     def bind_request_actor(self, *, job_id: str | None, actor_role: str | None) -> None:
         """Attach the child Session's existing job/role identity to this stream.
 
@@ -5538,6 +5574,38 @@ class SessionStreamFn:
             or request.model.provider in {"radient", "radient-key"}
             or not request.messages
         )
+
+    def mark_automation(self) -> None:
+        """Mark this conversation as a non-interactive run for the cache-TTL policy.
+
+        Called by ``exec_session.run_session`` and the SDK's session builder,
+        the two entry points that know nobody idles between this run's calls.
+        One-way: an automation run never becomes interactive in-process.
+        """
+        self._automation = True
+
+    def _observe_turn_gap(self, request: ChatRequest) -> bool:
+        """Record a turn request's start; whether a long start-to-start gap was ever seen.
+
+        START to START because the 5m entry is refreshed when a request starts:
+        a gap past five minutes is an expiry whether it went into a long
+        stream or a long tool. Measured here, before dispatch, so the request
+        that ends a long gap is already sent at the main-thread TTL; it pays
+        the one rewrite either way, and its fresh write then survives the next
+        gap. Turn requests only: isolated errands and auxiliary purposes do not
+        refresh this conversation's prefix.
+        """
+        if request.purpose != "turn" or request.isolated:
+            return self._had_long_gap
+        from local_operator.providers.anthropic_cache_ttl import (
+            AUTOMATION_LONG_GAP_1H_THRESHOLD_S,
+        )
+
+        now = time.monotonic()
+        previous, self._last_turn_started = self._last_turn_started, now
+        if previous is not None and now - previous >= AUTOMATION_LONG_GAP_1H_THRESHOLD_S:
+            self._had_long_gap = True
+        return self._had_long_gap
 
     def bind_saver_session(self, session: Any) -> None:
         """Read the owning session's live choice without sharing stream state.
@@ -7433,33 +7501,68 @@ class SessionStreamFn:
         return health, shared_remaining, tier_binding, access
 
     async def __call__(
-        self, request: ChatRequest, signal: AbortSignal | None
+        self,
+        request: ChatRequest,
+        signal: AbortSignal | None,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        root = getattr(self, "_observation_root", None) or self
+        policy = getattr(root, "_request_admission", None)
+        admission: tuple[str, AsyncExitStack] | None = None
+        if policy is not None:
+            # An evidence companion pre-assigns its id and durably records it
+            # before dispatch; admission must reuse it rather than mint a second
+            # id, or the spend gate, the ledger row and that receipt disagree.
+            request_id = request._auxiliary_request_id or uuid.uuid4().hex
+            finish = policy(request_id)
+            exit_stack = AsyncExitStack()
+            if finish is not None:
+                exit_stack.callback(finish)
+            admission = request_id, exit_stack
+
         # A quota/preflight pick must stay coherent until THIS request finishes,
         # without granting an unsuccessful pick a durable cache lease. Store-
         # owned identity cleanup also works when an old generator is closed
         # after a newer boundary replaced it; no ContextVar spans a yield.
-        begin = getattr(self._auth_store, "begin_account_request", None)
-        end = getattr(self._auth_store, "end_account_request", None)
-        boundary = (
-            begin(self._session_id, request) if callable(begin) and not request.isolated else None
-        )
-        stream = self._stream_account_request(request, signal, boundary)
         try:
-            async for event in stream:
-                yield event
-        finally:
+            # Session's dispatch evidence must not commit on refusal, but it
+            # still precedes provider preparation even on the no-policy path.
+            if on_admitted is not None:
+                on_admitted()
+            begin = getattr(self._auth_store, "begin_account_request", None)
+            end = getattr(self._auth_store, "end_account_request", None)
+            boundary = (
+                begin(self._session_id, request)
+                if callable(begin) and not request.isolated
+                else None
+            )
+            # Requests without a policy keep the original stream call contract.
+            stream = (
+                self._stream_account_request(request, signal, boundary)
+                if admission is None
+                else self._stream_account_request(request, signal, boundary, admission=admission)
+            )
             try:
-                await stream.aclose()
+                async for event in stream:
+                    yield event
             finally:
-                if boundary is not None and callable(end):
-                    end(self._session_id, boundary)
+                try:
+                    await stream.aclose()
+                finally:
+                    if boundary is not None and callable(end):
+                        end(self._session_id, boundary)
+        finally:
+            if admission is not None:
+                await admission[1].aclose()
 
     async def _stream_account_request(
         self,
         request: ChatRequest,
         signal: AbortSignal | None,
         boundary: object | None = None,
+        *,
+        admission: tuple[str, AsyncExitStack] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         # A session's old hint describes its preceding request, not this one.
         # Only the counted boundary held by this conversation can reconcile it
@@ -7526,6 +7629,8 @@ class SessionStreamFn:
                     delegated=bool(getattr(self, "_parent_session_id", None)),
                 ),
                 "cache_after_long_call": self._had_long_call,
+                "cache_automation": self._automation,
+                "cache_after_long_gap": self._observe_turn_gap(request),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
@@ -7553,7 +7658,7 @@ class SessionStreamFn:
             # the conversation's owner, and an errand's request is built
             # without one — the client's byte estimate of its tiny body
             # decides, so it never goes out at the 1h write rate.
-            async for event in self._record_stream(
+            async for event in self._account_recording(
                 request,
                 stream_with_failover(
                     request,
@@ -7563,6 +7668,8 @@ class SessionStreamFn:
                     signal=signal,
                     session_id=self._session_id,
                 ),
+                admission,
+                signal=signal,
             ):
                 yield event
             return
@@ -7572,7 +7679,8 @@ class SessionStreamFn:
         # model is sub-millisecond / zero tokens — an extra "small LLM" call
         # would erase the saving on the short prompts most likely to go low.
         if (
-            self._message_boundary_pending
+            self._use_auto_effort
+            and self._message_boundary_pending
             and request.purpose == "turn"
             and request.effort_override is None
         ):
@@ -7716,7 +7824,7 @@ class SessionStreamFn:
         # served on the same credential, and the note is an in-process read that
         # reports nothing when the account has not changed.
         self._note_serving_binding(request.model)
-        async for event in self._record_stream(
+        async for event in self._account_recording(
             request,
             stream_with_failover(
                 request,
@@ -7727,6 +7835,7 @@ class SessionStreamFn:
                 session_id=self._session_id,
                 route_state=self._route_state,
             ),
+            admission,
         ):
             usage = getattr(event, "usage", None)
             if tracks_context and usage is not None:
@@ -7779,9 +7888,37 @@ class SessionStreamFn:
         """
         return self._descendant_request_counter.count > 0
 
+    def _account_recording(
+        self,
+        request: ChatRequest,
+        stream: AsyncIterator[StreamEvent],
+        admission: tuple[str, AsyncExitStack] | None,
+        *,
+        signal: AbortSignal | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        # ``signal`` lets the recorder classify an aborted evidence companion
+        # as "aborted" (matching its durable receipt) on either path.
+        if admission is None:
+            return self._record_stream(request, stream, signal=signal)
+        request_id, exit_stack = admission
+        recorder = self._record_stream(request, stream, request_id=request_id, signal=signal)
+        # If the consumer closes at a yield, settle the existing observation
+        # before the cleanup callback checks for a missing final. Also close
+        # the upstream iterator on this owned path rather than relying on GC.
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            exit_stack.push_async_callback(close)
+        exit_stack.push_async_callback(recorder.aclose)
+        return recorder
+
     async def _record_stream(
-        self, request: ChatRequest, stream: AsyncIterator[StreamEvent]
-    ) -> AsyncIterator[StreamEvent]:
+        self,
+        request: ChatRequest,
+        stream: AsyncIterator[StreamEvent],
+        *,
+        request_id: str | None = None,
+        signal: AbortSignal | None = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Forward a provider stream unchanged, then record its usage analytics.
 
         Why the recording lives HERE, wrapping the one place every provider
@@ -7812,7 +7949,10 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = uuid.uuid4().hex
+        # An admitted request's id is the spend gate's; otherwise an evidence
+        # companion's pre-assigned id keeps its durable receipt and this
+        # ledger row on the same request.
+        request_id = request_id or request._auxiliary_request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.
@@ -8085,6 +8225,14 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if (
+                request._evidence_binding is not None
+                and request._evidence_binding.expected is not None
+                and (outcome == "CancelledError" or (signal is not None and signal.aborted))
+            ):
+                # The companion's durable receipt calls both cancellation
+                # paths aborted; keep the observer and ledger on that outcome.
+                ok, outcome = False, "aborted"
             if counted_child_request:
                 # Stop representing provider work before the separate analytics
                 # handoff; that bookkeeping must not widen the in-flight window.
@@ -8499,6 +8647,7 @@ def create_stream_fn(
     cache_lineage_id: str | None = None,
     wrap_client: Callable[[Any], Any] | None = None,
     http_client: Any | None = None,
+    use_auto_effort: bool = True,
 ) -> SessionStreamFn:
     """Build the ``LoopConfig.stream_fn`` for a session.
 
@@ -8542,6 +8691,7 @@ def create_stream_fn(
         cache_lineage_id,
         wrap_client=wrap_client,
         http_client=http_client,
+        use_auto_effort=use_auto_effort,
     )
 
 

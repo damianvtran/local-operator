@@ -1,4 +1,14 @@
 {
+  "relay.approvals.card.always_ask": {
+    "role": "link on a pending approval card, shown while this session is in auto, that switches this session back to asking before gated tools run",
+    "tone": "Sentence case, no full stop. The direct opposite of 'Auto-approve this session'.",
+    "note": "Owned relay SPA approvals copy. Tightening: never refused, needs no pairing. Changes the gate for future calls; it never answers the request on the card."
+  },
+  "relay.approvals.card.guardrails_still_apply": {
+    "role": "one-line consequence note under the auto-approve links on a pending approval card",
+    "tone": "Plain statement, full stop. Reassures without promising more than the product does.",
+    "note": "Owned relay SPA approvals copy. Safety meaning: auto mode skips the approval prompt only; guardrail rule refusals and the built-in dangerous-delete review are still enforced. Do not soften to 'may still apply'."
+  },
   "relay.approvals.card.notice_session_auto": {
     "role": "receipt fallback after loosening this session from the pending decision card",
     "tone": "Preserve casing and the em dash. Lowercase start is deliberate: the card appends its own sentence after it.",
@@ -11,12 +21,12 @@
   },
   "relay.approvals.card.set_auto_all": {
     "role": "link that loosens the GLOBAL default from the pending decision card",
-    "tone": "Sentence case, no full stop. Names the scope ('all sessions') before the tap.",
+    "tone": "Sentence case, no full stop. Names the scope ('all sessions') before the tap; 'auto-approve' is the verb, translated, not the literal mode token.",
     "note": "Owned relay SPA approvals copy. Authority-increasing: the press needs a paired phone and a signed challenge."
   },
   "relay.approvals.card.set_auto_session": {
     "role": "link that loosens this session's gate from the pending decision card",
-    "tone": "Sentence case, no full stop. Names the scope ('this session').",
+    "tone": "Sentence case, no full stop. Names the scope ('this session'); 'auto-approve' is the verb, translated, not the literal mode token.",
     "note": "Owned relay SPA approvals copy. It changes the gate for future calls and never answers the request on the card."
   },
   "relay.approvals.card.still_needs_answer": {

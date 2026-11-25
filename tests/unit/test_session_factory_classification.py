@@ -888,19 +888,11 @@ def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -
 async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The turn pays ``waitMs``, and the answer is delivered by the next message.
+    """The wait leaves the call running; no-ID callers carry it at their next refresh.
 
-    The operator's budget is our OWN overhead per user message, and on a real roster
-    the vendor's answer takes ~250 ms median — waiting for it would put the vendor's
-    model time on the critical path. So the turn waits ``values.classification.waitMs``
-    and no longer, and what it gave up on is not lost: the call keeps running, and the
-    next admitted user message re-renders the knowledge block WITH the late answer.
-    (That is the case this test covers — the turn had ENDED. An answer that lands while
-    its own turn is still running is delivered into that turn's next model step
-    instead, which is the sibling test below.)
-    That re-render is the delivery mechanism (a changed knowledge section is
-    journaled by the harness as a ``[session-state]`` update), which is why nothing
-    here writes a bespoke host-state row.
+    Without identity the callee cannot tell whether a task changed. The first
+    frozen render stays unchanged; a compaction makes the next render consume
+    the queued advice once, keeping the legacy compaction-only contract.
     """
     index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
     off = await _off_block(index)
@@ -957,7 +949,7 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
         # actual configured deadline distinguish budget enforcement from awaiting
         # the vendor even when a loaded event loop resumes after 200 ms.
         async with asyncio.timeout(5.0):
-            first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
+            first = await session_factory._select_knowledge_block(hooks, "first task")
             await unrelated_task
             assert observed_timeouts == [0.05]
             assert vendor_started.is_set()
@@ -970,11 +962,15 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
             release_vendor.set()
             await vendor_task
             assert vendor_finished.is_set()
+            frozen = await session_factory._select_knowledge_block(hooks, "second task")
+            assert frozen == off
             second = await session_factory._select_knowledge_block(
-                hooks, "second task", task_id="t2"
+                hooks, "second task", compaction_id="c1"
             )
             assert second.count("guide://tunnel") == 1
-            third = await session_factory._select_knowledge_block(hooks, "third task", task_id="t3")
+            third = await session_factory._select_knowledge_block(
+                hooks, "third task", compaction_id="c2"
+            )
             assert "guide://tunnel" not in third
     finally:
         # A failed assertion or watchdog must not leak the deliberately blocked
@@ -1003,20 +999,20 @@ async def test_a_late_answer_is_delivered_once_and_only_when_it_exists() -> None
     hooks = _hooks(classifier=classifier)
     hooks.classification_wait_s = 0.05
 
-    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
-    await asyncio.sleep(0.35)  # call 1 lands, late
-    # NOTHING MORE WILL EVER BE RECOMMENDED: every later call is answered empty, so
-    # anything that appears in a later block can only be call 1's answer arriving
-    # twice — which is exactly what must not happen.
-    classifier.recommendation = _Recommendation(skipped="empty-roster")
+    select = session_factory._select_knowledge_block
+    await select(hooks, "first", task_id="t1")
+    await hooks.classification_outstanding[0].task
 
-    second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
+    second = await select(hooks, "", task_id="t1")
     assert second.count("guide://tunnel") == 1
-    await asyncio.sleep(0.35)  # call 2 lands, empty
+    assert not hooks.classification_pending
 
-    third = await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
-    assert "guide://tunnel" not in third, "a delivered answer must never be delivered twice"
+    # An ordinary frozen step keeps the block, but rebuilding this task after
+    # a compaction must not resurrect already-consumed pending advice.
+    assert await select(hooks, "", task_id="t1") == second
+    third = await select(hooks, "first", task_id="t1", compaction_id="c1")
     assert "guide://tunnel" not in third
+    assert len(classifier.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -1508,29 +1504,302 @@ async def test_an_answer_that_misses_the_wait_lands_in_the_same_turn() -> None:
     assert "mcp://slack" in third
 
     # And a NEW message does not repeat it: the pending slot was consumed.
-    fourth = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
+    fourth = await session_factory._select_knowledge_block(hooks, "", task_id="t2")
     assert "mcp://slack" not in fourth
 
 
 @pytest.mark.asyncio
-async def test_an_answer_for_an_older_message_still_rides_the_next_one() -> None:
-    """The old behaviour, kept for the case it exists for: the turn has ENDED.
+@pytest.mark.parametrize(
+    ("limit", "fresh", "old_still_running"),
+    [(1, True, False), (2, True, False), (2, False, False), (1, True, True), (2, False, True)],
+)
+async def test_an_older_answer_does_not_ride_the_next_user_message(
+    limit: int, fresh: bool, old_still_running: bool
+) -> None:
+    """Stale advice may neither take a slot from fresh advice nor fill an empty slot."""
+    release_old = asyncio.Event()
+    release_new = asyncio.Event()
 
-    A call that is still in flight when its message's turn finishes has no next step
-    to reach, so it is carried — and labelled — as an answer to the previous message.
-    """
-    index = _FakeIndex(picked=[])
+    class _TwoTasks(_FakeClassifier):
+        async def recommend_resources(self, request: Any) -> _Recommendation:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                await release_old.wait()
+                return _slack_recommendation()
+            if not fresh:
+                await release_new.wait()
+            return _Recommendation(
+                resources=(_Candidate("mcp", "notion", "Pages and databases.", "mcp://notion"),),
+            )
+
+    classifier = _TwoTasks()
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    hooks.classification_max_recommendations = limit
+
+    select = session_factory._select_knowledge_block
+    assert "mcp://slack" not in await select(hooks, "read my Slack messages", task_id="t1")
+    old_call = hooks.classification_outstanding[0].task
+    if not old_still_running:
+        release_old.set()
+        await old_call
+
+    later = await select(hooks, "read the Notion page", task_id="t2")
+    if old_still_running:
+        assert not old_call.done(), "supersession does not cancel work that can fill the memo"
+        release_old.set()
+        await old_call
+    if not fresh:
+        release_new.set()
+        await hooks.classification_outstanding[-1].task
+    following = await select(hooks, "", task_id="t2")
+    assert "mcp://slack" not in later
+    assert ("mcp://notion" in later) is fresh
+    assert "mcp://slack" not in following
+    assert "mcp://notion" in following
+    assert len(classifier.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_harvested_answer_cannot_cross_tasks_after_render_failure() -> None:
     classifier = _slow_classifier(_slack_recommendation())
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.01
+    select = session_factory._select_knowledge_block
+
+    await select(hooks, "first task", task_id="t1")
+    await hooks.classification_outstanding[0].task
+
+    def fail_to_render(_query: str) -> str:
+        raise RuntimeError("fixture catalogue failure")
+
+    hooks.mcp_catalogue = fail_to_render
+    with pytest.raises(RuntimeError, match="fixture catalogue failure"):
+        await select(hooks, "", task_id="t1")
+    assert hooks.classification_pending, "the failure occurred after harvest"
+    hooks.mcp_catalogue = None
+    hooks.classifier = None
+    assert "mcp://slack" not in await select(hooks, "second task", task_id="t2")
+    assert "mcp://slack" not in await select(hooks, "", task_id="t2")
+    assert not hooks.classification_pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provenance", ["injected", "conflicting", "legacy", "unknown"])
+async def test_transcript_chrome_keeps_its_active_task_owner(
+    tmp_path: Path, provenance: str
+) -> None:
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+    from local_operator.harness.types import AgentTool, ImageContent, Message
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.session.session import INPUT_SURFACE_KEY
+    from local_operator.session.transcript import Transcript
+
+    classifier = _slow_classifier(_slack_recommendation())
+    index = _FakeIndex()
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 0.01
+    transcript = Transcript(tmp_path / "routing")
 
-    assert "mcp://slack" not in await session_factory._select_knowledge_block(
-        hooks, OFF_QUERY, task_id="t1"
+    async def unused_read(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the provider only needs to know that resources can be read")
+
+    tools = [AgentTool(name="read", description="Read a resource", execute=unused_read)]
+    provider = session_factory._make_system_blocks_provider(tools, transcript, hooks)
+
+    async def continuation() -> None:
+        provider_payload: dict[str, Any] = {}
+        text = goal_continuation_prompt("Finish the archive")
+        if provenance == "unknown":
+            provider_payload[INPUT_SURFACE_KEY] = "unknown"
+        elif provenance == "conflicting":
+            provider_payload[INPUT_SURFACE_KEY] = "tui"
+        if provenance in {"injected", "conflicting"}:
+            # This wording cannot bias the check toward treating the row as chrome.
+            text = "Synthetic harness continuation"
+            provider_payload[RENDERED_INJECTION_KEY] = True
+        message = Message.user(text, provider_payload=provider_payload or None)
+        await transcript.append_message(message)
+        # Check the exact mismatch: the raw transcript index advances to chrome.
+        raw_user = transcript.latest_user_entry()
+        assert raw_user is not None and raw_user.id == message.id
+
+    await transcript.append_message(Message.user("inspect the Slack archive"))
+    assert not any("mcp://slack" in block for block in await provider())
+    await hooks.classification_outstanding[0].task
+    await continuation()
+    assert any("mcp://slack" in block for block in await provider())
+    await continuation()
+    assert any("mcp://slack" in block for block in await provider())
+    assert len(classifier.requests) == 1
+
+    # An image-only input also replaces the owner. Chrome above it must not
+    # send the previous task's words back through the classifier or embedder.
+    await transcript.append_message(
+        Message.user("", images=[ImageContent(data="dGVzdA==", mime_type="image/png")])
     )
-    await asyncio.sleep(0.3)
+    await continuation()
+    assert not any("mcp://slack" in block for block in await provider())
+    assert len(classifier.requests) == 1
 
-    later = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
-    assert "mcp://slack" in later
+    # A new human row can be followed by chrome before the next provider step.
+    # It must supersede the previous task even though the newest raw row isn't human.
+    hooks.classifier = None
+    await transcript.append_message(Message.user("now inspect the Notion page"))
+    await continuation()
+    assert not any("mcp://slack" in block for block in await provider())
+    assert index.calls == [
+        "inspect the Slack archive",
+        "inspect the Slack archive",
+        "now inspect the Notion page",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["wait", "wake", "steer", "steer-legacy-text", "steer-notice"])
+async def test_session_delivers_late_advice_only_to_its_owner(
+    tmp_path: Path, boundary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    from local_operator import analytics
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        ToolResult,
+    )
+    from local_operator.harness.wake_types import DueWake, WakeSchedule
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.session.session import INPUT_SURFACE_KEY, Session
+    from local_operator.session.transcript import Transcript
+
+    # The tool boundary is real; analytics is unrelated to this assertion and
+    # its process-global worker must not outlive this test's isolated session.
+    monkeypatch.setattr(analytics, "record_tool_call", lambda *args, **kwargs: None)
+    release = asyncio.Event()
+    job_finish = asyncio.Event()
+    requests: list[str] = []
+    job_id = ""
+    is_steer = boundary.startswith("steer")
+    steer_text = "Corrected Notion scope"
+    if boundary == "steer-legacy-text":
+        # A real operator can paste an exact goal continuation. The live
+        # ingress stamp, not the wording, decides who owns the next request.
+        steer_text = goal_continuation_prompt(steer_text)
+    elif boundary == "steer-notice":
+        steer_text = f"[model switch] {steer_text}"
+
+    class Classifier(_FakeClassifier):
+        async def recommend_resources(self, request: Any) -> _Recommendation:
+            self.requests.append(request)
+            if request.user_message == "Inspect Slack archive":
+                await release.wait()
+                return _slack_recommendation()
+            if request.user_message == steer_text:
+                return _Recommendation(
+                    resources=(_Candidate("mcp", "notion", "Pages.", "mcp://notion"),),
+                )
+            return _Recommendation()
+
+    async def tool(call_id: str, *args: Any, **kwargs: Any) -> ToolResult:
+        return ToolResult(tool_call_id=call_id)
+
+    classifier = Classifier()
+    transcript = Transcript(tmp_path / "session")
+    hooks = _hooks(classifier=classifier)
+    hooks.classification_wait_s = 0.02
+    hooks.classification_max_recommendations = 1
+    tools = [AgentTool(name=name, description=name, execute=tool) for name in ("read", "mcp")]
+
+    def stream(request: Any, _signal: Any) -> Any:
+        requests.append("\n".join(message.text for message in request.messages))
+
+        async def events():
+            if len(requests) == 2 and boundary != "wake":
+                release.set()
+                await hooks.classification_outstanding[0].task
+                if is_steer:
+                    session.steer(steer_text, message_id="synthetic-steer")
+                job_finish.set()
+                yield StreamToolCallDelta(
+                    index=0,
+                    id="synthetic-tool",
+                    name="wait" if boundary == "wait" else "mcp",
+                    argument_delta=(
+                        json.dumps({"job_id": job_id, "wait_ms": 1000})
+                        if boundary == "wait"
+                        else "{}"
+                    ),
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+                return
+            yield StreamTextDelta(delta="fixture output")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return events()
+
+    session = Session(
+        model=ModelSpec(provider="anthropic", model_id="claude-sonnet-4-6", context_window=100_000),
+        stream_fn=stream,
+        tools=tools,
+        transcript=transcript,
+        system_blocks_provider=session_factory._make_system_blocks_provider(
+            tools, transcript, hooks
+        ),
+        has_ui=True,
+    )
+    try:
+        async with asyncio.timeout(5):
+            await session.prompt("Initialize fixture")
+            if boundary == "wait":
+
+                async def job(_id: str, _signal: Any, _report: Any) -> str:
+                    await job_finish.wait()
+                    return "synthetic job finished"
+
+                job_id = session.jobs.register("task", "synthetic-task", job)
+            await session.prompt("Inspect Slack archive")
+            assert "mcp://slack" not in requests[1]
+            if boundary == "wake":
+                release.set()
+                await hooks.classification_outstanding[0].task
+                before = set(session._background_tasks)
+                schedule = WakeSchedule(
+                    id="synthetic-wake",
+                    message="Wake fixture",
+                    next_due_at=0,
+                    created_at=0,
+                    hidden=True,
+                )
+                await session._deliver_wake(
+                    DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+                )
+                await asyncio.gather(*(session._background_tasks - before))
+                assert "Wake fixture" in requests[2]
+            if boundary == "wait":
+                assert "synthetic job finished" in requests[2]
+            if is_steer:
+                raw = transcript.latest_user_entry()
+                assert raw is not None and raw.id == "synthetic-steer"
+                assert raw.payload["provider_payload"][INPUT_SURFACE_KEY] == "tui"
+                assert steer_text in requests[2]
+                assert [url for url in ("mcp://slack", "mcp://notion") if url in requests[2]] == [
+                    "mcp://notion"
+                ]
+                assert classifier.requests[-1].user_message == steer_text
+            else:
+                assert "mcp://slack" in requests[2]
+                assert [r.user_message for r in classifier.requests] == [
+                    "Initialize fixture",
+                    "Inspect Slack archive",
+                ]
+    finally:
+        release.set()
+        job_finish.set()
+        await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -1842,3 +2111,256 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
         candidate.description for candidate in classifier.requests[0].candidates
     )
     assert "vault" not in request_text.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "route",
+    [
+        "disabled",
+        "no-vertex",
+        "early",
+        "blocked",
+        "oauth",
+        "native",
+        "takeover",
+        "takeover-vertex-breaker",
+        "expired-probe",
+        "spent-probe",
+    ],
+)
+async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatch, route):
+    import statistics
+    import threading
+    import time
+
+    import httpx
+
+    from local_operator import analytics
+    from local_operator.classification.service import ClassificationService
+    from local_operator.harness.types import (
+        AgentTool,
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        ToolResult,
+    )
+    from local_operator.providers import registry
+    from local_operator.providers.auth_store import OAuthAccess
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setattr(analytics, "record_tool_call", lambda *args, **kwargs: None)
+    if route == "native":
+        monkeypatch.setenv("RADIENT_API_KEY", "fixture-radient")
+    takeover = route.startswith("takeover")
+    if takeover:
+        monkeypatch.setenv("TYPESAFE_API_KEY", "fixture-typesafe")
+    held_probe = route in {"expired-probe", "spent-probe"}
+    cold, warm = [], []
+    for run in range(1 if held_probe or takeover else 5):
+        root = tmp_path / str(run)
+        root.mkdir()
+        oauth_started, request_started, release, finish_early = (asyncio.Event() for _ in range(4))
+        posts, prompts, dispatches = [], [], []
+        probe_started, probe_released, probe_finished = (threading.Event() for _ in range(3))
+        probe_starts = []
+        if held_probe:
+            read_secret = registry.provider_secret_value
+
+            def held_secret(name, *args, read_secret=read_secret, **kwargs):
+                if name != "RADIENT_API_KEY":
+                    return read_secret(name, *args, **kwargs)
+                probe_starts.append(time.perf_counter())
+                probe_started.set()
+                try:
+                    assert probe_released.wait(4), "fixture did not release native probe"
+                    return read_secret(name, *args, **kwargs)
+                finally:
+                    probe_finished.set()
+
+            monkeypatch.setattr(registry, "provider_secret_value", held_secret)
+
+        class Auth:
+            async def get_oauth_access(self, *_args, **_kwargs):
+                oauth_started.set()
+                if route in {"oauth", "spent-probe"}:
+                    await release.wait()
+                return OAuthAccess(
+                    access_token="fixture-vertex",
+                    credential_id=1,
+                    kind="oauth",
+                    raw={"project_id": "fixture-project", "location": "global"},
+                )
+
+        async def advisory_transport(request: httpx.Request) -> httpx.Response:
+            posts.append(request.url.host)
+            request_started.set()
+            if route == "early":
+                await finish_early.wait()
+            if route == "blocked":
+                await release.wait()
+            if request.url.host in {"api.radienthq.com", "api.typesafe.ai"}:
+                return httpx.Response(
+                    200,
+                    json={"answers": {"recommend_skill": {"choice": "alpha", "confidence": 1}}},
+                )
+            import json
+
+            body = json.loads(request.content)
+            config = body["generationConfig"]
+            assert config["thinkingConfig"] == {"thinkingLevel": "minimal"}
+            choices = config["responseSchema"]["properties"]
+            answer = json.dumps(
+                {
+                    name: "alpha" if "alpha" in prop["enum"] else "none"
+                    for name, prop in choices.items()
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "finishReason": "STOP",
+                            "content": {"parts": [{"text": answer}]},
+                        }
+                    ]
+                },
+            )
+
+        classifier = ClassificationService(config_dir=root)
+        classifier._http = httpx.AsyncClient(transport=httpx.MockTransport(advisory_transport))
+        if route not in {"disabled", "no-vertex"}:
+            classifier.bind_advisory_route(Auth(), "synthetic")
+        hooks = _hooks(classifier=None if route == "disabled" else classifier)
+        transcript = Transcript(root / "session")
+
+        async def tool(call_id, *_args, **_kwargs):
+            return ToolResult(tool_call_id=call_id)
+
+        tools = [AgentTool(name="read", description="read", execute=tool)]
+        step = 0
+
+        def stream(request, _signal):
+            nonlocal step
+            step += 1
+            dispatches.append(time.perf_counter())
+            prompts.append("\n".join([*request.system_blocks, *(m.text for m in request.messages)]))
+
+            async def events():
+                if step == 1:
+                    if route == "early":
+                        # Arrange an answer between chat steps, not before
+                        # first dispatch. Unlike product, the fixture may wait.
+                        await request_started.wait()
+                        pending = hooks.classification_outstanding[0].task
+                        finish_early.set()
+                        result = await pending
+                        assert result.resources
+                    elif route == "blocked":
+                        await request_started.wait()
+                    elif route == "oauth":
+                        await oauth_started.wait()
+                    yield StreamToolCallDelta(
+                        index=0, id="fixture-read", name="read", argument_delta="{}"
+                    )
+                    yield StreamEndEvent(stop_reason="toolUse")
+                else:
+                    yield StreamTextDelta(delta="fixture response")
+                    yield StreamEndEvent(stop_reason="stop")
+
+            return events()
+
+        session = Session(
+            model=ModelSpec(
+                provider="anthropic", model_id="claude-sonnet-4-6", context_window=100_000
+            ),
+            stream_fn=stream,
+            tools=tools,
+            transcript=transcript,
+            system_blocks_provider=session_factory._make_system_blocks_provider(
+                tools, transcript, hooks
+            ),
+            has_ui=True,
+        )
+        try:
+            async with asyncio.timeout(4):
+                start = time.perf_counter()
+                await session.prompt("find alpha skill")
+                cold.append((dispatches[0] - start) * 1000)
+                assert len(dispatches) == 2 and not release.is_set()
+                assert ("<resource_recommendations>" in prompts[0]) == (
+                    route == "native" or takeover
+                )
+                if route == "early":
+                    assert "<resource_recommendations>" in prompts[1]
+                elif route != "native" and not takeover:
+                    assert "<resource_recommendations>" not in prompts[1]
+                if route == "native":
+                    assert posts == ["api.radienthq.com"] and not oauth_started.is_set()
+                if route in {"disabled", "no-vertex", "oauth"}:
+                    assert posts == []
+                if held_probe:
+                    assert probe_started.is_set() and not probe_released.is_set()
+                    assert posts == [] and not oauth_started.is_set()
+                    foreground = hooks.classification_outstanding[0].task
+                    budget = classifier.timeout_s
+                    # Probe entry is after classifier admission, unlike entry to
+                    # Session.prompt(), which includes unrelated turn preparation.
+                    probe_start = probe_starts[0]
+                    if route == "spent-probe":
+                        # Spend part of the budget on native discovery, then hold
+                        # Vertex auth past the original admission deadline.
+                        await asyncio.sleep(
+                            max(0.0, probe_start + budget / 2 - time.perf_counter())
+                        )
+                        probe_released.set()
+                        await oauth_started.wait()
+                        await foreground
+                    await asyncio.sleep(max(0.0, probe_start + budget - time.perf_counter()) + 0.05)
+                    completed_before_release = all(
+                        pending.task.done() for pending in hooks.classification_outstanding
+                    )
+                    probe_released.set()
+                    release.set()
+                    assert await asyncio.to_thread(probe_finished.wait, 1)
+                    await foreground
+                    for pending in hooks.classification_outstanding:
+                        await pending.task
+                    print(
+                        f"{route}: dispatch={cold[-1]:.1f} ms, "
+                        f"finished before release={completed_before_release}, POSTs={posts}"
+                    )
+                    assert not posts and oauth_started.is_set() == (route == "spent-probe")
+                    assert completed_before_release
+                if takeover:
+                    assert posts == ["api.typesafe.ai"] and not oauth_started.is_set()
+                    if route == "takeover-vertex-breaker":
+                        classifier._structured_circuit_open = True
+                    monkeypatch.setenv("RADIENT_API_KEY", "fixture-new-radient")
+                release.set()
+                start = time.perf_counter()
+                if not held_probe:
+                    await session.prompt("another alpha skill")
+                    warm.append((dispatches[2] - start) * 1000)
+                if takeover:
+                    await session.prompt("a third alpha skill")
+                    print(f"warm native authority: POSTs={posts}")
+                    assert posts == ["api.typesafe.ai", "api.radienthq.com", "api.radienthq.com"]
+                    assert not oauth_started.is_set()
+                    assert all("<resource_recommendations>" in prompts[i] for i in (2, 3))
+        finally:
+            probe_released.set()
+            finish_early.set()
+            release.set()
+            await classifier.aclose()
+            await session.dispose()
+    if not warm:
+        return
+    print(
+        f"dispatch {route}: n={len(cold)} cold ms median={statistics.median(cold):.1f} "
+        f"range={min(cold):.1f}–{max(cold):.1f}; warm ms median={statistics.median(warm):.1f} "
+        f"range={min(warm):.1f}–{max(warm):.1f}"
+    )

@@ -71,6 +71,12 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.session.inline_ui_text import (
+    INLINE_UI_V1,
+    project_inline_ui,
+    terminal_inline_ui,
+    terminal_inline_ui_overlay,
+)
 from local_operator.session.runtime.types import EVENT_MUTE_DROP_TYPES
 from local_operator.tui.widgets.transcript import NoticeKind
 
@@ -313,6 +319,7 @@ class AssistantMessageEnd(SessionEvent):
         *,
         stop_reason: str | None = None,
         has_tool_calls: bool = False,
+        retract_inline_ui: bool = False,
     ) -> None:
         super().__init__()
         self.text = text
@@ -325,6 +332,7 @@ class AssistantMessageEnd(SessionEvent):
         # producers and synthetic test messages construct this positionally.
         self.stop_reason = stop_reason
         self.has_tool_calls = has_tool_calls
+        self.retract_inline_ui = retract_inline_ui
 
 
 class HistoryRowsSettled(SessionEvent):
@@ -543,7 +551,7 @@ class RetryEnded(SessionEvent):
 class SteeringDelivered(SessionEvent):
     """Queued mid-turn messages reached the model's context.
 
-    The receipt the ``queued — sends when this step finishes`` row was missing:
+    The receipt the ``steering — may stop a running tool`` row was missing:
     the app settles that row against this instead of leaving a promise about the
     future standing after the future arrived. ``count`` is how many messages
     went in at the one boundary.
@@ -713,6 +721,8 @@ class EventController:
         self._pending_tool_ends: dict[str, ToolExecutionEndEvent] = {}
         self._started_tools: set[str] = set()
         self._assistant_buffer: str = ""
+        self._assistant_source_version: int | None = None
+        self._assistant_inline_ui: tuple[str, object] = ("", None)
         self._assistant_seen: str = ""
         #: The reasoning channel's buffer, flushed on the same 30 Hz tick as the
         #: assistant text and for the same reason: a reasoning model emits a
@@ -819,6 +829,8 @@ class EventController:
             # can see; the buffer it would flush is dropped below anyway.
             self._stop_flush_timer()
             self._assistant_buffer = ""
+            self._assistant_source_version = None
+            self._assistant_inline_ui = ("", None)
             self._assistant_seen = ""
             # The reasoning buffer too. Not because it could have grown while
             # parked -- the drop above means no fragment reaches the handler --
@@ -850,7 +862,12 @@ class EventController:
         self._restoring_projection = True
         try:
             self._on_event(AgentStartEvent(generation=state.generation))
+            local_overlay = getattr(state, "_live_inline_ui", None)
             for data in state.live_events:
+                # The local store, unlike a socket seed, holds the overlay
+                # privately so an ordinary state dump stays a legacy shape.
+                if local_overlay and data.get("type") == "message_update":
+                    data = {**data, "inline_ui": local_overlay}
                 event = deserialize_event(data)
                 identity = str(getattr(getattr(event, "message", None), "id", "") or "")
                 if identity and identity in rendered_ids:
@@ -936,6 +953,8 @@ class EventController:
         self._pending_tool_ends.clear()
         self._started_tools.clear()
         self._assistant_buffer = ""
+        self._assistant_source_version = None
+        self._assistant_inline_ui = ("", None)
         self._assistant_seen = ""
         # And the reasoning buffer: a new turn's first model call starts a new
         # thinking phase, and a fragment inherited from the previous turn would
@@ -1122,6 +1141,8 @@ class EventController:
         # too, but a border-crossing phase must never inherit a stale buffer).
         self._close_reasoning_phase()
         self._assistant_buffer = ""
+        self._assistant_source_version = None
+        self._assistant_inline_ui = ("", None)
         self._assistant_seen = ""
         self._post(AssistantMessageStart())
 
@@ -1161,6 +1182,8 @@ class EventController:
     def _handle_message_update(self, event: MessageUpdateEvent) -> None:
         # Buffer the delta; flush on the 30 Hz timer (coalescing).
         self._assistant_buffer += event.delta
+        self._assistant_source_version = getattr(event.message, "_inline_ui_source_version", None)
+        self._assistant_inline_ui = (event.message.id, getattr(event, "inline_ui", None))
         self._request_flush_timer()
 
     def _handle_message_end(self, event: MessageEndEvent) -> None:
@@ -1169,8 +1192,29 @@ class EventController:
         text = getattr(event.message, "text", None)
         if text is None:
             text = self._assistant_buffer
+        envelope = getattr(event, "inline_ui", None)
+        rows = envelope.get("messages") if isinstance(envelope, dict) else None
+        message_id = event.message.id
+        retract = isinstance(rows, dict) and message_id in rows and rows[message_id] is None
+        if not text and self._assistant_source_version == 1:
+            previous = project_inline_ui(
+                self._assistant_buffer,
+                streaming=True,
+                source_version=1,
+                capabilities=frozenset({INLINE_UI_V1}),
+            )
+            if "inline_ui" in previous:
+                # An empty authoritative final usually preserves streamed prose.
+                # A previously shown provisional widget is the exception.
+                text = previous["text"]
+                retract = True
+        elif not text and retract:
+            text = self._assistant_buffer  # Attached updates already contain prose only.
         self._assistant_buffer = text
-        self._flush_assistant()
+        self._assistant_source_version = getattr(event.message, "_inline_ui_source_version", None)
+        self._assistant_inline_ui = (message_id, envelope)
+        text = self._assistant_display_text(streaming=False)
+        self._flush_assistant(streaming=False)
         # The model has stopped thinking for this call: flush whatever reasoning
         # is still buffered and close the phase, BEFORE the assistant end event
         # so the app sees the reasoning complete before the answer's block
@@ -1191,6 +1235,7 @@ class EventController:
                 message.id,
                 stop_reason=getattr(message, "stop_reason", None),
                 has_tool_calls=bool(getattr(message, "tool_calls", None)),
+                retract_inline_ui=retract,
             )
         )
         # Keep the context reading live THROUGH the turn, not just after it.
@@ -1466,12 +1511,21 @@ class EventController:
             self._flush_timer.stop()
             self._flush_timer = None
 
-    def _flush_assistant(self) -> None:
-        """Post the buffered assistant text, guarded by equality."""
-        if self._assistant_buffer == self._assistant_seen:
-            return  # equality guard — identical text = no work
-        self._assistant_seen = self._assistant_buffer
-        self._post(AssistantDelta(self._assistant_buffer))
+    def _assistant_display_text(self, *, streaming: bool) -> str:
+        # In-process events carry private source provenance. Attached events
+        # carry only prose plus the negotiated typed overlay, never raw JSON.
+        if self._assistant_source_version == 1:
+            return terminal_inline_ui(self._assistant_buffer, streaming=streaming)
+        message_id, overlay = self._assistant_inline_ui
+        return terminal_inline_ui_overlay(self._assistant_buffer, message_id, overlay)
+
+    def _flush_assistant(self, *, streaming: bool = True) -> None:
+        """Post the buffered assistant display. Widget-only updates also count."""
+        text = self._assistant_display_text(streaming=streaming)
+        if text == self._assistant_seen:
+            return
+        self._assistant_seen = text
+        self._post(AssistantDelta(text))
 
     def _flush_reasoning(self) -> None:
         """Post the buffered reasoning text, guarded by equality.

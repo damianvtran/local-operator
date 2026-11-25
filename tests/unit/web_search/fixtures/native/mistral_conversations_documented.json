@@ -1,0 +1,53 @@
+{
+  "_note": "DOCUMENTED SHAPE, not a live capture (no credential on the probe machine 2026-11-24); docs.mistral.ai Websearch example output (verbatim structure, ids redacted)",
+  "conversation_id": "conv_REDACTED",
+  "object": "conversation.response",
+  "outputs": [
+    {
+      "type": "tool.execution",
+      "name": "web_search",
+      "object": "entry",
+      "id": "tool_exec_REDACTED"
+    },
+    {
+      "type": "message.output",
+      "role": "assistant",
+      "model": "mistral-small-latest",
+      "object": "entry",
+      "id": "msg_REDACTED",
+      "content": [
+        {
+          "type": "text",
+          "text": "Python 3.15.2 is the latest stable release"
+        },
+        {
+          "type": "tool_reference",
+          "tool": "web_search",
+          "title": "Python Release Python 3.15.2",
+          "url": "https://www.python.org/downloads/release/python-3152/",
+          "source": "brave"
+        },
+        {
+          "type": "tool_reference",
+          "tool": "web_search",
+          "title": "Download Python",
+          "url": "https://www.python.org/downloads/",
+          "source": "brave"
+        },
+        {
+          "type": "text",
+          "text": "."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 188,
+    "completion_tokens": 55,
+    "total_tokens": 7355,
+    "connector_tokens": 7112,
+    "connectors": {
+      "web_search": 1
+    }
+  }
+}

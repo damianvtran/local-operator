@@ -388,6 +388,7 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    "LOP_RUNTIME_GOAL_WAKE_DUE",
     # The wake supervisor's per-invocation ownership stamp (#3028,
     # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
     # propagate it. serve() sets both in its own environment, so a suite run
@@ -402,6 +403,10 @@ _AMBIENT_VARS = (
     # a live supervisor it is harmless on its own (no test process shares that
     # pid), but it belongs to the same live-machine state as the token.
     "LOP_WAKE_SUPERVISOR_PID",
+    # "The supervisor started this runtime" (``owned_runtimes.SUPERVISOR_STARTED_ENV``):
+    # inherited from a supervisor-started shell, every session a test loads would
+    # pull its wakes forward (``harness.wake.take_supervisor_started``).
+    "LOP_WAKE_SUPERVISOR_STARTED",
     # The team-bridge connector's supervision gate
     # (``team_bridge/connector/__main__._is_supervised``). All three decide
     # whether THIS process may exit and leave a service manager to restart it,
@@ -587,6 +592,10 @@ _AMBIENT_VARS = (
     "SERPAPI_API_KEY",
     "TAVILY_API_KEY",
     "FAL_API_KEY",
+    # FAL's own SDK env name, honoured by the FAL image rung after FAL_API_KEY:
+    # an inherited one would light the FAL rung in every cell that asserts
+    # which rungs exist.
+    "FAL_KEY",
     # The audio rungs' BYOK probes fall back to an exported key (the image
     # lane's FAL/OpenAI rule), so an inherited one would light the ElevenLabs
     # rung in every cell that asserts which rungs exist.

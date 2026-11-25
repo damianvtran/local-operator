@@ -4335,6 +4335,55 @@ class _TurnScriptedSession(_ScriptedSession):
         self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
 
 
+class _ToolOnlyGroupsSession(_ScriptedSession):
+    """A session whose every group calls a local tool, never ``apply_actions``.
+
+    Each group is one assistant message carrying a ``bash`` tool call (a
+    fresh message id, so the bridge charges one attempted group) followed by
+    its ``TurnEndEvent``; nothing ever reaches the bridge socket, so the
+    admitted-step clock stays at 0. Emission stops at the first graceful
+    cancel, the boundary the real loop honours it at. ``linger_s`` holds the
+    turn open after that, so a wall bound can fire before it ends.
+    """
+
+    def __init__(
+        self,
+        scratch_root: Path,
+        *,
+        groups: int,
+        cancel_ends_aborted: bool,
+        linger_s: float = 0.0,
+    ) -> None:
+        super().__init__(scratch_root, [])
+        self._groups = groups
+        self._cancel_ends_aborted = cancel_ends_aborted
+        self._linger_s = linger_s
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del images
+        self.prompts.append((text, harness_injected))
+        if len(self.prompts) > 1:
+            return
+        for group in range(self._groups):
+            self._emit(
+                MessageEndEvent(
+                    message=Message(
+                        role="assistant",
+                        tool_calls=[ToolCall(id=f"local-{group}", name="bash", arguments={})],
+                        stop_reason="toolUse",
+                    )
+                )
+            )
+            self._emit(TurnEndEvent())
+            if self.cancels:
+                break
+        if self._linger_s:
+            await asyncio.sleep(self._linger_s)
+        self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
+
+
 def _record_kinds(outcome: Any) -> list[str]:
     """The ``kind`` sequence of an episode's ``events.jsonl``."""
 
@@ -4528,6 +4577,64 @@ class TestTextOnlyContinuationThroughTheDriver:
         assert len(rows) == 1
         assert rows[0]["delivered"] is False
         assert rows[0]["stopped"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_groups_that_never_apply_actions_end_max_steps_on_the_budget_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """The driver's own budget stop is a ``max-steps`` truncation.
+
+        The smoke shape (OSWorld smoke ep-ab550b5dd3e2): every group called a
+        tool other than ``apply_actions``, so the admitted-step clock stayed
+        at 0 while the attempted-group budget ran out. The driver wrote
+        ``budget_stop`` and asked for a graceful cancel, the Session ended the
+        turn ``aborted`` with no cause (it drops graceful-cancel reasons), and
+        the outcome read ``agent_stop`` / ``aborted`` / "no cut-off cause".
+        """
+
+        session = _ToolOnlyGroupsSession(short_scratch, groups=4, cancel_ends_aborted=True)
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert session.cancels == ["episode step budget reached"]
+        assert outcome.steps == 0  # unchanged: admitted epochs only
+        assert outcome.attempted_groups == 4
+        assert outcome.status == "truncated", outcome
+        assert outcome.terminal_reason == "max-steps"
+        assert "no cut-off cause" not in (outcome.diagnostic or "")
+        assert "budget_stop" in _record_kinds(outcome)
+
+    @pytest.mark.asyncio
+    async def test_a_wall_bound_after_the_budget_stop_keeps_its_own_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # Precedence guard: the wall bound is the driver's harder act, so a
+        # wall firing while the budget-cancelled turn is still winding down
+        # stays ``wall-bound`` rather than becoming ``max-steps``.
+        session = _ToolOnlyGroupsSession(
+            short_scratch, groups=4, cancel_ends_aborted=True, linger_s=1.0
+        )
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+            max_wall_s=0.3,
+        )
+        outcome = await run()
+
+        assert session.cancels == ["episode step budget reached"]
+        assert session.aborts == ["episode wall budget"]
+        assert "budget_stop" in _record_kinds(outcome)
+        assert outcome.status == "agent_stop", outcome
+        assert outcome.terminal_reason == "wall-bound"
 
     @pytest.mark.asyncio
     async def test_a_normal_finish_run_records_the_base_event_sequence(
@@ -5973,6 +6080,7 @@ class TestTheStreamCompletedStopBoundary:
         progress_guards: Any = None,
         frozen: bool = False,
         commands: bool = False,
+        enforce_recorded_spend: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
         """One real episode; returns (wire calls, outcome, record text).
 
@@ -6093,12 +6201,44 @@ class TestTheStreamCompletedStopBoundary:
             launch=launch,
             rescue=rescue,
             progress_guards=progress_guards,
+            enforce_recorded_spend=enforce_recorded_spend,
         )
         record = outcome.record_root / "events.jsonl" if outcome.record_root else None
         text = ""
         if record is not None and record.exists():
             text = record.read_text(encoding="utf-8")
         return calls, outcome, text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enforce", [False, True])
+    async def test_episode_spend_refusal_names_the_stop_and_joins_owned_work(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
+    ) -> None:
+        # The wire sends no usage, so only the opt-in must refuse request two.
+        # Use action groups: local-only groups spend the attempted-group clock
+        # but do not take the screen epochs that give this stop its max-steps label.
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL], [self._NOOP_CALL]],
+            max_steps=2,
+            enforce_recorded_spend=enforce,
+        )
+        assert len(calls) == (1 if enforce else 2)
+        assert outcome.steps == len(calls)
+        # The capped request ends an aborted assistant message before transport:
+        # it still reserves a group, but executes no action and takes no screen epoch.
+        assert outcome.attempted_groups == 2
+        rows = [json.loads(line) for line in text.splitlines()]
+        assert any(row["kind"] == "shutdown" and row["complete"] for row in rows)
+        stops = [row for row in rows if row.get("cap_semantics") == "admission_on_recorded_spend"]
+        if enforce:
+            assert outcome.status == "truncated"
+            assert outcome.terminal_reason == "cost-unreported"
+            assert len(stops) == 1 and stops[0]["in_flight"] == 0
+        else:
+            assert not stops
+            assert outcome.terminal_reason == "max-steps"
 
     @pytest.mark.asyncio
     async def test_a_local_only_nth_group_spends_no_second_request(
@@ -6200,11 +6340,12 @@ class TestTheStreamCompletedStopBoundary:
                 }
             )
         )
-        # The existing command-only close-out labels graceful budget stops as
-        # agent_stop/aborted (unlike screen-epoch exhaustion). Reporting must
-        # neither change that legacy status nor mistake it for lost enforcement.
-        assert outcome.status == "agent_stop", (outcome, text)
-        assert outcome.terminal_reason == "aborted"
+        # A command-only run exhausts the attempted-group budget with zero
+        # screen epochs; the driver's own budget stop names it ``max-steps``
+        # (it used to fall through to agent_stop/aborted, because the Session
+        # drops the graceful-cancel reason). ``steps`` stays admitted epochs.
+        assert outcome.status == "truncated", (outcome, text)
+        assert outcome.terminal_reason == "max-steps"
         assert len(wire) == 3
         assert outcome.steps == 0  # commands never claimed a screen epoch
         assert outcome.attempted_groups == 3
@@ -6897,6 +7038,57 @@ class TestBridgeCommand:
         assert "exit_code: none" in text
         assert reply["details"]["timed_out"] is True
         assert [p for k, p in rows if k == "command"][0]["exit_code"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("requested", [None, 2])
+    async def test_a_timeout_states_the_limit_that_applied(
+        self, tmp_path: Path, requested: int | None
+    ) -> None:
+        """``timed_out: true`` alone never said WHICH limit cut the command.
+        A worker whose ``timeout`` was dropped as undeclared ran on the 60 s
+        default, timed out six times and was never told the default was what
+        applied. Both the default and an explicit ``timeout_s`` are named."""
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result(exit_code=None, timed_out=True, stdout="", stdout_bytes=0)
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=[])
+        await bridge.start()
+        try:
+            arguments: dict[str, Any] = {"command": "sleep 99"}
+            if requested is not None:
+                arguments["timeout_s"] = requested
+            reply = await _speak_command(bridge, arguments)
+        finally:
+            await bridge.stop()
+        applied = COMMAND_DEFAULT_TIMEOUT_S if requested is None else requested
+        assert (
+            f"timeout_s: {applied} (the limit that applied; the default is "
+            f"{COMMAND_DEFAULT_TIMEOUT_S}, the maximum {COMMAND_MAX_TIMEOUT_S})\n"
+        ) in reply["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_a_command_that_did_not_time_out_names_no_limit(self, tmp_path: Path) -> None:
+        """Control for the test above: only a timeout gains the line, so every
+        other result keeps the text it had."""
+
+        async def run_command(command: str, timeout_s: float) -> Any:
+            del command, timeout_s
+            return _command_result()
+
+        bridge = self._bridge(tmp_path, run_command=run_command, rows=[])
+        await bridge.start()
+        try:
+            reply = await _speak_command(bridge, {"command": "true", "timeout_s": 2})
+        finally:
+            await bridge.stop()
+        text = reply["content"][0]["text"]
+        assert "timed_out: false" in text and "timeout_s:" not in text
 
     @pytest.mark.asyncio
     async def test_a_command_the_target_could_not_run_is_a_result_the_model_can_read(

@@ -28,6 +28,7 @@
   "wire.errors.desktop.claim_origin_outside_configured": "Заявка не может установить источник вне настроенных источников рабочего стола.",
   "wire.errors.desktop.claim_origin_wildcard": "Источник с подстановочным знаком заявить нельзя.",
   "wire.errors.desktop.claim_origins_not_list": "Поле 'origins' в теле заявки должно быть списком.",
+  "wire.errors.desktop.conversation_deleted": "Этот разговор удалён, поэтому ответить на этот вопрос уже нельзя. Вместо этого скройте или отклоните его.",
   "wire.errors.desktop.conversations_unreadable": "Сейчас не удалось прочитать разговоры. Это исправляется само; повторите чуть позже.",
   "wire.errors.desktop.credential_operation_failed": "Операция с учётными данными не завершилась",
   "wire.errors.desktop.cwd_marker_read_failed": "не удалось прочитать маркер рабочего каталога сессии: {error}",

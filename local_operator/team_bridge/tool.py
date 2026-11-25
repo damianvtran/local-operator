@@ -109,6 +109,11 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
   (hash-verified, never stored) so a sender can read what it wrote.
+  The timeline is ROOTS only: thread replies are excluded and read with
+  ``channel_thread``. A root with replies carries the hub's ``reply_count`` and
+  ``last_reply_at``, and the model copy carries a one-line thread note (after
+  the head, before the page) naming those roots, so a gap in the timeline is
+  not mistaken for a lost message.
 
 - **react** — set an emoji on an admitted conversation message (or remove it
   with ``remove=true``). ``emoji`` is a Unicode emoji or a Slack/GitHub
@@ -344,6 +349,80 @@ def _model_page_json(result: Any) -> str:
         if isinstance(page.get("root"), dict):
             page["root"] = _row(page["root"])
     return json.dumps(bound_inline_data_payload(page), ensure_ascii=False, separators=(",", ":"))
+
+
+#: The hub's ``last_reply_at`` is an RFC 3339 instant (Go ``time.Time``). It is
+#: echoed into the thread note only when it has exactly that shape, so the note
+#: can never carry free text from the payload.
+_THREAD_NOTE_TIMESTAMP = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})"
+)
+
+#: Marker that opens the thread note, so the model can tell a line Local Operator
+#: wrote from the hub page it follows.
+_THREAD_NOTE_MARKER = "[bridge thread note — from Local Operator, not message content]"
+
+
+def _thread_replies_note(result: Any, channel_id: str) -> str | None:
+    """One line telling the model which roots on a ``channel_history`` page have
+    thread replies, or None when none do.
+
+    WHY. The hub's channel timeline lists ROOT messages only; replies live under
+    their root and are read with ``channel_thread``. On 2026-11-24 an agent read
+    qa-coordination's history, saw it stop at seq 3384, and concluded seq 3385
+    was lost — it was a reply under root 3383, whose row carried ``reply_count:
+    1`` that nothing pointed the agent at. This note makes the rollup the hub
+    already returns actionable.
+
+    CONSTRAINTS. Built only from closed-grammar metadata of the page the hub just
+    served — a minted message id, an integer seq and count, an RFC 3339 instant —
+    so it never echoes a body, a display label or ``reply_participants`` (those
+    are sender-controlled text and stay inside the untrusted JSON). No extra hub
+    call per root. The latest REPLY's seq is not named: the hub's message view
+    (agent-server ``BridgeConversationMessageView``) carries only ``reply_count``,
+    ``last_reply_at`` and ``reply_participants`` on a root, and a seq guessed
+    from those would be invented. A row missing or mistyping those fields is
+    simply not listed.
+    """
+
+    rows = result.get("messages") if isinstance(result, dict) else None
+    if not isinstance(rows, list):
+        return None
+    entries: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("thread_root_id"):
+            continue
+        count = row.get("reply_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        root_id = row.get("id")
+        if not isinstance(root_id, str) or _CONVERSATION_MESSAGE_ID.fullmatch(root_id) is None:
+            continue
+        seq = row.get("seq")
+        where = (
+            f"seq {seq} " if isinstance(seq, int) and not isinstance(seq, bool) else ""
+        ) + f"(id {root_id})"
+        detail = f"{count} {'reply' if count == 1 else 'replies'}"
+        last = row.get("last_reply_at")
+        if isinstance(last, str) and _THREAD_NOTE_TIMESTAMP.fullmatch(last):
+            detail += f", last {last}"
+        entries.append(f"{where}: {detail}")
+    if not entries:
+        return None
+    # The resolved id came back from the hub (a name lookup) or the model; only
+    # the minted grammar is echoed, as with the root ids above.
+    conversation = channel_id if _CONVERSATION_ID.fullmatch(channel_id) else "<channel id>"
+    roots = (
+        "1 root on this page has"
+        if len(entries) == 1
+        else f"{len(entries)} roots on this page have"
+    )
+    return (
+        f"{_THREAD_NOTE_MARKER} This timeline excludes thread replies; {roots} "
+        f"replies — {'; '.join(entries)}. Read them with channel_thread "
+        f"(channel_id={conversation}, thread_root_id=<root id>); reply to a thread on its "
+        "ROOT id (threads are one level)."
+    )
 
 
 #: Display label for the auto-added creator member. The label is display-only
@@ -2697,10 +2776,12 @@ def _room_name_key(name: str, *, allow_hash: bool) -> str:
     name never carries the sigil.
     """
 
+    from .store import channel_name_key
+
     key = name.strip()
     if allow_hash and key.startswith("#"):
         key = key[1:].strip()
-    return key.lower()
+    return channel_name_key(key)
 
 
 async def _list_open_conversations(
@@ -2728,9 +2809,174 @@ async def _list_open_conversations(
             rows.extend(row for row in items if isinstance(row, dict))
         next_cursor = page.get("next_cursor")
         if not isinstance(next_cursor, str) or not next_cursor:
+            _remember_channel_names(runtime, rows)
             return rows, False
         cursor = next_cursor
+    _remember_channel_names(runtime, rows)
     return rows, True
+
+
+def _remember_channel_names(runtime: BridgeRuntime, rows: Sequence[Any]) -> None:
+    """Feed the local rename-alias table from a listing this session just read.
+
+    Only TENANT-VISIBLE channels are remembered: they are the only rows the
+    name lookup may resolve to, so a private room's name never becomes durable
+    here. BEST-EFFORT by design — the table only improves a later "not found",
+    so a busy or unreadable store must never fail the listing that fed it.
+    Names are never logged above debug (see the store's alias-table note).
+    """
+
+    sightings = [
+        (row["id"], row["name"])
+        for row in rows
+        if isinstance(row, Mapping)
+        and _is_tenant_visible_channel(row)
+        and isinstance(row.get("id"), str)
+        and isinstance(row.get("name"), str)
+    ]
+    if not sightings or not runtime.tenant_id:
+        return
+    from .store import Store
+
+    try:
+        Store(Path(runtime.config_dir)).record_channel_names(runtime.tenant_id, sightings)
+    except Exception as failure:  # noqa: BLE001 - advisory table, never the call's outcome
+        logger.debug("channel alias record skipped: %s", type(failure).__name__)
+
+
+def _channel_alias_rows(
+    runtime: BridgeRuntime,
+    *,
+    name_key: str | None = None,
+    conversation_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """This tenant's remembered (id, name) rows; [] when unknown or unreadable.
+
+    ``name_key`` / ``conversation_id`` narrow the read through the table's
+    indexes (see ``Store.channel_alias_rows_readonly``); rows come newest
+    ``last_seen`` first.
+    """
+
+    from .store import Store
+
+    try:
+        return Store(Path(runtime.config_dir)).channel_alias_rows_readonly(
+            runtime.tenant_id, name_key=name_key, conversation_id=conversation_id
+        )
+    except Exception as failure:  # noqa: BLE001 - an unreadable table is "no aliases"
+        logger.debug("channel alias read skipped: %s", type(failure).__name__)
+        return []
+
+
+def _last_known_channel_name(runtime: BridgeRuntime, conversation_id: str) -> str | None:
+    """The most recently SEEN name of an id-addressed channel, or None.
+
+    Local and free (no hub call), so an id-addressed post or read can still say
+    which room it touched. It is the name this machine last saw, which may lag
+    a rename made since; a name-addressed call reports the live name instead.
+    """
+
+    for row in _channel_alias_rows(runtime, conversation_id=conversation_id):  # newest first
+        if row.get("conversation_id") == conversation_id:
+            name = row.get("display_name")
+            return name if isinstance(name, str) and name else None
+    return None
+
+
+@dataclass(frozen=True)
+class ChannelResolution:
+    """What a channel NAME resolved to, and how — the keys a result carries."""
+
+    conversation_id: str
+    #: The room's CURRENT name, from the live list that confirmed it.
+    channel_name: str
+    #: The old name the caller used (sigil stripped), when the match came
+    #: through the alias table.
+    alias: str = ""
+    #: ISO-8601 UTC time this machine first saw ``channel_name`` after the old
+    #: name's last sighting (≈ the rename; a b -> a -> b return dates the second b).
+    renamed_at: str = ""
+
+    def renamed_refusal(self, op: str) -> dict[str, Any]:
+        """The typed refusal a WRITE addressed by an old name gets instead of sending.
+
+        WHY a write never follows an alias (security round 1, S-1): anyone in
+        the tenant can name a visible channel after a room the caller cannot
+        see (``finance``), let one lookup record it, then rename it away; the
+        alias would then quietly route every later ``finance`` post to that
+        room, and the advisory note arrives only after the body is delivered.
+        A read sends nothing, so ``channel_history`` may still follow the
+        alias; a post must be re-issued with the CURRENT name or the id, which
+        makes the redirect an explicit choice the agent can see first.
+        """
+
+        stamp = f" (seen {self.renamed_at})" if self.renamed_at else ""
+        return {
+            "ok": False,
+            "code": "channel_renamed",
+            "conversation_id": self.conversation_id,
+            "current_name": self.channel_name,
+            "renamed_at": self.renamed_at,
+            "error": (
+                f"'{self.alias}' is an old name: that channel is now '{self.channel_name}'"
+                f"{stamp}. Nothing was posted; {op} only sends to a channel's current "
+                f"name — re-send with channel_id={self.conversation_id} (or "
+                f"'{self.channel_name}') if that is the room you meant"
+            ),
+        }
+
+    def result_keys(self, asked: str) -> dict[str, Any]:
+        keys: dict[str, Any] = {
+            "resolved_channel_id": self.conversation_id,
+            "resolved_from_name": asked,
+        }
+        if self.alias:
+            keys["resolved_via_alias"] = True
+            keys["current_name"] = self.channel_name
+            if self.renamed_at:
+                keys["renamed_at"] = self.renamed_at
+            keys["alias_note"] = (
+                f"'{self.alias}' was renamed to '{self.channel_name}'"
+                f"{f' (seen {self.renamed_at})' if self.renamed_at else ''}; "
+                f"use '{self.channel_name}' or channel_id={self.conversation_id} from now on"
+            )
+        return keys
+
+
+def _result_channel_name(
+    runtime: BridgeRuntime,
+    conversation_id: str,
+    resolution: ChannelResolution | None,
+    view: Mapping[str, Any] | None,
+) -> str | None:
+    """The ``channel_name`` a channel_post/channel_history result carries.
+
+    Preference: the live name a by-name lookup just confirmed; else the room
+    view this call already fetched (a directed post); else the last name this
+    machine saw for the id (local, no extra hub read). ``None`` means honestly
+    unknown — never a guess and never an extra round trip just for a label.
+    """
+
+    if resolution is not None:
+        return resolution.channel_name
+    if view is not None and isinstance(view.get("name"), str) and view.get("name"):
+        return str(view["name"])
+    return _last_known_channel_name(runtime, conversation_id)
+
+
+def _iso_utc(stamp: Any) -> str:
+    if not isinstance(stamp, (int, float)) or stamp <= 0:
+        return ""
+    import datetime as _dt
+
+    return _dt.datetime.fromtimestamp(float(stamp), tz=_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+#: How many near-match names a "not found" offers. Enough to catch a typo or a
+#: shortened name without turning the refusal into a room directory.
+CHANNEL_NEAR_MATCH_MAX = 3
 
 
 def _is_tenant_visible_channel(row: Mapping[str, Any]) -> bool:
@@ -2743,7 +2989,7 @@ def _is_tenant_visible_channel(row: Mapping[str, Any]) -> bool:
 
 async def _resolve_channel_name(
     runtime: BridgeRuntime, op: str, name: str
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[ChannelResolution | None, dict[str, Any] | None]:
     """A channel NAME to its ``bcv_`` id, or a typed refusal — never both.
 
     A NARROW DISCLOSURE, deliberately. ``channels`` stays chief-of-staff-only
@@ -2755,6 +3001,23 @@ async def _resolve_channel_name(
     confirmed to exist. It runs under the OUTBOUND fence channel_post and
     channel_history already pass; it does not widen what a task session may do,
     only how it names the room it may already post in.
+
+    RENAMES (client-side only: the hub keeps no rename history). Order matters:
+    1. a LIVE exact name match always wins, even when the same string is an
+       old name of another room (a reused name means the live room);
+    2. otherwise the local alias table proposes ids that once held the name,
+       and each is RE-CHECKED against the live rows just read — only an id
+       still open and tenant-visible resolves (``resolved_via_alias``);
+    3. one alias -> several live ids is ``channel_ambiguous``, never a guess;
+    4. an alias any of whose holders is no longer open/visible is a not-found
+       that says so — never a silent redirect (even to another, still-live
+       holder: the caller may have meant the closed one), and never that
+       room's id or new name;
+    5. a TRUNCATED listing never resolves through an alias: the room that
+       holds the name now may sit past the page bound (rule 1 would lose);
+    6. the CALLER refuses a post that came through an alias
+       (``ChannelResolution.renamed_refusal``); only reads follow it.
+    Aliases are read for THIS tenant only.
     """
 
     key = _room_name_key(name, allow_hash=True)
@@ -2771,7 +3034,8 @@ async def _resolve_channel_name(
             "of staff or the operator for the conversation id",
             code="channel_lookup_failed",
         )
-    ids: list[str] = []
+    # id -> current name, for every live row this lookup may resolve to.
+    live: dict[str, str] = {}
     for row in rows:
         row_name = row.get("name")
         row_id = row.get("id")
@@ -2779,32 +3043,134 @@ async def _resolve_channel_name(
             _is_tenant_visible_channel(row)
             and isinstance(row_name, str)
             and isinstance(row_id, str)
-            and _room_name_key(row_name, allow_hash=False) == key
-            and row_id not in ids
+            and row_id not in live
         ):
-            ids.append(row_id)
+            live[row_id] = row_name
+    ids = [
+        row_id
+        for row_id, row_name in live.items()
+        if _room_name_key(row_name, allow_hash=False) == key
+    ]
     if len(ids) == 1:
-        return ids[0], None
-    if not ids:
-        # Past the page bound the room may still exist further down the list:
-        # say how far the read went rather than claim it does not exist.
-        where = (
-            f" in the first {CHANNEL_NAME_LOOKUP_MAX_PAGES * CONVERSATION_PAGE_MAX} "
-            "conversations"
-            if truncated
-            else ""
-        )
+        return ChannelResolution(ids[0], live[ids[0]]), None
+    if len(ids) > 1:
         return None, _error(
-            f"no tenant-visible channel named '{name.strip()}' was found{where}. "
-            "Do not create one; ask your chief of staff or the operator for the "
-            "conversation id (bcv_…)",
-            code="channel_not_found",
+            f"more than one tenant-visible channel is named '{name.strip()}' "
+            f"({', '.join(ids)}); pass the intended conversation id as channel_id",
+            code="channel_ambiguous",
         )
-    return None, _error(
-        f"more than one tenant-visible channel is named '{name.strip()}' "
-        f"({', '.join(ids)}); pass the intended conversation id as channel_id",
-        code="channel_ambiguous",
+
+    alias = name.strip()
+    if alias.startswith("#"):
+        alias = alias[1:].strip()
+    # Every row of every id that ever held this name, newest sighting first
+    # (an indexed read, so an old name is never lost past a scan bound).
+    held = [] if truncated else _channel_alias_rows(runtime, name_key=key)
+    alias_ids: list[str] = []
+    for row in held:
+        cid = row.get("conversation_id")
+        if row.get("name_key") == key and isinstance(cid, str) and cid not in alias_ids:
+            alias_ids.append(cid)
+    live_alias_ids = [cid for cid in alias_ids if cid in live]
+    # Resolve only when EVERY id that held the name is still live and there is
+    # exactly one: a closed or now-invisible holder (newer or older) means the
+    # caller may have meant that room, so redirecting to the live one would be
+    # a guess (code review round 1, R1-1).
+    if len(live_alias_ids) == 1 and len(alias_ids) == 1:
+        cid = live_alias_ids[0]
+        current_key = _room_name_key(live[cid], allow_hash=False)
+        alias_last = max(
+            (
+                float(row["last_seen"])
+                for row in held
+                if row.get("conversation_id") == cid
+                and row.get("name_key") == key
+                and isinstance(row.get("last_seen"), (int, float))
+            ),
+            default=0.0,
+        )
+        seen_current = [
+            float(row["first_seen"])
+            for row in held
+            if row.get("conversation_id") == cid
+            and row.get("name_key") == current_key
+            and isinstance(row.get("first_seen"), (int, float))
+        ]
+        # The store restarts ``first_seen`` when a name RETURNS after another
+        # (b -> a -> b); the clamp keeps the stamp from ever predating the old
+        # name's last sighting even on a table written before that rule.
+        renamed_at = _iso_utc(max(seen_current[0], alias_last)) if seen_current else ""
+        logger.debug("channel name resolved through a rename alias")
+        return ChannelResolution(cid, live[cid], alias=alias, renamed_at=renamed_at), None
+    if len(live_alias_ids) > 1 and len(live_alias_ids) == len(alias_ids):
+        candidates = ", ".join(f"{cid} (now '{live[cid]}')" for cid in live_alias_ids)
+        return None, _error(
+            f"'{name.strip()}' is an old name of more than one open channel ({candidates}); "
+            "pass the intended conversation id as channel_id",
+            code="channel_ambiguous",
+        )
+
+    # Past the page bound the room may still exist further down the list:
+    # say how far the read went rather than claim it does not exist.
+    where = (
+        f" in the first {CHANNEL_NAME_LOOKUP_MAX_PAGES * CONVERSATION_PAGE_MAX} conversations"
+        if truncated
+        else ""
     )
+    renamed = (
+        # Deliberately neither the id nor a later name: the room is no longer
+        # one this caller can discover, so the refusal confirms only what the
+        # caller already knew (that the name once existed).
+        f" A channel this machine knew as '{name.strip()}' was renamed or closed and "
+        "is no longer open and visible to you."
+        # Only names a tenant-visible listing recorded can reach ``alias_ids``
+        # (the one writer), and never on a truncated read (``held`` is empty),
+        # where the room may simply sit past the cut.
+        if alias_ids
+        else ""
+    )
+    near = _near_channel_names(key, live, _channel_alias_rows(runtime))
+    hint = f" Did you mean: {', '.join(repr(n) for n in near)}?" if near else ""
+    return None, _error(
+        f"no tenant-visible channel named '{name.strip()}' was found{where}.{renamed}{hint} "
+        "Do not create one; ask your chief of staff or the operator for the "
+        "conversation id (bcv_…)",
+        code="channel_not_found",
+    )
+
+
+def _near_channel_names(
+    key: str, live: Mapping[str, str], aliases: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """Up to :data:`CHANNEL_NEAR_MATCH_MAX` CURRENT names close to ``key``.
+
+    Candidates are the live rows already fetched (no extra hub read) plus old
+    names from the alias table, but an old name is only ever suggested as its
+    room's CURRENT live name — a suggestion must be something that resolves.
+    """
+
+    import difflib
+
+    by_key: dict[str, str] = {}
+    for row_name in live.values():
+        by_key.setdefault(_room_name_key(row_name, allow_hash=False), row_name)
+    for row in aliases:
+        cid = row.get("conversation_id")
+        old_key = row.get("name_key")
+        # The asked name itself is excluded: reaching here means the resolver
+        # REFUSED to follow that exact alias (a closed co-holder, a truncated
+        # read), and suggesting its room's current name would be the same
+        # redirect by another door, naming the room the refusal withheld.
+        if isinstance(cid, str) and cid in live and isinstance(old_key, str) and old_key != key:
+            by_key.setdefault(old_key, live[cid])
+    out: list[str] = []
+    for match in difflib.get_close_matches(key, list(by_key), n=len(by_key) or 1, cutoff=0.6):
+        current = by_key[match]
+        if current not in out:
+            out.append(current)
+        if len(out) == CHANNEL_NEAR_MATCH_MAX:
+            break
+    return out
 
 
 def _channel_exists(kind: str, name: str, conversation_id: str) -> dict[str, Any]:
@@ -3421,16 +3787,20 @@ async def execute_bridge(
     if params.op == "channel_post":
         channel_id = params.channel_id.strip()
         resolved_from_name = ""
+        resolution: ChannelResolution | None = None
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
             # Not an id: a room NAME (channel_id, else ``name``). See
             # _resolve_channel_name for why this is a narrow, safe disclosure.
             resolved_from_name = channel_id or params.name.strip()
-            resolved, refused = await _resolve_channel_name(
+            resolution, refused = await _resolve_channel_name(
                 runtime, "channel_post", resolved_from_name
             )
-            if refused is not None or resolved is None:
+            if refused is not None or resolution is None:
                 return refused or _error("channel_post could not resolve that channel name")
-            channel_id = resolved
+            if resolution.alias:
+                # A post never follows an old name (S-1): see renamed_refusal.
+                return resolution.renamed_refusal("channel_post")
+            channel_id = resolution.conversation_id
             # Same contract as a named recipient: from here on ``args`` carries
             # the resolved id, so every later reader of ``args["channel_id"]``
             # (the reply-binding checks, the pre-HTTP guard) binds against the
@@ -3763,10 +4133,14 @@ async def execute_bridge(
         )
         if file_batch:
             receipt["file_ids"] = list(file_batch.staged)
-        if resolved_from_name:
+        # Every channel_post result names the room it reached (operator ask: an
+        # agent addressing a renamed room must see the name it now has).
+        receipt["channel_name"] = _result_channel_name(
+            runtime, channel_id, resolution, conversation_view
+        )
+        if resolution is not None:
             # Teach the id: the next call can address the room directly.
-            receipt["resolved_channel_id"] = channel_id
-            receipt["resolved_from_name"] = resolved_from_name
+            receipt.update(resolution.result_keys(resolved_from_name))
         attachment_warning = _annotate_attachments(receipt, staged_images)
         _note_reply_destination(runtime, receipt)
         return _with_warnings(
@@ -3819,15 +4193,16 @@ async def execute_bridge(
     if params.op == "channel_history":
         channel_id = params.channel_id.strip()
         resolved_from_name = ""
+        resolution = None
         if _CONVERSATION_ID.fullmatch(channel_id) is None:
             # Same name lookup as channel_post (see _resolve_channel_name).
             resolved_from_name = channel_id or params.name.strip()
-            resolved, refused = await _resolve_channel_name(
+            resolution, refused = await _resolve_channel_name(
                 runtime, "channel_history", resolved_from_name
             )
-            if refused is not None or resolved is None:
+            if refused is not None or resolution is None:
                 return refused or _error("channel_history could not resolve that channel name")
-            channel_id = resolved
+            channel_id = resolution.conversation_id
             args = {**args, "channel_id": channel_id}
         if params.before_seq is not None and params.after_seq is not None:
             return _error(
@@ -3868,14 +4243,13 @@ async def execute_bridge(
         # the tool result as their own untrusted blocks rather than inside the page, so
         # the JSON page a model parses stays byte-identical to what the hub served.
         files = await _history_files(runtime, channel_id, result, endpoint_id)
-        resolved_keys: dict[str, str] = (
-            {"resolved_channel_id": channel_id, "resolved_from_name": resolved_from_name}
-            if resolved_from_name
-            else {}
+        resolved_keys: dict[str, Any] = (
+            resolution.result_keys(resolved_from_name) if resolution is not None else {}
         )
         return {
             "ok": True,
             "state": "ok",
+            "channel_name": _result_channel_name(runtime, channel_id, resolution, None),
             **resolved_keys,
             # See _shared_history: content is the RAW page (details keeps it, for a
             # human's renderer) and the model-facing copy rides the private key. File
@@ -3883,7 +4257,15 @@ async def execute_bridge(
             # "bytes never ride details" is the rule the raw page has to keep.
             "content": f"{BRIDGE_BODY_READ_HEAD}\n\n{json.dumps(result, ensure_ascii=False)}",
             _INLINE_DATA_KEY: _with_files(
-                f"{BRIDGE_BODY_READ_HEAD}\n\n{_model_page_json(result)}",
+                # The thread note is one line between the head and the blank
+                # line, MODEL copy only: every reader of these strings (the row
+                # renderers on ``content``, tests on this copy) splits on the
+                # first blank line and parses the rest as the page, so the note
+                # must sit before it, and the page stays byte-identical. The note
+                # is addressed to the model (see _thread_replies_note).
+                f"{BRIDGE_BODY_READ_HEAD}"
+                + (f"\n{note}" if (note := _thread_replies_note(result, channel_id)) else "")
+                + f"\n\n{_model_page_json(result)}",
                 files,
             ),
             _IMAGES_KEY: images,

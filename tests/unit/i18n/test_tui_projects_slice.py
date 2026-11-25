@@ -31,8 +31,9 @@ def test_catalogue_matches_the_extraction_golden() -> None:
     # NINETY-SEVEN: the P2 edit slice added the read-only notice and the form's
     # done-gate refusal (QA/UX round 1) to this English-only namespace; the
     # pin keeps the extraction golden and the shipped page vocabulary from
-    # drifting apart silently.
-    assert len(GOLDEN) == 97
+    # drifting apart silently. NINETY-EIGHT: the start picker's team detail
+    # (`start.team_detail`) replaced a hand-rolled English plural.
+    assert len(GOLDEN) == 98
     context = json.loads(
         (catalogues.catalogue_root() / "en" / "tui.projects.context.json").read_text()
     )
@@ -167,6 +168,39 @@ async def test_app_fault_consumer_resolves_after_backend_locale_move(corpus, mon
     text.set_active_locale("en")
     await OperatorApp._quick_send_worker(host, view, target, "synthetic draft")
     assert settled[-1] == (view, target, _en("fault"), "synthetic draft")
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_app_exited_never_breaks_a_later_locale_move(corpus) -> None:
+    """A dead card must leave the refresh registry and never repaint.
+
+    Full-suite shard 5 (PR #4555) ran ``tests/unit/tui/test_projects_send.py``
+    before ``tests/unit/tui/test_provider_state.py``: a card left over from an
+    exited app was still in ``_cards`` and still read ``is_mounted`` (Textual
+    never clears it), its children already pruned, so every later
+    ``set_active_locale`` — in any test, in any module — raised ``NoMatches``.
+    """
+    from textual.app import App, ComposeResult
+
+    card = send.SendTargetCard([])
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield card
+
+    async with Host().run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        assert card in send._cards
+    # Unmount took the card out of the registry with the DOM it belonged to.
+    assert card not in send._cards
+    # Even a card that is still registered (held by some other path) must not
+    # raise once detached: the attachment guard is the second line.
+    send._cards.add(card)
+    try:
+        text.set_active_locale("fr")
+        text.set_active_locale("en")
+    finally:
+        send._cards.discard(card)
 
 
 def test_disk_only_locale_fails_explicit_eligibility(corpus, monkeypatch) -> None:

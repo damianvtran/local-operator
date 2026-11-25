@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import stat
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -59,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, TypedDi
 
 if TYPE_CHECKING:
     from local_operator.network.relay import PeerLink, RelayServer
+    from local_operator.skills.manifest import SkillTransferReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -544,7 +546,7 @@ class MoveQueueBlock(TypedDict, total=False):
 
 
 class MoveCarryBlock(TypedDict, total=False):
-    """What a finished move knows about the session's scheduled state.
+    """What a finished move knows about the session's carried state.
 
     Assembled by BOTH ends and merged by the source, because each half is knowable
     only where it is produced:
@@ -608,11 +610,15 @@ class MoveCarryBlock(TypedDict, total=False):
     #: there. Additive inside an already-optional block, so a move that carried
     #: nothing new parses exactly as before.
     cwd: dict[str, str]
-    #: Present only when the source could NOT refresh the session's team/agent
-    #: definitions and the operator's custom instructions on the destination before
-    #: the move (``_push_move_definitions``): names what may be stale there. The
-    #: move itself still completed — a brief refresh never gates a move.
+    #: Non-fatal notice about the standing instructions on the destination.
+    #: RETAINED FOR PARSE COMPATIBILITY ONLY: no build of this side produces it any
+    #: more, because nothing may be applied on the destination before the invite
+    #: completes (review round 4, R4-2) and independent reconciliation owns those
+    #: writes. An older source still sends it on the carry, so the key must keep
+    #: parsing and keep reaching the receipt's printed lines.
     definitions_notice: str
+    #: The destination's pin acknowledgement, or explicit receiver-local routing.
+    skill_selection: SkillTransferReceipt
 
 
 class SessionMoveResult(TypedDict):
@@ -790,7 +796,15 @@ class _Progress:
         self._lock = threading.Lock()
         self._phases: dict[str, list[MovePhaseStamp]] = {}
         self._events: dict[str, threading.Event] = {}
-        self._refusals: dict[str, tuple[str, str, str]] = {}
+        #: The attempt token per session (see ``begin_attempt``). 0 = no attempt
+        #: has been started here. A refusal carries the token of the invite it
+        #: answers, so it can only end the wait it belongs to.
+        self._attempts: dict[str, int] = {}
+        self._refusals: dict[str, tuple[str, str, str, int | None]] = {}
+        #: Completions, ATTRIBUTED to the attempt whose invite they answer (R5-1).
+        #: A tokenless completion is kept apart, never folded into a tokenized one.
+        self._done_attempt: dict[str, int] = {}
+        self._done_untagged: set[str] = set()
         self._carry: dict[str, dict[str, Any]] = {}
         self._arrival_active: dict[str, bool] = {}
         self._workset: dict[str, tuple[dict[str, Any], str]] = {}
@@ -830,7 +844,55 @@ class _Progress:
             event = self._events.setdefault(self._event_key(session_id, marker), threading.Event())
         event.set()
 
-    def note_refusal(self, session_id: str, *, code: str, message: str, from_device: str) -> None:
+    def signal_done(self, session_id: str, attempt: int | None) -> None:
+        """Signal this move's completion, ATTRIBUTED to the attempt it answers.
+
+        WHY (review r5 R5-1). Clearing the previous completion at ``begin_attempt``
+        forgets a PAST answer; it does not identify the next one, so a ``done`` that
+        crossed a retry late could still end the wait of an attempt that never
+        produced it. The destination echoes the invite's token on the completion
+        frame, so the signal now carries its own attribution. A frame from a peer
+        too old to echo one is recorded as UNTAGGED: it is a real completion of
+        *some* attempt, and it is never credited to a tokenized wait, which then
+        falls through to the durable tombstone.
+        """
+        with self._lock:
+            if attempt is None:
+                self._done_untagged.add(session_id)
+            else:
+                self._done_attempt[session_id] = attempt
+            event = self._events.setdefault(self._event_key(session_id, "done"), threading.Event())
+        event.set()
+
+    def wait_done(self, session_id: str, attempt: int | None, timeout: float) -> bool:
+        """Whether ``attempt`` has completed here, waiting up to ``timeout``.
+
+        Polls rather than waiting on the level-triggered event: that event is set by
+        ANY completion, including one this attempt must not inherit, so waiting on it
+        would return instantly and spin. ``attempt=None`` (a caller holding no token)
+        keeps the pre-token reading: any completion at all counts.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                if attempt is None:
+                    done = session_id in self._done_untagged or session_id in self._done_attempt
+                else:
+                    done = self._done_attempt.get(session_id) == attempt
+            remaining = deadline - time.monotonic()
+            if done or remaining <= 0:
+                return done
+            time.sleep(min(remaining, 0.02))
+
+    def note_refusal(
+        self,
+        session_id: str,
+        *,
+        code: str,
+        message: str,
+        from_device: str,
+        attempt: int | None = None,
+    ) -> None:
         """Record the DESTINATION's refusal of a move THIS device invited.
 
         The offload's inviter watches its own durable progress and never asks the
@@ -845,20 +907,44 @@ class _Progress:
         of this move cannot shorten it.
         """
         with self._lock:
-            self._refusals[session_id] = (code, message, from_device)
+            # THE TOKEN IS WHAT MAKES THIS RECORD PER-ATTEMPT, so an ABSENT one is
+            # stored as absent and never stamped with the attempt in progress
+            # (review r5 R5-1). A sentence that cannot name the attempt it answered
+            # is that attempt's answer only, and crediting it to whichever attempt
+            # happens to be running is how an old refusal ended a newer wait: the
+            # retry then inherited an outcome it never produced.
+            self._refusals[session_id] = (code, message, from_device, attempt)
 
-    def refusal(self, session_id: str, *, from_device: str = "") -> tuple[str, str] | None:
+    def refusal(
+        self, session_id: str, *, from_device: str = "", attempt: int | None = None
+    ) -> tuple[str, str] | None:
         """The recorded refusal for ``session_id``, or ``None``.
 
         ``from_device`` filters by who refused: an empty string takes any device's
         answer (a caller with no invite to match), and a named device ignores a
         refusal recorded by anybody else.
+
+        ``attempt`` filters by WHICH ATTEMPT the sentence answers: the decision
+        about a move is computed per attempt, from the state at that attempt, so a
+        refusal recorded for an earlier attempt must not end this one's wait (see
+        ``begin_attempt``). A caller holding no attempt — a surface asking whether
+        anything refused this session at all — passes nothing and reads the last
+        recorded sentence.
         """
         with self._lock:
             found = self._refusals.get(session_id)
-        if found is None or (from_device and found[2] != from_device):
+        if found is None:
             return None
-        return found[0], found[1]
+        code, message, device, token = found
+        if attempt is not None and token != attempt:
+            # UNCORRELATED (a peer from before the token echoed one, or another
+            # attempt's answer) — so it cannot end a tokenized wait (R5-1). The
+            # wait falls through to the durable tombstone instead of reporting a
+            # sentence about a different attempt.
+            return None
+        if from_device and device != from_device:
+            return None
+        return code, message
 
     def note_carry(self, session_id: str, block: dict[str, Any]) -> None:
         """Record the DESTINATION's scheduled-state block for a move this device invited.
@@ -944,20 +1030,61 @@ class _Progress:
         ONE move; clearing it here is what scopes it to one.
         """
         with self._lock:
-            self._phases.pop(session_id, None)
-            self._refusals.pop(session_id, None)
-            # A carry block is about ONE move for the same reason the events are:
-            # it describes the supervisor state AFTER one promote, and answering a
-            # later move with it would be a claim about a stale adoption.
-            self._carry.pop(session_id, None)
-            # Same scoping: an earlier move's "was active" must never claim a resume
-            # was requested for this one.
-            self._arrival_active.pop(session_id, None)
-            self._workset.pop(session_id, None)
-            self._workset_sent.pop(session_id, None)
-            prefix = self._event_key(session_id, "")
-            for key in [item for item in self._events if item.startswith(prefix)]:
-                del self._events[key]
+            self._forget_locked(session_id)
+
+    def _forget_locked(self, session_id: str) -> None:
+        """``forget``'s body, and the first half of ``begin_attempt``.
+
+        Split out because ``begin_attempt`` must clear and stamp under ONE
+        acquisition of the lock: a refusal recorded between the clear and the
+        token bump would be stamped with the previous attempt's token and so be
+        shadowed for the attempt actually starting.
+        """
+        self._phases.pop(session_id, None)
+        self._refusals.pop(session_id, None)
+        self._done_attempt.pop(session_id, None)
+        self._done_untagged.discard(session_id)
+        # A carry block is about ONE move for the same reason the events are:
+        # it describes the supervisor state AFTER one promote, and answering a
+        # later move with it would be a claim about a stale adoption.
+        self._carry.pop(session_id, None)
+        # Same scoping: an earlier move's "was active" must never claim a resume
+        # was requested for this one.
+        self._arrival_active.pop(session_id, None)
+        self._workset.pop(session_id, None)
+        self._workset_sent.pop(session_id, None)
+        prefix = self._event_key(session_id, "")
+        for key in [item for item in self._events if item.startswith(prefix)]:
+            del self._events[key]
+
+    def begin_attempt(self, session_id: str) -> int:
+        """Start a FRESH attempt at moving ``session_id`` and return its token.
+
+        WHY THIS EXISTS (review round 4, R4-1). The decision about a move is
+        computed PER ATTEMPT, from the state at that attempt: a refusal is that
+        attempt's answer, never a property of the session. Clearing alone was not
+        enough — it forgot the PAST while leaving the fresh attempt unidentified,
+        so a refusal that arrived late (the destination re-probes a busy owner for
+        the whole ``wait_s`` it was given and reports whenever that ends) landed
+        under the new attempt and ended its wait with a sentence about the old
+        one. The token rides the invite, comes back on the ``refused`` frame, and
+        is what :meth:`refusal` matches on, so a remembered refusal can neither
+        outlive the attempt it described nor answer a later one.
+
+        Called ONCE at the start of each move attempt (``_offload`` and the
+        queue's ``_drive_copy``), never per poll: a second call inside one attempt
+        would discard that attempt's own recorded facts mid-flight.
+        """
+        with self._lock:
+            self._forget_locked(session_id)
+            token = self._attempts.get(session_id, 0) + 1
+            self._attempts[session_id] = token
+            return token
+
+    def attempt(self, session_id: str) -> int:
+        """The token of the attempt in progress here (0 = none started)."""
+        with self._lock:
+            return self._attempts.get(session_id, 0)
 
 
 _progress_lock = threading.Lock()
@@ -1662,7 +1789,13 @@ def _unreachable(peer: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _staging_content_digest(server: "RelayServer", session_id: str, staging: Path) -> str:
+def _staging_content_digest(
+    server: "RelayServer",
+    session_id: str,
+    staging: Path,
+    *,
+    original_attachment: Path | None = None,
+) -> str:
     """The digest of the bytes a copy holds, as the adopting device sees them.
 
     ``sync.copy_content_digest`` over the staging directory and this install's
@@ -1676,12 +1809,69 @@ def _staging_content_digest(server: "RelayServer", session_id: str, staging: Pat
     # ``<dir>/<ref>.bin``, so passing the root silently dropped every attachment from the
     # comparison — a copy whose blobs were all zeroed would have matched. Both ends pass
     # the same directory now, which is what makes the comparison mean what it says.
-    return sync_mod.copy_content_digest(staging, session_id, Path(server.root) / "attachments")
+    return sync_mod.copy_content_digest(
+        staging,
+        session_id,
+        Path(server.root) / "attachments",
+        staged_original_attachment=original_attachment,
+    )
+
+
+_SKILL_PIN_ORIGINAL = ".skill-pin-original"
+_UNSAFE_STAGING_REASON = (
+    "the staged conversation was not adopted: its path must be contained in network/staging "
+    "with no symlink components, and its handoff markers and attachment must be regular files"
+)
+
+
+def _plain_staging_sidecar(path: Path) -> bool:
+    """Whether a staging sidecar is a regular file rather than a link to something else.
+
+    THE SIDECAR NAMES ARE WHAT THE RECOVERY RENAMES OVER AND DELETES (see
+    ``_verify_staging``), so a link there turns a rollback into a write outside the
+    staged copy. Containment of the DIRECTORY — including Windows reparse points —
+    is ``_contained_handoff_path``'s job and is not re-derived here; this answers
+    only the entry's own type, the same question the credentials store's
+    ``_checked_info`` asks of its own files.
+
+    A HARD LINK IS ALLOWED HERE, which is why this is not ``_checked_info`` itself:
+    the pin stores the attachment's original bytes by ``os.link``-ing them to
+    ``_SKILL_PIN_ORIGINAL``, so a pinned sidecar legitimately carries ``st_nlink 2``.
+    ``lstat`` keeps the entry's own mode and attributes, so an alias the kernel would
+    follow (a symlink, a reparse point, or a directory named like a marker) is
+    refused while the sidecar's own inode passes.
+    """
+    info = path.lstat()
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if getattr(info, "st_file_attributes", 0) & reparse:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
+def _staging_for_verification(root: Path, session_id: str, staging: Path) -> Path | None:
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+    checked = _contained_handoff_path(
+        root, staging, parent_parts=("network", "staging"), leaf=session_id
+    )
+    if checked is None:
+        return None
+    # The restore touches these sidecars before _promote runs its own check.
+    # Other members of the copy are content, not rollback paths.
+    for name in ("ready.json", _SKILL_PIN_ORIGINAL, ATTACHMENT_SIDECAR_NAME):
+        try:
+            if not _plain_staging_sidecar(checked / name):
+                return None
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+    return checked
 
 
 def _verify_staging(
     server: "RelayServer", session_id: str, staging: Path, ready: dict[str, Any]
-) -> str:
+) -> tuple[str, str] | None:
     """Re-hash a staged copy against what ``ready.json`` recorded, before adopting.
 
     THE LAST CHECK BEFORE THE ONLY ``os.replace`` INTO ``sessions/``. The
@@ -1696,18 +1886,46 @@ def _verify_staging(
     record one, and it is refused rather than trusted: the whole point of the field
     is that the adopting device has a value to check against.
     """
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return "unsafe_staging", _UNSAFE_STAGING_REASON
     expected = str(ready.get("content_digest") or "")
     if not expected:
         return (
+            "digest_mismatch",
             "the copy of that conversation was staged before this build recorded what it "
-            "verified, so it was not adopted; asking again evaluates it from scratch"
+            "verified, so it was not adopted; asking again evaluates it from scratch",
         )
-    if _staging_content_digest(server, session_id, staging) != expected:
+    # An interrupted pin leaves the source's original bytes under the rollback
+    # marker. Hash those bytes under their original name before changing either
+    # file, so a digest refusal leaves the verified-copy evidence untouched.
+    backup = checked / _SKILL_PIN_ORIGINAL
+    original = backup if backup.is_file() else None
+    if (
+        _staging_content_digest(server, session_id, checked, original_attachment=original)
+        != expected
+    ):
         return (
+            "digest_mismatch",
             "the staged copy of that conversation no longer matches the bytes that were "
-            "verified, so it was not adopted and nothing was deleted"
+            "verified, so it was not adopted and nothing was deleted",
         )
-    return ""
+    if original is not None:
+        from local_operator.resume import ATTACHMENT_SIDECAR_NAME
+
+        try:
+            original.replace(checked / ATTACHMENT_SIDECAR_NAME)
+            # rename is a no-op if both names still point at the original inode.
+            original.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("mobility: could not restore staged skill metadata for %s", session_id)
+            from local_operator.i18n.keys import network_skill_transfer
+            from local_operator.i18n.text import tr
+
+            return "digest_mismatch", tr("network.skill_transfer")(
+                network_skill_transfer.receipt_write_failed()
+            )
+    return None
 
 
 def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
@@ -1848,6 +2066,7 @@ def _destination_move(
     resume_queued: bool = False,
     drop_session_roles: bool = False,
     working_set: dict[str, Any] | None = None,
+    invite_attempt: int | None = None,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1879,6 +2098,7 @@ def _destination_move(
     in flight is still refused by the owner before any of this can start (§6.4).
     """
     from local_operator import fork as fork_mod
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.resume import ORIGIN_FORK, mark_session_origin
     from local_operator.session.placement import (
@@ -1985,6 +2205,7 @@ def _destination_move(
                     "mode": "keep" if keep else "move",
                     "resume": bool(pending),
                     "have": {},
+                    move_team.KEY: move_team.CAPABILITY,
                     # THE QUEUE REQUEST rides the prepare, additively: an owner
                     # older than the key ignores it and answers ``busy`` exactly as
                     # before — so ``--queue`` against a pre-queue fleet degrades to
@@ -2312,6 +2533,19 @@ def _destination_move(
                 "",
             )
 
+    try:
+        team_identity = move_team.check_arrival(server.root, staging, prepared.get(move_team.KEY))
+    except move_team.TeamIdentityRefused as refusal:
+        # The pull carries evidence, not declarations. Roll back even for
+        # definitions still in flight so the source can prepare a fresh retry.
+        code = refusal.code
+        _report_destination_rollback(transport, session_id, lease_epoch, code)
+        _roll_back_destination(server, session_id, staging)
+        return (
+            None,
+            _move_refusal(session_id, code, str(refusal), phase_reached="prepared"),
+            "",
+        )
     # THE DESTINATION'S OWN CONTENT DIGEST, computed from the bytes it actually
     # holds over the same function the owner uses (``sync.copy_content_digest``),
     # and the value the owner commits on (review round 1, M-2). Computed HERE,
@@ -2341,6 +2575,7 @@ def _destination_move(
                 "source_device": owner_device,
                 "source_session_id": session_id,
                 "moved_at": time.time(),
+                **({move_team.KEY: team_identity} if team_identity is not None else {}),
             },
             # CARRIED AUTO AUTHORITY (§6 defect 2): the flag rode the invite from the
             # device that held the session, and it is stamped HERE because the
@@ -2505,17 +2740,19 @@ def _destination_move(
     # are re-hashed against what this device recorded when it verified them, so a
     # copy damaged between the two moments is never presented as a session (M-2's
     # destination half, and the structural form of M-5's "never a partial copy").
-    damaged = _verify_staging(server, target_id, staging, ready)
-    if damaged:
-        # THE STAGING DIRECTORY IS KEPT, deliberately: by now the owner may already
-        # have deleted its copy, so sweeping it would destroy the only one left. The
-        # id is released and the sentence names where the bytes are.
-        clear_handoff_entry(server.root, session_id)
+    verification_refusal = _verify_staging(server, target_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
+        # The owner may have deleted its copy already, so keep the staging bytes.
+        # An unsafe path also keeps the journal: this device cannot account for
+        # its copy and should not release the handoff on that evidence.
+        if code != "unsafe_staging":
+            clear_handoff_entry(server.root, session_id)
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging}, and this device's "
                 "``lop sessions sync`` cannot replace it)",
                 phase_reached="handing_off",
@@ -2535,19 +2772,22 @@ def _destination_move(
         if not keep:
             settle_promoted_handoff(server.root, session_id)
     if not promote_outcome.ok:
-        clear_handoff_entry(server.root, session_id)
+        # A committed copy blocked on a team revision remains recoverable from
+        # staging. Its journal must keep local runtime creation fenced off.
+        if not promote_outcome.team_refusal:
+            clear_handoff_entry(server.root, session_id)
         return (
             None,
             _move_refusal(
                 session_id,
-                "in_progress",
+                move_team.CODE if promote_outcome.team_refusal else "in_progress",
                 _promote_refusal_detail(target_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     if session_roles_left:
         # THE NOTICE THE TARGET RECORDS (design §3.5): the count came from the
         # source, the device name is the source's, and the sentence rides the
@@ -2572,6 +2812,12 @@ def _destination_move(
             "session_id": session_id,
             "new_session_id": target_id,
         }
+        if invite_attempt is not None:
+            # WHICH ATTEMPT THIS COMPLETES (review r5 R5-1). The inviter waits per
+            # attempt, and a completion that crossed a retry late must not end the
+            # wait of the attempt that did not produce it. Absent for a peer from
+            # before the token existed, which reads as unattributed over there.
+            done_frame["attempt"] = invite_attempt
         if carry_block is not None:
             # THE §5.3 ``ensure`` OUTCOME RIDES THE COMPLETION FRAME. It is knowable
             # HERE, as part of the promote itself — unlike the engage, which runs
@@ -2887,12 +3133,26 @@ def _finish_from_tombstone(
     cannot make that comparison for itself — the record is the OWNER's file, so the only
     thing it could read here is the answer somebody else wrote.
     """
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
 
-    progress = progress_for(server)
     staging = sync_mod.staging_dir(server.root, session_id)
-    ready_path = staging / "ready.json"
+    checked = _staging_for_verification(Path(server.root), session_id, staging)
+    if checked is None:
+        return (
+            None,
+            _move_refusal(
+                session_id,
+                "unsafe_staging",
+                _UNSAFE_STAGING_REASON,
+                phase_reached="handing_off",
+                changed=True,
+            ),
+            "",
+        )
+    progress = progress_for(server)
+    ready_path = checked / "ready.json"
     if not ready_path.is_file():
         return (
             None,
@@ -2912,13 +3172,14 @@ def _finish_from_tombstone(
     # thing that says the bytes were ever verified (M-2). A ``ready.json`` whose
     # digest no longer describes the staged bytes refuses here, keeping the
     # staging directory so the bytes are not lost with the id.
-    damaged = _verify_staging(server, session_id, staging, ready)
-    if damaged:
+    verification_refusal = _verify_staging(server, session_id, staging, ready)
+    if verification_refusal is not None:
+        code, damaged = verification_refusal
         return (
             None,
             _move_refusal(
                 session_id,
-                "digest_mismatch",
+                code,
                 f"{damaged} (the copy is still under {staging})",
                 phase_reached="handing_off",
                 changed=True,
@@ -2958,14 +3219,14 @@ def _finish_from_tombstone(
             None,
             _move_refusal(
                 session_id,
-                "in_progress",
+                move_team.CODE if promote_outcome.team_refusal else "in_progress",
                 _promote_refusal_detail(session_id, promote_outcome),
                 phase_reached="handing_off",
                 changed=True,
             ),
             "",
         )
-    carry_block = promote_outcome.carry
+    carry_block = _receipt_carry(promote_outcome)
     clear_handoff_entry(server.root, session_id)
     progress.note(session_id, "committed")
     _audit(server, AUDIT_DONE, session_id, owner_device, resumed=True)
@@ -3001,19 +3262,45 @@ class _PromoteOutcome(NamedTuple):
     """``_promote``'s answer: whether the copy landed, and its scheduled-state block.
 
     ``ok`` is the bool the callers used to get back wholesale. ``carry`` is
-    ``None`` unless the arriving session carried wakes — the block the move's
-    receipt reports (see :class:`MoveCarryBlock`), which is the half a bool
-    could never carry out of the promote.
+    ``None`` unless the arriving session carried something to report — the block
+    the move's receipt reports (see :class:`MoveCarryBlock`), which is the half a
+    bool could never carry out of the promote. A promote with no wakes (or other
+    adopted state) MUST leave it ``None``: the wake hook exists so sleepers pay
+    nothing for it, and ``test_move_carry_supervisor`` pins that contract.
+
+    ``skill_selection`` is a SEPARATE concern and so a separate field: the
+    destination's pin acknowledgement (or explicit local routing), present on
+    every successful promote. Folding it into ``carry`` here made ``carry``
+    non-``None`` for every promote and broke the exact wake-carry receipt shape.
+    The callers merge it into the RECEIPT's carry block (``MoveCarryBlock``
+    declares ``skill_selection``), which is where the source and the CLI read it.
 
     ``stamps_refused`` (QA Q-1) marks the one refusal that is NOT about the id
     already being taken here: the copy's origin stamps could not be lowered to
     ``verified: false``. The callers word their reply from it, so the operator is
-    not told about a collision that never happened.
+    not told about a collision that never happened. ``team_refusal`` likewise
+    distinguishes a staged copy held for an unavailable team definition.
     """
 
     ok: bool
     carry: dict[str, Any] | None
     stamps_refused: bool = False
+    team_refusal: str = ""
+    skill_pin_refused: bool = False
+    skill_selection: SkillTransferReceipt | None = None
+
+
+def _receipt_carry(outcome: _PromoteOutcome) -> dict[str, Any] | None:
+    """The receipt's carry block: the promote's wake-carry plus its skill selection.
+
+    ``_promote`` keeps the two apart so its own ``carry`` stays the exact wake-carry
+    contract; the RECEIPT (``MoveCarryBlock``) is where they meet, because the done
+    frame and the returned move result are what the source and the CLI read
+    ``skill_selection`` from.
+    """
+    if outcome.skill_selection is None:
+        return outcome.carry
+    return {**(outcome.carry or {}), "skill_selection": outcome.skill_selection}
 
 
 #: The refusal ``_promote`` answers with when the id is taken or the copy could
@@ -3026,10 +3313,15 @@ _PROMOTE_STAMPS_REFUSED = _PromoteOutcome(ok=False, carry=None, stamps_refused=T
 def _promote_refusal_detail(target_id: str, outcome: _PromoteOutcome) -> str:
     """The reply for a refused promote, naming its real cause (QA Q-1).
 
-    Shared by ``_destination_move`` and ``_finish_from_tombstone`` so both say
-    the same thing. This module words its replies inline rather than through
-    i18n keys, so this follows suit.
+    Shared by live and recovered adoption so both name the same refusal.
     """
+    if outcome.team_refusal:
+        return outcome.team_refusal
+    if outcome.skill_pin_refused:
+        from local_operator.i18n.keys import network_skill_transfer
+        from local_operator.i18n.text import tr
+
+        return tr("network.skill_transfer")(network_skill_transfer.receipt_write_failed())
     if outcome.stamps_refused:
         return (
             f"{target_id} could not be adopted here because its origin stamps could not "
@@ -3061,6 +3353,24 @@ def _validated_session_id(value: Any) -> str:
         ) from None
 
 
+def _is_handoff_directory(path: Path) -> bool:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        # lstat can follow some reparse tags on Windows. Read the entry's own
+        # attributes first so only ordinary directories can lead to handoff mutations.
+        get_attributes = ctypes.WinDLL("kernel32", use_last_error=True).GetFileAttributesW
+        get_attributes.argtypes = (wintypes.LPCWSTR,)
+        get_attributes.restype = wintypes.DWORD
+        attributes = get_attributes(os.fspath(path))
+        if attributes == 0xFFFFFFFF:  # INVALID_FILE_ATTRIBUTES
+            raise ctypes.WinError(ctypes.get_last_error())
+        if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return False
+    return stat.S_ISDIR(path.lstat().st_mode)
+
+
 def _contained_handoff_path(
     root: Path,
     path: Path,
@@ -3072,14 +3382,13 @@ def _contained_handoff_path(
 ) -> Path | None:
     """Resolve one handoff directory only through real directories.
 
-    ``root`` is the operator-selected configuration anchor; everything below it
-    is checked with ``lstat`` so a pre-existing alias cannot redirect rename or
-    recursive deletion. The selected root is resolved once, and an absent final
-    ``sessions`` directory may be created, but no missing staging path is made.
+    Resolve the operator-selected ``root`` once. Check each existing component
+    below it, including the leaf: reject the Windows reparse-point attribute
+    before requiring directory mode with ``lstat``. An absent final ``sessions``
+    directory may be created, but no missing staging path is made.
 
-    These checks fail closed against static traversal and pre-existing links.
-    They are not filesystem-namespace locking against another same-UID process
-    replacing components between the final check and the following syscall.
+    These checks are not filesystem-namespace locking against another same-UID
+    process replacing components between the final check and the following syscall.
     """
     from local_operator.network.store import safe_component
     from local_operator.network.types import MeshRefusal
@@ -3092,8 +3401,7 @@ def _contained_handoff_path(
         lexical = Path(os.path.abspath(root))
         # THE ROOT'S OWN SPELLING IS NOT A TRUST QUESTION (macOS /var -> /private/var,
         # an isolation mktemp root): resolve the anchor once and compare the caller's
-        # spelling against it. Everything BELOW the anchor is still checked by lstat,
-        # so a link there refuses exactly as before.
+        # spelling against it. Check the components below that anchor separately.
         anchor = lexical.resolve(strict=True)
         if not stat.S_ISDIR(anchor.stat().st_mode):
             return None
@@ -3109,10 +3417,10 @@ def _contained_handoff_path(
                     current.mkdir()
                 except FileExistsError:
                     pass
-            if not stat.S_ISDIR(current.lstat().st_mode):
+            if not _is_handoff_directory(current):
                 return None
         try:
-            if not stat.S_ISDIR(candidate.lstat().st_mode):
+            if not _is_handoff_directory(candidate):
                 return None
         except FileNotFoundError:
             if require_leaf:
@@ -3169,6 +3477,14 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             target_id,
         )
         return _PROMOTE_REFUSED
+    from local_operator.network import move_team
+
+    # Recovery can reach here without prepare, so also require a binding on
+    # the staged copy itself. Never trust the staging name or a stale check.
+    try:
+        move_team.check_promotion(server.root, source)
+    except move_team.TeamIdentityRefused as refusal:
+        return _PromoteOutcome(ok=False, carry=None, team_refusal=str(refusal))
     if target.is_symlink():
         return _PROMOTE_REFUSED
     if target.exists():
@@ -3227,6 +3543,33 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
             target,
             target_id,
         )
+    # The copied sidecar was just checked against the source digest. Pin it in
+    # staging, before any other normalization or the single publication rename:
+    # a failed write leaves the original verified bytes available for recovery.
+    from local_operator.resume import (
+        ATTACHMENT_SIDECAR_NAME,
+        read_session_attachment,
+        record_session_skill_manifest,
+    )
+    from local_operator.skills.manifest import skill_transfer_receipt
+
+    attachment = read_session_attachment(source)
+    has_snapshot = attachment is not None and attachment.skill_manifest is not None
+    if (
+        attachment is not None
+        and attachment.skill_manifest is not None
+        and not attachment.skill_manifest_pinned
+    ):
+        try:
+            # The original member participates in the source's digest. Keep
+            # its exact bytes until the stage has atomically become the session.
+            os.link(source / ATTACHMENT_SIDECAR_NAME, source / _SKILL_PIN_ORIGINAL)
+            record_session_skill_manifest(
+                source, attachment.skill_manifest, pinned=True, strict=True
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning("mobility: could not pin the skill snapshot of %s: %s", target_id, exc)
+            return _PromoteOutcome(ok=False, carry=None, skill_pin_refused=True)
     # IMPORTED STAMPS ARE EVIDENCE ONLY (mesh-origin-stamp M-4, R2-1). Every mesh
     # origin stamp in the copy is lowered to ``verified: false`` BEFORE the one
     # atomic promote, whoever minted it: a session shed A→D and recalled D→A can
@@ -3273,6 +3616,7 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         # the same answer a store that never archived anything gives, and a promote
         # must never fail because bookkeeping could not be read.
         ready_doc = {}
+    (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
     ready_path.unlink(missing_ok=True)
     # THE STORE MARKER, which is what makes this directory REMOVABLE later.
     # ``remove_session_dir`` refuses a store that carries no marker, and the marker
@@ -3411,7 +3755,13 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         workset_move.promote_incoming(server.root, target_id)
     except Exception:  # noqa: BLE001 — the session is promoted; the files wait
         logger.warning("mobility: could not promote %s's working set", target_id, exc_info=True)
-    return _PromoteOutcome(ok=True, carry=carry_block)
+    # Kept OUT of ``carry_block``: that block is the wake-carry receipt and stays
+    # ``None`` for a promote that adopted nothing (see ``_PromoteOutcome``).
+    return _PromoteOutcome(
+        ok=True,
+        carry=carry_block,
+        skill_selection=skill_transfer_receipt("pinned" if has_snapshot else "local_routing"),
+    )
 
 
 def _roll_back_destination(server: "RelayServer", session_id: str, staging: Path) -> None:
@@ -3662,6 +4012,7 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
     # layout is how this check would drift away from the thing it is checking.
     if sync_mod.staging_dir(Path(root), session_id).exists():
         return False
+    (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
     (target / "ready.json").unlink(missing_ok=True)
     clear_handoff_entry(root, session_id)
     logger.info(
@@ -3669,6 +4020,20 @@ def settle_promoted_handoff(root: Path, session_id: str) -> bool:
         session_id,
     )
     return True
+
+
+def _attempt_token(value: Any) -> int | None:
+    """A move attempt's token as it crossed the wire, or ``None`` when absent.
+
+    Absent is a REAL case and not corruption: a peer from before the token
+    existed sends no key at all, and the owner then scopes the refusal no further
+    than the pre-token behaviour did (see ``_Progress.note_refusal``). A present
+    but unusable value is treated the same way rather than as a reason to drop a
+    refusal the peer did produce.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def _source_refused(
@@ -3709,6 +4074,10 @@ def _source_refused(
         code=str(frame.get("code") or "refused"),
         message=str(frame.get("message") or "the other device refused the move"),
         from_device=str(getattr(link, "device_id", "") or ""),
+        # WHICH ATTEMPT REFUSED, read off the invite's own token echoed back (R4-1).
+        # A peer that sends none is stamped against the attempt in progress, which
+        # keeps an older peer working exactly as before.
+        attempt=_attempt_token(frame.get("attempt")),
     )
     return {"result": "recorded", "session_id": session_id}
 
@@ -5456,6 +5825,7 @@ def _source_prepare(
     and, at the promote, into the ``desktop.json`` a session with no marker of its
     own could never otherwise have.
     """
+    from local_operator.network import move_team
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
@@ -5473,6 +5843,26 @@ def _source_prepare(
             "message": f"this device does not hold {session_id} any more",
             "session_id": session_id,
         }
+
+    def team_offer() -> dict[str, Any] | None:
+        return move_team.source_offer(
+            server.root,
+            Path(server.root) / "sessions" / session_id,
+            supported=frame.get(move_team.KEY) == move_team.CAPABILITY,
+        )
+
+    def team_refusal(error: move_team.TeamIdentityRefused) -> dict[str, Any]:
+        return {
+            "result": "refused",
+            "code": move_team.CODE,
+            "message": str(error),
+            "session_id": session_id,
+        }
+
+    try:
+        expected_team = team_offer()
+    except move_team.TeamIdentityRefused as error:
+        return team_refusal(error)
     # THE ROLE-DEFINITION GATE (LOH-9 S2). The copy set excludes ``roles/`` for
     # v1, so this is the one place that can stop a deleting move from losing
     # definitions no other device has. It runs for BOTH modes (a ``--keep`` copy
@@ -5649,6 +6039,7 @@ def _source_prepare(
             "lease_epoch": new_lease_epoch(),
             "mode": "keep",
             "manifest": manifest,
+            move_team.KEY: expected_team,
             # The destination states what stayed behind, in the receipt it builds
             # (see ``MoveCarryBlock.session_roles``); 0 means none, which is every
             # ordinary move.
@@ -5929,6 +6320,12 @@ def _source_prepare(
     )
     if refused_ws is not None:
         return refused_ws
+    # The attachment can change before the runtime is retired. Re-read it
+    # with the writer stopped, before committing to a copy plan.
+    try:
+        expected_team = team_offer()
+    except move_team.TeamIdentityRefused as error:
+        return team_refusal(error)
     lease_epoch = new_lease_epoch()
     if workset_arrival is not None:
         # THE CONSENT ROW, BEFORE THE TRANSFER STARTS (security ruling, offload
@@ -6039,6 +6436,7 @@ def _source_prepare(
         "session_roles_stash": roles_stash,
         "session_id": session_id,
     }
+    answer[move_team.KEY] = expected_team
     if source_cwd:
         answer["cwd"] = source_cwd
     if workset_arrival is not None:
@@ -6580,7 +6978,7 @@ def _source_done(server: "RelayServer", link: "PeerLink", frame: dict[str, Any])
             session_id, copy.deepcopy(ws_outcome), from_device=link.device_id
         )
     progress_for(server).note(session_id, "done")
-    progress_for(server).signal(session_id, "done")
+    progress_for(server).signal_done(session_id, _attempt_token(frame.get("attempt")))
     _audit(server, AUDIT_DONE, session_id, link.device_id)
     # The served artifacts are no longer needed once the destination says done AND no
     # handoff of this id is in flight here (a stale ``done`` must not strand a live
@@ -6656,6 +7054,11 @@ def _destination_invite(
     # LOH-9 S2: the inviter's explicit opt-out from the source's role-definition
     # gate travels to the prepare this destination sends; absent reads False.
     drop_session_roles = bool(frame.get("drop_session_roles") or False)
+    # THE INVITE'S ATTEMPT TOKEN, echoed on the refusal this device may send back
+    # (R4-1): the owner can then tell THIS move's refusal from an earlier attempt's
+    # sentence about the same session. Absent from an older source — no token
+    # travels, and the owner scopes no further than it did before the token existed.
+    invite_attempt = _attempt_token(frame.get("attempt"))
     # The inviter's working-set consent, forwarded verbatim into the prepare: the
     # gate that reads it runs on the OWNER, which is the device that invited us.
     raw_consent = frame.get("working_set")
@@ -6708,6 +7111,7 @@ def _destination_invite(
                 resume_queued=resume_queued,
                 drop_session_roles=drop_session_roles,
                 working_set=invite_consent,
+                invite_attempt=invite_attempt,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -6758,6 +7162,9 @@ def _destination_invite(
                         "session_id": session_id,
                         "code": str(refusal.get("code") or "refused"),
                         "message": str(refusal.get("message") or "this device refused the move"),
+                        # THE ATTEMPT IT ANSWERS, so the owner's wait ends only if
+                        # that is still the attempt waiting (R4-1).
+                        **({"attempt": invite_attempt} if invite_attempt is not None else {}),
                     },
                     # A NOTIFICATION, NOT AN OP WITH A BUDGET: the owner answers from
                     # memory in microseconds, and the move op's own slow-op deadline
@@ -7123,6 +7530,7 @@ def adopt_staged_if_mine(
                 {"phase": "committed", "at": time.time()},
             ],
             "recovered": True,
+            "carry": {"skill_selection": report["skill_selection"]},
         },
     )
 
@@ -7424,7 +7832,9 @@ def _reconcile_destination(
         # (``sync.EXCLUDED_ENTRIES`` says so) and this is the only moment anything
         # still knows it is ours, so it goes here rather than lingering in a
         # conversation the user will open.
-        (Path(root) / "sessions" / session_id / "ready.json").unlink(missing_ok=True)
+        target = Path(root) / "sessions" / session_id
+        (target / _SKILL_PIN_ORIGINAL).unlink(missing_ok=True)
+        (target / "ready.json").unlink(missing_ok=True)
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
     if server is None:
@@ -7479,7 +7889,13 @@ def _reconcile_destination(
             "phase": "handing_off",
             "detail": (refusal or {}).get("message", ""),
         }
-    return {"session_id": session_id, "action": "promoted", "phase": "committed"}
+    selection = (result.get("carry") or {}).get("skill_selection")
+    return {
+        "session_id": session_id,
+        "action": "promoted",
+        "phase": "committed",
+        "skill_selection": selection,
+    }
 
 
 def sweep_staging(root: Path, *, max_age_s: float = STAGING_MAX_AGE_S) -> list[str]:
@@ -8069,7 +8485,11 @@ def _offload(
     except Moved as refusal:
         return _move_refusal(session_id, "unreachable", refusal.message)
     progress = progress_for(server)
-    progress.forget(session_id)
+    # ONE TOKEN PER ATTEMPT (R4-1): the refusal that ends this wait must be the one
+    # THIS invite produced. The token travels with the invite and comes back on the
+    # refused frame, so a sentence remembered from an earlier try answers nothing
+    # here (``_Progress.begin_attempt``).
+    attempt = progress.begin_attempt(session_id)
     # THE PRE-CHECK SITS BELOW THE BOOKKEEPING, not above it (Aida round 2, finding 3):
     # every other exit from this function has already cleared the session's in-memory
     # phases and refusal, and an early return that skipped that would be the one path
@@ -8079,17 +8499,31 @@ def _offload(
     )
     if blocked is not None:
         return blocked
-    # THE DESTINATION GETS THIS DEVICE'S DEFINITIONS BEFORE IT PULLS, so the moved
-    # session restores against the CURRENT team/agent brief and the operator's custom
-    # instructions rather than whatever mirror the cadence last left there (a team
-    # edited a minute ago, or a node paired since the last tick). It runs before the
-    # invite, and therefore before any commit. NON-FATAL by design: the move's own
-    # contract is the transcript, and refusing a move because a brief could not be
-    # refreshed would strand the session on a device the operator is moving it off.
-    # The failure is not silent — it names the copy that may be stale on the receipt.
-    definitions_notice = _push_move_definitions(
-        server, session_id, target_device, target_name or target_device
-    )
+    # Read the authenticated hello/challenge advert on the very link that will
+    # carry the invite, not pairing or member records: reconnecting (including
+    # after a downgrade) gets a new handshake, so no old yes carries forward.
+    # net_definitions state is admin-gated; reading it here would impose admin
+    # on a move-authorized peer. Neither authorization check is changed.
+    # Silence is not consent: no advert on this link fails closed. Admission
+    # proves "cannot participate" without the advert; the wait proves "not
+    # credited" without the matching echo. Neither stands in for the other.
+    from local_operator.network.wire import SESSION_MOVE_ATTEMPT_V1
+
+    if SESSION_MOVE_ATTEMPT_V1 not in link.capabilities:
+        return _move_refusal(
+            session_id,
+            "peer_cannot_confirm_attempts",
+            f"{target_name or target_device} does not advertise move attempt token support. "
+            "Upgrade that peer to a version that advertises move attempt token support, "
+            "or move the session to a device that advertises support.",
+        )
+    # NOTHING IS APPLIED ON THE DESTINATION BEFORE THIS INVITE (review round 4,
+    # R4-2). The invite is not authority to install anything there — not roles or
+    # teams, and not the standing-instructions singleton either: "the empty
+    # selectors only install instructions today" is an argument about the current
+    # arguments, not about the mechanism, and ``definitions.apply_bundle`` is that
+    # mechanism. Independent reconciliation owns those writes, and arrival checks
+    # the destination's RECORDED authority before the copy is admitted.
     transport = LinkTransport(server, link, session_id)
     # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP OR ITS SAVED MODE, and it has
     # to be: the source holds the session, so the source is the only device that can
@@ -8143,6 +8577,12 @@ def _offload(
                 "phase": "invite",
                 "session_id": session_id,
                 "keep": keep,
+                # THE ATTEMPT THIS INVITE BELONGS TO (R4-1), echoed back on any
+                # refusal this move produces: without it the owner can only guess
+                # which attempt a sentence answers, and guessing wrong ends a fresh
+                # attempt with an old refusal. The live advert was required at
+                # admission; only the matching echo can confirm this attempt.
+                "attempt": attempt,
                 # THE OWNER'S WAIT TRAVELS WITH THE INVITE: the re-probe happens
                 # where the busy answer is produced (the destination's loop), so
                 # a ``--wait`` that stops at this device is a promise nobody keeps.
@@ -8181,7 +8621,9 @@ def _offload(
         return _move_refusal(session_id, refusal.code or "unreachable", refusal.message)
     new_id = str(accepted.get("new_session_id") or "")
     budget = move_bound_s(wait_s, keep=keep)
-    outcome, refusal = _await_own_progress(server, session_id, budget=budget, invited=target_device)
+    outcome, refusal = _await_own_progress(
+        server, session_id, budget=budget, invited=target_device, attempt=attempt
+    )
     if outcome == "queued":
         # THIS DEVICE (the source) QUEUED IT (design note §5.4): the pull ran, the
         # prepare answered "queued", and the durable intent now lives here. Read
@@ -8235,11 +8677,17 @@ def _offload(
         # arrived on the ``done`` frame — wakes carried plus the supervisor's verified
         # state, including the LOUD fallback when it is not running — and this side adds
         # the monitor half from its own count (``monitors_here``, read before the
-        # commit). Either half may be absent (an older peer sends none; no monitors),
-        # and the key is absent when both are, so an unchanged move parses unchanged.
+        # commit). Older peers may send none; the source names that fallback.
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
         carry_block = progress.carry(session_id) or {}
-        if definitions_notice:
-            carry_block["definitions_notice"] = definitions_notice
+        # An older destination completes without this additive field. Move
+        # completion alone confirms neither a pin nor a local routing decision.
+        reported = skill_transfer_status(carry_block.get("skill_selection"))
+        carry_block["skill_selection"] = skill_transfer_receipt(reported or "unconfirmed")
         if monitors_here > 0:
             carry_block.setdefault("monitors", monitors_here)
             carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)
@@ -8352,10 +8800,13 @@ def _offload(
             changed=bool(reached and reached != "prepared"),
             working_set=refused_workset,
         )
+    deadline_code = (
+        "move_attempt_unconfirmed" if outcome == "move_attempt_unconfirmed" else "deadline_exceeded"
+    )
     if keep:
         return _move_refusal(
             session_id,
-            "deadline_exceeded",
+            deadline_code,
             f"{target_name or target_device} is still copying {session_id}"
             + (f" as {new_id}" if new_id else "")
             + ". Nothing on this device changed, and asking again would make another copy.",
@@ -8364,7 +8815,7 @@ def _offload(
         )
     return _move_refusal(
         session_id,
-        "deadline_exceeded",
+        deadline_code,
         f"{target_name or target_device} did not finish taking {session_id} in time. "
         + (
             "This device has already committed the handoff, so ask again rather than "
@@ -8377,80 +8828,13 @@ def _offload(
     )
 
 
-def _push_move_definitions(
-    server: "RelayServer", session_id: str, target_device: str, target_label: str
-) -> str:
-    """Reconcile the moving session's team/agent (and the operator's instructions)
-    onto the destination; return the receipt's notice, or ``""`` when it landed.
-
-    The names come from the session's own ``attachment.json`` (what ``/team`` and
-    ``/agent`` put on it); ``definitions.push_to_peer`` expands a team to its roster
-    and always carries the operator-instructions singleton, so a session with no
-    attachment still gets the operator's standing rules. Never raises: see the call
-    site for why this cannot fail a move.
-    """
-    from local_operator.network import definitions
-    from local_operator.resume import read_session_attachment
-
-    team = agent = ""
-    try:
-        attachment = read_session_attachment(Path(server.root) / "sessions" / session_id)
-    except Exception:  # noqa: BLE001 — an unreadable sidecar still moves
-        attachment = None
-    if attachment is not None:
-        team, agent = attachment.team, attachment.agent
-    names = {"agents": [agent] if agent else [], "teams": [team] if team else []}
-    try:
-        pushed = definitions.push_to_peer(server, target_device, names=names)
-    except Exception as exc:  # noqa: BLE001 — non-fatal, see the call site
-        logger.warning(
-            "mobility: definitions push before moving %s failed", session_id, exc_info=True
-        )
-        pushed = {"ok": False, "message": str(exc)}
-    report = pushed.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
-    report = report if isinstance(report, dict) else {}
-    outcome = str(report.get("outcome") or "")
-    # A KEPT-OWN-COPY IS ITS OWN SENTENCE, with its remedy (R1-2): the peer chose to
-    # keep its instructions, which is not "could not be refreshed". Informational —
-    # the move still completes.
-    kept_own = str(report.get("notice") or "") if outcome == "conflict" else ""
-    # THE INSTRUCTIONS ARE NAMED ONLY WHEN THEY ARE WHAT FAILED (R1-4). ``ok`` is
-    # False for an agent/team conflict or a transport failure; the instructions
-    # outcome never sets it, so naming them on every failure blamed them for a
-    # team conflict. No report at all (the push never reached the peer) leaves
-    # them unknown, so they stay named then.
-    instructions_stale = not kept_own and outcome not in definitions.INSTRUCTIONS_SETTLED_OUTCOMES
-    parts: list[str] = []
-    if not pushed.get("ok") or instructions_stale:
-        named = [
-            part
-            for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
-            if part
-        ]
-        if instructions_stale:
-            named.append("the custom instructions")
-        if not pushed.get("ok"):
-            reason = str(pushed.get("message") or pushed.get("code") or "no answer")
-        else:
-            reason = str(report.get("reason") or outcome or "no answer")
-        if named:
-            subject = " and ".join(named)
-            parts.append(
-                f"{subject} on {target_label} may be an older copy — "
-                f"{'it' if len(named) == 1 else 'they'} could not be refreshed before the "
-                f"move ({reason})"
-            )
-    if kept_own:
-        parts.append(kept_own)
-    if not parts:
-        return ""
-    notice = "; ".join(parts)
-    logger.warning("mobility: after moving %s to %s: %s", session_id, target_label, notice)
-    return notice
-
-
 def _await_own_progress(
-    server: "RelayServer", session_id: str, *, budget: float, invited: str = ""
+    server: "RelayServer",
+    session_id: str,
+    *,
+    budget: float,
+    invited: str = "",
+    attempt: int | None = None,
 ) -> tuple[str, tuple[str, str] | None]:
     """Wait for this device's own side of an invited move to reach ``done``.
 
@@ -8492,7 +8876,8 @@ def _await_own_progress(
     ``invited`` names the device this move was invited to, so a refusal can only end
     the wait it belongs to. A refusal is consulted ONLY while nothing has committed
     here, because a handoff that committed has an answer a late refusal must not
-    overwrite.
+    overwrite. Before commit, an expired tokenized wait reports its own named
+    refusal, not a purported answer from the invited device.
     """
     deadline = time.monotonic() + max(0.0, budget)
     progress = progress_for(server)
@@ -8506,18 +8891,23 @@ def _await_own_progress(
             # ``_source_prepare`` in this same process before the pull's answer
             # was written, so there is no race to lose.
             return "queued", None
-        if progress.wait_for(session_id, "done", 0.05 if committed_at else 0.2):
+        if progress.wait_done(session_id, attempt, 0.05 if committed_at else 0.2):
             return "done", None
         now = time.monotonic()
         if committed_at is None:
             if _tombstone(server.root, session_id):
                 committed_at = now
             else:
-                refusal = progress.refusal(session_id, from_device=invited)
+                # SCOPED TO THIS ATTEMPT (R4-1): the caller's token, so a refusal
+                # that answered an earlier try cannot end this wait.
+                refusal = progress.refusal(session_id, from_device=invited, attempt=attempt)
                 if refusal is not None:
                     return "none", refusal
                 if now >= deadline:
-                    return "none", None
+                    # The deadline is local evidence, not a refusal from the peer:
+                    # neither an unattributed nor a different attempt's outcome
+                    # can confirm this wait or decide its refusal code.
+                    return ("move_attempt_unconfirmed" if attempt is not None else "none"), None
                 continue
         # Committed, now or earlier: hold the confirmation window, then answer.
         if now >= min(deadline, committed_at + OFFLOAD_CONFIRM_WAIT_S):

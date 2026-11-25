@@ -667,6 +667,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
         logger.warning("temporary-chat sweeper could not start", exc_info=True)
 
+    # THE ORPHAN SWEEP (``asks/orphans.py``): settles inbox rows and ask-index
+    # entries whose conversation left this device by a path that did not
+    # cascade (a manual rm, a crash mid-move), so a "Waiting on you" row can
+    # never outlive its conversation for more than one interval. One pass shortly
+    # after boot, then every ``SWEEP_INTERVAL_S``; index-driven and bounded, so
+    # a pass costs O(sessions with asks or inbox rows), never a store scan.
+    orphan_sweep_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.asks.orphans import run_forever as run_orphan_sweep
+
+        orphan_sweep_task = asyncio.create_task(run_orphan_sweep(config_dir))
+    except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
+        logger.warning("orphan sweep could not start", exc_info=True)
+
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
@@ -754,6 +768,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        if orphan_sweep_task is not None:
+            orphan_sweep_task.cancel()
+            await asyncio.gather(orphan_sweep_task, return_exceptions=True)
         if temporary_sweeper_started:
             try:
                 from local_operator.session.cleanup import stop_temporary_sweeper
@@ -1300,6 +1317,28 @@ async def standalone_browser_write_gate(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
+    if request.url.path == "/v1/desktop/attention/seen" and request.method == "POST":
+        # A client needs to know which item blocked the whole receipt batch.
+        # Only include known schema locations: an extra key in `loc`, `input`,
+        # and JSON-decoder context can contain caller data.
+        issues = []
+        for issue in error.errors():
+            location: list[str | int] = []
+            for part in issue["loc"]:
+                if not isinstance(part, int) and part not in (
+                    "body",
+                    "items",
+                    "session_id",
+                    "completion_token",
+                ):
+                    break
+                location.append(part)
+            if issue["type"] == "json_invalid":
+                continue
+            issues.append({"loc": location, "msg": issue["msg"]})
+            break  # One diagnostic suffices; don't amplify a 500-item failure.
+        if issues:
+            return JSONResponse(status_code=422, content={"detail": issues})
     if request.url.path.startswith(
         ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
     ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):

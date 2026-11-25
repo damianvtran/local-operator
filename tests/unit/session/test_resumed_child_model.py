@@ -1007,3 +1007,45 @@ async def test_a_resumed_pinned_child_whose_pin_cannot_serve_ends_on_the_chain_t
     finally:
         await parent.dispose()
         auth.close()
+
+
+class _OneRowComms:
+    """Just enough of the comms registry for ``_resumed_line`` to read a row."""
+
+    def __init__(self, model: str, owns: bool | None) -> None:
+        self._row = SimpleNamespace(model_label=model, owns_model=owns)
+
+    def job(self, job_id: str) -> Any:
+        return self._row
+
+    def resume_model_note(self, job_id: str) -> str:
+        return ""
+
+    def resumed_on_parent_model(self, job_id: str) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    ("owns", "session_model", "clause"),
+    [
+        (True, FLASH, f"will run on {OPUS}"),
+        (False, OPUS, f"will run on this session's model ({OPUS})"),
+    ],
+)
+def test_the_resume_line_names_the_target_model_not_one_that_ran(
+    owns: bool, session_model: str, clause: str
+) -> None:
+    """The line is written as soon as ``resume_async`` returns, before the child
+    is built, so its model is the resume TARGET. Phrasing it as ``resumed as
+    job N on X`` read as a model that had already executed."""
+    from local_operator.tools.builtin import _resumed_line
+
+    line = _resumed_line(
+        _OneRowComms(OPUS, owns), "explore", "job-1", "job-2", FLASH, session_model
+    )
+
+    assert line.startswith("- explore (job-1): resumed as job job-2 \u2014 "), line
+    assert clause in line, line
+    assert "resumed as job job-2 on " not in line, line
+    # The previous run really did execute, so its past tense stays.
+    assert f"(its previous run was on {FLASH})" in line, line

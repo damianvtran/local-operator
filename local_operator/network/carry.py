@@ -68,6 +68,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 #: The journal's file name (``session.transcript.TRANSCRIPT_FILENAME``). Local
@@ -336,11 +338,7 @@ def _write_marker(marker: Path, document: Mapping[str, Any]) -> None:
     written file a runtime would read as corrupt — and 0600 matches what the marker
     is: this device's own note about where the conversation lives, never shared.
     """
-    temporary = marker.with_name(f"{marker.name}.{os.getpid()}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document, sort_keys=True))
-    os.replace(temporary, marker)
+    atomic_write_text(marker, json.dumps(document, sort_keys=True), mode=0o600)
 
 
 def rewrite_host_cwd(
@@ -944,13 +942,11 @@ def attachment_resolution(config_dir: Path, session_dir: Path) -> dict[str, Any]
 
     WHY (2026-11-13): the moved session's prompt on lop-remote-node-2 carried its
     skills but not the lopdev team brief, and nothing said so. ``attachment.json``
-    travels in the copy set and the session re-attaches from it by NAME at open
-    (``Session._restore_attachment``), so the brief appears exactly when this
-    device's registries resolve that name — which the source's definitions push
-    (``mobility._push_move_definitions``, now on the queued path too) is meant to
-    guarantee. This reads the same registries at the promote and reports the
-    answer, so a brief that will NOT be there is named on the receipt rather than
-    discovered from a prompt. ``{}`` when the session has no team or agent.
+    travels in the copy set, but does not authorize an attachment. Definitions
+    reconcile independently of the invite, and the arrival check uses the source's
+    recorded ceiling for a team. This reads what the destination registries resolve
+    at promote for the receipt, not as a grant to attach it. ``{}`` when the
+    session has no team or agent.
     Never raises.
     """
     try:

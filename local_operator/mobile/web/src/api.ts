@@ -6,6 +6,7 @@
  * the same way, so reload the page and let the server 303 to /login. There
  * is no client-side login form — login is server-rendered.
  */
+import { readInlineUiMessages, type InlineUiMessages } from "./inline-ui-parts";
 import { clearPrivateSessionStorage } from "./private-storage";
 import type {
 	AttentionUnread,
@@ -583,13 +584,20 @@ export type CommandReceipt = {
 	    reply cannot say which channel the first attempt landed on), and on an
 	    older relay. */
 	delivered_as?: "prompt" | "steer";
+	/** Present (true) only on a cold prompt sent with `accept_waking`: a
+	    runtime is booting and the prompt is NOT admitted yet; the reply streams.
+	    See `continuation-command.ts` for what the retry envelope does then. */
+	waking?: boolean;
 };
 
 export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {
+	// This renderer consumes v1 overlays; the relay checks the selected owner
+	// before forwarding the declaration (including a busy prompt → steer).
+	const body = op.op === "prompt" || op.op === "steer" ? { ...op, inline_ui: true } : op;
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
-		body: JSON.stringify(op),
+		body: JSON.stringify(body),
 	});
 }
 
@@ -623,10 +631,16 @@ function recordingFilename(blob: Blob): string {
 
     `signal` is for U5's cancel: the composer's status row aborts an in-flight
     transcription rather than only hiding the wait; a fetch aborted through it
-    rejects with an AbortError, which the caller already treats as a discard. */
+    rejects with an AbortError, which the caller already treats as a discard.
+
+    `client`/`sessionId` are DIAGNOSTIC fields, not routing: the daemon logs
+    which surface a refusal happened on and which conversation it belonged to,
+    so a report ("transcription failed") can be found in `mobile.log` and the
+    request log's `reason` stops being blank. The daemon drops anything that is
+    not its own session-id shape, so a value from an unexpected route is safe. */
 export function transcribeAudio(
 	blob: Blob,
-	signal?: AbortSignal,
+	options: { signal?: AbortSignal; sessionId?: string } = {},
 ): Promise<{
 	text: string;
 	provider: string;
@@ -635,13 +649,15 @@ export function transcribeAudio(
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
+	form.append("client", "web");
+	if (options.sessionId) form.append("session_id", options.sessionId);
 	// The daemon normalises this to an ISO-639-1 code before it reaches Radient
 	// or the client rules; an unmapped tag (e.g. fil-PH -> fil) is omitted, not
 	// guessed. English-only cleanup on a Tagalog take is the failure direction
 	// the cleanup design refuses.
 	const language = typeof navigator !== "undefined" ? navigator.language : "";
 	if (language) form.append("language", language);
-	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
+	return fetch("/api/transcribe", { method: "POST", body: form, signal: options.signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();
 			throw new Error("unauthorized");
@@ -1006,14 +1022,31 @@ export function getBridgeCardBody(sessionId: string, entryId: string, signal?: A
     oldest entry the client already has; the daemon returns the page
     immediately older than it (chronological within the page) plus whether
     more history exists beyond. */
-export function getHistory(
+export interface TranscriptPage {
+	entries: TranscriptEntry[];
+	has_more: boolean;
+	inline_ui?: InlineUiMessages;
+}
+
+export async function getHistory(
 	sessionId: string,
 	before: string | null,
 	limit = 80,
-): Promise<{ entries: TranscriptEntry[]; has_more: boolean }> {
+	/* Optional so every existing caller is unchanged; the composer's wake
+	   confirmation passes one so an unmount stops its walk (review round 3,
+	   R3-m2 on PR #4584). */
+	signal?: AbortSignal,
+): Promise<TranscriptPage> {
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
-	return request(`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`);
+	q.set("inline_ui", "1");
+	const { inline_ui, ...page } = await request<Omit<TranscriptPage, "inline_ui"> & { inline_ui?: unknown }>(
+		`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`,
+		signal ? { signal } : undefined,
+	);
+	const messages = inline_ui !== undefined && Array.isArray(page.entries)
+		? readInlineUiMessages(inline_ui, page.entries) : undefined;
+	return messages ? { ...page, inline_ui: messages } : page;
 }
 
 export function getSubagentDetail(

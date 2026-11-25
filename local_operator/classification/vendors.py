@@ -94,23 +94,26 @@ key could otherwise reach a log line from here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import httpx
 from pydantic import SecretStr
 
 from local_operator.classification.accounting import note_post
+from local_operator.classification.advisory import GOOGLE_VERTEX, AdvisoryVendor
 from local_operator.classification.types import (
     Answer,
     DecisionRequest,
     DecisionResponse,
     DecisionSchemaError,
+    DecisionVendor,
     DecisionVendorError,
     Question,
 )
@@ -126,6 +129,8 @@ from local_operator.session.channel_spend import BASIS_NOT_TRACKED
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from local_operator.classification.advisory import AdvisoryAuthSource
 
 logger = logging.getLogger(__name__)
 
@@ -484,7 +489,7 @@ async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | 
         store = shared_auth_store(
             (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
         )
-        local = await store.get_api_key(storage, read_only=True)
+        local = await store.get_api_key(storage, read_only=True, offload_static_key=True)
         if local:
             return local
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
@@ -605,7 +610,9 @@ class _HttpDecisionVendor:
                     return SecretStr(stored), index
                 continue
 
-            stored_key = provider_secret_value(tier, base=config_dir)
+            # Secret/broker access is synchronous and may stall; the turn
+            # and the decision deadline must remain cancellable.
+            stored_key = await asyncio.to_thread(provider_secret_value, tier, base=config_dir)
             if stored_key:
                 return SecretStr(stored_key), index
             # An exported variable is a real instruction and is not what PR2a
@@ -704,8 +711,22 @@ class _HttpDecisionVendor:
         self.invalidate_credential()
         return True
 
-    async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
-        key = await self.credential(self._config_dir)
+    async def decide(
+        self,
+        request: DecisionRequest,
+        *,
+        timeout_s: float,
+        check_radient: Callable[[], Awaitable[None]] | None = None,
+    ) -> DecisionResponse:
+        # A native leg can suspend for credentials too, including between
+        # POSTs after a refusal. Guard each send, not just entry to the leg.
+        async def resolve_key() -> SecretStr | None:
+            key = await self.credential(self._config_dir)
+            if check_radient is not None:
+                await check_radient()
+            return key
+
+        key = await resolve_key()
         if key is None or not key.get_secret_value():
             raise DecisionVendorError(f"{self.name} has no credential", kind="auth", status=401)
         body = request_body(request, self.model_id)
@@ -742,7 +763,7 @@ class _HttpDecisionVendor:
                 self.name,
             )
             self.invalidate_credential()
-            refreshed = await self.credential(self._config_dir)
+            refreshed = await resolve_key()
             if refreshed is None or not refreshed.get_secret_value():
                 raise refusal
             response = await self._send_with(
@@ -767,7 +788,7 @@ class _HttpDecisionVendor:
                     self.name,
                     self.credential_tiers[self._tier],
                 )
-                fallback = await self.credential(self._config_dir)
+                fallback = await resolve_key()
                 if fallback is None or not fallback.get_secret_value():
                     raise refusal
                 response = await self._send_with(
@@ -1074,6 +1095,12 @@ def build_vendor(
     *,
     model: str = "",
     client: httpx.AsyncClient | None = None,
-) -> _HttpDecisionVendor:
-    """Construct one leg by name. Raises ``KeyError`` for an unknown name."""
+    auth_store: AdvisoryAuthSource | None = None,
+    session_id: str | None = None,
+) -> DecisionVendor:
+    """Construct a native leg or a private, auto-only structured hint leg."""
+    if name == GOOGLE_VERTEX:
+        return AdvisoryVendor(
+            config_dir, client=client, auth_store=auth_store, session_id=session_id
+        )
     return VENDOR_CLASSES[name](config_dir, model=model, client=client)

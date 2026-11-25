@@ -62,6 +62,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "highlights",
         "i18n",
         "image-generation",
+        "inline-ui",
         "mcp",
         "memory",
         "mobile",
@@ -778,13 +779,18 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     # with.
     assert "`stop` is ALWAYS REFUSED for a `peer` target" in flat
     assert "nothing is sent and the operator stops it on that device" in flat
-    assert "--force" not in flat
-    # ...and the LOCAL front door states the same authority limit: it ends an idle
-    # session, never signals, and has no force option of its own — the escalation
-    # stays the operator's, in the CLI (`test_graceful_only_stop.py` proves the
-    # tool half of that sentence).
+    # The REMOTE escalation stays absent: no mesh `--force` spelling may return.
+    assert not re.search(r"network sessions[^.]*--force", flat)
+    # ...and the LOCAL front door: an idle-only stop by default, plus ONE
+    # operator-safety escalation (`force=true`, the runtime memory-runaway
+    # incident of 2026-11-24, where an idle-only refusal left a runaway with no
+    # way forward). The guide must say when it is legitimate and that it cuts
+    # work, so it never reads as a tidy-up option (`test_graceful_only_stop.py`
+    # proves the default half; `test_sessions_tool.py` the forced half).
     assert "`stop` ends an IDLE local session" in flat
-    assert "There is no force option" in flat
+    assert "There is no force option" not in flat
+    assert "`force=true` is the one escalation, for operator safety only" in flat
+    assert "it cuts the work in flight" in flat
     # Mesh-node managers, refused a pinned tier, ran review as parallel
     # sessions; the remote section must say review lanes are `task` subagents
     # and name the tier fix (2026-11-14).

@@ -1,0 +1,6 @@
+{
+  "network.skill_transfer.receipt.local_routing": "Không ghim bản chụp kỹ năng nào. Thiết bị đích sẽ tự chọn trong số các kỹ năng có sẵn trên máy.",
+  "network.skill_transfer.receipt.pinned": "Thiết bị đích đã ghim các kỹ năng do thiết bị nguồn chọn. Chỉ các kỹ năng cục bộ khớp với lựa chọn đó mới được tải.",
+  "network.skill_transfer.receipt.unconfirmed": "Thiết bị đích chưa xác nhận bản chụp kỹ năng. Đừng mặc định rằng thiết bị đích dùng lựa chọn của thiết bị nguồn.",
+  "network.skill_transfer.receipt.write_failed": "Thiết bị đích không lưu được bản chụp kỹ năng. Bản sao tạm vẫn được giữ và chưa được công bố."
+}

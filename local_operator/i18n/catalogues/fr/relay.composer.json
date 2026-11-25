@@ -4,5 +4,13 @@
   "relay.composer.action.stop": "arrêter",
   "relay.composer.action.stopping": "arrêt en cours",
   "relay.composer.action.connecting": "Connexion",
-  "relay.composer.action.stop_agent": "arrêter l’agent"
+  "relay.composer.action.stop_agent": "arrêter l’agent",
+  "relay.composer.delivery.label": "envoi",
+  "relay.composer.delivery.steer": "orienter",
+  "relay.composer.delivery.queue": "file d’attente",
+  "relay.composer.delivery.both": "file, puis orienter",
+  "relay.composer.delivery.steer_hint": "Interrompre un outil en cours",
+  "relay.composer.delivery.queue_hint": "Attendre, sans interrompre d’outil",
+  "relay.composer.delivery.both_hint": "Attendre, puis orienter si ça tarde",
+  "relay.composer.delivery.both_chip": "file→orient"
 }

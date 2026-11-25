@@ -1,0 +1,75 @@
+{
+ "schema": 1,
+ "audit_id": "relayid-r1-35f05771f20c",
+ "audit_kind": "independent semantic audit of the relay ask-id foot and chip delta (14 new keys); the 87 unchanged keys carried by byte proof",
+ "locale": "ur",
+ "namespace": "relay.asks",
+ "status": "passed",
+ "verdict": "passed",
+ "pr": "feat/relay-ask-ids (local branch, commits 62d72e431..d03db9007 on origin/main 94ba2a018; PR number not yet assigned)",
+ "audited_revision": "d03db9007 plus this audit's catalogue edits",
+ "catalogue_state": "d03db9007 bytes with the edits listed in findings_note",
+ "scope": "the 14 new relay.asks.id.* and relay.asks.chip.* keys read against the en source, en/relay.asks.context.json, i18n/glossary.md, i18n/style-guides/ur.md, the shipped relay.asks.status.*, card.* and sheet.settled words of the same locale, and local-operator-mobile origin/main src/i18n/catalogues/ur/mobile.asks.json (chip.*); the whole namespace re-rendered through messages.render and mechanically checked; the other 87 keys are byte-identical in en and ur to origin/main 94ba2a018, whose last ledger row (askparity-r1-b7ef3c226fc6) was passed with source e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef and the target hash recorded in that evidence, recomputed from origin/main",
+ "keys_audited": [
+  "relay.asks.id.copy_label",
+  "relay.asks.id.copied",
+  "relay.asks.id.copied_named",
+  "relay.asks.id.copy_failed",
+  "relay.asks.chip.open",
+  "relay.asks.chip.answered",
+  "relay.asks.chip.declined",
+  "relay.asks.chip.timed_out",
+  "relay.asks.chip.late",
+  "relay.asks.chip.dismissed",
+  "relay.asks.chip.withdrawn",
+  "relay.asks.chip.expired",
+  "relay.asks.chip.label",
+  "relay.asks.chip.label_bare"
+ ],
+ "keys_total": 101,
+ "keys_edited_by_audit": [
+  "relay.asks.id.copy_label",
+  "relay.asks.id.copied",
+  "relay.asks.id.copied_named",
+  "relay.asks.id.copy_failed",
+  "relay.asks.chip.declined"
+ ],
+ "mechanical_checks": [
+  "key set and order parity with en (101 keys)",
+  "ICU argument names parity (id, state, question)",
+  "NFC",
+  "no bidi/zero-width/control characters",
+  "no ASCII ellipsis",
+  "cell width via rich.cells.cell_len against context maxCells (id.copy_label is an aria-label, advisory)",
+  "every key rendered through local_operator.i18n.messages.render with id=a-745e, state=the locale's own timed_out word, question=sample",
+  "chip state words compared with the same locale's status.* words and card.dismiss/decline/skip",
+  "chip.* compared with the native app's mobile.asks.chip.* wording (read-only)",
+  "en 'Ask {id}, {state}: {question}.' yields '?.' when the question ends in '?': an English-source observation, not touched here"
+ ],
+ "translator": {
+  "agent": "radient/auto (translator of record for the PR commit 8077e80c9, ask-id foot and chip delta); not independently verified",
+  "model": "radient/auto",
+  "fallback": "none",
+  "date": "2026-11-23"
+ },
+ "auditor": {
+  "agent": "independent i18n auditor (lopdev i18n-auditor task, session 35f05771f20c; not the translator, did not write or edit the English)",
+  "session": "35f05771f20c",
+  "model": "anthropic/claude-sonnet-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-23",
+  "result": "passed",
+  "findings": 3,
+  "unresolved_blocker_major": 0,
+  "minor": 2,
+  "nit": 1
+ },
+ "findings_note": "F1 MINOR fixed: id.copy_label, id.copied, id.copied_named, id.copy_failed used 'نقل' while the same namespace ships 'کاپی' (card.command.copy, copied 'کاپی ہو گئی', copy_failed 'کاپی نہیں ہو سکی'); now 'کاپی', with the shipped 'کاپی ہو گئی' / 'کاپی نہیں ہو سکی' forms (also fixes 'نقل ہو گیا', whose verb did not agree with feminine 'نقل'). F2 MINOR fixed: chip.declined 'مسترد' against shipped status.declined 'انکار کیا گیا' and the action 'انکار کریں'; now 'انکار کیا گیا'. F3 NIT left: chip.late 'تاخیر سے' against status.late 'دیر سے جواب دیا گیا' (synonym, mobile parity). Bidi: no control characters; {id} appears inside RTL text only in aria-labels (ask-id.tsx), the visible id is a dir=ltr span, and the render layer isolates each string, as the ur guide requires.",
+ "report": "lopdev i18n-auditor report to the manager (not posted to GitHub)",
+ "source_sha256": "d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b",
+ "target_sha256": "5b21d280c24d65c4656281ffa30180d1b4873be087faf2f83e8e4b989ae0da4f",
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/relay.asks.json",
+  "target": "local_operator/i18n/catalogues/ur/relay.asks.json"
+ }
+}

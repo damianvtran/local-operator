@@ -327,6 +327,51 @@ def advance_due(
     return candidate
 
 
+def check_hash(text: str, spec: MonitorSpec, settings: MonitorSettings) -> tuple[str, str]:
+    """``(normalized, content_hash)`` of one check's comparable text.
+
+    THE ONE EVALUATION both check paths run: the in-session scheduler's
+    :meth:`MonitorScheduler._apply_success` and the out-of-process probe
+    (:mod:`local_operator.monitors.parked`), which the wake supervisor now runs
+    for EVERY due monitor of a session with no live runtime, not only a parked
+    one. A quiet/changed decision that two spellings could disagree on would
+    either reopen a session for nothing or, worse, commit a quiet tick over a
+    real change; one function makes the decision identical by construction
+    (``tests/unit/monitors/test_probe_parity.py`` drives both paths).
+    """
+    normalized = normalize_result(text, spec, settings)
+    return normalized, content_hash(normalized)
+
+
+def commit_quiet_tick(
+    counters: dict[str, Any],
+    spec: MonitorSpec,
+    now: int,
+    *,
+    handle: str | None = None,
+    uniform: Callable[[float, float], float] = random.uniform,
+) -> None:
+    """Apply one UNCHANGED check to ``counters`` (in place) — the quiet tick.
+
+    Shared with the out-of-process probe for the reason given on
+    :func:`check_hash`: the probe commits this tick itself (the session is not
+    booted for a quiet check), so its counters must be exactly what the
+    session's own scheduler would have written — the same ``checks`` count,
+    ``last_check_at``, cleared failure state, recorded spill handle and next
+    due time. The baseline (``content_hash``/snapshot) is deliberately NOT
+    touched: an unchanged check has nothing to adopt.
+    """
+    counters["checks"] = int(counters.get("checks") or 0) + 1
+    counters["last_check_at"] = now
+    counters["consecutive_failures"] = 0
+    counters["last_error"] = ""
+    # A spilled result is recorded as the next diff's full baseline even on a
+    # quiet tick: the content is identical, so the handle addresses the same text.
+    if handle:
+        counters["last_handle"] = handle
+    counters["next_due_at"] = advance_due(spec, now, uniform)
+
+
 #: What :func:`apply_unavailable_tick` says the tick OWES beyond the counters:
 #: ``gone`` = the 24 h episode limit is reached and the monitor must be
 #: disabled with its notice; ``stalled`` = the 30-minute stall notice is due.
@@ -439,6 +484,7 @@ class MonitorScheduler:
         deliver: Callable[[MonitorDelivery], Awaitable[None] | None],
         persist: Callable[[list[MonitorSpec]], Awaitable[None] | None],
         on_change: Callable[[], None] | None = None,
+        on_quiet_check: Callable[[], None] | None = None,
         index_writable: Callable[[], bool] | None = None,
         #: The §8 classifier gate: bounded delta → the materiality class, or
         #: ``None`` for "no classifier". Absent (``None``) means every change
@@ -462,6 +508,7 @@ class MonitorScheduler:
         self._deliver = deliver
         self._persist = persist
         self._on_change = on_change
+        self._on_quiet_check = on_quiet_check
         self._index_writable = index_writable
         self._classify = classify
         self._announce = announce
@@ -622,17 +669,25 @@ class MonitorScheduler:
                 logger.warning("dropping invalid monitor spec %r", getattr(raw, "id", raw))
                 continue
             counters = monitor_state.read_counters(self._config_dir, self._session_id, spec.id)
+            had_readable_counters = counters is not None
             if counters is None or counters.get("monitor_id") != spec.id:
                 counters = fresh_counters(spec.id, None)
             next_due = counters.get("next_due_at")
-            if (
+            rearmed = (
                 not counters.get("disabled")
                 and (not isinstance(next_due, int) or next_due <= now)
                 and (spec.until_at is None or now < spec.until_at)
-            ):
-                next_due = now + self._first_check_delay_ms()
-            counters["next_due_at"] = next_due
-            adopted.append(_Entry(spec=spec, counters=counters))
+            )
+            counters["next_due_at"] = now + self._first_check_delay_ms() if rearmed else next_due
+            entry = _Entry(spec=spec, counters=counters)
+            if rearmed and had_readable_counters:
+                # Cold readers overlay counters on the rebuilt index so quiet
+                # checks do not need index writes. Publish this one-time due
+                # change first, or the old counters undo the reopen until a tick.
+                # If no counters can be read, the index already covers it. The
+                # best-effort write keeps an I/O error from failing the open.
+                self._write_counters(entry)
+            adopted.append(entry)
         adopted.sort(key=lambda entry: entry.spec.created_at)
         self._entries = {entry.spec.id: entry for entry in adopted}
         self._next_seq = next_monitor_seq([entry.spec.id for entry in adopted], next_seq)
@@ -1081,20 +1136,16 @@ class MonitorScheduler:
                         if restored is not None:
                             notices.append(restored)
                     self._write_counters(entry)
-                    # AN UNAVAILABLE EPISODE PUBLISHES ITS TWO EDGES, NEVER ITS
-                    # TICKS. Every reader outside this process — `lop monitor
-                    # status`, the desktop route, the TUI band through the
-                    # frontend state — renders the published row, and a tick
-                    # publishes nothing (§10.2), so before this an unreachable
-                    # watch rendered as a normal one everywhere but here until
-                    # the 24 h episode ended in a disable (agent review round 1,
-                    # MAJOR-1). One site, AFTER the write, so the published row
-                    # and the counters file agree on every key — the retry's
-                    # ``next_due_at`` included — and one call even when the
-                    # episode's end IS the disable.
+                    # Publish unavailable edges to the index after writing the
+                    # retry's due time, once even if the edge is also a disable.
+                    # A quiet check has a separate viewer-only path: leave the
+                    # index alone, and let material changes and notices publish
+                    # through their existing paths.
                     stall_edge = was_unavailable != bool(entry.counters.get("unavailable_since"))
                     if entry.counters.get("disabled") or stall_edge:
                         self._notify_change()
+                    elif change is None and not notices:
+                        self._notify_quiet_check()
                 if change is not None:
                     # The gate runs OUTSIDE the write lock: the classifier
                     # call is a network call bounded by ``timeoutMs``, and a
@@ -1243,8 +1294,7 @@ class MonitorScheduler:
         # ``_classify_change``). A source that changes shape mid-stream is
         # handled by the basis check below, not by this flag.
         record_view = is_record_log(text)
-        normalized = normalize_result(text, spec, self._settings)
-        new_hash = content_hash(normalized)
+        normalized, new_hash = check_hash(text, spec, self._settings)
         old_hash = str(counters.get("content_hash") or "")
         pure_addition = False
         # Set only by the rendered-diff branch below; every other path (loss
@@ -1252,24 +1302,22 @@ class MonitorScheduler:
         # preview to report.
         delta_hidden = False
 
-        counters["checks"] = int(counters.get("checks") or 0) + 1
-        counters["last_check_at"] = now
-        counters["consecutive_failures"] = 0
-        counters["last_error"] = ""
-
         if new_hash == old_hash:
-            # Quiet tick. One ≲1 KiB write is the whole cost; the blob is only
-            # probed so a blob-only loss heals for free (§7.2). A spilled result
-            # is recorded as the next diff's full baseline even here: the
-            # content is identical, so the handle addresses the same text.
-            if handle:
-                counters["last_handle"] = handle
+            # Quiet tick: the SHARED commit (see ``commit_quiet_tick``), so the
+            # out-of-process probe writes byte-identical counters. One ≲1 KiB
+            # write is the whole cost; the blob is only probed so a blob-only
+            # loss heals for free (§7.2).
+            commit_quiet_tick(counters, spec, now, handle=handle, uniform=self._uniform)
             if old_hash and not monitor_state.snapshot_exists(
                 self._config_dir, self._session_id, spec.id
             ):
                 self._write_snapshot(spec, normalized)
-            counters["next_due_at"] = self._advance(spec, now)
             return None
+
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["consecutive_failures"] = 0
+        counters["last_error"] = ""
 
         blob = monitor_state.read_snapshot(self._config_dir, self._session_id, spec.id)
         blob_text = ""
@@ -2166,6 +2214,13 @@ class MonitorScheduler:
             self._on_change()
         except Exception:  # noqa: BLE001 — observation cannot break scheduling
             logger.warning("monitor on_change failed", exc_info=True)
+
+    def _notify_quiet_check(self) -> None:
+        if self._on_quiet_check is not None:
+            try:
+                self._on_quiet_check()
+            except Exception:  # noqa: BLE001 — observation cannot break scheduling
+                logger.debug("monitor quiet check observer failed", exc_info=True)
 
     @staticmethod
     async def _maybe_await(value: Any) -> Any:

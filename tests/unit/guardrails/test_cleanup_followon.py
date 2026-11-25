@@ -56,7 +56,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(prov, "_github_repo", lambda _: "example/repo")
     monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
-    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False: ())
+    monkeypatch.setattr(prov, "_running_owners", lambda real, sid, strict=False, **_: ())
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))

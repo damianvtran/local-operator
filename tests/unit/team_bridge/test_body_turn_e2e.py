@@ -32,6 +32,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Iterable
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -252,7 +253,7 @@ def _allow_receipt(config_dir: Path, message_id: str) -> None:
     The real screener writes this row before a body is ever reserved for a wake.
     """
 
-    with sqlite3.connect(state_db_path(config_dir)) as conn:
+    with closing(sqlite3.connect(state_db_path(config_dir))) as conn, conn:
         owner_key, generation = conn.execute(
             "SELECT owner_key, enrollment_generation FROM enrollments"
         ).fetchone()
@@ -312,7 +313,7 @@ def _tool_call(call_id: str, name: str) -> list[StreamEvent]:
 
 
 def _row(config_dir: Path) -> dict[str, Any]:
-    with sqlite3.connect(state_db_path(config_dir)) as conn:
+    with closing(sqlite3.connect(state_db_path(config_dir))) as conn, conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM body_reservations WHERE message_id = ?", (MESSAGE_ID,)
@@ -546,7 +547,7 @@ async def test_a_withdrawn_consent_stops_the_frame_on_later_calls(tmp_path) -> N
     async def execute(tool_call_id, args, signal, on_update, context):
         # The real withdrawal path writes a new consent version; the local
         # read then disagrees with the version recorded at admission.
-        with sqlite3.connect(state_db_path(config_dir)) as conn:
+        with closing(sqlite3.connect(state_db_path(config_dir))) as conn, conn:
             conn.execute("UPDATE enrollments SET consent_version = 'bridge_consent_v2'")
         return ToolResult(
             tool_call_id=tool_call_id, tool_name="revoke", content=[TextContent(text="revoked")]
@@ -1994,7 +1995,7 @@ async def test_mid_turn_body_frame_stays_anchored_for_wire_prefix_stability(tmp_
 
 
 def _states(config_dir: Path) -> dict[str, str]:
-    with sqlite3.connect(state_db_path(config_dir)) as conn:
+    with closing(sqlite3.connect(state_db_path(config_dir))) as conn, conn:
         return dict(conn.execute("SELECT message_id, state FROM body_reservations").fetchall())
 
 

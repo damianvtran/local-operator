@@ -26,6 +26,7 @@ class _FakeAttach:
     created: list["_FakeAttach"] = []
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        self.options = _kwargs
         self.calls: list[tuple[str, dict[str, Any]]] = []
         _FakeAttach.created.append(self)
 
@@ -137,3 +138,17 @@ async def test_continue_command_threads_the_annotation_into_the_errand(
     assert errand.text == "hello"
     assert errand.input_mode == "dictated"
     assert errand.input_path == "provider_stt_radient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capable", [True, False])
+async def test_cold_prompt_carries_requested_inline_ui_to_the_winning_client(monkeypatch, capable):
+    from local_operator.mobile import attach_client
+
+    monkeypatch.setattr(attach_client, "AttachClient", _FakeAttach)
+    winner = object()
+    await launch._deliver(winner, "s", PromptErrand(text="Hi", origin="mobile", inline_ui=capable))
+    client = _FakeAttach.created[-1]
+    assert client.connected_to == (winner, "s")
+    assert client.options.get("inline_ui") is (True if capable else None)
+    assert client.calls[0][1].get("inline_ui") is (True if capable else None)

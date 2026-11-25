@@ -158,9 +158,14 @@ CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
 #: §11.1): the ``workset_preflight``/``workset_probe`` phases of ``net_session_move`` and
 #: the ``dry_run``/``working_set`` fields of a local move request.
 SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
+#: An offload destination can echo its invite's attempt token (``mobility``).
+#: Additive: older links omit this string, older readers ignore it, and no op
+#: or member grant changes shape.
+SESSION_MOVE_ATTEMPT_V1 = "session-move-attempt-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
+    SESSION_MOVE_ATTEMPT_V1,
     "credential-broker-v1",
     # The refresh delegation's advertisement (manager ruling on review R1-4: this
     # is an INTERPRETATION of the signed design's §3.9 "no wire.py change" line,
@@ -231,9 +236,14 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # Origin-only completion/notice fields on catalogue rows; see
     # REMOTE_ATTENTION_V1 below.
     "remote-attention-v1",
+    # Paged/searched catalogue reads; see REMOTE_CATALOG_PAGE_V1 below.
+    "remote-catalog-page-v1",
     # The operator's device presents its signed onboarding decision; see
     # OPERATOR_BINDING_V1 below.
     "operator-binding-v1",
+    # A one-session catalogue lookup (``net_catalog`` + ``session_id``); see
+    # REMOTE_CATALOG_SESSION_ID_V1 below.
+    "remote-catalog-session-id-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
@@ -244,6 +254,29 @@ MESH_NET_V1 = "mesh-net-v1"
 #: always did. Named here so the tuple above, the owner's condition and the tests
 #: read ONE spelling of the string.
 REMOTE_ATTENTION_V1 = "remote-attention-v1"
+#: ``net_catalog`` honours an optional ``session_id`` and answers only that
+#: session's row (0 or 1, byte-identical to its row in the full listing) instead
+#: of every row. Why: a viewer's ``peer_session_facts`` asks about ONE session —
+#: the remote pilot's ``RemoteOwner.locate`` before every bind — yet answered it
+#: from a full mesh-wide catalogue fan-out; measured 2026-11-25, 232 rows took
+#: 11.56 s of the 12 s ``LISTING_PROBE_BUDGET_S``, and one overrun made a LIVE
+#: session read as unowned ("could not start a runtime"). A viewer sends the
+#: field only on a link advertising this, so an older owner keeps receiving the
+#: exact frame it always did (and answers with its full rows, which the viewer
+#: then filters itself). Additive: no new op, no grant.
+REMOTE_CATALOG_SESSION_ID_V1 = "remote-catalog-session-id-v1"
+#: ``net_catalog`` honours optional ``limit``/``cursor``/``query`` frame fields
+#: (``RelayServer._catalog_page``): one page of the viewer's rows past the
+#: unpaged answer's ``CATALOG_SCAN_LIMIT`` stored cap, with ``next_cursor`` and
+#: ``total``, or the owner's own store search over those rows. A viewer sends
+#: the fields only to an owner advertising this; an older owner would ignore
+#: them and answer the capped list, which a viewer must never present as the
+#: complete answer to a paged or searched ask.
+REMOTE_CATALOG_PAGE_V1 = "remote-catalog-page-v1"
+#: Longest ``net_catalog`` cursor or query an owner accepts. A minted cursor
+#: is ~80 characters (base64 of an offset and one session id); a search is a
+#: few words. Anything longer is a client that concatenated something.
+CATALOG_PAGE_MAX_TOKEN = 512
 #: ``net_operator_binding`` (``network/operator_binding.py``): the operator's Mac
 #: presents the onboarding decision the operator already signed, so a node can
 #: forward asks/notices of sessions STARTED on it to that device. A peer without
@@ -767,6 +800,16 @@ def _decode_lifecycle_json(text: str) -> Any:
     return frame
 
 
+def peer_ack(req: Any, detail: Any) -> dict[str, Any]:
+    """The relay's ACK envelope, also used by ops that cap their full reply."""
+    return {"op": "ack", "req": req, "detail": detail}
+
+
+def encode_peer_payload(frame: dict[str, Any]) -> bytes:
+    """The uncompressed JSON payload that sender-side budgets measure."""
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
 class LinkCrypto:
     """Seals and opens the records of ONE link, one codec per side.
 
@@ -836,9 +879,7 @@ class LinkCrypto:
         """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        plaintext = json.dumps(
-            frame, sort_keys=False, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        plaintext = encode_peer_payload(frame)
         if len(plaintext) > MAX_RECORD_BYTES:
             raise LinkCryptoError(
                 f"a frame of {len(plaintext)} bytes exceeds the {MAX_RECORD_BYTES}-byte record "

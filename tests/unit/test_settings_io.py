@@ -180,6 +180,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
     )
+    from local_operator.session.runtime.runtime_memory import (
+        RUNTIME_MEMORY_ENABLED_DEFAULT,
+        RUNTIME_MEMORY_LIMIT_MB_DEFAULT,
+    )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.session.temporary import (
         DEFAULT_IDLE_MINUTES as _TEMPORARY_DEFAULT_IDLE_MINUTES,
@@ -201,7 +205,14 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tools.result_normalize import (
+        RESULT_NORMALIZATION_DEFAULT,
+        RESULT_TEXT_RENDERING_DEFAULT,
+        SEARCH_SNIPPET_CHARS_DEFAULT,
+    )
+    from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
+    from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -232,6 +243,11 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The transcript layout mode's own vocabulary, from the module the TUI
+        # reader lives in (``tui/settings.py:transcript_display_mode``). The
+        # registry restates "by-turn" because it must not import the TUI
+        # module's cache; THIS entry is what turns a drift into a red test.
+        "display.transcript_display": tui_settings.DEFAULT_TRANSCRIPT_DISPLAY,
         # The language resolver's own default, from the module that READS the
         # key (`i18n.resolve.resolve_language`). The registry restates "auto"
         # rather than importing it (settings_io stays off the resolver's import
@@ -249,6 +265,10 @@ def _consumer_defaults() -> dict[str, object]:
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
+        # The submit-time reader's own constant, beside the fallback
+        # ``OperatorApp._busy_delivery_mode`` applies; the registry restates it
+        # rather than importing the TUI (settings_io stays off that path).
+        "delivery.busy_default": DEFAULT_BUSY_DELIVERY,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,
@@ -274,6 +294,9 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The per-runtime guard's two keys; consumers in runtime_memory.py.
+        "session.runtime_memory.enabled": RUNTIME_MEMORY_ENABLED_DEFAULT,
+        "session.runtime_memory.limit_mb": RUNTIME_MEMORY_LIMIT_MB_DEFAULT,
         # The heavy-job queue switch; its consumer constant sits beside the
         # reader in heavy_lease.py.
         "bash.heavy_jobs.enabled": HEAVY_JOBS_ENABLED_DEFAULT,
@@ -282,6 +305,11 @@ def _consumer_defaults() -> dict[str, object]:
         # registry default and the code default drifting.
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         "tools.defer": DEFAULT_TOOL_DEFERRAL,
+        # Read by mcp.manager.read_result_normalization_mode; the constant
+        # lives beside the pure normalizer it configures.
+        "mcp.result_normalization": RESULT_NORMALIZATION_DEFAULT,
+        "mcp.search_snippet_chars": SEARCH_SNIPPET_CHARS_DEFAULT,
+        "mcp.result_text_rendering": RESULT_TEXT_RENDERING_DEFAULT,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The guardrail keys; consumer constants live beside the reader in
@@ -1285,6 +1313,10 @@ def _sample_value(setting: settings_io.Setting) -> object:
         return setting.default
     if setting.kind is Kind.LIST:
         return list(setting.members[:1]) or []
+    if setting.kind is Kind.HOTKEY and setting.hotkey_scope == "composer":
+        # The composer rows ship unbound (default ""), so the default is not
+        # a writable sample. This row's own deliverable chord is the probe.
+        return "ctrl+enter"
     if setting.kind is Kind.TEXT:
         if setting.validate_value is not None:
             # A validated TEXT setting rejects an arbitrary probe by design
@@ -2385,19 +2417,41 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
     succeeded and one action became unreachable.
     """
     manager = ConfigManager(tmp_path)
-    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+g")
+    settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], "ctrl+y")
 
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "ctrl+y")
 
     # And through the ALTERNATES form, which is the shape `lop config edit`
     # reaches for a second key (design §H.1) and which bypassed the guard
     # entirely while it compared whole strings (review round 2, M4).
-    with pytest.raises(ValueError, match="already uses ctrl\\+g"):
-        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+g")
+    with pytest.raises(ValueError, match="already uses ctrl\\+y"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5,ctrl+y")
 
     # A free key still stores, and re-writing a row's own key is not a clash.
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
+
+
+def test_the_write_boundary_covers_every_newly_exposed_app_row(tmp_path) -> None:
+    """The rows this slice exposes are ordinary rows at the write boundary.
+
+    A newly exposed id that skipped the group check would let `lop config
+    edit keymap.aside ctrl+t` take the todo panel's shipped key with no
+    refusal anywhere — the exact silent disable §C.4 exists to prevent, now
+    with twelve more rows that can be the victim.
+    """
+    manager = ConfigManager(tmp_path)
+    with pytest.raises(ValueError, match="already uses ctrl\\+t"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.aside"], "ctrl+t")
+    with pytest.raises(ValueError, match="already uses ctrl\\+p"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.fork_aside"], "ctrl+p")
+    # The default of a NEW row is itself refused for an older row, because the
+    # defaults are live whether or not any value was written.
+    with pytest.raises(ValueError, match="already uses f9"):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f9")
+    # A non-clearable app row cannot be cleared: `none` is not a terminal key.
+    with pytest.raises(ValueError):
+        settings_io.write_setting(manager, settings_io.BY_KEY["keymap.command_palette"], "none")
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], "f5")
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "f5"
 
@@ -2405,17 +2459,17 @@ def test_the_write_boundary_refuses_a_key_another_hotkey_already_holds(tmp_path)
 @pytest.mark.parametrize(
     ("existing", "candidate"),
     [
-        ("f5,ctrl+g", "ctrl+g"),
-        ("ctrl+g", "f5,ctrl+g"),
-        ("ctrl+g", "ctrl+g,ctrl+g"),
-        ("f5,ctrl+g", "ctrl+t,ctrl+g"),
+        ("f5,ctrl+y", "ctrl+y"),
+        ("ctrl+y", "f5,ctrl+y"),
+        ("ctrl+y", "ctrl+y,ctrl+y"),
+        ("f5,ctrl+y", "ctrl+t,ctrl+y"),
     ],
 )
 def test_write_boundary_refuses_every_alternate_overlap(tmp_path, existing, candidate):
     """All documented alternate forms must reach the same refusal boundary."""
     manager = ConfigManager(tmp_path)
     settings_io.write_setting(manager, settings_io.BY_KEY["keymap.new_session"], existing)
-    with pytest.raises(ValueError, match=r"already uses ctrl\+g"):
+    with pytest.raises(ValueError, match=r"already uses ctrl\+y"):
         settings_io.write_setting(manager, settings_io.BY_KEY["keymap.resume"], candidate)
     assert settings_io.read_setting(manager, settings_io.BY_KEY["keymap.resume"]) == "ctrl+s"
 
@@ -3710,6 +3764,165 @@ class TestTheLapsedAskWindowRow:
         assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
 
 
+class TestTheBusyDefaultRow:
+    """``delivery.busy_default`` (architect D1/D2): the neutral busy-send default.
+
+    The row was renamed outright from the TUI-only ``tui.busy_delivery``
+    (nothing shipped, so no alias): a neutral path the TUI and the desktop
+    app share through one config.yml, a LIVE section of its own, an ENUM
+    over the engine vocabulary, and the shipped default pinned to the
+    submit-time reader's constant.
+    """
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        assert setting.path == ("delivery", "busy_default")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "steer"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "composer"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_old_tui_key_is_gone_without_an_alias(self) -> None:
+        assert "tui.busy_delivery" not in settings_io.BY_KEY
+
+    def test_the_choices_are_exactly_the_engine_vocabulary(self) -> None:
+        from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
+
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["steer", "queue", "both"]
+        assert setting.default == DEFAULT_BUSY_DELIVERY
+
+    @pytest.mark.parametrize("value", ["steer", "queue", "both"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is None
+
+    @pytest.mark.parametrize("value", ["sometimes", "", "STEER", 0, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is not None
+
+    def test_the_section_holds_only_this_row(self) -> None:
+        assert [s.key for s in settings_io.settings_for("composer")] == ["delivery.busy_default"]
+
+    def test_the_row_present_advertises_the_busy_delivery_feature(self) -> None:
+        """T2: the settings row and the feature key stand or fall together.
+
+        The desktop composer sends ``delivery`` only when ``busy_delivery``
+        is in ``server/features.py``'s flags, and a backend without the row
+        has no default for the client to resolve. If either side is removed
+        alone the client is left sending a field the gate will not open (or
+        gating on a field nothing defaults), so this asserts both exist.
+        """
+        from local_operator.server.features import feature_flags
+
+        assert "delivery.busy_default" in settings_io.BY_KEY
+        assert "busy_delivery" in feature_flags()
+
+    def test_an_old_body_without_delivery_hashes_as_before(self) -> None:
+        """T2: an absent ``delivery`` must not change the receipt fingerprint.
+
+        The receipt journal (``server/utils/desktop_receipts.py``) fingerprints
+        the whole request body, so a same-``request_id`` retry of a body written
+        before the field existed must read as the same body, not a changed one:
+        ``Prompt``'s wrap-serializer drops a ``None`` delivery.
+
+        The fingerprint here is the REAL journal's: the test drives
+        ``DesktopReceipts.run`` twice — first with the parsed old body,
+        then with the same body again — and requires the second to REPLAY
+        the first's outcome. A changed fingerprint would raise
+        ``ReceiptConflict`` on the retry instead, so any drift between
+        ``Prompt.model_dump`` and the journal's hash breaks this. The
+        literal digest the old body must produce is pinned too (derived
+        once from the journal's canonical form).
+        """
+        import asyncio
+        import hashlib
+        import json
+
+        from local_operator.server.routes.desktop_sessions import Prompt
+        from local_operator.server.utils.desktop_receipts import DesktopReceipts
+
+        old_body = {"text": "hello", "request_id": "00000000-0000-0000-0000-000000000001"}
+        prompt = Prompt.model_validate(old_body)
+        assert prompt.delivery is None
+        dumped = prompt.model_dump()
+        assert "delivery" not in dumped
+        # Pinned literal: sha256 of json.dumps(dumped, sort_keys, separators)
+        # — the journal's canonical form for this exact old body.
+        pinned = hashlib.sha256(
+            json.dumps(dumped, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert pinned == "caad6969613c9171da0becc65ed5cb2b8d687be4821fe2f745bd73bfe4bc6481"
+        # And a body that IS an old body (no delivery key at all, as stored
+        # before the field existed) is byte-identical after a round trip.
+        assert Prompt.model_validate(old_body).model_dump() == dumped
+
+        async def _replay() -> tuple[dict[str, object], dict[str, object]]:
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as root:
+                journal = DesktopReceipts(Path(root))
+                calls: list[str] = []
+
+                async def _operation() -> dict[str, object]:
+                    calls.append("run")
+                    return {"status": "ok"}
+
+                first = await journal.run("req-1", dumped, _operation)
+                # Same id, same body (an explicit None delivery round-trips
+                # to the same dumped dict asserted above): must replay, not
+                # conflict and not re-run.
+                second = await journal.run("req-1", dumped, _operation)
+                assert first == {"status": "ok"}
+                assert second == {"status": "ok", "replayed": True}
+                assert calls == ["run"]
+                return first, second
+
+        asyncio.run(_replay())
+
+
+class TestComposerHotkeyRawValidation:
+    """Q-r2-1: a repeated modifier is refused on the RAW spelling.
+
+    ``coerce`` and ``write_setting`` receive the raw string from the wire
+    (``lop config edit`` / ``PATCH /v1/settings``); canonicalising first
+    would collapse ``ctrl+ctrl+enter`` to ``ctrl+enter`` before the
+    validator sees it and store a chord the operator never asked for.
+    """
+
+    def test_coerce_refuses_a_repeated_modifier(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "ctrl+ctrl+enter")
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "alt+alt+enter")
+
+    def test_coerce_still_canonicalises_a_valid_spelling(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.coerce(setting, "ctrl+alt+b") == "alt+ctrl+b"
+
+    def test_write_setting_refuses_a_repeated_modifier(self, manager: ConfigManager) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.write_setting(manager, setting, "ctrl+ctrl+enter")
+        # Nothing was stored: the row still reads as unbound.
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_write_setting_stores_a_valid_spelling_canonicalised(
+        self, manager: ConfigManager
+    ) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        settings_io.write_setting(manager, setting, "ctrl+alt+b")
+        assert settings_io.read_setting(manager, setting) == "alt+ctrl+b"
+
+    def test_validate_is_the_same_sentence_as_coerce(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.validate(setting, "ctrl+ctrl+enter", {}) is not None
+        assert "twice" in (settings_io.validate(setting, "ctrl+ctrl+enter", {}) or "")
+
+
 def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
     manager: ConfigManager,
 ) -> None:
@@ -3990,3 +4203,32 @@ def test_the_temporary_window_is_an_int_enum_typed_text_coerces_to_the_member() 
     assert settings_io.validate(setting, 120) is None
     assert settings_io.validate(setting, 45) is not None
     assert settings_io.validate(setting, "30") is not None
+
+
+def test_runtime_memory_rows_share_the_consumer_paths(tmp_path) -> None:
+    """The registry rows write exactly where the supervisor's guard reads.
+
+    A row whose ``path`` disagreed with ``runtime_memory.RUNTIME_MEMORY_*_PATH``
+    would look like a working off switch while the guard kept reading its
+    default — the failure "Adding a configuration key" in AGENTS.md describes.
+    Negative control: a value written through the row must change what
+    ``read_settings`` returns (it would not if the paths diverged).
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session.runtime import runtime_memory
+
+    assert (
+        settings_io.BY_KEY["session.runtime_memory.enabled"].path
+        == runtime_memory.RUNTIME_MEMORY_ENABLED_PATH
+    )
+    assert (
+        settings_io.BY_KEY["session.runtime_memory.limit_mb"].path
+        == runtime_memory.RUNTIME_MEMORY_LIMIT_MB_PATH
+    )
+    manager = ConfigManager(tmp_path)
+    assert runtime_memory.read_settings(tmp_path).enabled is True
+    settings_io.write_setting(manager, settings_io.BY_KEY["session.runtime_memory.enabled"], False)
+    settings_io.write_setting(manager, settings_io.BY_KEY["session.runtime_memory.limit_mb"], 2048)
+    conf = runtime_memory.read_settings(tmp_path)
+    assert conf.enabled is False
+    assert conf.limit_mb == 2048

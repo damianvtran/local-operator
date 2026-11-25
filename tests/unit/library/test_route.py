@@ -447,6 +447,40 @@ def test_waveform_service_refuses_a_denied_path(tmp_path, monkeypatch) -> None:
         service.waveform(root, asset_id)
 
 
+def test_a_failed_waveform_cache_write_serves_the_payload_and_leaves_no_temp(
+    tmp_path, monkeypatch
+) -> None:
+    """A cache that cannot be published is not a failed request, nor a stranded temp.
+
+    Nothing reaps ``cache/library/peaks``, so a temp left by a failed replace (a
+    full disk, or before per-write names a concurrent render that consumed the
+    shared ``<pid>.tmp``) would sit there forever.
+    """
+    import os
+
+    from local_operator.library import service
+
+    root = config_root(monkeypatch, tmp_path)
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(wav())
+    session(root, SESSION, write_rows("w1", 1, clip))
+    indexer.rebuild_now(root)
+    asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
+    monkeypatch.setattr(service, "_decode_peaks_bounded", lambda raw: [0.25] * 240)
+    peaks = root / "cache" / "library" / "peaks"
+    real_replace = os.replace
+
+    def disk_full(src, dst, *args, **kwargs):
+        if Path(dst).parent == peaks:
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(service.os, "replace", disk_full)
+    payload = service.waveform(root, asset_id)
+    assert payload["bars"] == 240
+    assert list(peaks.iterdir()) == []
+
+
 async def test_a_corrupt_index_recovers_and_answers_a_building_page(api, monkeypatch) -> None:
     """ "Derived" must mean "rebuildable at runtime", not only in a docstring."""
     from local_operator.library.store import IndexUnavailable, LibraryStore

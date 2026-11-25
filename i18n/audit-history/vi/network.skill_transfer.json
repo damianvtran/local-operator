@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "network.skill_transfer",
+  "history_sha256": "9ab5c3f692e307f96fde385fa4e23535d91c9a83c195eeae81943530d9f02afd",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "network.skill_transfer",
+      "source_sha256": "4da3cde56a2d44d86acd75395ad486103e0835055b4be8c638c9569149ee60b1",
+      "translator": {
+        "agent": "coder a9641a485cef (lopdev)",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "from anthropic/claude-opus-5-5 after quota failure",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "reviewer (independent lopdev agent)",
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-23",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "findings": 0,
+        "minor": 0
+      },
+      "status": "passed",
+      "note": "PR #4487, independent glossary and locale-style audit relayed by the coordinating manager. Four keys; no placeholders or plurals. Target catalogue SHA-256: c2d6139ada44a763fe37766c586fc5a3f26dd3ac846f39f8cdea249acdd7adbe. The independent reconfirmation passed this wording, including the prescribed fixes where applicable."
+    }
+  ]
+}

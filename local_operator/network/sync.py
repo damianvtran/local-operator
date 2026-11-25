@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.session.approval_policy import OVERRIDE_FILENAME
 from local_operator.session.runtime.artefact_names import SIGNAL_REFUSALS_NAME
 
@@ -388,6 +389,16 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "notification-authority.json": "operator notification grant applies only on the issuing device",
     ".file-provenance": "owner-local witnesses; replicas/imports cannot issue proofs",
     ".file-provenance.initialized.json": "origin-local incarnation; never copied/rebuilt",
+    # THE P3 SEALED SNAPSHOTS (``network/mentioned_file_read``): a byte copy of a
+    # transcript-named file that may live OUTSIDE the scratchpad. Its only
+    # authorised reader is ``net_mentioned_file``, which re-checks the P1 account
+    # binding and P2 proof and writes an audit row before every byte. As a
+    # content tree it would be served by ``net_sync`` (``view`` only, no P1, no
+    # audit) and pushed to replicas, so it never travels; a deleting move deletes
+    # it with the source, and the destination re-establishes on its next stat.
+    "mentioned-file-versions": (
+        "owner-local sealed snapshots; bytes only through the P1/P2/audited op"
+    ),
     "profile-backups": "origin-local before-images; never portable approval or action authority",
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is
@@ -468,6 +479,7 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # NEW owner. Copying it would leave the moved session stamped as this
     # device's.
     "mesh.json": "the ownership stamp, rewritten by whoever adopts the copy",
+    "local-team-binding.json": "local authority journal, never inherited from a peer",
     # Describes a replica, means nothing inside a session.
     REPLICA_CURSOR_NAME: "the replica cursor, which is about this device's copy",
     # The DESKTOP sidebar's destination layout (``server.sidebar_layout``): which
@@ -535,6 +547,7 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # and that unlink can leave one behind, and ``mobility``'s recovery removes it
     # rather than treating it as content.
     "ready.json": "the move's own boot marker, not session content",
+    ".skill-pin-original": "an adopter's rollback copy of the verified attachment, never content",
     # An UPDATE WINDOW's marker (``session/runtime/inbox.UPDATE_WINDOW_NAME``): a live
     # process's note to its successor that it is moving to a new build. On the
     # destination it would tell an unrelated runtime that an update it never ran was
@@ -747,9 +760,7 @@ def write_replica_cursor(root: Path, session_id: str, payload: dict[str, Any]) -
     directory = replica_dir(root, session_id)
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / REPLICA_CURSOR_NAME
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, target)
+    atomic_write_text(target, json.dumps(payload, indent=2, sort_keys=True), hidden=True)
     return target
 
 
@@ -1277,6 +1288,7 @@ def _member_stamps(
     attachments_dir: Path,
     *,
     whole_transcript: bool = False,
+    staged_original_attachment: Path | None = None,
 ) -> dict[str, _MemberStamp]:
     """ONE pass over the copy set: every member's digest, size and stat.
 
@@ -1300,7 +1312,13 @@ def _member_stamps(
     directory = Path(directory)
     stamps: dict[str, _MemberStamp] = {}
     for name in list(COPY_SET_NAMES) + family_entries(directory):
-        path = directory / name
+        # Rollback recovery must prove the original bytes under the original wire
+        # name without first replacing a staged file. No other member is substituted.
+        path = (
+            staged_original_attachment
+            if name == "attachment.json" and staged_original_attachment is not None
+            else directory / name
+        )
         try:
             if name == TRANSCRIPT_NAME:
                 raw = path.read_bytes()
@@ -1573,7 +1591,13 @@ def plan_id(
     )
 
 
-def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path) -> str:
+def copy_content_digest(
+    directory: Path,
+    session_id: str,
+    attachments_dir: Path,
+    *,
+    staged_original_attachment: Path | None = None,
+) -> str:
     """``_content_digest`` for a MOVE: whole transcript, names an adopter writes skipped.
 
     What a move compares across devices: the source's own directory against the copy the
@@ -1583,12 +1607,16 @@ def copy_content_digest(directory: Path, session_id: str, attachments_dir: Path)
     taken whole because a move carries every byte of it (``_safe_region``'s cut is for a
     live source, and cutting it here is what deleted a torn tail in review round 2).
     """
-    return _content_digest(
-        directory,
+    return _content_digest_from(
+        _member_stamps(
+            directory,
+            session_id,
+            attachments_dir,
+            whole_transcript=True,
+            staged_original_attachment=staged_original_attachment,
+        ),
         session_id,
-        attachments_dir,
         skip=ADOPTED_LOCALLY,
-        whole_transcript=True,
     )
 
 
@@ -4122,6 +4150,9 @@ def promote_replica(root: Path, session_id: str, *, new_id: str = "") -> dict[st
         from local_operator.network.origin import downgrade_stamps
 
         downgrade_stamps(target)
+        from local_operator.network.move_team import require_replica_reauthorization
+
+        require_replica_reauthorization(target)
     except Exception as exc:  # noqa: BLE001 — every failure here is a refusal, not a crash
         # ``Exception``, not ``(OSError, SyncRefused)`` (security review S-1): the
         # replica is peer-authored, so the downgrade can fail in ways no file API

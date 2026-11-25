@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "relay.transcript",
-  "history_sha256": "8226f4fbf6059214e905f511450ebb2647b1230401772636f35f3897d940bcef",
+  "history_sha256": "78c04bdd05f98ecfbc0c216a8ee234dfe385f3a83d96a7ea6b45ce031a5cf9b3",
   "entries": [
     {
       "locale": "zh-CN",
@@ -118,6 +118,105 @@
         "relay.transcript.jump.latest_short"
       ],
       "note": "2 new keys relay.transcript.jump.{latest,latest_short} (jump-to-latest chip on the phone web transcript; en 'Jump to latest' / 'Latest'). Independent audit of the whole relay.transcript namespace for this locale at en sha 64d6a705…: key order, ICU placeholder parity, NFC and plural categories verified mechanically; 0 BLOCKER/MAJOR. Pre-existing keys unchanged and carry their prior passed audit. zh-CN '跳到最新消息' / '最新': passed, 0 findings. Verb-forward, no pronoun/请 per zh-CN guide; '跳到' matches shipped TUI '跳到…'; '消息' matches label.messages; short form is the exact tail of the full form. 12/4 cells."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "1f123ed6b06bac2833d57c020c7bbce368cf2a2bad6735ebfc91616b7fc700c1",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-zh-CN-e896d2db9139.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "1f123ed6b06bac2833d57c020c7bbce368cf2a2bad6735ebfc91616b7fc700c1",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "9af46213ad99",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota before audit",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Scoped bridge-card delta independently passed; untouched values retain prior audits. Evidence: i18n/receipts/bridge-card-copy-audit-9af46213ad99.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "bf64e8fc10eb8b4b3ccf29fc05079a0a22192a650c2c034682b7e55f152bf374",
+      "target_sha256": "9c1aca3589271c99292fb06efadb25bab040bac7b3d1973deff0be081f4ab80a",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer; audit-zhcn)",
+        "session": "9b6c7373a45f",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-zh-CN-9b6c7373a45f.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+      "target_sha256": "2db6a2020e7f4378b4282fe91f30df5d4928ac435699c42c26f572143aee4da5",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer; audit-zhcn)",
+        "session": "9b6c7373a45f",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation (2-space re-serialization; parsed content identical to the prior pass) after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-zh-CN-reserialized-9b6c7373a45f.json"
     }
   ]
 }

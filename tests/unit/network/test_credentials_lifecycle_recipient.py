@@ -484,11 +484,25 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # The one-session lookup adds no op either: it gates an optional
+        # ``session_id`` filter on the same catalogue answer
+        # (``RelayServer._op_catalog``), so advertising it promises an owner whose
+        # ``net_catalog`` handler answers only that session's row.
+        wire.REMOTE_CATALOG_SESSION_ID_V1: "net_catalog",
+        # Paging/search adds no op: it gates optional ``limit``/``cursor``/``query``
+        # fields on the same catalogue frame (``RelayServer._catalog_page``), so
+        # advertising it promises an owner whose ``net_catalog`` handler pages.
+        wire.REMOTE_CATALOG_PAGE_V1: "net_catalog",
         # Advertising the binding promises verification/storage of the signed
         # onboarding proof through this dedicated peer op, not just a wire feature.
         wire.OPERATOR_BINDING_V1: "net_operator_binding",
         # The working-set move gate rides the existing move op's phases.
         wire.SESSION_MOVE_WORKSET_V1: "net_session_move",
+        # The attempt token rides the same op: an advertising destination reads
+        # ``attempt`` off the ``invite`` phase and echoes it on the ``refused``/
+        # ``done`` phases it sends back. The source gates its invite on this
+        # advert (``mobility._offload``), so it is a receiver obligation.
+        wire.SESSION_MOVE_ATTEMPT_V1: "net_session_move",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.

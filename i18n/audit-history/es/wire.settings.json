@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "864a987054db7cfdf281cb616053b72e8c014e375a9cd6cdb872ad79bb7c1640",
+  "history_sha256": "482f986aac5d22a21bf73b4bd0d558bb09ac0b8b9c366e51b36d83de560b76f6",
   "entries": [
     {
       "locale": "es",
@@ -7115,6 +7115,428 @@
           "original_algorithms_preserved": "fr-B source/target strings and ur-A fresh source/target strings use raw UTF-8 SHA256; other top per-key hashes compact JSON. Original ES R2 B context object algorithms preserved (spaced JSON for fresh records); transport never rewrites raw originals."
         }
       }
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "87b023b7c4d9e6bb7e52ba367b0f9d9d3e9f9f689ce9afdb2d46dab29dc7497c",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: queue.description 'Espera a este paso' meaning (1 major); steer.description (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): fr/es/hi PASS 0/0 (no findings). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 8
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "bffca6147c3a32a964971f1622aa6cdca7d616f5d4044ea27f7af89c104b515b",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "e2ed196547e99c65c70d80190e81e0c2ab12501d0ff499d1fe303099b95ac862",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 3 keys audited in this namespace (tui_busy_delivery choice steer/queue/both description). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 findings (queue_notice/queue.description majors, steer.description minor) are superseded where their keys were replaced in wave 2 and re-audited. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r3",
+      "keys_audited": 3
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b1bcfd823f343c8f08f46b98fb827fa563904a709fbfe75a67f2e8a1cf8c49b6",
+      "context_sha256": "31cff35cdb37c6e87efd4d9a9f9ef737d479b1efe4f19dad2139a412a3bce25e",
+      "target_sha256": "93fbb12017cd7b9c395d25081004c9da1f461b8fda799464757cf8bcb204fc40",
+      "translator": {
+        "agent": "upstream: coder agent (radientdev team subagent, screening-pref implementer); ours: task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "upstream: deepseek/deepseek-flash (requested); ours: anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "no new audit: union of two independent audits. Upstream (screening keys, verifier deepseek/deepseek-flash, 2026-11-08; delta review of team_bridge_screening_model.label/.help at en sha 206f2b12…, findings 0, unresolved_blocker_major 0). Ours (busy-delivery keys, codex MCP gpt-5.6-sol requested, 2026-11-10; wave 1 r2 + wave 2 r3, findings 0, unresolved_blocker_major 0).",
+        "model": "upstream: deepseek/deepseek-flash (requested); ours: gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new semantic audit): merge reconciliation of concurrent additions to one namespace; no value changed. Origin/main en wire.settings sha 206f2b124405… and ours bffca6147c3a… merged to b1bcfd823f34…. Proof (this session, scripted): merged <locale>/wire.settings.json == origin/main's file + exactly our 8 tui_busy_delivery keys; every value byte-identical to one of the two independently audited states (origin/main catalogue for upstream keys; committed e635f034a catalogue for our 8 keys); keyset union, zero mismatches on all 7 locales. Only wave-1/2 keys were newly audited by us (r2 keys_audited 8, r3 keys_audited 3, previous rows in this file); upstream keys audited under their own row. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed.",
+      "round": "r4",
+      "keys_audited": 10
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "41b6a352abefc77fd48f54131a7bff09fb9361a457aeaf524c9abded206dde3c",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "c0a1b0dd0b2a7fb593755cf3a6dc50ab4ec5e9448eacd4dd860f8d828bcb545d",
+      "keys_audited": 10,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S1 Message sending section (branch feat/busy-delivery-modes @ 4b70d0d83 + uncommitted catalogue edits, 2026-11-11): 10 keys audited in this namespace. 8 keys carried over by rename from wire.settings.tui_busy_delivery.* (label, help, choice.steer/queue/both label/description) to wire.settings.delivery_busy_default.*; values moved byte-identically from the keys audited in earlier waves (r2/r3 + r4 union, PR #3768 history) and re-audited in context this round. 2 NEW keys: wire.settings.composer.title, wire.settings.composer.description. en source renamed in 4b70d0d83; en context sidecar gained the 2 composer entries in the same commit. keys_audited lists all 10 keys of this slice. Audit: fr/es/zh-CN/ru/vi/hi PASS 0 blocker/major, no findings, first pass. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b1568a0fa23f7e4683dc44f988fa6c94fd67e1385a96dbb6be4cd3902577fdc0",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "e2e8751c30ea82d6443ef8ee69b1131adf7432f1aac409ce4a3904d952a41e21",
+      "keys_audited": 2,
+      "round": "r2",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 2 CHANGED-ENGLISH keys wire.settings.delivery_busy_default.help and wire.settings.delivery_busy_default.choice.steer.description (en source changed in 5425d7845/73bb22ca2); existing translations updated, values changed only in these 2 keys. keys_audited 2. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors + 1 minor colon-spacing/antecedent) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "26fb2ec583bb65ac79ce1346123e97a67618e138a371ca79a52ff2577dddbfc1",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "70eb76c4e1ea5e5eb7e4f487cb220d45eeb1dbf2aa4e8198187cacb05d76c240",
+      "keys_audited": 2,
+      "round": "r4",
+      "translator": {
+        "agent": "task subagent tr8-es (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-es job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 2 keys in this namespace: wire.settings.delivery_busy_default.choice.both.label (changed), wire.settings.delivery_busy_default.choice.both.description (changed). Translator: task subagent tr8-es (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-es job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for es until PASS: rounds 1-3 FAIL, round 4 PASS, 0 blocker/major at the final round. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "d0eb488b4b361ec11e299e59c5e38bc96c6343bdcf793ba03c1724ae4d80172c",
+      "context_sha256": "0027aaff35263844eb92c113be2233587acaec4ae4d7d18f619864274bac6fbd",
+      "target_sha256": "78f0f09969033f700382aaf2bed03393ca52f1362cbb3a549d32db17d27f0e29",
+      "translator": {
+        "agent": "upstream: core-backend coder cf2843d74957 / round-1 remediation coder 1c07b39051ed (relayed from PR #3832 i18n audit comments, not independently verified — quoted from origin/main's row just above this one); ours: the branch's per-locale translator subagents, named in the rows above this one",
+        "model": "upstream: anthropic/claude-opus-5-5; ours: anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11..2026-11-12"
+      },
+      "auditor": {
+        "agent": "no new audit: union of two independent audits. Upstream: independent i18n auditor, lopdev reviewer role, session 5c6cf4252f37, 2026-11-12, 0 findings, unresolved_blocker_major 0. Ours: codex MCP server (gpt-5.6-sol requested), rounds r1-r4 above this one, 0 unresolved blocker/major.",
+        "model": "upstream: anthropic/claude-opus-5-5; ours: gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): reconciliation of concurrent additions to one namespace during the second fold of feat/tui-send-chords onto origin/main; no value changed. Origin/main en wire.settings sha ffb9cf937f10… and the branch's 26fb2ec583bb… merged to d0eb488b4b36…. Reconciled 2026-11-13 by the lopdev coder session 653a6c1d0ebc with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or hand-forged. Proof (scripted in that session): merged es/wire.settings.json == origin/main's file + exactly the branch's 10 added wire.settings keys; origin/main's 865 key values byte-identical to origin/main, the added keys' values byte-identical to the branch's committed 161899207 catalogue; 0 keys removed, 0 values changed, on all 7 locales. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. keys_audited counts the 10 wire.settings keys the branch adds, whose audits are the rows above this one; upstream's 6 session_cleanup keys carry their own row. No second independent audit: merge reconciliation; no value changed.",
+      "round": "r5",
+      "keys_audited": 10
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b3753dde0a0177a255f67a6e4febbeb14831c03dd2eb40262b5f230a76b1300d",
+      "context_sha256": "6fbb5cf8e60cbc627a25fcceb1e6702d22bb9843d41e204f053791670bad0fcd",
+      "target_sha256": "601887cc4b67e989b9a6d336333c11e79b957df813da641faa82c5aed85b8880",
+      "keys_audited": 10,
+      "round": "r6",
+      "translator": {
+        "agent": "upstream (origin/main's rows above) and this branch's per-locale translators (rows above); not re-translated here",
+        "model": "see the rows above",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "no new audit: union of independent audits already recorded above (origin/main's receipts, and this branch's receipts audited by the codex MCP server, gpt-5.6-sol requested)",
+        "model": "see the rows above",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "66e9a68db9da55126f2523381cf280e8b87797828bb362596cbd0eb81803144b",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 1a85b60c0c79)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "66e9a68db9da55126f2523381cf280e8b87797828bb362596cbd0eb81803144b",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 2f1a97e5392b)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "651fcf54081a22ae7cd777b275be519f3350a4ffaee5063aef8ae4678e35656d",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/es.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 4 findings, fixed by the auditor in this commit (MINOR): (1-3) register — the three choice descriptions used 3rd-person indicative ('envía', 'conserva … quita'); verb-led neighbours in es/wire.settings use the infinitive ('mantener al día …', 'guardar automáticamente', 'limitar …', 'detener la consulta') per the es guide's infinitive rule; now 'enviar …', 'conservar …', 'conservar …, quitar cada URL' (46/48 cells). (4) grammar — help 'Desactivado los envía sin cambios.' used a bare participle as subject; now 'Desactivado: se envían sin cambios.' (160/188 cells), matching fr's 'Désactivé : …' and ru's 'Отключено: …'."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "c9cbb030bc4dcd5299dda86923cc270f84fbc36c2d614aeb3d966b0da0c7f68a",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/es.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c6f8cc389af42fdfccfa5ad6cd2bdadbd06181d7d954d60cbede1a9f83483d",
+      "context_sha256": "83926b0cacb43c28cc1cba831e08651b374942b310ba9e581ba761305d3bb832",
+      "target_sha256": "0125174b486d8dd16b45906d815e2fcfa964b9adf219237fce75c02559a8a95e",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4525 implementer, commit 903751aca151)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 22e1dfd5a736 (independent of the translator; did not write PR #4525)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4525 (branch feat/mcp-search-snippet-clip, stacked on #4514), 2026-11-24: the 2 NEW keys wire.settings.mcp_search_snippet_chars.{label,help}, judged against the en source + context sidecar (claims: per-snippet character cap for MCP search tools; titles and URLs never cut; 0 = whole), i18n/glossary.md, i18n/style-guides/es.md and neighbouring wire.settings keys (accuracy, glossary terms, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; rich.cells.cell_len label 26/29, help 160/188; key parity 2/2. Merge proof: this branch was merged with origin/feat/mcp-result-normalization 197d442a8214; scripted flattened-JSON diff shows this locale's file (and en, and the en context sidecar) == 197d442a's file + exactly the 2 new keys, 0 removed, 0 changed, new values byte-identical to PR head 903751aca151; 197d442a's file matches its last passed receipt (target and source hashes verified). 1 finding, MINOR, deferred in the PR thread (not fixed here; the auditor does not translate): the label 'Fragmentos de búsqueda MCP' drops the measured dimension (en '... snippet length'); on an integer row it reads as a count of snippets. Neighbouring length labels use 'Longitud de ...' (conversation_length, detail_length). Suggested: 'Longitud de fragmentos MCP' (26 cells). Help is accurate and carries all three claims."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "2a696ee73589202ce14053f538541cb2bd901c4e0b6646b772cd1da6bcf58974",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "153e2beafffd0a2e152592ab5fde660da4d0cff43fa138a6a7758f9b1a52ebb0",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4540 implementer, commit 86d35a271ba3)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 867cc715eef1 (independent of the translator; did not write PR #4540)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4540 (branch feat/mcp-result-shaping, stacked on #4525), 2026-11-24, at head 7a06565cdbd7 against en wire.settings sha256 2a696ee73589: the 2 NEW keys wire.settings.mcp_result_text_rendering.{label,help}, judged against the en source + context sidecar (claims: MCP search results and fetched pages go to the agent as plain text instead of JSON; every field kept; off = stays JSON), i18n/glossary.md (agent), i18n/style-guides/<locale>.md and neighbouring wire.settings keys (off-state word, MCP/JSON kept Latin). Checks run by the auditor: no ICU arguments in source or target; key parity 2/2; scripted proof that this locale's file at the PR base fc780867 equals its last passed receipt's target_sha256 (and that receipt's source equals the base en hash), and that the head file = base + exactly the 2 new keys, 0 removed, 0 changed. rich.cells.cell_len label 25/29, help 169/188. Label/help accurate, all three claims carried; 'Desactivado:' matches the neighbouring mcp_result_normalization help; no space before ; or :. 0 findings."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "1dd2cd29f99c4d4f3e4be4a39629ea4b9cca86bc2cebf2689f0702d609eed500",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "1cb91f16200e64ac0baf28caa127872a82446bce40db17ffb7fa7f92a9dffe22",
+      "round": "r1",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (commits 523db30d3a5a, 8e0671d8b692, bc579643fd8c)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commits or the audit brief",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-audit, independent of the translator; did not write PR #4569)",
+        "session": "3312bdd83ac9",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "the 2 new keys wire.settings.web_search_claude_subscription_search.{label,help} plus the web_search.* settings neighbours; all 917 PR1 keys byte-unchanged vs 95055bbc785f, placeholder/bidi parity scanned across all 919 against en + context sidecar, i18n/glossary.md, the locale style guide and shipped corpus usage; placeholders rendered through i18n.runtime.render_message with real vendor/plan values; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "minor: 'sesión de Claude' renders *sign-in* with the glossary's *session* word (label and help) vs corpus 'inicio de sesión'.",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "c515e528ce6932243edaf407642cd3ff581189714410d7111f9adc8b4bd63add",
+      "context_sha256": "8ae319470f58210c1917333219389d1fd81e4fc6951d3db5fbccadc8ebc53c1b",
+      "target_sha256": "3674c399002423b7d6b03dfd8bdb685d57857328d5bed74cc89182f9c1a41d97",
+      "round": "r2",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (remediation commit 5bfa50d8bf0a; applied r1 auditor corrections.json)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commit or the audit brief",
+        "date": "2026-11-25",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-r2, independent of the translator; did not write PR #4569)",
+        "session": "eb15f9c6eb35",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-25",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "findings": 0,
+        "independent_from_translator": true,
+        "scope": "round 2 delta e91c217dff52..5bfa50d8bf0a: every changed value read against en + context sidecar, i18n/glossary.md, the locale style guide and namespace/corpus usage; r1 corrections.json checked byte-for-byte (28/37 verbatim, 9 superseded by the D1/D7 source changes); full-namespace placeholder and bidi/zero-width parity scan; widths by rich.cells.cell_len against the 29-cell label, 80-cell help and 24-cell access budgets",
+        "namespace_finding_detail": "clean: label 'Búsqueda vía Claude (de pago)' 29/29 exactly, help 77/80, cost-first, matches state word '(de pago)'."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4569 head 5bfa50d8bf0a1db1739807b76b778163681929b7. Minor findings carry corrected strings above and in the PR comment; applying them changes target_sha256 without voiding this pass, but a changed source_sha256 does."
     }
   ]
 }

@@ -70,6 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # so this spec's schema vocabulary cannot drift from ``OutputContract``'s.
     from local_operator.i18n.messages import Msg
     from local_operator.output_contract import OutputSchemaValue
+    from local_operator.research_evidence import PublicResearchPolicy
 
 __all__ = [
     "ApprovalPolicy",
@@ -473,8 +474,9 @@ class SessionSpec:
     #: the stamp itself is written by ``session_factory._prepare``, the same
     #: place exec's stamp is written, so the SDK cannot drift from it.
     workstream: bool = False
-    #: Construction-time reasoning level (``spawn_owned_session``'s documented
-    #: extra; clamped by the factory rather than refused).
+    #: Explicit startup reasoning level, clamped by the factory rather than
+    #: refused. When set, the SDK uses that choice instead of the optional
+    #: automatic effort classifier. None leaves settings resolution unchanged.
     birth_effort: str | None = None
     #: Conversation-scoped Saver choice; None follows global/profile resolution.
     radient_saver: bool | None = None
@@ -544,6 +546,9 @@ class SessionSpec:
     #: (``wait_for_tools`` remains the manual gate). ``open_session(mode="own")``
     #: only: attach and ``spawn_session`` refuse a non-default value.
     mcp_ready_timeout_s: float | None = 30.0
+    # None preserves the ordinary SDK/exec path. Only the in-process owner
+    # can authorize companion egress; never checkpoint or inherit this policy.
+    public_research: PublicResearchPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:

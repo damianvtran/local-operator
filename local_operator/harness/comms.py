@@ -3740,6 +3740,7 @@ class SubagentComms:
         # so a missing resolver degrades instead of raising.
         model_spec: ModelSpec | None = None
         selection_source: str | None = None
+        held_back: list[str] = []
         # Prefer the SELECTION entry point, which also says which layer chose the
         # model: the receipt an operator reads must not call a roster override
         # "role" on a resume while a fresh launch of the same child says "team".
@@ -3772,6 +3773,14 @@ class SubagentComms:
                     strict=True,
                     **self._target_kwargs(target, agent),
                     **({"model": selector} if selector is not None else {}),
+                    # Only the SELECTION entry point takes these: the launch
+                    # parent's binding (the role-tag provider ceiling) and the
+                    # list a held-back edit's reason lands in for the receipt.
+                    **(
+                        {"authority": target.authority, "notes": held_back}
+                        if callable(selection)
+                        else {}
+                    ),
                 )
             except (SubagentModelUnavailable, ValueError) as exc:
                 return None, f"cannot resume {record.label}: {exc}"
@@ -3807,6 +3816,7 @@ class SubagentComms:
             effort=effort,
             model_selector=selector,
             selection_source=selection_source,
+            selection_notes=held_back,
             restricted=record.restricted,
             inherited_model=inherited,
             target=target,
@@ -4506,7 +4516,7 @@ def _resolve_peek_range(
     return lo, min(hi, lo + PEEK_MAX_STEPS - 1), None
 
 
-def _clip(text: str, limit: int = PEEK_STEP_CHARS) -> str:
+def _clip(text: str, limit: int | None = PEEK_STEP_CHARS) -> str:
     """Hold one step's body inside the budget, keeping head AND tail.
 
     The head says what was asked or run; the tail says how it ended. A plain
@@ -4515,7 +4525,7 @@ def _clip(text: str, limit: int = PEEK_STEP_CHARS) -> str:
     review verdict would show the preamble and hide the verdict.
     """
     text = text.strip()
-    if len(text) <= limit:
+    if limit is None or len(text) <= limit:
         return text
     head = limit * 2 // 3
     tail = limit - head
@@ -4624,9 +4634,11 @@ def _render_transcript_steps(entries: list[Any]) -> list[PeekStep]:
     return steps
 
 
-def _render_message_step(index: int, payload: dict[str, Any]) -> PeekStep:
+def _render_message_step(
+    index: int, payload: dict[str, Any], *, body_limit: int | None = PEEK_STEP_CHARS
+) -> PeekStep:
     if payload.get("kind") == "custom":
-        return _render_custom_step(index, payload)
+        return _render_custom_step(index, payload, body_limit=body_limit)
     role = str(payload.get("role", "user"))
     if role == "assistant":
         calls = payload.get("tool_calls") or []
@@ -4638,17 +4650,20 @@ def _render_message_step(index: int, payload: dict[str, Any]) -> PeekStep:
             body = "\n".join(_call_line(c) for c in calls)
         elif calls:
             body = body + "\n" + "\n".join(_call_line(c) for c in calls)
-        return PeekStep(index, "assistant", heading, _clip(body))
+        return PeekStep(index, "assistant", heading, _clip(body, body_limit))
     if role == "tool":
         name = str(payload.get("tool_name") or "tool")
         err = " (error)" if payload.get("is_error") else ""
         return PeekStep(
-            index, "tool", f"{name} result{err}", _clip(_blocks_text(payload.get("content")))
+            index,
+            "tool",
+            f"{name} result{err}",
+            _clip(_blocks_text(payload.get("content")), body_limit),
         )
-    return PeekStep(index, "user", "user", _clip(_blocks_text(payload.get("content"))))
+    return PeekStep(index, "user", "user", _clip(_blocks_text(payload.get("content")), body_limit))
 
 
-def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
+def _render_custom_step(index: int, payload: dict[str, Any], *, body_limit: int | None) -> PeekStep:
     details = payload.get("details") or {}
     custom_type = str(payload.get("custom_type", "custom"))
     if custom_type == HUB_MESSAGE_TYPE:
@@ -4656,19 +4671,21 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         body = str(details.get("body") or details.get("text") or "")
         if direction == "to_child":
             sense = "question" if details.get("expects_reply") else "note"
-            return PeekStep(index, "hub", f"parent → child ({sense})", _clip(body))
+            return PeekStep(index, "hub", f"parent → child ({sense})", _clip(body, body_limit))
         if direction == "to_parent":
-            return PeekStep(index, "hub", "child → parent", _clip(body))
-        return PeekStep(index, "hub", "hub message", _clip(body))
+            return PeekStep(index, "hub", "child → parent", _clip(body, body_limit))
+        return PeekStep(index, "hub", "hub message", _clip(body, body_limit))
     if custom_type == "compaction_summary":
-        return PeekStep(index, "system", "compaction", _clip(str(details.get("summary", ""))))
+        return PeekStep(
+            index, "system", "compaction", _clip(str(details.get("summary", "")), body_limit)
+        )
     if custom_type == PEER_MESSAGE_MESSAGE_TYPE:
         # A parent peeking a child that received a `lop send` message sees who
         # reached in, so the peek view stays honest about cross-session traffic.
         sender = details.get("sender") or {}
         who = str(sender.get("conversation_name") or sender.get("pid") or "another session")
         body = str(details.get("body") or details.get("text") or "")
-        return PeekStep(index, "system", f"peer ← {who}", _clip(body))
+        return PeekStep(index, "system", f"peer ← {who}", _clip(body, body_limit))
     if custom_type == SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE:
         # The credential-shape notice, and the one custom row in this view the
         # operator is meant to READ rather than skim: it lands in a peek far more
@@ -4684,10 +4701,12 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         # because ``hub peek`` serves STORED transcripts, and one written before
         # that date still carries the rows: without it a parent peeking an old
         # child would see the raw wire type where it used to read a phrase.
-        return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
+        return PeekStep(
+            index, "system", "credential masked", _clip(str(details.get("text", "")), body_limit)
+        )
     # NO BRANCH FOR SESSION_BINDING_NOTICE_MESSAGE_TYPE, and its absence is the
     # fix rather than an oversight: that row never reaches this function, because
     # ``is_peek_step_entry`` refuses it (the sentence names the account, and a
     # step's body is pasted into model context). A renderer arm here is exactly
     # how the leak comes back the next time someone adds a reader.
-    return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))
+    return PeekStep(index, "system", custom_type, _clip(str(details.get("text", "")), body_limit))

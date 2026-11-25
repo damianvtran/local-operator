@@ -167,6 +167,21 @@ def _plant(tmp_path: Path) -> tuple[Path, str]:
     (directory / "transcript.jsonl").write_text(
         "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
     )
+    # A COMPLETED local binding: without one the checkpoint's team is a name-only
+    # hint, the cold open publishes the empty identity and never reaches the
+    # team registry this file exists to measure. The record is the minimal shape
+    # ``move_team.has_local_authority`` accepts; the names come from that module
+    # so they cannot drift.
+    from local_operator.network.move_team import KEY, LOCAL_BINDING_NAME
+    from local_operator.resume import write_session_attachment
+
+    # The cold open takes the team from the attachment sidecar (as the warm
+    # restore does) and requires the binding to name that same team.
+    write_session_attachment(directory, team="lane-one-probe", agent="", goal="")
+
+    (directory / LOCAL_BINDING_NAME).write_text(
+        json.dumps({KEY: {"name": "lane-one-probe", "delegation": {}}}), encoding="utf-8"
+    )
     return tmp_path / "config", session_id
 
 

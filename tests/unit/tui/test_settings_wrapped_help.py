@@ -404,3 +404,50 @@ async def test_off_default_wrapped_help_names_the_default_when_it_fits(
     rendered = _assert_whole(help_plain, width, help_text)
     assert len(rendered) == len(lines) == view._detail_rows
     assert all(cell_len(line) <= width for line in plain.split("\n"))
+
+
+# --- the runtime memory guard's rows (PR #4519 UX round 1, U4) ----------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (150, 40)])
+@pytest.mark.parametrize(
+    ("key", "guarantee"),
+    [
+        # What keeps a units typo from becoming a fleet kill.
+        ("session.runtime_memory.limit_mb", "is ignored and the default applies."),
+        # What tells the operator the guard never closes the window they are in.
+        ("session.runtime_memory.enabled", "is never ended."),
+    ],
+)
+async def test_the_runtime_memory_help_keeps_its_closing_guarantee_on_screen(
+    size: tuple[int, int], key: str, guarantee: str
+) -> None:
+    """The one-row band cut both helps before their LAST clause at 100 and 150
+    columns. Listed in ``_WRAPPED_HELP_KEYS``, each shows whole.
+
+    Negative control: with the key removed from the set, the same paint takes the
+    one-row marked cut and the guarantee is off screen (asserted below).
+    """
+    help_text = str(settings_io.BY_KEY[key].help)
+    assert help_text.endswith(guarantee), help_text
+
+    async def paint() -> tuple[str, int]:
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            await pilot.pause()
+            app._open_settings_view()
+            await pilot.pause()
+            view = app.query_one(SettingsView)
+            _select_key(view, key)
+            return view._detail_text.plain, view._detail_width()
+
+    plain, width = await paint()
+    _assert_whole(plain, width, help_text)
+    assert guarantee in plain.replace("\n", " ")
+
+    unlisted = settings_view_mod._WRAPPED_HELP_KEYS - {key}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settings_view_mod, "_WRAPPED_HELP_KEYS", unlisted)
+        cut, _ = await paint()
+    assert guarantee not in cut.replace("\n", " "), cut

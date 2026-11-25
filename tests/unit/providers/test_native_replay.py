@@ -17,10 +17,15 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
     ToolCall,
+)
+from local_operator.providers.account_affinity import (
+    WireHintCapture,
+    capture_wire_stream,
 )
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.clients import (
@@ -29,6 +34,7 @@ from local_operator.providers.clients import (
     OpenAICompatClient,
 )
 from local_operator.providers.replay import credential_scope
+from local_operator.session.inline_ui import INSTRUCTIONS
 
 
 def sse(events):
@@ -56,7 +62,10 @@ async def message_from_stream(events):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("codex", [False, True])
 @pytest.mark.parametrize("terminal_output", [False, True])
-async def test_responses_reasoning_survives_resume_order_and_route_switch(codex, terminal_output):
+@pytest.mark.parametrize("model_id", ["gpt-5", "gpt-6.1-sol", "gpt-6.2-sol"])
+async def test_responses_reasoning_survives_resume_order_and_route_switch(
+    codex, terminal_output, model_id
+):
     reasoning = {
         "id": "rs_1",
         "type": "reasoning",
@@ -73,6 +82,7 @@ async def test_responses_reasoning_survives_resume_order_and_route_switch(codex,
     }
     output = [reasoning, call]
     events = [
+        {"type": "response.created", "response": {"id": "resp_1"}},
         {"type": "response.output_item.added", "output_index": 0, "item": reasoning},
         {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
         {"type": "response.output_item.added", "output_index": 1, "item": call},
@@ -87,20 +97,28 @@ async def test_responses_reasoning_survives_resume_order_and_route_switch(codex,
             "response": {"id": "resp_1", **({"output": output} if terminal_output else {})},
         },
     ]
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=sse(events)))
-    ) as http:
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(200, content=sse(events))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = OpenAICompatClient(
             "https://api.openai.com/v1", http_client=http, openai_api="responses"
         )
         spec = ModelSpec(
             provider="openai",
-            model_id="gpt-5",
+            model_id=model_id,
             supports_responses_api=True,
             reasoning_efforts=("low", "high"),
             reasoning_effort="high",
         )
-        request = ChatRequest(model=spec, messages=[Message.user("read it")])
+        request = ChatRequest(
+            model=spec,
+            system_blocks=["Keep the first block.\n", " Keep the second block. «exactly»"],
+            messages=[Message.user("read it")],
+        )
         access = (
             OAuthAccess(access_token="fixture", credential_id=1, org_id="org", kind="oauth")
             if codex
@@ -125,9 +143,45 @@ async def test_responses_reasoning_survives_resume_order_and_route_switch(codex,
             client._build_codex_responses_body if codex else client._build_responses_body,
             scope=scope,
         )
-        body = build(request)
-        assert body["input"][1:3] == output
-        assert body["input"][3]["type"] == "function_call_output"
+        unhinted_body = build(request)
+        request.inline_ui_hint = INSTRUCTIONS
+        capture = WireHintCapture()
+        continued = [
+            event
+            async for event in capture_wire_stream(
+                client.stream(request, "fixture", access), capture
+            )
+        ]
+        assert capture.inline_ui_source_version == 1
+        [unhinted_start] = [event for event in result if isinstance(event, StreamStartEvent)]
+        [hinted_start] = [event for event in continued if isinstance(event, StreamStartEvent)]
+        assert unhinted_start.model_dump() == hinted_start.model_dump()
+        assert hinted_start.response_id == "resp_1"
+        url, body = sent[1]
+        assert body["input"].pop() == {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": INSTRUCTIONS}],
+        }
+        assert body == unhinted_body
+        assert url == (CODEX_RESPONSES_URL if codex else "https://api.openai.com/v1/responses")
+        assert sent[0][0] == url
+        joined = "Keep the first block.\n\n\n Keep the second block. «exactly»"
+        if model_id == "gpt-6.2-sol":
+            assert "instructions" not in body
+            assert body["input"][0] == {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": joined}],
+            }
+            offset = 1
+        else:
+            assert body["instructions"] == joined
+            offset = 0
+        assert sent[0][1]["input"] == body["input"][: offset + 1]
+        assert body["input"][offset]["role"] == "user"
+        assert body["input"][offset + 1 : offset + 3] == output
+        assert body["input"][offset + 3]["type"] == "function_call_output"
         # A route/model switch must never forward another model's opaque state.
         changed = request.model_copy(
             update={"model": spec.model_copy(update={"model_id": "other"})}
@@ -145,7 +199,7 @@ async def test_responses_reasoning_survives_resume_order_and_route_switch(codex,
             ]
         )
         # Returning to the original route can safely replay retained state.
-        assert build(request)["input"][1] == reasoning
+        assert build(request)["input"][offset + 1] == reasoning
         assert not any(
             item.get("type") == "reasoning"
             for item in build(request, scope="different-account")["input"]

@@ -306,6 +306,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "It is never an entry of a session directory, so nothing under this name "
         "belongs in the session copy set.",
     ),
+    "local_operator/team_bridge/responders/pinned_credentials.py": (
+        2,
+        "``RESPONDER_ROLE_NAME`` ('radient-responder-readonly') is an IAM role name and "
+        "``SOURCE_PROFILE`` ('radient-prod-admin') an AWS CLI profile name: identifiers "
+        "the pinned STS resolver passes to AWS, never files or session-directory entries.",
+    ),
+    "local_operator/team_bridge/responders/jail.py": (
+        1,
+        "``CA_BUNDLE_NAME`` ('ca-bundle.crt') names a file INSIDE a responder run's own "
+        "home, never a direct entry of a session directory. The file is a per-run copy "
+        "of the public system trust store, rewritten by ``prepare_home`` for every run, "
+        "so it must not travel with a session.",
+    ),
     "local_operator/session/row_clip.py": (
         1,
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
@@ -1137,11 +1150,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "or an entry of a session directory",
     ),
     "local_operator/asks/store.py": (
-        5,
+        6,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
-        "and ``ask-relay-``, the watcher's settle-note row), "
+        "directory. Plus the four row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "``ask-relay-``, the watcher's settle-note row, and ``ask-withdrawn-``, the "
+        "display-only row an agent's withdrawal leaves), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -1217,9 +1231,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
-        1,
+        7,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
-        "``network/audit`` — a store file, never a session entry",
+        "``network/audit`` — a store file, never a session entry. "
+        "``AUDIT_LOCK_SUFFIX`` (``.lock``): the sibling ``network/audit.jsonl.lock`` "
+        "cross-process append lock — per-device store state beside the log, never a "
+        "session entry and never synced. ``AUDIT_PENDING_SUFFIX`` (``.pending``) and "
+        "``_PENDING_READY_SUFFIX``/``_PENDING_CLAIM_SUFFIX``/``_PENDING_TEMP_SUFFIX``/"
+        "``_PENDING_REJECTED_SUFFIX`` (``.rejected``, a parked entry set aside unread): "
+        "the ``network/audit.jsonl.pending/`` directory of rows a discarded writer parked "
+        "on a lock timeout, and its file suffixes — device-local, drained into this "
+        "device's own log, never a session entry and never synced",
     ),
     "local_operator/network/enrollment.py": (
         1,
@@ -1651,7 +1673,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
         "the live/replay context, never a filename or session entry",
     ),
-    "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
+    "local_operator/keymap.py": (
+        2,
+        "``keymap.`` prefixes a config key name, and ``keymap.transcript_`` is the "
+        "printable-chord id prefix — the same kind of name, not a path",
+    ),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
     "local_operator/mobile/push_payload.py": (1, "``attention-`` prefixes a push payload key"),
     "local_operator/network/invite.py": (1, "``lop1`` prefixes an invite token string"),

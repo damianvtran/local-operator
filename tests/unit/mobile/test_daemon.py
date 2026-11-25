@@ -3857,7 +3857,7 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     (cfg / "sessions" / "cold-skills" / "desktop.json").write_text(json.dumps({"cwd": str(work)}))
     _write_skill(work / ".local-operator" / "skills", "zz-probe", body="Read primary sources.")
 
-    async def capture(config_root, command, *, origin=""):  # noqa: ANN001, ANN202
+    async def capture(config_root, command, *, origin="", **_kw):  # noqa: ANN001, ANN003, ANN202
         seen.append(command.text)
         origins.append(origin)
         return SimpleNamespace(close=lambda: None), "woke it"
@@ -3887,7 +3887,9 @@ def test_a_cold_prompt_expands_against_the_durable_cwd(tmp_path, monkeypatch) ->
     assert origins == ["mobile"]
 
 
-def _continuation_rig(tmp_path, monkeypatch, *, busy: bool) -> tuple[Any, list[dict[str, Any]]]:
+def _continuation_rig(
+    tmp_path, monkeypatch, *, busy: bool, capabilities: list[str] | None = None
+) -> tuple[Any, list[dict[str, Any]]]:
     """A live entry whose owner answers like a serving runtime, busy or idle.
 
     The real ``/command`` route and the real ``daemon.request`` writer; only the
@@ -3898,6 +3900,7 @@ def _continuation_rig(tmp_path, monkeypatch, *, busy: bool) -> tuple[Any, list[d
     which this rig marks by never answering at all.
     """
     from local_operator.session.errors import TURN_IN_FLIGHT
+    from local_operator.session.runtime.types import BUSY_DELIVERY_CAPABILITY
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     daemon = MobileDaemon(port=0, password="pw123")
@@ -3910,6 +3913,9 @@ def _continuation_rig(tmp_path, monkeypatch, *, busy: bool) -> tuple[Any, list[d
         model_label="m",
         control_port=1,
         control_key="k",
+        # Default to the capable owner, so the existing delivery test exercises
+        # the forwarded mode; the refusal test below passes [] explicitly.
+        capabilities=([BUSY_DELIVERY_CAPABILITY] if capabilities is None else capabilities),
     )
     entry = SessionEntry(record)
     daemon.table.entries[record.pid] = entry
@@ -3995,6 +4001,64 @@ def test_a_steer_is_forwarded_once_and_says_so(tmp_path, monkeypatch) -> None:
     assert reply.json() == {"ok": True, "detail": "steering queued", "delivered_as": "steer"}
     assert [f["op"] for f in frames] == ["steer"]
     assert "wait_for_turn" not in frames[0]
+
+
+def test_a_queued_prompt_fallback_keeps_delivery(tmp_path, monkeypatch) -> None:
+    """The prompt -> steer fallback carries ``delivery``: a queued send must not
+    arrive as an urgent steer after ``TurnInFlight``."""
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=True)
+    reply = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": "prompt", **_CONTINUATION, "delivery": "queue"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["delivered_as"] == "steer"
+    assert [(f["op"], f.get("delivery")) for f in frames] == [
+        ("prompt", "queue"),
+        ("steer", "queue"),
+    ]
+    # A bad mode is refused at the wire, never forwarded.
+    refused = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": "prompt", **_CONTINUATION, "delivery": "whenever"},
+    )
+    assert refused.status_code == 422, refused.text
+    assert len(frames) == 2, "a refused delivery must not reach the owner"
+
+
+@pytest.mark.parametrize(
+    "op,delivery",
+    [("prompt", "queue"), ("prompt", "both"), ("steer", "queue")],
+)
+def test_a_delivery_mode_to_an_owner_without_the_capability_is_refused(
+    tmp_path, monkeypatch, op: str, delivery: str
+) -> None:
+    """The relay refuses ``queue``/``both`` to a record without the token.
+
+    The mode is a promise about cancelling the owner's running tool; an
+    owner that predates it would silently drop the key and deliver an urgent
+    steer. Both legal modes, both ops — before any frame is written.
+    """
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=True, capabilities=[])
+    reply = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": op, **_CONTINUATION, "delivery": delivery},
+    )
+    assert reply.status_code == 422, reply.text
+    assert frames == [], "a refused delivery must not reach the owner"
+
+
+def test_a_steer_mode_to_an_owner_without_the_capability_still_forwards(
+    tmp_path, monkeypatch
+) -> None:
+    """``steer`` is today's behaviour: no key, no gate, no refusal."""
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=False, capabilities=[])
+    reply = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": "steer", **_CONTINUATION, "delivery": "steer"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert [f["op"] for f in frames] == ["steer"]
 
 
 def test_summary_rows_carry_the_background_work_fact(tmp_path: Path, monkeypatch) -> None:

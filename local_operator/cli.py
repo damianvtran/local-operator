@@ -2097,6 +2097,16 @@ def build_cli_parser() -> LocalizedArgumentParser:
         choices=("evidence", "source-of-truth", "operator"),
         default="operator",
     )
+    # `lop sessions orphan-sweep`: settle inbox rows and ask-index entries whose
+    # conversation is gone (``asks/orphans.py``) -- the same pass `lop serve`
+    # runs at startup and every 10 minutes, for an operator who wants it now or
+    # wants to SEE what it would settle (`--dry-run`) before a release reaches
+    # the daemon. Output is the report as JSON (machine output, no prose), and
+    # the subparser is hidden like `hold`/`holds` above for the same reason: its
+    # help text would be new copy awaiting a translation wave.
+    orphan_sweep_parser = sessions_subparsers.add_parser("orphan-sweep", parents=[parent_parser])
+    orphan_sweep_parser.add_argument("--dry-run", action="store_true")
+    orphan_sweep_parser.add_argument("--full", action="store_true")
     holds_parser = sessions_subparsers.add_parser("holds", parents=[parent_parser])
     holds_parser.add_argument("--json", action="store_true")
     unhold_parser = sessions_subparsers.add_parser("unhold", parents=[parent_parser])
@@ -3302,6 +3312,20 @@ def config_edit_command(args: argparse.Namespace) -> int:
         stored = settings_io.read_setting(config_manager, setting)
         echoed = matched_choice.label if matched_choice is not None else stored
         print(_cct(_cc.updated(key=args.key, value=str(echoed))))
+        # The settings PAGE warns when a hotkey lands on a chord the composer or
+        # a fixed app binding already owns (Q8). This command has no UI, and
+        # silently accepting a key the page would have flagged left the two
+        # writers disagreeing about what the user should know. The sentence is
+        # `keymap.conflict_note`'s own registry English — the same words the
+        # page paints, not new catalogue copy — printed AFTER the receipt and
+        # still accepting the write, which is the warn-and-allow contract.
+        if setting.kind is settings_io.Kind.HOTKEY:
+            from local_operator import keymap as keymap_mod
+            from local_operator.cli_style import WARNING
+
+            note = keymap_mod.conflict_note(setting.key, str(stored))
+            if note:
+                print(paint(f"Warning: {note}", WARNING, stream=sys.stderr), file=sys.stderr)
         if setting.key == "tool_approval_mode" and str(stored).strip().lower() == "auto":
             # Qualified on purpose (UX round 1, U4). "Successfully updated
             # tool_approval_mode to auto" reads as "my running agents are not
@@ -7660,15 +7684,15 @@ def sessions_resume_command(args: argparse.Namespace) -> int:
 def _carry_lines(result: dict[str, Any]) -> list[str]:
     """The scheduled-state lines a move reports when it carried any (§ ``MoveCarryBlock``).
 
-    Up to three sentences, each a fact about a different half, and the wake half
+    Each sentence is a distinct fact, and the wake half
     is BOTH-OR (design round 1, D4): the quiet ``running_notice`` confirms a
     carried wake whose supervisor was verified running, so a live schedule is not
     indistinguishable from no schedule; the loud ``notice`` is its complement —
     wakes arrived and the supervisor that would fire them is not running, so the
     line names the command and the device it must run on ('lop wake install' on
     the named device). The monitor line says what does not travel (the state) and
-    what happens instead (its checks start fresh on the destination). Absent keys
-    print nothing: a move that carried nothing new prints exactly as before.
+    what happens instead (its checks start fresh on the destination). The skill
+    receipt separately says whether the destination pinned a source selection.
     """
     carry = result.get("carry")
     if not isinstance(carry, dict):
@@ -7684,6 +7708,13 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
+    from local_operator.skills.manifest import (
+        skill_transfer_receipt,
+        skill_transfer_status,
+    )
+
+    if status := skill_transfer_status(carry.get("skill_selection")):
+        lines.append(skill_transfer_receipt(status)["message"])
     return lines
 
 
@@ -8891,6 +8922,17 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "holds":
         return sessions_holds_command(args)
+
+    if getattr(args, "sessions_command", None) == "orphan-sweep":
+        from local_operator.asks import orphans
+
+        report = orphans.sweep_with_peers(
+            config_dir(),
+            dry_run=bool(args.dry_run),
+            incremental=not bool(args.full),
+        )
+        print(_json.dumps(report.as_dict(), indent=2))
+        return 0
 
     if getattr(args, "sessions_command", None) == "unhold":
         return sessions_unhold_command(args)
@@ -10945,15 +10987,13 @@ def _monitor_rows() -> "list[dict[str, Any]]":
 
     Reads the derived index rather than each transcript: the index exists
     exactly so this question can be answered without opening every session,
-    and it is rewritten on every persist and every open, so a stale row
-    self-heals rather than needing a repair path here (the ``_wake_rows``
-    rule). Health rides the row: ``disabled``/``disabled_reason`` and the
-    failure count are written by the same sync that rewrites the index, so a
-    disabled monitor cannot be invisible on this surface (§11.3).
+    and it is rewritten on every persist and every open. Overlay counters
+    because a quiet tick advances the clock and health without rewriting the
+    index or notifying the session.
     """
     import time as _time
 
-    from local_operator.monitors.store import is_held, read_index
+    from local_operator.monitors.store import effective_rows, is_held, read_index
     from local_operator.paths import config_dir
 
     root = config_dir()
@@ -10966,25 +11006,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
         # Aida engine for them — and ``is_held`` is the store's own spelling
         # for it, so this listing and the cleanup guards cannot disagree.
         dormant = is_held(entry)
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, dict):
-                continue
+        for raw in effective_rows(root, session_id, entry):
             due = raw.get("next_due_at")
             due = due if isinstance(due, int) and not isinstance(due, bool) else None
             last = raw.get("last_check_at")
             last = last if isinstance(last, int) and not isinstance(last, bool) else 0
             rows.append(
                 {
-                    # THE INDEX ROW IS THE BASE (QA round 1, Q1). This listing used
-                    # to re-list the health fields by hand, and a hand-written list
-                    # can only ever be one change behind: it dropped ``failing`` and
-                    # ``empty_checks`` the moment they were added, so `lop monitor
-                    # status` kept printing "nothing has changed (confirm the call
-                    # observes what you expect)" for a watch that had been failing on
-                    # every tick — the incident's own sentence, in the one reader
-                    # that had the row in hand. Spreading it means any field added to
-                    # the index reaches every surface that shares
-                    # ``store.health_hint`` instead of reaching all but this one.
+                    # Forward the effective row: hand-selecting its fields here
+                    # previously dropped ``failing`` and ``empty_checks`` from
+                    # the CLI's shared health hint.
                     **raw,
                     "session_id": session_id,
                     "cwd": entry.get("cwd") or "",
@@ -11006,7 +11037,7 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
                     # The blind state and the suppression counts: ``health_hint``
-                    # renders from the INDEX row, so a listing that dropped
+                    # renders from the status row, so a listing that dropped
                     # them could only ever say "nothing has changed" for a
                     # watch that was suppressing changes or comparing a
                     # truncated result.

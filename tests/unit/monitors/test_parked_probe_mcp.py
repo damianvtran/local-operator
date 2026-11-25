@@ -43,6 +43,7 @@ from local_operator.monitors.scheduler import (
 )
 from local_operator.monitors.settings import read_monitor_settings
 from local_operator.monitors.spec import MonitorSpec
+from tests.unit.monitors.support import seed_session_baseline
 
 SID = "probemcp0001"
 NOW = 1_800_000_000_000
@@ -119,6 +120,13 @@ def _write_servers(rig: SimpleNamespace, servers: dict[str, Any]) -> None:
 
 
 async def _session_hash(rig: SimpleNamespace, row: dict[str, Any]) -> str:
+    """``content_hash`` of :func:`_session_text`, as the session's scheduler stores it."""
+    return content_hash(
+        normalize_result(await _session_text(rig, row), _spec(row), read_monitor_settings())
+    )
+
+
+async def _session_text(rig: SimpleNamespace, row: dict[str, Any]) -> str:
     """The hash the IN-SESSION scheduler stores for this row: ``Session._run_monitor_check``
     over a live MCP tool, then the scheduler's ``normalize_result`` + ``content_hash``."""
     from local_operator.harness.types import StreamEndEvent
@@ -139,9 +147,7 @@ async def _session_hash(rig: SimpleNamespace, row: dict[str, Any]) -> str:
     finally:
         await manager.disconnect_all(in_task=True)
     assert outcome.get("error") is None, outcome
-    return content_hash(
-        normalize_result(str(outcome.get("text")), _spec(row), read_monitor_settings())
-    )
+    return str(outcome.get("text"))
 
 
 # --- the shared predicate ---------------------------------------------------
@@ -196,8 +202,7 @@ async def test_a_glob_watch_is_probed_and_stays_parked(rig: SimpleNamespace) -> 
         "t", dict(row["arguments"]), AbortSignal(), None, env.context(_spec(row))
     )
     text, _b, _h = _monitor_comparable_text(result.text, result.details)
-    baseline = content_hash(normalize_result(str(text), _spec(row), read_monitor_settings()))
-    monitor_state.write_counters(rig.root, SID, "m1", _counters(baseline))
+    seed_session_baseline(rig.root, SID, _spec(row), str(text), _counters(""))
     outcome = await parked.probe_session(rig.root, SID, now_ms=NOW, tier="keyfile")
     assert outcome == {"verdict": "quiet", "why": "unchanged", "checked": 1}
     (rig.cwd / "b.txt").write_text("b", encoding="utf-8")
@@ -258,8 +263,7 @@ async def test_a_web_fetch_watch_runs_through_the_registry_factory_with_session_
         assert not result.is_error, result.text
         assert "cache hit" in result.text
         text, _b, _h = _monitor_comparable_text(result.text, result.details)
-        baseline = content_hash(normalize_result(str(text), _spec(row), read_monitor_settings()))
-        monitor_state.write_counters(rig.root, SID, "m1", _counters(baseline))
+        seed_session_baseline(rig.root, SID, _spec(row), str(text), _counters(""))
         quiet = await parked.probe_session(rig.root, SID, now_ms=NOW, tier="keyfile")
         assert quiet["verdict"] == "quiet", quiet
     finally:
@@ -281,8 +285,11 @@ async def test_mcp_quiet_tick_matches_the_session_hash_and_a_change_engages(
         assert (rig.stub / "thread.txt").stat().st_size > 8 * 1024
     row = _row(TOOL, {"thread": "C1/1"}, str(rig.cwd))
     _arm(rig.root, row, rig.cwd)
-    baseline = await _session_hash(rig, row)
-    monitor_state.write_counters(rig.root, SID, "m1", _counters(baseline))
+    # The (hash, blob) pair the session's scheduler commits, blob through its
+    # own writer: a spilled result's blob is clipped at the real cap.
+    seed_session_baseline(rig.root, SID, _spec(row), await _session_text(rig, row), _counters(""))
+    blob = monitor_state.read_snapshot(rig.root, SID, "m1")
+    assert blob is not None
     before = _calls(rig.stub)
 
     quiet = await parked.probe_session(rig.root, SID, now_ms=NOW, tier="keyfile")
@@ -300,7 +307,8 @@ async def test_mcp_quiet_tick_matches_the_session_hash_and_a_change_engages(
     changed = await parked.probe_session(rig.root, SID, now_ms=later, tier="keyfile")
     assert changed["verdict"] == "engage" and changed["why"] == "m1: changed"
     assert monitor_state.read_counters(rig.root, SID, "m1") == after
-    assert not monitor_state.snapshot_exists(rig.root, SID, "m1")
+    # The probe writes NOTHING on a change: the blob is still the baseline's.
+    assert monitor_state.read_snapshot(rig.root, SID, "m1") == blob
     assert _stub_processes(rig.script) == []
 
 

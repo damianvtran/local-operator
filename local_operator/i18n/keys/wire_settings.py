@@ -645,12 +645,52 @@ def compaction_wire_bytes_trigger_label() -> Msg:
     return Msg("wire.settings.compaction_wire_bytes_trigger.label", {})
 
 
+def composer_description() -> Msg:
+    return Msg("wire.settings.composer.description", {})
+
+
+def composer_title() -> Msg:
+    return Msg("wire.settings.composer.title", {})
+
+
 def conversation_length_help() -> Msg:
     return Msg("wire.settings.conversation_length.help", {})
 
 
 def conversation_length_label() -> Msg:
     return Msg("wire.settings.conversation_length.label", {})
+
+
+def delivery_busy_default_choice_both_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.both.description", {})
+
+
+def delivery_busy_default_choice_both_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.both.label", {})
+
+
+def delivery_busy_default_choice_queue_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.queue.description", {})
+
+
+def delivery_busy_default_choice_queue_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.queue.label", {})
+
+
+def delivery_busy_default_choice_steer_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.steer.description", {})
+
+
+def delivery_busy_default_choice_steer_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.steer.label", {})
+
+
+def delivery_busy_default_help() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.help", {})
+
+
+def delivery_busy_default_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.label", {})
 
 
 def desktop_description() -> Msg:
@@ -1443,6 +1483,54 @@ def max_learnings_history_help() -> Msg:
 
 def max_learnings_history_label() -> Msg:
     return Msg("wire.settings.max_learnings_history.label", {})
+
+
+def mcp_result_normalization_choice_off_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.off.description", {})
+
+
+def mcp_result_normalization_choice_off_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.off.label", {})
+
+
+def mcp_result_normalization_choice_prose_links_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.prose_links.description", {})
+
+
+def mcp_result_normalization_choice_prose_links_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.prose_links.label", {})
+
+
+def mcp_result_normalization_choice_strip_links_description() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.strip_links.description", {})
+
+
+def mcp_result_normalization_choice_strip_links_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.choice.strip_links.label", {})
+
+
+def mcp_result_normalization_help() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.help", {})
+
+
+def mcp_result_normalization_label() -> Msg:
+    return Msg("wire.settings.mcp_result_normalization.label", {})
+
+
+def mcp_result_text_rendering_help() -> Msg:
+    return Msg("wire.settings.mcp_result_text_rendering.help", {})
+
+
+def mcp_result_text_rendering_label() -> Msg:
+    return Msg("wire.settings.mcp_result_text_rendering.label", {})
+
+
+def mcp_search_snippet_chars_help() -> Msg:
+    return Msg("wire.settings.mcp_search_snippet_chars.help", {})
+
+
+def mcp_search_snippet_chars_label() -> Msg:
+    return Msg("wire.settings.mcp_search_snippet_chars.label", {})
 
 
 def memory_guard_description() -> Msg:
@@ -3506,6 +3594,14 @@ def web_search_description() -> Msg:
 
 def web_search_title() -> Msg:
     return Msg("wire.settings.web_search.title", {})
+
+
+def web_search_claude_subscription_search_help() -> Msg:
+    return Msg("wire.settings.web_search_claude_subscription_search.help", {})
+
+
+def web_search_claude_subscription_search_label() -> Msg:
+    return Msg("wire.settings.web_search_claude_subscription_search.label", {})
 
 
 def web_search_deepseek_evidence_help() -> Msg:

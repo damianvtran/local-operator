@@ -22,13 +22,22 @@ decision):
   billed) — irrelevant to the rung's behaviour, relevant to the guide's cost
   note.
 
-**Model default**: ``bytedance-seed/seedream-4.5`` — a default, never a pin
-(the caller's ``model`` overrides it). It is the catalog's multi-image
-workhorse (its endpoint record documents ``n`` up to 10 and seed support);
-the guide names the cheaper ``black-forest-labs/flux.2-klein-4b`` and the
-frontier ``openai/gpt-image-2.5`` / ``google/gemini-nano-banana-2.1`` classes
-as alternatives, and per-model availability/pricing moves, so nothing is
-pinned in code.
+**Model default**: ``openai/gpt-image-2.6-sunburst`` — a default, never a
+pin (the caller's ``model`` overrides it). Chosen 2026-11-19 from
+``GET /api/v1/images/models``: the newest GPT Image release (created
+2026-11-04), image input accepted (``input_references`` 0..16, so it edits),
+``n`` 1..10, every ratio the tool maps. It is the same family Radient, FAL
+and OpenAI default to, so whichever rung serves, an unpinned call lands on
+the same frontier model. It replaced ``bytedance-seed/seedream-4.5``, a
+mid-tier model that on 2026-11-19 served an unpinned edit with prompt words
+rendered as on-image text, invented popups/avatars and unreadable UI text,
+where a frontier pin produced a faithful edit. Trade-off, accepted: the GPT
+Image models document no ``seed``, so a seed sent with no pinned model is
+not honoured (whether OpenRouter ignores or rejects it is unprobed) — pin a
+model whose listing's ``supported_parameters`` include ``seed`` for
+reproducible runs. Frontier
+alternatives: ``google/gemini-3-pro-image`` (Nano Banana Pro) and
+``black-forest-labs/flux-3-image`` / ``flux.2-max``.
 
 **Editing** (wired media wave-2 edit lane, 2026-10-10): the source rides
 ``input_references`` — the docs' own shape, ``[{"type": "image_url",
@@ -64,7 +73,7 @@ OPENROUTER_IMAGES_URL = "https://openrouter.ai/api/v1/images"
 OPENROUTER_IMAGES_MODELS_URL = "https://openrouter.ai/api/v1/images/models"
 
 #: A default, not a pin — see the module docstring.
-OPENROUTER_DEFAULT_IMAGE_MODEL = "bytedance-seed/seedream-4.5"
+OPENROUTER_DEFAULT_IMAGE_MODEL = "openai/gpt-image-2.6-sunburst"
 
 #: One synchronous request's bound (the OpenAI rung's class: single call).
 OPENROUTER_IMAGE_TIMEOUT_S = 120.0

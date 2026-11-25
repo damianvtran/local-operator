@@ -5,9 +5,9 @@ Usage:
     python scripts/shard_tests.py --report          # all shards, projected totals
     python scripts/shard_tests.py --tree e2e --shard I --total 2 --out e2e_tests.txt
 
-Two trees are sharded today -- ``unit`` (the default) and ``e2e`` -- and the
-only thing that differs between them is which files to collect and which
-committed manifest weighs them. Both live in ``TREES`` below; ``--tree``
+Two trees are sharded today -- ``unit`` (the default) and ``e2e``. Each
+policy defines which files to collect, which committed manifest weighs them,
+and any fixed starting load. Both live in ``TREES`` below; ``--tree``
 selects one. This is deliberately the SAME script rather than a second copy
 under a new name: the properties that make the split safe (globbed file list,
 committed weights, pessimistic fallback, deterministic LPT) are the ones a
@@ -107,8 +107,8 @@ are in ``scripts/gen_test_durations.py``):
   same tree, because a pre-rebase and a post-rebase table are not comparable
   (that error is recorded in ``scripts/gen_test_durations.py``).
 - **A tree that outgrows its job's ceiling fails a test, not a runner.**
-  ``tests/unit/test_ci_hygiene.py`` asserts the ceiling against the projection
-  printed below, in minutes, at the worker count the job really gets.
+  ``tests/unit/test_ci_hygiene.py`` checks projected file time (reported by
+  this script) at the job's worker count, plus any fixed serial wall time.
 
 So when a shard is slow, read the projection against the pytest summary line in
 the same log FIRST: if they agree, the shard is doing the work the manifest
@@ -189,6 +189,7 @@ class Tree:
     glob: str
     manifest: Path
     default_shards: int
+    shard_zero_fixed_load_seconds: float = 0.0
 
     @property
     def root(self) -> str:
@@ -210,6 +211,10 @@ TREES: dict[str, Tree] = {
         glob="tests/unit/**/test_*.py",
         manifest=REPO / "tests" / "durations.json",
         default_shards=6,
+        # The full-suite workflow runs a serial step only on shard 0. Reserve
+        # its entire 420 s wall-time ceiling in the scheduler's test-seconds
+        # (four xdist workers). The CI hygiene guard checks both workflow inputs.
+        shard_zero_fixed_load_seconds=420 * 4,
     ),
     # `tests/e2e` is globbed with `**` like the unit tree even though it is
     # flat today, so a future subdirectory is collected rather than silently
@@ -263,9 +268,18 @@ def load_weights(manifest: Path = MANIFEST) -> tuple[dict[str, float], float]:
 
 
 def partition(
-    files: list[str], weights: dict[str, float], fallback: float, total: int
+    files: list[str],
+    weights: dict[str, float],
+    fallback: float,
+    total: int,
+    *,
+    tree: str = DEFAULT_TREE,
 ) -> list[list[str]]:
     """LPT greedy: heaviest first, each onto the currently lightest shard.
+
+    Preload shard 0 before assigning files so other shards absorb parallel work
+    while it reserves the serial wall-time budget. This is not a test weight:
+    it neither represents a file nor discounts any file's measured duration.
 
     Determinism comes from the two tie-breaks, both of which matter:
     the sort key ends in the path (equal-weight files -- notably every
@@ -273,7 +287,8 @@ def partition(
     the shard choice breaks a load tie on the lowest index.
     """
     shards: list[list[str]] = [[] for _ in range(total)]
-    loads = [0.0] * total
+    fixed_load = TREES[tree].shard_zero_fixed_load_seconds
+    loads = [fixed_load if i == 0 else 0.0 for i in range(total)]
     for path in sorted(files, key=lambda f: (-weights.get(f, fallback), f)):
         target = min(range(total), key=lambda i: (loads[i], i))
         shards[target].append(path)
@@ -310,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
 
     files = collect_test_files(tree=args.tree)
     weights, fallback = load_weights(tree.manifest)
-    shards = partition(files, weights, fallback, total)
+    shards = partition(files, weights, fallback, total, tree=args.tree)
     unmeasured = [f for f in files if f not in weights]
 
     if args.report:

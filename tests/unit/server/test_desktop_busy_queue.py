@@ -28,9 +28,14 @@ from pathlib import Path
 import pytest
 
 from local_operator.mobile import attach_client
+from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.inbox import SOURCE_USER, inbox_path, peek_inbox
-from local_operator.session.runtime.types import LIVE_INBOX_CAPABILITY
+from local_operator.session.runtime.types import (
+    BUSY_DELIVERY_CAPABILITY,
+    BUSY_DELIVERY_UNSUPPORTED,
+    LIVE_INBOX_CAPABILITY,
+)
 from tests.unit.server.test_desktop_admission_ack import (
     DEADLOCK_GUARD_S,
     TOKEN,
@@ -66,16 +71,31 @@ def _short_ack(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(attach_client.AttachClient, "_request_frame", bounded)
 
 
-def _publish(root: Path, owner: _FakeOwner, session_id: str, *, live_inbox: bool) -> None:
+def _publish(
+    root: Path,
+    owner: _FakeOwner,
+    session_id: str,
+    *,
+    live_inbox: bool,
+    busy_delivery: bool = False,
+    inline_ui: bool = False,
+) -> None:
     record = _record(session_id, owner.port, cwd=root)
+    if inline_ui:
+        record.capabilities = [*record.capabilities, INLINE_UI_V1]
     if live_inbox:
         record.capabilities = [*record.capabilities, LIVE_INBOX_CAPABILITY]
+    if busy_delivery:
+        record.capabilities = [*record.capabilities, BUSY_DELIVERY_CAPABILITY]
     registry.publish(record, root)
     (root / "sessions" / session_id / ".session.pid").write_text(str(record.pid))
 
 
 @pytest.mark.asyncio
-async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: Path) -> None:
+@pytest.mark.parametrize("inline_ui", [False, True])
+async def test_a_busy_owner_that_drains_live_gets_the_message_queued(
+    tmp_path: Path, inline_ui: bool
+) -> None:
     """503 runtime_busy before the fix; a durable queued receipt after it."""
     park = asyncio.Event()  # never set: the owner takes the frame and never acks
     async with _Harness(tmp_path) as harness:
@@ -90,8 +110,14 @@ async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: P
         _publish(tmp_path, owner, harness.session_id, live_inbox=True)
         try:
             request_id = str(uuid.uuid4())
+            assert harness.client is not None
+            url = f"/v1/desktop/sessions/{harness.session_id}/messages"
+            body = {"request_id": request_id, "text": "are you there?"}
             response = await asyncio.wait_for(
-                _post(harness, "are you there?", request_id=request_id), DEADLOCK_GUARD_S
+                harness.client.post(
+                    url, json={**body, **({"inline_ui": True} if inline_ui else {})}
+                ),
+                DEADLOCK_GUARD_S,
             )
             assert response.status_code == 200, response.text
             result = response.json()["result"]
@@ -106,8 +132,11 @@ async def test_a_busy_owner_that_drains_live_gets_the_message_queued(tmp_path: P
 
             # A RETRY OF THE SAME REQUEST REPLAYS THE RECEIPT, it does not spool
             # a second row (the receipt journal keys on the request id).
+            assert rows[0].inline_ui is inline_ui
+            assert rows[0].sender["input_surface"] == "desktop"
             again = await asyncio.wait_for(
-                _post(harness, "are you there?", request_id=request_id), DEADLOCK_GUARD_S
+                harness.client.post(url, json={**body, "inline_ui": not inline_ui}),
+                DEADLOCK_GUARD_S,
             )
             assert again.status_code == 200, again.text
             assert again.json()["result"]["status"] == "queued"
@@ -166,7 +195,12 @@ async def test_a_steer_to_a_busy_owner_is_queued_as_a_steer(tmp_path: Path) -> N
             response = await asyncio.wait_for(
                 harness.client.post(
                     f"/v1/desktop/sessions/{harness.session_id}/messages",
-                    json={"request_id": request_id, "text": "also check X", "mode": "steer"},
+                    json={
+                        "request_id": request_id,
+                        "text": "also check X",
+                        "mode": "steer",
+                        "inline_ui": True,
+                    },
                 ),
                 DEADLOCK_GUARD_S,
             )
@@ -174,6 +208,120 @@ async def test_a_steer_to_a_busy_owner_is_queued_as_a_steer(tmp_path: Path) -> N
             assert response.json()["result"]["status"] == "queued"
             raw = inbox_path(tmp_path / "sessions" / harness.session_id).read_text()
             assert json.loads(raw.splitlines()[0])["mode"] == "steer"
+            assert peek_inbox(tmp_path / "sessions" / harness.session_id)[0].inline_ui is True
+        finally:
+            park.set()
+            await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["queue", "both"])
+async def test_a_capable_owner_busy_delivery_to_a_busy_owner_is_refused_not_downgraded(
+    tmp_path: Path, delivery: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``queue``/``both`` send to a CAPABLE busy owner keeps the busy refusal (F2).
+
+    The owner advertises ``busy-delivery-v1`` so the 409 capability gate
+    (``attached.admit_prompt``) lets the frame through; the parked admission
+    then times out, and ``_queue_or_refuse`` must refuse at its own F2 arm
+    (``if body.delivery in ("queue", "both")``) because the spool row
+    (``InboxLine(mode='steer'|...)``) carries no delivery mode — queueing
+    would deliver the message as an URGENT steer while the receipt says
+    "queued", the silent downgrade the delivery modes exist to prevent.
+    The spy proves the F2 arm was reached (not the capability gate), the
+    response is the re-raised 503 ``runtime_busy``, and no row is spooled.
+    """
+    from local_operator.server.routes import desktop_sessions as ds
+
+    calls: list[str | None] = []
+    real = ds._queue_or_refuse
+
+    async def spy(request, session_id, body, error):  # type: ignore[no-untyped-def]
+        calls.append(body.delivery)
+        return await real(request, session_id, body, error)
+
+    monkeypatch.setattr(ds, "_queue_or_refuse", spy)
+    park = asyncio.Event()
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(
+            harness.session_id,
+            tmp_path,
+            sync_on_connect=True,
+            answer_prompts=True,
+            park_prompts=park,
+        )
+        await owner.start()
+        _publish(
+            tmp_path, owner, harness.session_id, live_inbox=True, busy_delivery=True, inline_ui=True
+        )
+        try:
+            assert harness.client is not None
+            response = await asyncio.wait_for(
+                harness.client.post(
+                    f"/v1/desktop/sessions/{harness.session_id}/messages",
+                    json={
+                        "request_id": str(uuid.uuid4()),
+                        "text": "hold this, do not interrupt",
+                        "delivery": delivery,
+                        "inline_ui": True,
+                    },
+                ),
+                DEADLOCK_GUARD_S,
+            )
+            assert calls == [delivery], "the F2 arm in _queue_or_refuse must be reached"
+            # The advertising owner gets both flags on one admission, even
+            # though this non-urgent mode cannot safely fall back to the spool.
+            (frame,) = owner.prompts
+            assert frame["delivery"] == delivery and frame["inline_ui"] is True
+            assert response.status_code == 503, response.text
+            assert response.json()["detail"]["code"] == "runtime_busy"
+            rows = peek_inbox(tmp_path / "sessions" / harness.session_id)
+            assert rows == [], "a refused delivery must not be spooled"
+        finally:
+            park.set()
+            await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["queue", "both"])
+async def test_a_non_capable_owner_delivery_is_refused_at_the_capability_gate(
+    tmp_path: Path, delivery: str
+) -> None:
+    """A ``queue``/``both`` send to an owner WITHOUT ``busy-delivery-v1`` is 409.
+
+    Pins the desktop admit path's own capability gate (``attached.py``): the
+    owner never advertised the token, so the send is refused before the
+    frame is sent and ``_queue_or_refuse`` is never reached — no busy-owner
+    refusal, no spool row.
+    """
+    park = asyncio.Event()
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(
+            harness.session_id,
+            tmp_path,
+            sync_on_connect=True,
+            answer_prompts=True,
+            park_prompts=park,
+        )
+        await owner.start()
+        _publish(tmp_path, owner, harness.session_id, live_inbox=True)
+        try:
+            assert harness.client is not None
+            response = await asyncio.wait_for(
+                harness.client.post(
+                    f"/v1/desktop/sessions/{harness.session_id}/messages",
+                    json={
+                        "request_id": str(uuid.uuid4()),
+                        "text": "hold this, do not interrupt",
+                        "delivery": delivery,
+                    },
+                ),
+                DEADLOCK_GUARD_S,
+            )
+            assert response.status_code == 409, response.text
+            assert response.json()["detail"] == BUSY_DELIVERY_UNSUPPORTED
+            rows = peek_inbox(tmp_path / "sessions" / harness.session_id)
+            assert rows == [], "a refused delivery must not be spooled"
         finally:
             park.set()
             await owner.stop()

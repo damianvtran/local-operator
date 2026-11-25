@@ -557,40 +557,10 @@ def test_an_unnamed_create_receipt_carries_the_kept_own_notice(
     assert reply["session_id"] == "s1" and reply["custom_instructions_notice"] == notice, reply
 
 
-def _move_notice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pushed: dict[str, Any]) -> str:
-    from types import SimpleNamespace
-
-    from local_operator.network import mobility
-
-    monkeypatch.setattr(definitions, "push_to_peer", lambda *a, **k: pushed)
-    server = SimpleNamespace(root=str(tmp_path))
-    return mobility._push_move_definitions(
-        server, "sess", NODE_DEVICE, "device-b"  # type: ignore[arg-type]
-    )
-
-
-def test_the_move_notice_names_only_what_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R1-4 and R1-2 on the move receipt."""
-    kind = definitions.OPERATOR_INSTRUCTIONS_KIND
-    # A row conflict with the instructions installed: the instructions are not blamed.
-    # (No attachment here, so no team is named either; the reason carries the row.)
-    row_only = _move_notice(
-        monkeypatch,
-        tmp_path,
-        {"ok": False, "message": "team 'x' (local edits)", kind: {"outcome": "installed"}},
-    )
-    assert "custom instructions" not in row_only, row_only
-    # Transport failure: the instructions' fate is unknown, so they are named.
-    lost = _move_notice(monkeypatch, tmp_path, {"ok": False, "message": "link dropped"})
-    assert lost.startswith("the custom instructions on device-b may be an older copy"), lost
-    # The peer kept its own: the shared sentence with its remedy, nothing "stale".
-    kept = _move_notice(
-        monkeypatch,
-        tmp_path,
-        {"ok": True, kind: {"outcome": "conflict", "notice": "device-b keeps its own …"}},
-    )
-    assert kept == "device-b keeps its own …", kept
-    # Clean: nothing.
-    assert _move_notice(monkeypatch, tmp_path, {"ok": True, kind: {"outcome": "in_sync"}}) == ""
+# The move's pre-invite instructions refresh is GONE (review round 4, R4-2): nothing
+# may be applied on the destination before its invite completes, so there is no move
+# notice left to test here. The invariant is exercised end to end instead, by
+# ``test_mobility.py::test_no_authority_conferring_install_before_invite_and_retry_after_sync``
+# (no ``apply_bundle`` on the destination before the invite) and
+# ``test_mobility.py::test_a_failed_definitions_refresh_does_not_block_an_already_matching_team``
+# (a broken definitions relay neither blocks the move nor produces a notice).

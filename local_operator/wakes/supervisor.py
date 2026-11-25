@@ -544,18 +544,11 @@ _monitor_backoff = _MonitorBackoff()
 
 
 def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
-    """The monitor index, each row's due time taken from its COUNTERS file.
+    """The monitor index with current due/disable state for wake decisions.
 
-    The index row's ``next_due_at`` is not rewritten on quiet ticks (§10.2: a
-    30 s monitor would rewrite it 2,880×/day), so a live session's index says
-    "due" long after the counters moved on — trusting it would re-engage every
-    slice. The counters file is what the scheduler writes on every check; the
-    index row is the fallback only when no counters file exists yet (an arm
-    whose first counters write has not landed). ``disabled`` is OR-ed in from
-    the counters for the same reason. Never raises: a monitors read that fails
-    must not take the wake pass with it.
+    The index is not rewritten on quiet ticks: trusting its due time alone
+    would re-engage every slice after the counters had already moved on.
     """
-    from local_operator.monitors import state as monitor_state
     from local_operator.monitors import store as monitor_store
 
     try:
@@ -564,22 +557,9 @@ def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
         logger.warning("monitor index unreadable; skipping the monitors pass", exc_info=True)
         return {}
     for session_id, entry in index.items():
-        rows: list[dict[str, Any]] = []
-        for raw in entry.get("monitors") or ():
-            if not isinstance(raw, Mapping):
-                continue
-            row = dict(raw)
-            monitor_id = row.get("id")
-            if isinstance(monitor_id, str) and monitor_id:
-                try:
-                    counters = monitor_state.read_counters(config_dir, session_id, monitor_id)
-                except Exception:  # noqa: BLE001 — one bad file costs one row's freshness
-                    counters = None
-                if counters is not None:
-                    row["next_due_at"] = counters.get("next_due_at")
-                    row["disabled"] = bool(row.get("disabled") or counters.get("disabled"))
-            rows.append(row)
-        entry["monitors"] = rows
+        entry["monitors"] = list(
+            monitor_store.effective_rows(config_dir, session_id, entry, include_health=False)
+        )
     return index
 
 
@@ -1130,6 +1110,16 @@ PARKED_PROBE_TIMEOUT_S = 180.0
 PARKED_PROBE_START_MARGIN_S = 15.0
 
 
+def _monitor_entry_is_parked(config_dir: Path, session_id: str) -> bool:
+    """Whether the on-disk monitor entry is parked — for the probe's log label only."""
+    from local_operator.monitors import store as monitor_store
+
+    try:
+        return _is_parked_monitor_entry(monitor_store.read_entry(config_dir, session_id))
+    except Exception:  # noqa: BLE001 — a label must never fail the probe
+        return False
+
+
 def _is_parked_monitor_entry(entry: Any) -> bool:
     """A monitor entry stamped ``parked_at`` by a park (and not held)."""
     return (
@@ -1194,7 +1184,18 @@ def _sweep_probe_group(pid: int) -> None:
 
 
 async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "") -> bool:
-    """Run a parked session's due monitor checks WITHOUT reopening it.
+    """Run a runtime-less session's due monitor checks WITHOUT booting it.
+
+    Named for its first use (parked sessions); since the wake boot economy
+    change it runs for EVERY due monitor row whose session has no live runtime.
+    Its log lines say ``parked monitors`` for a parked session and ``cold
+    monitors`` for an idle-exited one, so the two populations stay countable.
+
+    COST, measured from the supervisor log (8,657 probe samples before this
+    widening): maxrss median ~106 MB, p90 ~116 MB, max ~171 MB, for the life of
+    one short subprocess; it shares the ``_MAX_CONCURRENT_ENGAGES`` slots with
+    engagements and is bounded by ``PARKED_PROBE_TIMEOUT_S``. A cold boot it
+    avoids costs a median 11.4 s of boot and ~147 s of residency.
 
     True only when the probe ran every due check and each was unchanged (it
     advanced their counters itself); then the session stays parked. Every other
@@ -1213,6 +1214,16 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
 
     if await _has_live_runtime(config_dir, session_id):
         return False
+    label = (
+        "parked monitors"
+        if await asyncio.to_thread(_monitor_entry_is_parked, config_dir, session_id)
+        else "cold monitors"
+    )
+    # Probe wall time is LOGGED (round 1, R2): every runtime-less monitor is now
+    # probed before any engage, so a probe holds one of the shared engage slots
+    # and delays a real change by its duration. The distribution has to be read
+    # from these lines before any cap or slot split is set.
+    probe_started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -1233,13 +1244,13 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
             env=_parked_probe_env(config_dir),
         )
     except OSError as exc:
-        logger.warning("parked monitors %s: probe could not start (%s); engaging", session_id, exc)
+        logger.warning("%s %s: probe could not start (%s); engaging", label, session_id, exc)
         return False
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=PARKED_PROBE_TIMEOUT_S)
     except asyncio.TimeoutError:
         await _reap_probe(proc)
-        logger.warning("parked monitors %s: probe timed out; engaging", session_id)
+        logger.warning("%s %s: probe timed out; engaging", label, session_id)
         return False
     except asyncio.CancelledError:
         # SHUTDOWN, NOT A VERDICT (review round 1, R1-5). Swallowing the
@@ -1269,11 +1280,17 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
     # that matters — real servers such as Slack's — cannot be measured in
     # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
-        "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        "%s %s: %s (%s, %s checked, %.1fs, maxrss self=%s KiB children=%s KiB)",
+        label,
         session_id,
-        "quiet — left parked" if quiet else "engaging",
+        (
+            ("quiet — left parked" if label == "parked monitors" else "quiet — not booted")
+            if quiet
+            else "engaging"
+        ),
         verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
+        time.monotonic() - probe_started,
         maxrss.get("self", "?"),
         maxrss.get("children", "?"),
     )
@@ -1366,7 +1383,8 @@ async def _engage_one(
     task, so it must not block or raise — ``_note_spooled_attempt`` neither does.
     """
     outcome: Callable[[str], None] = on_outcome or (lambda _reason: None)
-    ledger = not schedule_id.startswith("monitor:")
+    is_goal = schedule_id == "goal"
+    ledger = not (is_goal or schedule_id.startswith("monitor:"))
     from local_operator.session.runtime.launch import WakeErrand, engage_runtime
 
     overdue_s = (moment - due_ms) / 1000.0
@@ -1473,6 +1491,13 @@ async def _engage_one(
                 )
             outcome("wedged")
             return False
+        if is_goal:
+            from local_operator.wakes.goals import permits_wake
+
+            # The scan is only a hint. Clear/replace/stop may have landed while
+            # this task was waiting for a slot or probing the previous owner.
+            if not permits_wake(config_dir / "sessions" / session_id, due_ms):
+                return False
         # Only the conditions we just cleared: reaching here means the session
         # is no longer skipped for a live/ghost/wedged/stale reason (nor
         # live-stalled, the live skip's escalated form). Whether the engage
@@ -1842,6 +1867,12 @@ class _MachineMemorySweep:
         #: same reason.
         self.last_key: tuple[str, int | None] | None = None
         self._task: "asyncio.Task[Any] | None" = None
+        #: The per-runtime guard's streaks (``runtime_memory.RuntimeGuardTracker``),
+        #: built lazily so this module still starts without the runtime stack.
+        self._runtime_tracker: Any = None
+        #: The per-runtime guard's last structural key, for the same INFO/DEBUG
+        #: split as :attr:`last_key`.
+        self.last_runtime_key: tuple[str, tuple[int, ...]] | None = None
 
     def seconds_until(self, now: float | None = None) -> float:
         """How long the loop may sleep before this pass is due again."""
@@ -1928,6 +1959,13 @@ class _MachineMemorySweep:
             park_idle_sessions_sync,
         )
 
+        # THE PER-RUNTIME GUARD RUNS FIRST, on the same cadence and thread: it is
+        # the one bound on a runtime's OWN memory (the machine pass below never
+        # ends a runtime), it reads only syscalls, and a runaway it ends is memory
+        # the fleet sum below no longer has to account for. Its failure is logged
+        # and never costs the machine pass (see :mod:`runtime_memory`).
+        self.sweep_runtimes(apply=apply)
+
         def _relieve(reason: str) -> int:
             # The fleet guard's first rung: park idle sessions before ending a
             # fragment (see ``park_pressure``). Runs on this worker thread.
@@ -1951,6 +1989,25 @@ class _MachineMemorySweep:
             self._ended.append(
                 (time.monotonic(), frozenset(getattr(report, "killed_lineage", frozenset())))
             )
+        return report
+
+    def sweep_runtimes(self, *, apply: bool = True) -> Any:
+        """One per-runtime guard pass; never raises (a guard must not add a crash path)."""
+        try:
+            from local_operator.session.runtime import runtime_memory
+
+            if self._runtime_tracker is None:
+                self._runtime_tracker = runtime_memory.RuntimeGuardTracker()
+            report = runtime_memory.runtime_memory_pass(
+                self.config_dir, self._runtime_tracker, apply=apply
+            )
+        except Exception:  # noqa: BLE001 — the machine pass still runs
+            logger.warning("the runtime memory guard failed; runtimes are unbounded", exc_info=True)
+            return None
+        key = (report.state, tuple(sorted(pid for pid, _mb, _n in report.over)))
+        changed = key != self.last_runtime_key
+        self.last_runtime_key = key
+        (logger.info if changed or report.acts else logger.debug)("%s", report.summary())
         return report
 
     def in_cooldown(self, lineage: "frozenset[tuple[str, int]]", now: float | None = None) -> bool:
@@ -2279,13 +2336,15 @@ class _Sweeper:
         moment: int,
         *,
         schedule_id: str = "",
-        parked: bool = False,
+        probe_first: bool = False,
     ) -> bool:
         """Start one engagement in the background. False when already running.
 
-        ``parked`` (monitor rows only): the session was PARKED, so its due
-        checks are first run by :func:`_parked_monitors_quiet` outside the
-        session, and the engagement happens only when one is not quiet. Shares
+        ``probe_first`` (monitor rows only; renamed from ``parked`` when the
+        probe widened past parked sessions, round 1 R4): the
+        session's due checks are first run by :func:`_parked_monitors_quiet`
+        outside the session — for any session with no live runtime, parked or
+        not — and the engagement happens only when one is not quiet. Shares
         the engagement semaphore, so probes and engagements together stay
         within ``_MAX_CONCURRENT_ENGAGES``.
 
@@ -2295,6 +2354,7 @@ class _Sweeper:
         (:class:`_MonitorBackoff`) instead.
         """
         is_monitor = schedule_id.startswith("monitor:")
+        is_goal = schedule_id == "goal"
         self.raise_if_failed()
         key = (session_id, due_ms)
         if key in self._in_flight:
@@ -2324,6 +2384,8 @@ class _Sweeper:
                 that did not happen, which is exactly what ``failed`` means.
                 """
                 outcomes.append(reason)
+                if is_goal:
+                    return
                 if is_monitor:
                     # A monitor row is not a trigger record or a spooled turn:
                     # its only bookkeeping is the in-memory backoff.
@@ -2334,7 +2396,7 @@ class _Sweeper:
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
-                if is_monitor and parked:
+                if is_monitor and probe_first:
                     # Inside the try so the in-flight key is popped by the
                     # ``finally`` below on every path, quiet or not.
                     async with self._semaphore:
@@ -2354,7 +2416,7 @@ class _Sweeper:
                     on_outcome=_outcome,
                     # Only a monitor row passes it, so a wake engagement's call
                     # is exactly what it was before the monitors pass existed.
-                    **({"schedule_id": schedule_id} if is_monitor else {}),
+                    **({"schedule_id": schedule_id} if is_monitor or is_goal else {}),
                 )
             except asyncio.CancelledError:
                 # Shutdown, not a failure: `shutdown()` cancels in-flight work
@@ -2394,7 +2456,7 @@ class _Sweeper:
                     # Persist backoff before releasing retry ownership, even on
                     # cancellation. Failed bookkeeping latches this engagement
                     # against a hot retry; task error stays observable to owner.
-                    for reason in outcomes if not is_monitor else ():
+                    for reason in outcomes if not (is_monitor or is_goal) else ():
                         await await_spool_write(
                             _note_spooled_attempt, config_dir, session_id, reason=reason
                         )
@@ -2481,12 +2543,23 @@ class _Sweeper:
             origins=origins,
         ):
             origin = origins.get(session_id)
-            parked = bool(
-                origin and monitors and _is_parked_monitor_entry(monitors.get(session_id))
-            )
+            # EVERY monitors-pass row is probed first, parked or not (wake boot
+            # economy, 2026-11-24). Parking was a proxy for "no runtime"; the
+            # probe itself re-checks liveness (``_parked_monitors_quiet`` asks
+            # ``_has_live_runtime`` before spawning, the probe re-asks at commit),
+            # so a session a runtime hosts still reaches ``_engage_one``'s live
+            # skip. Before this, 1,039 of 2,878 cold boots in 3.57 days (36.1%)
+            # booted an idle-exited session only to find its check unchanged.
+            probe = bool(origin and monitors)
             engaged = (
                 self.engage(
-                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=parked
+                    config_dir,
+                    session_id,
+                    cwd,
+                    due_ms,
+                    moment,
+                    schedule_id=origin,
+                    probe_first=probe,
                 )
                 if origin
                 else self.engage(config_dir, session_id, cwd, due_ms, moment)
@@ -3032,7 +3105,9 @@ async def _should_retire(config_dir: Path) -> bool:
     index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
         _load_and_reconcile_state, config_dir
     )
-    return not _has_fireable_wakes(
+    from local_operator.wakes.goals import candidates
+
+    return not await asyncio.to_thread(candidates, config_dir, index) and not _has_fireable_wakes(
         index,
         config_dir=config_dir,
         deliveries=deliveries,
@@ -3070,6 +3145,8 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
     is not the supervisor's, and an in-place exec of THAT process would replace a
     command the operator is watching. ``--once`` never moves either.
     """
+    from local_operator.wakes.goals import GOAL_RETRY_S
+    from local_operator.wakes.goals import candidates as goal_candidates
     from local_operator.wakes.owned_runtimes import (
         OWNER_ENV,
         SUPERVISOR_PID_ENV,
@@ -3119,6 +3196,8 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
         stop_signals = _install_stop_handlers(loop, _on_stop)
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
+    next_goal_scan = 0.0
+    goal_rows: list[tuple[str, str, int]] = []
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
     store_maintenance = _MemoryMaintenanceSeat(config_dir)
@@ -3149,7 +3228,19 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
             index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
-            if not _has_fireable_wakes(
+            # The goal sidecar is the queue: no wake-index write or one-shot
+            # acknowledgement can lose a retry on owner exit. Scan at the
+            # recovery cadence, not on every wake-index slice.
+            if time.monotonic() >= next_goal_scan:
+                goal_rows = await asyncio.to_thread(goal_candidates, config_dir, index)
+                next_goal_scan = time.monotonic() + GOAL_RETRY_S
+                goal_now = int(time.time() * 1000)
+                for session_id, cwd, due_ms in goal_rows:
+                    if due_ms <= goal_now:
+                        sweeper.engage(
+                            config_dir, session_id, cwd, due_ms, goal_now, schedule_id="goal"
+                        )
+            if not goal_rows and not _has_fireable_wakes(
                 index,
                 config_dir=config_dir,
                 deliveries=deliveries,
@@ -3177,6 +3268,37 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                         config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed
                     )
                     continue
+                # THE RUNTIME MEMORY GUARD HOLDS THE SUPERVISOR UP (QA round 1 on
+                # #4519, Q1). This process is the guard's only host, and "nothing
+                # fireable" is exactly the state the guard's own act leaves behind
+                # (it makes the stopped session's wakes dormant): retiring here left
+                # a second 1.2 GiB runaway unguarded for 12 minutes in QA, and a
+                # store with nothing scheduled had no guard at all. So while the
+                # guard is enabled and a guardable runtime is live, stay up and run
+                # ONLY the memory seat (its machine pass included) on its own 60 s
+                # interval. Re-decided every slice, so the moment the last runtime
+                # exits this falls through to the retirement below.
+                #
+                # The restart half is launchd's ``StartInterval`` self-heal (900 s):
+                # a supervisor that retired before a runtime started is relaunched
+                # within one interval, sees the live runtime here and stays. No new
+                # start path from the runtime itself: a fork per runtime boot would
+                # cost every session for a bound that one relaunch tick already
+                # provides.
+                from local_operator.session.runtime.runtime_memory import (
+                    holds_supervisor,
+                )
+
+                if await asyncio.to_thread(holds_supervisor, config_dir):
+                    memory_sweep.kick()
+                    await _sleep_in_slices(
+                        config_dir,
+                        SLICE_S,
+                        None,
+                        failure_check=sweeper.raise_if_failed,
+                        interrupt=move.due if move is not None else None,
+                    )
+                    continue
                 if await _should_retire(config_dir):
                     # LOGGED WITH THE REASON, because this is the transition
                     # that ends the process: a supervisor that is gone looks
@@ -3196,6 +3318,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                     )
                     sweeper.raise_if_failed()
                     return 0
+                next_goal_scan = 0.0
                 logger.info("a wake was armed during the retirement grace; staying up")
                 continue
 
@@ -3219,7 +3342,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
             index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
-            if not _has_fireable_wakes(
+            if not goal_rows and not _has_fireable_wakes(
                 index,
                 config_dir=config_dir,
                 deliveries=deliveries,
@@ -3299,6 +3422,7 @@ async def serve(config_dir: Path, *, once: bool = False, move: "_BuildMove | Non
                     residency.seconds_until(),
                     memory_sweep.seconds_until(),
                     rescue_seat.seconds_until(),
+                    max(0.0, next_goal_scan - time.monotonic()),
                 ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)

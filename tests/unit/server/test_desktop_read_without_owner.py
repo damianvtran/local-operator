@@ -1102,3 +1102,45 @@ async def test_a_settle_behind_a_newer_attempt_still_corrects_its_cold_paint(
         assert not bridge.read_attach_outran
         await bridge.release()
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_approvals_entities_name_the_owners_live_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4558 X1: ``current`` is the owner's live gate, not a hard null.
+
+    The desktop composer chip and ``ApprovalsPicker`` read this field; a switch
+    in the owner (either direction) must be what the next read names.
+    """
+    from local_operator.session.frontend_state import SlashResult
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        directory = tmp_path / "sessions" / harness.session_id
+        owner_session = build_session(directory, ScriptedStream([]), cwd=harness.inputs)
+        handle = ServingSessionHandle(
+            owner_session, asyncio.get_running_loop(), cwd=str(harness.inputs)
+        )
+        server = RuntimeServer(handle, kind="daemon")
+        await server.start_in_process()
+        await asyncio.sleep(0.2)
+        (directory / ".session.pid").write_text(str(registry.scan(tmp_path)[0][0].pid))
+        url = f"/v1/desktop/sessions/{harness.session_id}/command-entities?command=approvals"
+        try:
+            seen: list[Any] = []
+            for mode in ("auto", "ask"):
+                handle._approvals_slash(owner_session, mode, SlashResult)
+                deadline = time.monotonic() + 5.0
+                while True:
+                    status, _elapsed, body = await _get(harness.client, url)
+                    assert status == 200, body
+                    current = body["result"]["current"]
+                    if current == mode or time.monotonic() > deadline:
+                        break
+                    await asyncio.sleep(0.05)
+                seen.append(current)
+            assert seen == ["auto", "ask"]
+        finally:
+            await server.aclose()

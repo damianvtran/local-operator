@@ -691,9 +691,14 @@ class SupplementRunner:
                     components.extend(result.components)
                 if refusal:
                     prepared_detail.append(refusal)
-        # Explicit prepared work must not wait for a decoration vendor. The same
-        # decision function applies its deterministic file rules and bounds locally.
-        service = self._seam() if self._seam is not None and not pre.prepared else None
+        # Charts now belong in the primary answer. Preserve the existing file
+        # ranking seam (and local fallback) without asking for graphics or
+        # starting another generation job on any viewer, including legacy.
+        service = (
+            self._seam()
+            if self._seam is not None and not pre.prepared and want_files and pre.candidates
+            else None
+        )
         decision = await decide_supplement(
             service,
             user_text=provenance.user_text,
@@ -701,7 +706,7 @@ class SupplementRunner:
             candidates=pre.candidates,
             evidence=pre.evidence,
             want_files=want_files,
-            want_graphics=want_graphics,
+            want_graphics=False,
             max_featured=settings.max_featured,
         )
         if pre.sweep_more:
@@ -742,28 +747,6 @@ class SupplementRunner:
                 sounds=sounds,
                 withheld=withheld,
                 music_jobs=music_jobs,
-            )
-            return
-        if decision.graphics and want_graphics:
-            # Files AND graphics: the generator half runs on its own task so a steer can cut
-            # it without touching the decision's work, and so a slow model can never delay
-            # the turn that is already over (§2.9).
-            # Only when present: the keywords are additive, and a turn with nothing
-            # withheld and no music keeps the exact call shape the render seam always had.
-            optional: dict[str, Any] = {}
-            if withheld:
-                optional["withheld"] = withheld
-            if music_jobs:
-                optional["music_jobs"] = music_jobs
-            self._render(
-                answer.id,
-                decision,
-                pre.evidence.datasets,
-                provenance.user_text,
-                answer.text,
-                settings,
-                sounds=sounds,
-                **optional,
             )
             return
         await self._write(

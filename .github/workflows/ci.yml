@@ -777,6 +777,12 @@ jobs:
       - name: Install and start the built wheel
         run: python scripts/smoke_wheel.py --wheel dist/packaging-smoke/local_operator-*.whl
 
+      # This is a persisted-session compatibility check, not another interpreter
+      # compatibility matrix. Test the same artifact once, on the Python floor.
+      - name: Resume pre-binding team sessions after upgrading
+        if: matrix.python-version == '3.12'
+        run: python scripts/smoke_team_session_upgrade.py --wheel dist/packaging-smoke/local_operator-*.whl
+
   # The source-tree half of the same interpreter class. `packaging-smoke` above
   # proves the BUILT artifact starts on 3.14; this job proves the tree the next
   # tag is cut from can be installed and imported on 3.14 first. That is a
@@ -981,8 +987,8 @@ jobs:
       !cancelled() &&
       needs.changes.outputs.windows != 'false'
     # Canonical containment must use native Windows drive/junction semantics,
-    # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import
-    # contract rather than claiming the complete interactive suite is portable.
+    # not a POSIX test with os.name mocked. Run selected boundary tests rather
+    # than claiming the complete interactive suite is portable.
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -1001,7 +1007,7 @@ jobs:
           $env:USERPROFILE = $env:HOME
           $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
+          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout tests/unit/network/test_mobility_windows.py -n0 -q
 
       # The Team Bridge receiver is cross-platform (Task Scheduler on Windows),
       # and its Windows arm has properties a POSIX host cannot answer: the
@@ -1283,6 +1289,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
       - name: Run CLI Sanity Test
+        shell: bash
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
@@ -1301,7 +1308,7 @@ jobs:
           # upstream saturates the job dies with
           #   HTTP 429 ... Alibaba returned error: qwen/qwen3.7-flash is
           #   temporarily rate-limited upstream
-          # and test.txt is never written. Observed on runs 34188298919 and
+          # and the probe file is never written. Observed on runs 34188298919 and
           # 34184908064 (cli-sanity, main) and 34189747430 attempt 1
           # (server-sanity, /v1/chat 500s), all of which passed on retry --
           # which is the signature of upstream capacity, not of a defect in the
@@ -1330,17 +1337,22 @@ jobs:
           # ignore them. Any replacement must support `tools`, be served by
           # more than one provider, and be verified against both the --yolo
           # write task and the --json streaming contract.
-          local-operator --hosting openrouter --model openai/gpt-oss-20b exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
+          # A bare filename lets the model choose scratchpad:// per standing guidance.
+          # Name a fresh absolute destination so this checks a real write, not that choice.
+          probe_dir=$(mktemp -d "$RUNNER_TEMP/cli-sanity.XXXXXX")
+          probe_path="$probe_dir/probe.txt"
+          local-operator --hosting openrouter --model openai/gpt-oss-20b exec --yolo \
+            "Use the write tool to create the file at the exact absolute path '$probe_path' (not scratchpad:// or a relative path). Write only the text 'hello world'." || exit 1
 
-          # Check if file exists and contains correct text
-          if [ ! -f test.txt ]; then
-            echo "test.txt was not created"
+          if [ ! -f "$probe_path" ]; then
+            echo "Probe file was not created at $probe_path"
             exit 1
           fi
 
-          if ! grep -q "hello world" test.txt; then
-            echo "test.txt does not contain expected text"
-            cat test.txt
+          if ! cmp -s "$probe_path" <(printf 'hello world') &&
+             ! cmp -s "$probe_path" <(printf 'hello world\n'); then
+            echo "Probe file at $probe_path does not contain exactly 'hello world'"
+            cat "$probe_path"
             exit 1
           fi
 

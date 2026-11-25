@@ -17,6 +17,12 @@ no approval — that is not a reroute. A review-type child whose brief names a
 path because that role carries no `write`/`edit`; no other session gets it. Copying
 or importing the blocked material there by any route is still a reroute.
 
+**Clean up after yourself without asking** (operator directive 2026-11-24): remove
+your own finished worktrees, scratch and preview residue (branches, databases,
+deploys your task created) yourself; `ask` only about paths you did not create.
+After a guard upgrade, `preview_tool_call` a previously refused call before
+asking — ALLOW or WARN means re-issue it (exception 1 below), not ask.
+
 **Exactly two exceptions** let you re-issue the IDENTICAL call — same tool,
 byte-identical arguments — ONCE. Neither bypasses anything: the guard re-checks
 every call, so the re-issue runs only if the installed guard lets it.
@@ -54,8 +60,10 @@ answer record, not built yet — fetched or file content, an `ask_withdraw` with
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with
-zero model calls; then (2) **your rules** — `<config_dir>/rules/*.md` (default
-`~/.local-operator/rules`), plus `guardrails.rules_dir` when configured.
+zero model calls; then (2) the **built-in guard-policy-write** review (every other
+tool): a call that edits the guard's own policy goes to a judge — see "Edits to the
+guard's own policy" below; then (3) **your rules** — `<config_dir>/rules/*.md`
+(default `~/.local-operator/rules`), plus `guardrails.rules_dir` when configured.
 
 Matching sees a bash call's command string, and the JSON of every other tool's
 arguments — which is why `tool:*` reaches them all.
@@ -64,6 +72,24 @@ Neither layer can be loosened. `guardrails.enabled` switches user rules only; th
 built-in is not switchable, because a config file the model can write must not lift
 the guard protecting that same file. `guardrails.critical_override` turns CRITICAL
 into HIGH — a judge decision, never a pass. Rules only ADD restriction.
+
+## Edits to the guard's own policy
+
+A `write`/`edit` (and `browser`/`evidence` path arguments) onto a rule file
+(`<config_dir>/rules/*.md`, and a configured `guardrails.rules_dir`), the native
+`hooks.json`, or `config.yml`; a `setting` `set` of a `hooks.*` or `guardrails.*`
+key; and an `eval` cell that names one of those paths literally and is not provably
+read-only, go to a judge — not to a refusal. It sees the operator's words (typed or
+an approved `ask` answer) and what the loader would read from the new content, and it
+allows only a change the operator asked for: adding or tightening a rule at their word
+passes; deleting, emptying, narrowing or switching off a rule, hook or setting, or
+adding a hook command they did not describe, does not. A session with **no** trusted
+operator words (a subagent, an agent-opened lane, a wake) is refused with no model call:
+`ask` the operator, and the approved answer unlocks the judge. The paths are resolved
+as the tool resolves them (`~`, `..` after a link, symlinks, hardlinks, case, the
+`LOCAL_OPERATOR_CONFIG_DIR` override). Risk is reported as `high`, rule
+`guard-policy-write`. A CRITICAL evidence refusal still comes first, and your own
+`block` rules still apply after an allow.
 
 ## What the built-in ranks
 
@@ -202,8 +228,9 @@ session made. Everything CRITICAL is still refused.
   any other delete of it stays HIGH and names the creator. A raw `rm -rf` of
   an ancestor's tree still goes to the judge if it contains non-regenerable
   ignored files, such as an ignored `.env` you did not make. Exact plain
-  `git worktree remove` holds unverified ignored files even in a family-owned
-  tree: Git can delete them. An unrelated session's tree is never yours.
+  `git worktree remove` holds unverified ignored files in a sibling's or
+  cousin's tree: Git can delete them. In a tree you or your ancestors and
+  descendants created, ignored payload is yours (below). An unrelated session's tree is never yours.
   A later delete of exactly that path, or anything inside it, ranks LOW —
   unless another session's ledger row sits at or under the target, or the
   target is or holds a git work tree or repository this session's ledger does
@@ -268,9 +295,10 @@ session made. Everything CRITICAL is still refused.
   The hold names the condition that failed. Ignored files the guard cannot
   prove regenerable (the reason counts them, never lists them): there is
   nothing to commit, stash or push for that hold, and it is not the open-PR
-  refusal (that one is CRITICAL and says "has open PR"). Copy or move what
-  you need out of the checkout; whether the rest may be deleted is the
-  operator's decision. Ignored files that could not be read: the guard could
+  refusal (that one is CRITICAL and says "has open PR"). In your own tree it
+  means a nested Git repository: push or move it out, then remove the tree
+  yourself. In a tree you did not create, copy or move what you need out of
+  the checkout and ask only about those paths. Ignored files that could not be read: the guard could
   not verify them; check the path and registration. Otherwise (tracked or
   untracked changes, tracked deletions): preserve unknown files, commit or
   stash edits, push commits that must survive, and verify the canonical path
@@ -287,7 +315,12 @@ session made. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  or its family (above) is yours to maintain. Outside the exact removal
+  or its family (above) is yours to maintain. Its ignored payload (`.env`,
+  logs, local databases, any output directory, links) is yours too and goes
+  with it on plain and `--force` removal, with no ask: a recorded `git worktree
+  add` starts with zero ignored files, so every ignored byte came from your own
+  work. The one exception is an ignored entry holding a nested Git repository
+  (or one too large to walk), whose commits may exist nowhere else. Outside the exact removal
   routes above, the existing ranking also covers `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
   reaches only your own trees (up to 16 per command; their checks run in
@@ -701,12 +734,22 @@ not verified — it lands at HIGH and goes to the judge. Measured on this build:
 `python -c "shutil.rmtree('~/.local-operator')"` and `rm -rf ~/local-operator` (a
 repo root) → HIGH.
 
+The policy-write review (above) is best-effort in the same way, and does **not**
+cover: a path composed in code (`Path.home() / ".local-operator"`, an env var, a
+glob or a directory loop in `eval`), another interpreter, the `skill`, `agent` and
+`team` stores, forwarded Claude/Codex hook files (`~/.claude/settings.json`,
+`.claude/settings*.json`, plugin hooks, `~/.codex/hooks.json`), the installed
+package and shipped `defaults/`, an in-process janitor, or a symlink a concurrent
+sibling call plants between the check and the write.
+
 ## When the user asks for a rule
 
 1. **Propose it first** — path, frontmatter, body, and what it will and will not
    catch — before it exists.
 2. **Write it to the real rules directory**, never a scratch or sample copy: a rule
-   outside `<config_dir>/rules/` (or `rules_dir`) does nothing. Never edit or delete a
+   outside `<config_dir>/rules/` (or `rules_dir`) does nothing. That write is judged
+   against the user's request (above), so do it in the turn they asked in; a session
+   with no operator words must `ask` first. Never edit or delete a
    rule the user did not ask about to make your own fire — a file cannot loosen
    another, so that is the only way an agent can weaken protection.
 3. **Verify it loads and fires** — `parse_rule` on its text and `preview_tool_call`

@@ -52,6 +52,7 @@ from local_operator.tui.glyphs import (
 from local_operator.tui.widgets import tool_card as card_mod
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import (
+    _HARNESS_ADVISORY_LEADS,
     COLLAPSE_HINT,
     DURATION_COL,
     EXPAND_HINT,
@@ -79,6 +80,8 @@ from local_operator.tui.widgets.tool_card import (
     ToolCard,
     _category_element,
     compact_path,
+    detail_indent,
+    row_indent,
 )
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
@@ -2473,6 +2476,62 @@ def test_a_programs_scratch_prefixed_stdout_line_stays_captured_bytes() -> None:
     assert _style_at(content, "[scratch]") != bindings.style("tool.live.advisory")
 
 
+#: A held-back tier edit's reason exactly as the bound-team path words it
+#: (``tests/unit/session/test_member_tier_overrides.py``, the provider-ceiling
+#: refusal) -- the 200+-cell sentence design review D1 measured being cropped.
+HELD_BACK_REASON = (
+    "team 'org' slot 'pod': kept the attached tier 'lo' (provider test); the "
+    "edited tier 'hi' routes to provider elsewhere, which this binding did not "
+    "authorize; re-attach via /team to use it"
+)
+
+
+def test_the_selection_note_lead_is_a_wrapped_harness_advisory() -> None:
+    """D1: the receipt's own builder and the card's carve-out agree on the
+    lead, so the held-back reason is recognised as the harness's advisory."""
+    from local_operator.tools import builtin as builtin_mod
+
+    assert builtin_mod.SELECTION_NOTE_LEAD in _HARNESS_ADVISORY_LEADS
+    note = builtin_mod._selection_note_line("team", HELD_BACK_REASON)
+    assert note == "\n" + builtin_mod.SELECTION_NOTE_LEAD + HELD_BACK_REASON
+
+
+@pytest.mark.parametrize("width", [100, 150])
+def test_a_held_back_selection_reason_wraps_whole_on_the_receipt_card(width: int) -> None:
+    """D1, measured: as the tail of the ``[selection: …]`` line the reason
+    showed 27 cells at 100 columns and 77 at 150, remedy never visible. From
+    the REAL builders, the tag stays on the launch line and the reason is its
+    own line that wraps at the measure -- every cell painted, none cropped,
+    in the advisory ink rather than the captured-output dim."""
+    from local_operator.tools import builtin as builtin_mod
+
+    launch = "- pod (team:pod) on lo-model: job job-1" + builtin_mod._selection_tag("team")
+    note = builtin_mod._selection_note_line("team", HELD_BACK_REASON)
+    card = ToolCard("t", "task", {"agent": "team:pod"})
+    card.mark_done(
+        "launched 1 subagent(s) as concurrent background jobs:\n"
+        + launch
+        + note
+        + "\nuse 'wait' (job_id=...) to await one, or 'jobs' to list running work."
+    )
+    card.toggle_expanded()
+
+    content = card._build_content(width)
+    body = content.plain.splitlines()
+    assert any(line.rstrip().endswith("[selection: team]") for line in body), body
+    start = next(i for i, line in enumerate(body) if "selection not applied:" in line)
+    full_wrap = wrap_cells(note.lstrip("\n"), width - 2 - OUTPUT_INDENT)
+    rows = [line[OUTPUT_INDENT:] for line in body[start : start + len(full_wrap)]]
+    assert rows == full_wrap, (rows, full_wrap)
+    assert len(rows) > 1, rows
+    assert all(not row.rstrip().endswith("…") for row in rows), rows
+    # The reason carries no word wider than the measure, so the rows re-join
+    # to the whole sentence: nothing between the lead and the remedy is lost.
+    assert " ".join(row.rstrip() for row in rows) == note.strip(), rows
+    ink = _style_at(content, "selection not applied:")
+    assert ink == bindings.style("tool.live.advisory")
+
+
 def test_a_result_whose_head_line_is_not_the_reason_keeps_the_plain_crop() -> None:
     """The expansion is the tool's OUTPUT — no synthetic row restating the row.
 
@@ -3548,7 +3607,7 @@ def test_a_running_rows_duration_advances_and_holds_the_settled_column() -> None
     use, so settling does not make the row jump.
     """
     card = ToolCard("t", "bash", {"command": "sleep 30"})
-    assert card._build_row(80).plain.rstrip().endswith("0s")
+    assert card._build_row(80).plain.rstrip().endswith("<0.1s")
 
     # A card built here started its own clock; ``_started`` is only ``None`` for
     # a card adopted through ``restore()``, which refuses to time a row it did
@@ -4024,6 +4083,40 @@ def test_a_settled_row_ignores_a_start_epoch() -> None:
     assert "27s" not in row, "the epoch has no part in a settled receipt"
 
 
+def test_duration_s_reports_the_measured_interval_or_the_live_age() -> None:
+    """The fold bars sum ``duration_s``; it must never invent a number.
+
+    Live: the age of a call that has started. Settled: the executor's measured
+    interval. Replayed: the persisted interval, restored rather than
+    recomputed from when the row was mounted. A card that cannot date itself
+    (restored ``running`` with no start epoch, a legacy row with no persisted
+    duration) reports ``None`` and the caller omits its time.
+    """
+    now = [1_000.0]
+    live = ToolCard("live", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    live.begin_running("bash", {"command": "sleep 3"}, None)
+    now[0] = 1_002.5
+    assert live.duration_s == 2.5, "a running card reports its age so far"
+    live.mark_done("done")
+    assert live.duration_s == 2.5, "settling swaps the age for the measured interval"
+
+    replayed = ToolCard("replay", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    replayed.restore(state="success", result_text="done", duration_s=6.0)
+    assert replayed.duration_s == 6.0, "replay restores the persisted interval"
+    assert not replayed.is_failed
+
+    unknown = ToolCard("unknown", "bash", {"command": "sleep 3"}, clock=lambda: now[0])
+    unknown.restore(state="running")
+    assert unknown.duration_s is None, "no start epoch, no number"
+
+    failed = ToolCard("failed", "bash", {"command": "false"})
+    failed.mark_failed("boom")
+    assert failed.is_failed
+    stopped = ToolCard("stopped", "bash", {"command": "sleep 3"})
+    stopped.mark_interrupted()
+    assert not stopped.is_failed, "interrupted is a stop, not a failure"
+
+
 def test_begin_running_arms_the_clock_from_the_epoch_when_it_has_one() -> None:
     """The re-entry arm, which the switch actually takes.
 
@@ -4082,7 +4175,7 @@ def test_an_unknown_start_mounts_clockless_where_none_still_means_begins_now() -
 
     ordinary = ToolCard("n", "bash", {"command": "sleep 30"}, clock=lambda: now[0])
     assert ordinary.started_at == 1_505.0, "the ordinary mount still takes the mount instant"
-    assert ordinary._build_row(80).plain.rstrip().endswith("0s")
+    assert ordinary._build_row(80).plain.rstrip().endswith("<0.1s")
 
 
 def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
@@ -4097,7 +4190,7 @@ def test_a_row_that_watched_its_own_start_keeps_its_own_zero() -> None:
     card = ToolCard("t", "bash", {"command": "ls"}, clock=lambda: now[0])
     assert card.started_at == 3_000.0
     now[0] += 2.0
-    assert card._build_row(80).plain.rstrip().endswith("2s")
+    assert card._build_row(80).plain.rstrip().endswith("2.0s")
 
 
 def test_a_cut_off_turn_names_its_cards_cut_off() -> None:
@@ -4886,3 +4979,35 @@ def test_pending_stop_does_not_paint_as_a_completed_stop() -> None:
     # so the fix ambers the attention glyph and nothing else.
     refused.toggle_expanded()
     assert _triplet(_style_at(refused._build_content(80), "✗ stop accepted").color) == danger
+
+
+def test_detail_rows_follow_the_row_into_the_fold() -> None:
+    """An expanded call's body steps with its row, at every fold level.
+
+    The rows below the summary used the fixed ``OUTPUT_INDENT`` while the row
+    itself took ``row_indent(width, fold_depth)``, so a row revealed at col 6
+    of a 100-column frame sat above ``action:``/``target:``/``error:`` rows at
+    col 4 — the row walked right and left its own content behind, which reads
+    as another row's expansion. The body follows the row by the DELTA the row
+    took, so depth 0 is byte-identical to before the fold existed and every
+    deeper level keeps the one-cell drop the reader already knows.
+    """
+    card = ToolCard("t1", "bash", {"command": "pytest -q"})
+    card.restore(state="error", error="assert 1 == 2", duration_s=0.4)
+    assert card.toggle_expanded() is True
+
+    for depth in (0, 1, 2):
+        card.fold_depth = depth
+        card._built_width = 80
+        lines = card._build_content(80).plain.split("\n")
+        assert len(lines) > 2, "the expansion really has detail rows"
+        assert len(lines[0]) - len(lines[0].lstrip(" ")) == row_indent(80, depth)
+        for line in lines[1:]:
+            lead = len(line) - len(line.lstrip(" "))
+            assert lead == detail_indent(80, depth), (depth, line)
+        # One cell right of the row, exactly as the plain ledger had it, and
+        # the copy gutter reads the same cell the body drew at.
+        assert detail_indent(80, depth) - row_indent(80, depth) == OUTPUT_INDENT - ROW_INDENT
+        assert card.copy_gutter(1) == detail_indent(80, depth)
+
+    assert detail_indent(80, 0) == OUTPUT_INDENT

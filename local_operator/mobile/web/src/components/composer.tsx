@@ -9,10 +9,18 @@
  * command) and a stop button appears beside it.
  */
 import { contentDir } from "../lib/content-direction";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
-import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
+import {
+	busyDeliverySupported,
+	deliveryForSend,
+	getDeliveryMode,
+	nextDeliveryMode,
+	setDeliveryMode,
+	type DeliveryMode,
+} from "../lib/delivery";
+import { getCommands, getHistory, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	QUEUED_DETAIL,
 	deferredSettingsFields,
@@ -24,6 +32,7 @@ import {
 } from "../lib/settings-defer";
 import {
 	getPendingContinuation,
+	settleWakingContinuation,
 	submitContinuation,
 } from "../continuation-command";
 import {
@@ -40,8 +49,14 @@ import {
 } from "../lib/dictation";
 import {
 	markPendingEchoAccepted,
+	markPendingEchoWaking,
+	failedWakeFor,
+	forgetFailedWake,
+	pendingEchoFor,
 	projectionCarriesCommand,
+	recordFailedWake,
 	registerPendingEcho,
+	transcriptTailId,
 	withdrawPendingEcho,
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
@@ -72,6 +87,7 @@ import {
 	type SendRecordingPhase,
 } from "../lib/composer-slots";
 import { stopTurn, useTurnStopping } from "../lib/turn-stop";
+import { firstHistoryCursor, projectionHeadPinned } from "../lib/history-cursor";
 import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -181,19 +197,55 @@ export function isSlashDraft(text: string, imageCount: number): boolean {
 type DictationState = "idle" | "recording" | "transcribing";
 
 /**
- * The failure copy for one transcription attempt.
+ * The relay's own request-body cap, BELOW the daemon's audio cap.
  *
- * 402/413/422/503 carry the DAEMON's own actionable sentence (top up, shorten,
- * wrong format, no path) and are shown verbatim — the user can act on every
- * one. 502/500 and transport failures are transient or diagnostic, so they get
- * the one retry sentence; the server's upstream diagnostics belong in a log,
- * not on a phone.
+ * The tunnel gateway answers 413 to any body over 10 MiB
+ * (`local_operator/tunnels/gateway.py`), while the daemon accepts 20 MiB of
+ * audio — so a take in between can never reach the daemon at all, and an offer
+ * to "try again" with it would be a lie the user pays for twice.
  */
-function dictationErrorCopy(error: unknown): string {
-	if (error instanceof HttpError && [402, 413, 422, 503].includes(error.status)) {
-		return error.message;
+const TUNNEL_MAX_BODY_BYTES = 10 * 1024 * 1024;
+/** The failure row's own sentence for a transient refusal (shown WITH Retry). */
+const DICTATION_FAILED = "Transcription failed";
+/** Said instead of a retry when the take can never fit through the tunnel. */
+const DICTATION_TOO_LONG = "That recording is too long to send. Discard it and record a shorter one.";
+
+/** The focus ring both failure-row actions paint for a KEYBOARD (D6). The shape
+    matches the app's document-level 2px accent outline, spelled out here so the
+    two actions never depend on a default focus paint to be visible. */
+const DICTATION_ACTION_FOCUS =
+	"focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
+
+/** One failed take as the status row presents it: the sentence, and whether a
+    retry can honestly help. */
+type DictationFailure = { message: string; retry: boolean };
+
+/** Classify one failed transcription attempt for the failure row.
+
+    402/422/503 carry the DAEMON's own actionable sentence (top up, wrong
+    format, no path) and are shown verbatim: a retry would answer them word for
+    word, so they get Discard alone. 413, and any retained take over the
+    tunnel's own cap, can never be sent, so they say that instead of pretending
+    a retry could work. Every OTHER 5xx is transient — the same rule the desktop
+    applies (500-599) — so a tunnel's 504 gets a Retry too, and the row says
+    "Transcription failed" rather than repeating the server's diagnostics (those
+    belong in a log, not on a phone). An unknown status outside 5xx (a 418, a
+    stray 409) keeps Discard alone and says the same short sentence: "Try
+    again" would offer a retry the row does not draw. */
+function dictationFailureFor(error: unknown, blob: Blob): DictationFailure {
+	if ((error instanceof HttpError && error.status === 413) || blob.size > TUNNEL_MAX_BODY_BYTES) {
+		return { message: DICTATION_TOO_LONG, retry: false };
 	}
-	return "Couldn't transcribe that. Try again.";
+	if (error instanceof HttpError) {
+		if ([401, 402, 422, 503].includes(error.status)) return { message: error.message, retry: false };
+		if (error.status >= 500 && error.status <= 599) return { message: DICTATION_FAILED, retry: true };
+		return { message: DICTATION_FAILED, retry: false };
+	}
+	/* fetch rejects with a TypeError when it never reached the daemon (offline,
+	   DNS, a dropped connection): the one class where the same bytes are worth
+	   sending again. */
+	if (error instanceof TypeError) return { message: DICTATION_FAILED, retry: true };
+	return { message: DICTATION_FAILED, retry: false };
 }
 
 /**
@@ -409,7 +461,86 @@ function EffortSheet({
 	);
 }
 
+/** The busy-send delivery-mode picker (busy-delivery-v1). One row per mode,
+    the chosen one marked with the same accent dot effort uses. The mode is a
+    per-device preference (`lib/delivery.ts`), never a command: choosing it
+    writes localStorage and closes; the next busy send carries it. */
+function DeliverySheet({
+	open,
+	onClose,
+	value,
+	onChoose,
+}: {
+	open: boolean;
+	onClose: () => void;
+	value: DeliveryMode;
+	onChoose: (mode: DeliveryMode) => void;
+}) {
+	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both"; hintKey: "relay.composer.delivery.steer_hint" | "relay.composer.delivery.queue_hint" | "relay.composer.delivery.both_hint" }> = [
+		{ mode: "steer", labelKey: "relay.composer.delivery.steer", hintKey: "relay.composer.delivery.steer_hint" },
+		{ mode: "queue", labelKey: "relay.composer.delivery.queue", hintKey: "relay.composer.delivery.queue_hint" },
+		{ mode: "both", labelKey: "relay.composer.delivery.both", hintKey: "relay.composer.delivery.both_hint" },
+	];
+	return (
+		<Sheet
+			open={open}
+			onClose={onClose}
+			title={messageRuntime.t("relay.composer.delivery.label")}
+		>
+			<div className="flex flex-col p-2">
+				{modes.map(({ mode, labelKey, hintKey }) => (
+					<button
+						key={mode}
+						type="button"
+						onClick={() => {
+							onChoose(mode);
+							onClose();
+						}}
+						/* The muted hint names what the mode DOES (D1): a bare
+						   word does not say that queue never interrupts tools,
+						   and "queue, then steer" does not say when it steers.
+						   `min-h-11` is the 44 px touch floor; the hint wraps to
+						   two lines at 280 px without pushing the row taller
+						   (sheet padding absorbs it). */
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 py-1 text-start active:bg-surface"
+					>
+						<span
+							className={cn(
+								"size-2 shrink-0 rounded-full",
+								mode === value ? "bg-accent" : "bg-hairline",
+							)}
+							aria-hidden
+						/>
+						<span className="min-w-0 flex-1">
+							<span className="block text-body text-ink">
+								{messageRuntime.t(labelKey)}
+							</span>
+							<span className="block text-body-sm text-ink-dim">
+								{messageRuntime.t(hintKey)}
+							</span>
+						</span>
+					</button>
+				))}
+			</div>
+		</Sheet>
+	);
+}
+
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
+/* How long after a `waking` receipt the relay's wake has certainly settled
+   (review round 5, M1 on PR #4522). Invariant: the relay boots under
+   `PROMPT_WAKE_DEADLINE_S = 180` (`mobile/daemon.py`, set above the measured
+   engage max of 169.6 s, n=2845) and that task starts before the receipt, so
+   by 180 s after the receipt it has delivered or failed. +30 s covers the
+   relay's work outside that deadline: `engage_runtime` takes it only after
+   `_engage_and_publish`'s pre-engage durable fold, and the failure frame is
+   published after it expires. (Not clock skew: both stamps are this device's
+   `Date.now()`.) `composer.wake-bound.test.ts` reads the daemon constant and
+   fails if the two drift apart. Only gates a
+   failure the relay's one-shot `wake_failed` frame should already have
+   reported — a composer that missed it (unmounted, stream down). Exported
+   for the regression cells. */
+export const WAKE_SETTLED_BOUND_MS = 210_000;
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
@@ -419,6 +550,25 @@ const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 const RETAINED_RETRY_ERROR =
 	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
 const RETRY_BUTTON_LABEL = "Retry earlier instruction";
+/* Review round 2, R2-M1 on PR #4584: past the wake bound the session wrote
+   something, but neither the tail nor the bounded history walk carries this
+   command's row. The tail can move for reasons other than our delivery (the
+   failed wake's runtime booting late, the wake supervisor, another surface, a
+   re-fold), so this is NOT a failure claim and NOT a delivery claim: it says
+   what the phone knows and points at the Retry, whose same-`command_id` replay
+   the session dedupes. A literal like its retained-retry siblings above (U5
+   vocabulary: "earlier instruction"), not a relay catalogue key. */
+const UNCONFIRMED_WAKE_ERROR =
+	"Couldn’t confirm your earlier instruction was delivered. Retry it to be sure — it won’t be sent twice.";
+/* How far back the moved-tail confirmation pages (R2-M1). The cap is what
+   keeps a remount after a long absence (the envelope lives up to 24 h) from
+   walking a whole long session's history on every mount. Missing the row
+   because it sits deeper than this is the SAFE direction: the user sees
+   UNCONFIRMED_WAKE_ERROR and a Retry the session dedupes by `command_id`, at
+   worst one extra boot, never a lost message. 3 pages of `getHistory`'s
+   default 80 rows = 240 rows past the 80-row tail. */
+const WAKE_CONFIRM_HISTORY_PAGES = 3;
+const WAKE_CONFIRM_PAGE_ROWS = 80;
 /* D11: the positive acknowledgement is a SUCCESS, not a failure — it renders in
    the neutral/success notice, never the danger alert container.
 
@@ -428,6 +578,15 @@ const RETRY_BUTTON_LABEL = "Retry earlier instruction";
    draft" named a noun that describes only the retry-of-a-retained-instruction
    case, which is now the rarer one. */
 const RETRY_ACK_NOTICE = "Earlier instruction delivered. Your draft is ready to send.";
+/* The same situation while the earlier instruction is still WAKING its session
+   (agent review round 2, R2-2): a new send replays the retained envelope first,
+   and a `waking` answer means it is not delivered yet, so RETRY_ACK_NOTICE's
+   "delivered" would be false. Without any line the tap looked like it did
+   nothing — the draft simply stayed. Same vocabulary ("earlier", "draft").
+   Design round 1, D1: "ready to send" invited exactly the send this line is
+   asking the user to hold, so it says when instead; the settle effect swaps it
+   for RETRY_ACK_NOTICE once the earlier instruction lands. */
+const RETRY_WAKING_NOTICE = "Earlier instruction is still sending. Send your draft once it's delivered.";
 /* U4: the reason the primary send is disabled while an uncertain envelope is
    pending — stated inline so the dead control reads as intentional. */
 const RETRY_DISABLED_HINT = "Resolve the earlier instruction first.";
@@ -569,7 +728,11 @@ const COMPOSER_LEADING = "-ms-1.5";
    (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
 	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
+/* The chip's colour is ONE class, never a stacked override (D4): the
+   generated stylesheet's order let `text-ink-dim` win over an appended
+   `text-accent`, so the non-default mode never looked accent. */
+const COMPOSER_CHIP = (accent: boolean) =>
+	cn("flex min-h-11 min-w-11 items-center text-meta tabular-nums", accent ? "text-accent" : "text-ink-dim");
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -622,7 +785,7 @@ export function ComposerFrame() {
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
-			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP(false)} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
 				{/* The mic's box is held whenever the live composer will hold or draw it
 				    (`micSlot`, the same rule): a browser or daemon that cannot dictate
@@ -830,6 +993,30 @@ export function Composer({
 	/* The `$name` catalogue. Empty while the capability is absent or the fetch
 	   failed — both mean "no picker", never a banner (SKM-D5). */
 	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* The busy-send delivery mode (busy-delivery-v1): a per-device preference,
+	   read from localStorage once per composer mount. Re-read when streaming
+	   changes so a mode picked in another conversation applies here without
+	   a reload; a fresh send pins it into the envelope at submit time. */
+	const [delivery, setDelivery] = useState<DeliveryMode>(() => getDeliveryMode());
+	const [deliveryOpen, setDeliveryOpen] = useState(false);
+	const deliveryLabelKey = (delivery === "queue" ? "relay.composer.delivery.queue" : delivery === "both" ? "relay.composer.delivery.both" : "relay.composer.delivery.steer") as "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both";
+	/* The chip's VISIBLE text for queue-then-steer: the full label ("queue,
+	   then steer") runs the composer row past 280 px, so this one mode shows the
+	   short form. The accessible name above and the sheet row keep the full
+	   label; only the glyph-sized chip shortens. */
+	const deliveryChipKey: typeof deliveryLabelKey | "relay.composer.delivery.both_chip" =
+		delivery === "both" ? "relay.composer.delivery.both_chip" : deliveryLabelKey;
+	const deliveryVisibleText = messageRuntime.t(deliveryChipKey);
+	/* WCAG 2.5.3, label in name: the accessible name must CONTAIN the text on
+	   the chip. For `both` the chip reads `queue→steer` while the name carried
+	   only the full label, so a voice-control user saying what the chip shows
+	   could not reach it. Both parts are existing keys — the full mode label
+	   first, the chip's own text after it — so no third string is authored and
+	   the shortened chip stays a display-only decision. */
+	const deliveryAriaLabel =
+		delivery === "both"
+			? `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}: ${deliveryVisibleText}`
+			: `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`;
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -849,6 +1036,40 @@ export function Composer({
 	const slashOpen = slashTokenOnly(text) && !slashDismissed;
 	const [sending, setSending] = useState(false);
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
+	/* The cold prompt answered `waking` and not yet settled by the stream. A ref,
+	   not state: nothing renders from it; the settle effect reads it. */
+	const wakingCommand = useRef<{
+		pid: string;
+		commandId: string;
+		text: string;
+		/* A frame from a RUNNING owner (`projection.pid > 0`) arrived since the
+		   `waking` answer: only then is a later `projection.ended` this boot's end
+		   (the fallback for a relay without the `wake_failed` marker). */
+		sawLive: boolean;
+		/* The stream already reported this wake failed and the composer turned it
+		   into the failed send. Still tracked, because the row can land after all
+		   (another surface woke the session, or the retry joined), and that row
+		   must take the failure copy down with it. */
+		failed: boolean;
+		/* `Date.now()` of the LATEST `waking` answer for this id (review round 1,
+		   m1 on PR #4584: a retry re-stamps it, see `PendingEcho.wakingAt`). What
+		   `WAKE_SETTLED_BOUND_MS` is measured from. */
+		startedAt: number;
+		/* The projection's newest row id at the first `waking` answer, taken only
+		   from a pid-0 durable rebuild (see `PendingEcho.wakingTailId` and the
+		   settle effect). Undefined = no baseline: the bound then fails the send
+		   as before. */
+		tailId?: string;
+		/* Past the bound with a moved tail (R2-M1): the bounded search for this
+		   command's row. Undefined = not started; `"found"` = delivered;
+		   `"missing"` = unconfirmed (envelope and Retry kept). Per tracker, so a
+		   remount re-checks once. */
+		confirm?: "checking" | "found" | "missing";
+	} | null>(null);
+	/* Bumped by the tracker's deadline timer, so the settle effect re-runs
+	   when the wake's settled bound passes even if no frame arrives (a cold
+	   session whose wake failed while nobody watched publishes nothing more). */
+	const [wakeDeadlineTick, setWakeDeadlineTick] = useState(0);
 	const retryPending = retryEnvelope !== null;
 	/* Presentation is deliberately separate from the immutable retry envelope.
 	   Each occurrence is an object, even for identical copy: a queued close from
@@ -869,6 +1090,11 @@ export function Composer({
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
+	/* Read by the waking settle effect (D1), which must not re-run per notice
+	   change: it swaps RETRY_WAKING_NOTICE for the delivered line only when that
+	   is still the line on screen, never over a notice that replaced it. */
+	const noticeRef = useRef(notice);
+	noticeRef.current = notice;
 	/* Deferred settings picks (model/effort sheets) and their late outcomes,
 	   per session in `lib/settings-defer`: the sheets close on the `queued` ack,
 	   so the refusal — which lands on a later repaint — is shown HERE, where it
@@ -891,6 +1117,10 @@ export function Composer({
 	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	/* The dictation status row, focusable by script only (`tabIndex={-1}` while a
+	   failure is shown): the Retry press removes the button that had focus, and
+	   focus must land here rather than fall to <body>. */
+	const dictationRowRef = useRef<HTMLDivElement>(null);
 	/* THE PRIMARY SLOT'S ROLE (slot B of the action cluster). One occupant, so
 	   send / steer / stop are never drawn together; see `primaryRole`. */
 	const [dictation, setDictation] = useState<DictationState>("idle");
@@ -1041,6 +1271,16 @@ export function Composer({
 	/* U5: the in-flight transcribe request, so the status row's cancel aborts
 	   it rather than only hiding the wait. Null whenever nothing is in flight. */
 	const transcribeAbortRef = useRef<AbortController | null>(null);
+	/* THE LAST COMPLETE TAKE, kept while its transcription is REFUSED so Retry
+	   resends exactly those bytes instead of asking the user to speak again. A
+	   ref, not state: handlers read it and the row renders through
+	   `dictationFailure`. Released on success, Discard, a new take, a cancel, a
+	   route change and unmount, so a recording never outlives its attempt. */
+	const lastTakeRef = useRef<Blob | null>(null);
+	/* The failed take as the status row presents it (message + whether Retry is
+	   honest). Lives in the status row, NOT the danger alert: a failed take is
+	   recoverable in place, and the alert row's dismiss would throw it away. */
+	const [dictationFailure, setDictationFailure] = useState<DictationFailure | null>(null);
 	/* U1: set when a transcript has just been committed, consumed by the [text]
 	   layout effect to reveal the appended span (scroll, never focus). */
 	const revealAppendRef = useRef(false);
@@ -1235,8 +1475,340 @@ export function Composer({
 		   what clears every route's private state — not navigation. */
 		const pending = getPendingContinuation(pid);
 		setRetryEnvelope(pending);
-		setError(pending ? RETAINED_RETRY_ERROR : "");
+		/* A wake this device already reported as failed (or unconfirmed) keeps
+		   that copy across a remount (QA round 2, row 4 on PR #4584): the generic
+		   "may have been delivered" line is for an envelope whose fate nobody
+		   saw, and showing it here replaced a definite answer with a vaguer one.
+		   See `FailedWake`; the settle effect rebuilds the tracker from it. */
+		const failed = pending ? failedWakeFor(pid, pending.command_id) : undefined;
+		setError(
+			!pending
+				? ""
+				: failed
+					? failed.unconfirmed
+						? UNCONFIRMED_WAKE_ERROR
+						: messageRuntime.t("relay.health.ended_send_failed")
+					: RETAINED_RETRY_ERROR,
+		);
 	}, [pid]);
+
+	/* The wake confirmation's history walk, cancelled on UNMOUNT only (review
+	   round 3, R3-m2 on PR #4584) — not from the settle effect's per-frame
+	   cleanup, which runs on every SSE frame and would abort the walk it just
+	   started. `mounted` lets an aborted walk tell a real unmount (drop the
+	   result: the remount runs its own) from StrictMode's dev-only
+	   cleanup/re-run (restart the walk, or the tracker would sit at
+	   "checking" with nothing left to finish it). */
+	const confirmAbort = useRef<AbortController | null>(null);
+	const mounted = useRef(true);
+	const wakeDeadlineTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const clearWakeDeadline = useCallback(() => {
+		if (wakeDeadlineTimer.current === null) return;
+		clearTimeout(wakeDeadlineTimer.current);
+		wakeDeadlineTimer.current = null;
+	}, []);
+	/* Both a route remount and a fresh waking receipt can install the tracker.
+	   Scheduling is not settling: do not replay the last projection on a new
+	   receipt, as it may still carry the previous attempt's same-id failure. */
+	const armWakeDeadline = useCallback((tracker: NonNullable<typeof wakingCommand.current>) => {
+		clearWakeDeadline();
+		const remaining = tracker.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
+		if (!mounted.current || remaining <= 0) return;
+		const timer = setTimeout(() => {
+			if (wakeDeadlineTimer.current !== timer) return;
+			wakeDeadlineTimer.current = null;
+			if (wakingCommand.current === tracker) setWakeDeadlineTick((n) => n + 1);
+		}, remaining);
+		wakeDeadlineTimer.current = timer;
+	}, [clearWakeDeadline]);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+			clearWakeDeadline();
+			confirmAbort.current?.abort();
+			confirmAbort.current = null;
+		};
+	}, [clearWakeDeadline]);
+
+	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
+	   outcomes only the stream can report:
+	   - the projection carries a row under the envelope's id: the session wrote
+	     the message, so the envelope is cleared — and if the stream had already
+	     reported this wake failed, the failure copy and the restored draft go
+	     with it (the message is in the transcript; leaving "send failed" up
+	     would invite a second send under a NEW id);
+	   - the stream reports THIS wake failed without that row: the boot failed,
+	     so this becomes the failed send it is — the row comes down, the text
+	     returns to an empty composer, and the retry replays the SAME id.
+
+	   WHY NOT THE SCREEN'S `ended` (agent review round 2, R2-1). `ended` is the
+	   header dot's health, and a cold conversation is served as a disk rebuild
+	   with `pid: 0`, which health reads as ended BEFORE, DURING and after a
+	   wake. Keyed on it, a boot that failed before its first live frame was
+	   never reported (the row said "sending…" forever), and a reconnect blip
+	   (health `reconnecting`, then the reconnect's pid-0 seed) read as a
+	   failure while the boot carried on. The failure signal is now a fact about
+	   the wake itself: the relay's `wake_failed: <command_id>` marker on the
+	   terminal frame it publishes for a failed wake, or — from a relay without
+	   the marker — `projection.ended` after a frame from a running owner. */
+	useEffect(() => {
+		/* RE-ATTACH A WAKE THIS COMPOSER DID NOT SEE START (review round 5, M1 on
+		   PR #4522). `SessionScreen` is keyed per route, so a session switch
+		   unmounts this composer and its tracker ref with it, while the pending
+		   row — module-level in `pending-echo.ts` — survives with `waking` set.
+		   Without a tracker this effect could never fail the send, and the row
+		   read "waking session…" until a land, a retry or a reload.
+
+		   Rebuilt from the two durable facts, both required: the retained
+		   envelope (the retry's body, same id) and a held row for THAT id still
+		   flagged waking. An envelope alone is not enough — an ambiguous 504 or a
+		   reload retains one too, and those keep their own retained-retry
+		   affordance rather than becoming a failed wake. `sawLive` restarts false
+		   (the frames since are unknown), which only ever delays the `ended`
+		   fallback; the marker and the bound below do not depend on it.
+
+		   Re-attaching rather than merely clearing the flag on unmount (the
+		   review's cheaper option): clearing would turn the caption back into
+		   `sending…` — the pre-#4522 stuck row — while a re-attached tracker
+		   lets the failure land as the ordinary failed send. */
+		if (wakingCommand.current === null || wakingCommand.current.pid !== pid) {
+			const envelope = getPendingContinuation(pid);
+			const held = envelope ? pendingEchoFor(pid, envelope.command_id) : undefined;
+			const failedWake = envelope && !held?.waking ? failedWakeFor(pid, envelope.command_id) : undefined;
+			if (envelope && held?.waking) {
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: false,
+					startedAt: held.wakingAt ?? Date.now(),
+					tailId: held.wakingTailId,
+				};
+			} else if (envelope && failedWake) {
+				/* A wake that FAILED while a composer watched (QA round 2, row 4
+				   and Q2-2 on PR #4584). Its row was withdrawn, so the waking row
+				   above is gone, but the failure is still the route's answer and a
+				   late delivery (the failed wake's runtime booting after all, a
+				   retry from another surface) must still take it down. Rebuilt
+				   FAILED, so nothing re-reports it; an unconfirmed one keeps its
+				   "missing" verdict, so a remount does not walk history again. */
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: true,
+					startedAt: failedWake.startedAt,
+					tailId: failedWake.tailId,
+					confirm: failedWake.unconfirmed ? "missing" : undefined,
+				};
+			}
+		}
+		const waking = wakingCommand.current?.pid === pid ? wakingCommand.current : null;
+		if (waking && projection.pid > 0 && projection.ended !== true) waking.sawLive = true;
+		/* THE WAKE HAS SETTLED BY NOW, WHETHER OR NOT ANYONE SAW IT. The relay's
+		   `wake_failed` marker rides ONE frame and is never stored, so a composer
+		   that was unmounted (or whose stream was down) when it was published
+		   never sees it, and a re-subscribed cold session serves only its pid-0
+		   disk rebuild — the same frame a running wake shows. What bounds the
+		   wait is the relay itself: the boot runs under `deadline_s =
+		   PROMPT_WAKE_DEADLINE_S` and the task started before this receipt. Past
+		   the bound, a frame with NO running owner and no row under the id means
+		   the wake ended without delivering, i.e. it failed. A frame from a
+		   running owner never trips this: the runtime is up (this wake or another
+		   surface's) and its `command_id` dedupe owns the message from there. */
+		const pastBound =
+			waking !== null &&
+			Date.now() - waking.startedAt >= WAKE_SETTLED_BOUND_MS &&
+			(projection.pid === 0 || projection.ended === true);
+		/* PAST THE BOUND, A MOVED TAIL STARTS A CONFIRMATION (review round 1, M1
+		   on PR #4584; narrowed by R2-M1 below). The projection is the 80-row tail, so a wake that delivered and
+		   then ran a long turn has pushed the user row out of it, and "no row
+		   under the id" stopped meaning "not delivered". A failed wake writes
+		   nothing to the journal, so a durable rebuild whose newest row is not
+		   the one it showed when the wake was answered means the session wrote
+		   after the wake started — something to check, not yet a delivery (see
+		   the next block). Only consulted past the bound with no running
+		   owner, i.e. once the wake has certainly settled: a live frame's
+		   transient notice rows could move the tail mid-boot, and before the
+		   bound the row's own arrival is the signal. Not the session list's
+		   activity time or a turn counter: neither rides the pid-0 rebuild this
+		   composer is served while the session is cold. */
+		const hasMovedColdTail =
+			waking !== null &&
+			/* The baseline is only ever stamped from a durable rebuild; an ended
+			   LIVE frame can end in a transient notice row no rebuild reproduces
+			   (review round 2, R2-m1). */
+			projection.pid === 0 &&
+			waking.tailId !== undefined &&
+			(projection.transcript?.length ?? 0) > 0 &&
+			transcriptTailId(projection.transcript) !== waking.tailId;
+		const movedPastBaseline = pastBound && hasMovedColdTail;
+		/* A MOVED TAIL IS NOT PROOF OF DELIVERY (review round 2, R2-M1). Something
+		   wrote, but it need not be our message: the failed wake's own runtime
+		   booting late, the wake supervisor, another surface's prompt, or a
+		   re-fold all move the newest id too. Treating that as delivered retired
+		   the row, the envelope and the Retry, and the message was gone from the
+		   phone. So the move only means "look": the command's own id is the proof,
+		   in the tail (the projection check below) or in a bounded walk of older
+		   history. Found settles as delivered; not found (or the walk errored)
+		   is unconfirmed — the failed-send affordances with neutral copy. A
+		   brand-new session's baseline is `""`, so its first row takes this path
+		   as well. */
+		const carriedInTail =
+			waking !== null && projectionCarriesCommand(projection.transcript, waking.commandId);
+		if (waking && movedPastBaseline && !carriedInTail && waking.confirm === undefined) {
+			const tracker = waking;
+			tracker.confirm = "checking";
+			/* A pinned opener has no history before it, and `carriedInTail` has
+			   already checked it. With `transcript_has_older` but no pin, the
+			   current daemon can send a contiguous, user-headed 80-row tail:
+			   skipping its head would spend one of our bounded older-row slots on
+			   overlap. Keep the shape fallback only for legacy projections without
+			   that signal, and don't change the transcript's own paging policy. */
+			const tail = projection.transcript ?? [];
+			const headPinned = projection.transcript_head_pinned ??
+				(projection.transcript_has_older === true ? false : undefined);
+			const oldest = firstHistoryCursor(tail, projectionHeadPinned(tail, headPinned));
+			confirmAbort.current?.abort();
+			const abort = new AbortController();
+			confirmAbort.current = abort;
+			void (async () => {
+				let found = false;
+				try {
+					let before = oldest;
+					for (let page = 0; page < WAKE_CONFIRM_HISTORY_PAGES && before; page++) {
+						const { entries, has_more } = await getHistory(pid, before, WAKE_CONFIRM_PAGE_ROWS, abort.signal);
+						if (projectionCarriesCommand(entries, tracker.commandId)) {
+							found = true;
+							break;
+						}
+						if (!has_more || entries.length === 0) break;
+						before = entries[0].id;
+					}
+				} catch {
+					/* Unreachable history is not evidence of delivery: unconfirmed. */
+				}
+				if (confirmAbort.current === abort) confirmAbort.current = null;
+				if (abort.signal.aborted) {
+					/* Unmounted: the remount runs its own walk. Still mounted (StrictMode's
+					   dev re-run): start again rather than sit at "checking". */
+					if (mounted.current && wakingCommand.current === tracker) {
+						tracker.confirm = undefined;
+						setWakeDeadlineTick((n) => n + 1);
+					}
+					return;
+				}
+				/* A newer tracker (a retry's) owns the outcome now. */
+				if (wakingCommand.current !== tracker) return;
+				tracker.confirm = found ? "found" : "missing";
+				setWakeDeadlineTick((n) => n + 1);
+			})();
+		}
+		const unconfirmed =
+			waking !== null &&
+			!waking.failed &&
+			movedPastBaseline &&
+			!carriedInTail &&
+			waking.confirm === "missing";
+		const wakeFailed =
+			waking !== null &&
+			!waking.failed &&
+			!movedPastBaseline &&
+			(projection.wake_failed === waking.commandId ||
+				(waking.sawLive && projection.ended === true) ||
+				pastBound);
+		const outcome = settleWakingContinuation(
+			pid,
+			(commandId) =>
+				projectionCarriesCommand(projection.transcript, commandId) ||
+				(waking?.commandId === commandId && waking.confirm === "found"),
+			wakeFailed || unconfirmed,
+			waking?.commandId ?? null,
+		);
+		if (outcome === "delivered") {
+			wakingCommand.current = null;
+			forgetFailedWake(pid);
+			/* A row the tail no longer carries is never retired by the projection
+			   (`usePendingEchoes` filters on the tail), so a delivery read off the
+			   moved tail takes it down here, or it would sit at the bottom. */
+			/* A `found` verdict counts even when the bound no longer holds (review
+			   round 3, R3-m1): another surface may have booted the session during
+			   the walk, so `movedPastBaseline` is false, yet the row is still in
+			   older history, not the tail, and nothing else would retire it. */
+			if (waking && !carriedInTail && (movedPastBaseline || waking.confirm === "found")) {
+				withdrawPendingEcho(pid, waking.commandId);
+			}
+			else if (waking) markPendingEchoWaking(pid, waking.commandId, false);
+			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
+			   the user to wait for exactly this; leaving it up after the landing
+			   kept them waiting on nothing. Same success line as a plain retry. */
+			if (noticeRef.current === RETRY_WAKING_NOTICE) {
+				setNoticeTone("success");
+				setNotice(RETRY_ACK_NOTICE);
+			}
+			/* The envelope is cleared, so the retained-retry affordance a remount
+			   restored for it is stale (M1 on PR #4584): a delivered message must
+			   not keep offering "Retry earlier instruction". */
+			setRetryEnvelope(null);
+			if (!waking?.failed) {
+				setErrorOccurrence((current) =>
+					current.message === RETAINED_RETRY_ERROR ? { message: "" } : current,
+				);
+			}
+			if (waking?.failed) {
+				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
+				setErrorOccurrence((current) =>
+					current.message === failedCopy ||
+					current.message === RETAINED_RETRY_ERROR ||
+					current.message === UNCONFIRMED_WAKE_ERROR
+						? { message: "" }
+						: current,
+				);
+				/* Only the draft THIS failure handed back, untouched since: anything
+				   the user typed over it is theirs. */
+				if (textRef.current.trim() === waking.text.trim()) clearDraft();
+			}
+		} else if (outcome === "failed" && waking && (wakeFailed || unconfirmed)) {
+			waking.failed = true;
+			withdrawPendingEcho(pid, waking.commandId);
+			recordFailedWake(pid, {
+				commandId: waking.commandId,
+				unconfirmed,
+				startedAt: waking.startedAt,
+				tailId: waking.tailId,
+			});
+			if (textRef.current.trim() === "") {
+				provenanceRef.current = emptyProvenance();
+				setText(waking.text);
+				setCaret(null);
+			}
+			setRetryEnvelope(getPendingContinuation(pid));
+			setError(unconfirmed ? UNCONFIRMED_WAKE_ERROR : messageRuntime.t("relay.health.ended_send_failed"));
+		} else if (outcome === null) {
+			/* Settled out from under the tracker (the envelope is gone): the row,
+			   if any is left, no longer knows a wake is running. */
+			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
+			wakingCommand.current = null;
+			forgetFailedWake(pid);
+		}
+		/* A quiet cold stream may never re-enter this effect. Even a watched
+		   failure needs the deadline callback if the cold seed already moved
+		   and history still needs checking. Don't re-arm after the deadline or
+		   a verdict, and leave the callback with the tracker that scheduled it. */
+		const tracked = wakingCommand.current;
+		if (tracked === null || tracked.pid !== pid ||
+			(tracked.failed && (!hasMovedColdTail || tracked.confirm !== undefined))) {
+			clearWakeDeadline();
+			return;
+		}
+		armWakeDeadline(tracked);
+	}, [
+		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
+		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick, armWakeDeadline, clearWakeDeadline,
+	]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -1325,6 +1897,9 @@ export function Composer({
 		}
 		releaseDictationTracks();
 		chunksRef.current = [];
+		/* A cancel is a discard: the retained take goes with it. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setDictation("idle");
 		setRecordSeconds(0);
 		setDictationNotice("");
@@ -1332,6 +1907,10 @@ export function Composer({
 
 	const startDictation = async () => {
 		if (dictationRef.current !== "idle" || !micAvailable) return;
+		/* A fresh take replaces a failed one: the retained blob is released, so a
+		   Retry can never resend speech the user has already moved past. */
+		lastTakeRef.current = null;
+		setDictationFailure(null);
 		setError("");
 		setNotice("");
 		setDictationNotice("");
@@ -1438,19 +2017,41 @@ export function Composer({
 			setRecordSeconds(0);
 			return;
 		}
-		const blob = new Blob(chunks, { type: recorder.mimeType });
+		await transcribeTake(new Blob(chunks, { type: recorder.mimeType }));
+	};
+
+	/** Transcribe ONE complete take and put its words in the box.
+
+	    The single path a fresh recording AND a Retry run: the blob is the only
+	    input, so a retry resends the same bytes through the same append, the same
+	    provenance note and the same completion notice. `dictationCancelledRef` is
+	    the attempt's guard, so a cancel or a send during a retry drops the result
+	    exactly as it does during a first attempt. */
+	const transcribeTake = async (blob: Blob) => {
+		setDictationFailure(null);
+		setDictation("transcribing");
+		setRecordSeconds(0);
 		/* U5: the request is abortable, so the status row's own cancel reaches
 		   the network rather than only hiding the wait. */
 		const controller = new AbortController();
 		transcribeAbortRef.current = controller;
 		let result: { text: string; path: string };
 		try {
-			result = await transcribeAudio(blob, controller.signal);
+			result = await transcribeAudio(blob, {
+				signal: controller.signal,
+				sessionId: projection.session_id,
+			});
 		} catch (e) {
 			if (dictationCancelledRef.current) return;
 			dictationActiveRef.current = false;
 			endDictatedSend();
-			setError(dictationErrorCopy(e));
+			/* KEEP THE TAKE: a refusal that answers the same way twice still gets
+			   a Discard, and the transient classes get a Retry that resends these
+			   exact bytes. The blob is released by success, Discard, a new take,
+			   a cancel, a route change or unmount — never left to linger. */
+			lastTakeRef.current = blob;
+			setDictationNotice("");
+			setDictationFailure(dictationFailureFor(e, blob));
 			setDictation("idle");
 			setRecordSeconds(0);
 			return;
@@ -1464,6 +2065,9 @@ export function Composer({
 		   a clobber by another name. */
 		if (dictationCancelledRef.current) return;
 		dictationActiveRef.current = false;
+		/* The take is spent: the words are in the box, so there is nothing left
+		   for a Retry to resend. */
+		lastTakeRef.current = null;
 		const previous = textRef.current;
 		const joined = joinDraft(previous, result.text);
 		const cleaned = result.text.trim();
@@ -1507,6 +2111,39 @@ export function Composer({
 		setRecordSeconds(0);
 	};
 
+	/** Resend the retained take through the SAME path a fresh one uses.
+
+	    It NEVER sends, even when the take came from a "Send recording" press:
+	    the press is dropped first (`endDictatedSend`, idempotent), so a retry
+	    after a failed send APPENDS the words and the user reviews them. A retry
+	    of a failed send must not turn into the message they thought had failed. */
+	const retryDictation = () => {
+		const take = lastTakeRef.current;
+		if (take === null || dictationRef.current !== "idle") return;
+		/* This is a FRESH attempt: clear the previous attempt's cancel guard
+		   before the request goes out (a cancel after this still wins). */
+		dictationCancelledRef.current = false;
+		dictationActiveRef.current = true;
+		endDictatedSend();
+		setDictationNotice("");
+		void transcribeTake(take);
+		/* The Retry button unmounts with the failure row: hand focus to the status
+		   row that outlives it, or the browser drops focus to <body> and a hardware
+		   keyboard loses its place in the form. The row, not the field: focusing
+		   the textarea here would raise the soft keyboard over the wait. */
+		dictationRowRef.current?.focus();
+	};
+
+	/** Throw the failed take away. Quiet, like every other deliberate discard:
+	    the user knows what they tapped, and the words are gone by design. */
+	const discardDictationTake = () => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		dictationActiveRef.current = false;
+		setDictation("idle");
+		setRecordSeconds(0);
+	};
+
 	/** "SEND RECORDING": stop the take, transcribe it and submit the words in one
 	    press. Only the PRESS lives here; the send is the effect below, run against
 	    the render in which the transcript is in the box. */
@@ -1546,6 +2183,15 @@ export function Composer({
 		return () => cancelDictation();
 		// eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable setters only
 	}, []);
+
+	/* A different conversation is a different composer: the failed take was
+	   recorded into this one, so a route change releases it. Unmount (a sign-out
+	   reloads the SPA) is covered by the cleanup above. */
+	useEffect(() => {
+		lastTakeRef.current = null;
+		setDictationFailure(null);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- a ref and a stable setter
+	}, [pid]);
 
 	const send = async (raw: string, op?: "prompt" | "steer") => {
 		/* SEND CANCELS AN IN-FLIGHT DICTATION: tracks released and a result still
@@ -1632,6 +2278,14 @@ export function Composer({
 					text: trimmed,
 					images: payloadImages,
 				};
+				/* The busy-send delivery mode is pinned into the envelope for a FRESH
+				   send only (a retained retry replays its stored mode, never the
+				   composer's current preference). `deliveryForSend` keeps `steer`,
+				   idle and unsupported sends byte-identical to the legacy frame. */
+				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
+				/* A new attempt supersedes any failure this route last reported: from
+				   here the receipt (or this send's own error) is the answer. */
+				forgetFailedWake(pid);
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -1639,7 +2293,7 @@ export function Composer({
 					payloadImages,
 					/* The annotation is consulted only for a FRESH send (a retry replays
 					   the stored envelope's own bytes, annotation included). */
-					annotationForSend(provenanceRef.current),
+					{ ...annotationForSend(provenanceRef.current), ...(deliveryPin && deliveryPin !== "steer" ? { delivery: deliveryPin } : {}) },
 					/* The user's message leaves the composer HERE, into a row of its own,
 					   before the daemon has answered — the whole point of the optimistic
 					   path. It is painted under the ENVELOPE's id rather than a fresh one,
@@ -1679,6 +2333,56 @@ export function Composer({
 					skillCapability && trimmed.includes("$"),
 				);
 				setRetryEnvelope(null);
+				if (receipt.waking) {
+					/* A COLD PROMPT THE RELAY IS STILL WAKING A RUNTIME FOR: not admitted
+					   yet, so the row keeps saying it is going out and the envelope stays
+					   retained until the stream settles it (the effect on
+					   `wakingCommand` below). The draft already moved into the row. */
+					/* `sawLive` starts false whatever the screen shows: the frame on screen
+					   predates this boot, and only a running owner's frame AFTER the answer
+					   makes a later `ended` this boot's end (the settle effect). A retry
+					   that joins the same wake keeps what the stream already showed. */
+					const prior = wakingCommand.current;
+					/* M1's baseline, only from a durable rebuild: a live frame can end in
+					   a transient notice row whose id no rebuild reproduces. */
+					const coldTail = projection.pid === 0 ? transcriptTailId(projection.transcript) : undefined;
+					const joined =
+						prior !== null &&
+						prior.pid === pid &&
+						prior.commandId === receipt.envelope.command_id &&
+						!prior.failed
+							? prior
+							: null;
+					wakingCommand.current = {
+						pid,
+						commandId: receipt.envelope.command_id,
+						text: receipt.envelope.text,
+						sawLive: joined?.sawLive ?? false,
+						failed: false,
+						/* EVERY `waking` answer restarts the clock (m1 on PR #4584), a
+						   joining one too: "joined" means same id and not failed, not
+						   same relay task. A retry after a failure nobody saw starts a
+						   new task with a fresh deadline, and the latest receipt is the
+						   conservative bound for either. */
+						startedAt: Date.now(),
+						/* The baseline stays the FIRST answer's (see `tailId`). */
+						tailId: joined ? joined.tailId : coldTail,
+					};
+					/* The row says the session is booting, not just "sending…" (D2). */
+					markPendingEchoWaking(pid, receipt.envelope.command_id, true, wakingCommand.current.tailId);
+					/* A retry replaces the old timer even when the stream sends no
+					   subsequent frame (R5-M1 on PR #4584). */
+					armWakeDeadline(wakingCommand.current);
+					/* A NEW draft that rode along (R2-2): the send replayed the retained
+					   earlier instruction, which is still waking, and the composer kept
+					   what the user just typed. Say so — the tap otherwise looked dead. */
+					const draft = textRef.current.trim();
+					if (draft !== "" && draft !== receipt.envelope.text.trim()) {
+						setNoticeTone("neutral");
+						setNotice(RETRY_WAKING_NOTICE);
+					}
+					return;
+				}
 				/* The session admitted this command — the receipt IS that fact, and it is
 				   what lets the row stop saying it is still going out. A no-op when the
 				   projection already answered the echo, or when none was painted. */
@@ -1707,7 +2411,9 @@ export function Composer({
 					   rather than presenting an idempotent ACK as delivery of content the
 					   owner never received. This is a positive outcome, so it renders in the
 					   success notice, not the danger alert (D11). The pending row stays up
-					   either way — it is a row the session genuinely owes. */
+					   either way — it is a row the session genuinely owes. The tone is
+					   set, not inherited: the waking branch's neutral line may precede it. */
+					setNoticeTone("success");
 					setNotice(RETRY_ACK_NOTICE);
 				}
 				/* A skill the relay could not attach is SAID (SKM-D4): the message
@@ -1774,7 +2480,15 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				/* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
+				/* A 400 that names the delivery modes is a REFUSAL with a remedy,
+				   rendered verbatim rather than swallowed as a generic retry line:
+				   the relay could not honour queue/both for this owner, and the
+				   user must see that sentence. Any other 400 keeps the generic
+				   copy below. Keyed on status + message shape so no mode string
+				   is special-cased. */
+				failure instanceof HttpError && failure.status === 400 && failure.message.includes("delivery")
+					? failure.message
+					: /* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
 				   not a transient failure: retrying the same draft is refused again,
 				   so the one retry sentence pointed at an action that cannot work and
 				   hid the cause (UX review U6). Keyed on the wire's typed code, so the
@@ -2143,9 +2857,81 @@ export function Composer({
 			    move the line (design round 1, D3). `role="status"` (polite) so a
 			    screen reader hears the state without stealing focus; colour is never
 			    the only carrier (dot + word + timer). */}
-			{dictation !== "idle" || dictationNotice ? (
-				<div className="flex min-h-11 items-center gap-2 px-0.5">
-					{dictation === "recording" ? (
+			{dictation !== "idle" || dictationFailure !== null || dictationNotice ? (
+				<div
+					ref={dictationRowRef}
+					/* Focusable by script only, for the row's WHOLE life: the state
+					   change that REMOVES the focused Retry button hands focus here, or
+					   the browser drops it to <body> and a hardware keyboard loses its
+					   place in the form. The attribute must outlive the failure row:
+					   Retry clears `dictationFailure` while this same row stays (the
+					   transcribing line, then the outcome notice), and Chrome resets
+					   activeElement to <body> the moment the FOCUSED element loses its
+					   tabIndex — Gecko keeps it, so only a real Chrome shows it. */
+					tabIndex={-1}
+					className={cn(
+						"flex min-h-11 items-center gap-2 px-0.5",
+						/* A long sentence and two 44 px actions cannot share one line at
+						   200% text: unwrapped, the message was squeezed to one letter per
+						   line at 320 px (Q1/Q2/D5). Wrapped, the actions move to a second
+						   line, right-aligned, only when they do not fit on the first. */
+						dictationFailure !== null && "flex-wrap",
+					)}
+				>
+					{dictationFailure !== null ? (
+						<>
+							{/* The failed take is recoverable IN PLACE: the row keeps the same
+							    min-h-11 line the live states use (D3), so retrying does not move
+							    anything, and role="alert" is preserved from the alert row this
+							    moved out of. */}
+							{/* `flex-auto` (auto basis), not `flex-1` (zero basis): a zero basis
+							    fits itself beside the actions and then grows, so the row would
+							    ALWAYS wrap onto two lines. Auto basis lets a short sentence keep
+							    one line at 100%, and the min-width forces the wrap before the
+							    message can be squeezed narrow. `min()` keeps that floor inside
+							    the row when 200% text grows 12rem past a 320 px viewport. */}
+							<p
+								role="alert"
+								aria-live="assertive"
+								className="min-w-[min(12rem,100%)] flex-auto break-words text-body-sm text-danger"
+							>
+								{dictationFailure.message}
+							</p>
+							{/* One group for both actions (D1): `gap-4` keeps Retry and Discard
+							    apart, `ml-auto` right-aligns the group on its own line, and
+							    `self-end` bottoms it against a multi-line message instead of
+							    vertically centring Discard against the text. */}
+							<div className="ml-auto flex items-end gap-4 self-end">
+								{dictationFailure.retry ? (
+									/* A quiet bordered pill (D1): the retry is the row's only
+									   positive action, so it reads as a control without the accent
+									   fill of Send. */
+									<button
+										type="button"
+										onClick={retryDictation}
+										aria-label="retry transcription"
+										className={cn(
+											"flex min-h-11 shrink-0 items-center rounded-full border border-control px-3 text-body-sm text-ink active:bg-elevated",
+											DICTATION_ACTION_FOCUS,
+										)}
+									>
+										Retry
+									</button>
+								) : null}
+								<button
+									type="button"
+									onClick={discardDictationTake}
+									aria-label="discard recording"
+									className={cn(
+										"flex min-h-11 shrink-0 items-center rounded-sm px-2 text-body-sm text-ink-muted active:text-ink",
+										DICTATION_ACTION_FOCUS,
+									)}
+								>
+									Discard
+								</button>
+							</div>
+						</>
+					) : dictation === "recording" ? (
 						<>
 							<p
 								role="status"
@@ -2364,10 +3150,47 @@ export function Composer({
 					   width a `shrink-0` chip would take the whole label's width); every
 					   other level lets it grow into what is left. The mic is an action
 					   and keeps its full touch target at every level. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP(false), foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
+					{/* The busy-send delivery-mode chips (busy-delivery-v1) render AFTER
+					   the model chip (D5): a streaming-only chip ahead of the model
+					   pushed its left edge from x=64 idle to x=170 streaming at
+					   375 px and clipped the label to `claude-sonne…` at 280 px;
+					   after the model, the label keeps its edge and the chips take
+					   what is left. Visible ONLY
+					   while the agent is working AND the relay advertised the feature:
+					   an older relay or an idle session never offers a control whose
+					   send would be refused. One tap cycles steer → queue → both and
+					   persists per device. The worded options are the sheet, opened by
+					   a second visible affordance — the sheet button beside the chip
+					   is the door, never a hidden gesture. */}
+					{projection.streaming && busyDeliverySupported(capabilities) ? (
+						<>
+							<button
+								type="button"
+								onClick={() => {
+									const next = nextDeliveryMode(delivery);
+									setDelivery(next);
+									setDeliveryMode(next);
+								}}
+								aria-label={deliveryAriaLabel}
+								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
+							>
+									<span aria-hidden data-delivery-glyph>‹</span>
+									<span>{deliveryVisibleText}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => setDeliveryOpen(true)}
+									aria-label={messageRuntime.t("relay.composer.delivery.label")}
+									className={cn(COMPOSER_CHIP(false), "shrink-0 px-1")}
+								>
+									<span aria-hidden>⋯</span>
+								</button>
+							</>
+					) : null}
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
@@ -2410,6 +3233,12 @@ export function Composer({
 				onPick={onSlashPick}
 				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
+			/>
+			<DeliverySheet
+				open={deliveryOpen}
+				onClose={() => setDeliveryOpen(false)}
+				value={delivery}
+				onChoose={(mode) => { setDelivery(mode); setDeliveryMode(mode); }}
 			/>
 			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			<EffortSheet

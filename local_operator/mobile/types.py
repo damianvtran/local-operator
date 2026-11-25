@@ -88,6 +88,30 @@ INPUT_MODES = ("typed", "dictated", "mixed")
 #: durable state.
 INPUT_PATH_MAX_CHARS = 96
 
+#: The busy-send delivery-mode vocabulary (``delivery``). Absence and an
+#: explicit empty string BOTH read as ``steer`` — every pre-feature producer
+#: sends nothing — while any other present value must be one of these. The
+#: value is refused (never coerced) at the wire so a typo cannot silently
+#: become an urgent steer.
+DELIVERY_MODES = ("steer", "queue", "both")
+
+
+def _delivery(data: Any) -> str:
+    """Validate the reserved ``delivery`` mode on a payload; empty is legacy.
+
+    Shared by every boundary this module serves (HTTP body, control frame,
+    continuation envelope): absent is ``steer``, a present non-empty value
+    must be in :data:`DELIVERY_MODES`, and anything else is refused rather
+    than coerced. Returns the value as sent (``""`` for legacy), so callers
+    that forward verbatim keep the legacy frame byte-identical.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("delivery payload must be an object")
+    delivery = data.get("delivery", "")
+    if not isinstance(delivery, str) or (delivery and delivery not in DELIVERY_MODES):
+        raise ValueError("delivery must be one of 'steer', 'queue' or 'both'")
+    return delivery
+
 
 def _input_annotation(data: Any) -> tuple[str, str]:
     """Validate the reserved ``input_mode``/``input_path`` pair on a payload.
@@ -122,6 +146,11 @@ class ContinuationCommand:
     envelope as text/images so a retry replays the annotation under the same
     UUID — the fields are part of the command's immutable identity, not a
     transport option.
+
+    ``delivery`` is the busy-send mode (``steer``/``queue``/``both``), riding
+    the same envelope for the same reason: a retry of a queued send must
+    replay as queued, not as an urgent steer. Absence ("") is the legacy
+    reading; see ``_delivery``. It is ignored when the session is idle.
     """
 
     command_id: str
@@ -131,20 +160,32 @@ class ContinuationCommand:
     submitted_at: float = field(default_factory=time.time)
     input_mode: str = ""
     input_path: str = ""
+    delivery: str = ""
+    # A viewer declaration travels across cold-owner arbitration, but the
+    # selected owner's advertised capability still gates the actual socket send.
+    inline_ui: bool = False
 
     @staticmethod
     def create(
-        session_id: str, text: str, images: list[dict[str, str]] | None = None
+        session_id: str,
+        text: str,
+        images: list[dict[str, str]] | None = None,
+        *,
+        inline_ui: bool = False,
     ) -> "ContinuationCommand":
         return ContinuationCommand(
             command_id=str(uuid.uuid4()),
             session_id=session_id,
             text=text,
             images=list(images or []),
+            inline_ui=inline_ui,
         )
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if not self.inline_ui:
+            data.pop("inline_ui", None)
+        return data
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> "ContinuationCommand":
@@ -188,6 +229,8 @@ class ContinuationCommand:
             submitted_at=float(submitted_at),
             input_mode=input_mode,
             input_path=input_path,
+            delivery=_delivery(data),
+            inline_ui=data.get("inline_ui") is True,
         )
 
 
@@ -287,6 +330,9 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # unknown fields are deliberately not rejected in general, so without
         # this a mangled input_mode would ride silently to a durable row.
         _input_annotation(frame)
+        # Likewise the busy-send delivery mode: shape-checked here so a
+        # mangled `delivery` never rides silently to a queued steer.
+        _delivery(frame)
         # Protocol-v3 producers send identity on both paths. Older authenticated
         # loopback clients omitted it, so absence remains compatible; a supplied
         # id is always validated before reaching transcript or steering state.
@@ -796,9 +842,13 @@ class TranscriptEntry:
     calls_tools: bool = False
     custom_type: str = ""
     terminal: bool = False
+    # Durable replay keeps the marked source beside the display row. It is
+    # never an ordinary row field on the wire; only negotiated overlays use it.
+    _inline_ui_source: str | None = field(default=None, repr=False, compare=False)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        data.pop("_inline_ui_source", None)
         if not self.files:
             data.pop("files", None)
         # SPARSE: each condensation fact goes out only when it differs from its
@@ -1251,6 +1301,50 @@ class SessionProjection:
     #: stated here. SPARSE: absent means false, which is what an older daemon
     #: and an uncapped projection both mean.
     transcript_head_pinned: bool = False
+    #: IN-PROCESS ONLY, never on the wire (popped in :meth:`to_json`): this
+    #: transcript's first user row is NOT the conversation's opener, so no cap
+    #: may pin it. Set by ``ProjectionFold._cap_tail`` when the folded render
+    #: opens at a compaction marker (``projection._opening_user_row``). It has
+    #: to outlive that one trim because the trim drops the marker itself: the
+    #: next live append, and every frame-cap tail tier after it, would otherwise
+    #: see a kept-window prompt as the first user row and pin it as the opener
+    #: (PR #4521 R1-1/Q1). A projection rebuilt from the wire defaults to
+    #: false; it was already capped by the process that folded it.
+    #: The daemon DOES re-cap that rebuild (``daemon._projection_frame`` ->
+    #: ``cap_projection_frame``), and with the flag false a tail tier there
+    #: would re-derive the opener from rows that no longer hold the marker.
+    #: It never gets that far because of one invariant: the rebuild is the
+    #: frame the session process already fitted under the SAME
+    #: ``PROJECTION_FRAME_SOFT_CAP_BYTES``, and the daemon adds its own fields
+    #: (``attention``) only AFTER capping, so the re-cap fits before tier 4.
+    #: A daemon-side change that grows the projection before
+    #: ``cap_projection_frame`` (or a smaller daemon cap) breaks that and
+    #: reopens R1-1; such a change must first get this decision to the daemon.
+    transcript_opener_absent: bool = False
+    #: OLDER ROWS EXIST THAN THIS TRANSCRIPT HOLDS: the journal has rows older
+    #: than ``transcript``'s oldest (unpinned) row, so a client must offer "load
+    #: earlier" and may page from the tail's oldest row. True when the render
+    #: OPENS AT A COMPACTION MARKER (the durable seed and the live fold both
+    #: start at the newest marker) or when a cap trimmed rows off the head.
+    #:
+    #: WHY A SEPARATE FIELD (PR #4521 QA Q3): before #4521 the compaction's
+    #: carried user copies padded every compacted render past 80 rows, so the
+    #: 80-row cap pinned an opener and ``transcript_head_pinned`` doubled as
+    #: "capped". With the copies shed, a compacted session whose kept window
+    #: is short seeds e.g. 14 rows with no pin, and the relay SPA read that as
+    #: the WHOLE conversation: no load-earlier slot, no mount fetch, and nothing
+    #: to scroll, so every turn before the compaction was unreachable. The pin
+    #: cannot be reused to say this: both clients detach ``transcript[0]`` as
+    #: the opener when it is set (the RN app regardless of the row's kind), which
+    #: is exactly the false opener Q1 removed. So "older rows exist" and "row 0
+    #: is the pinned opener" are two facts on the wire.
+    #:
+    #: STICKY until a wholesale re-seed (``ProjectionFold.fold_history``): the
+    #: transcript's head only moves forward, so once older rows exist they keep
+    #: existing; the trim that drops the marker must not forget it.
+    #: SPARSE and ADDITIVE: absent means false, which is what an older daemon
+    #: meant; an older client ignores the key.
+    transcript_has_older: bool = False
     #: WHERE EACH DELIVERED PHONE STEER SITS IN THE JOURNAL: steer row id -> the
     #: id of the row it follows there. A phone steer is painted at SEND time
     #: (``ProjectionFold.note_user_message``) and upgraded in place when the
@@ -1381,6 +1475,9 @@ class SessionProjection:
             data["transcript"] = [row.to_json() for row in self.transcript]
         if not self.transcript_head_pinned:
             data.pop("transcript_head_pinned", None)
+        data.pop("transcript_opener_absent", None)
+        if not self.transcript_has_older:
+            data.pop("transcript_has_older", None)
         if not self.steer_journal_order:
             data.pop("steer_journal_order", None)
         if self.peer_cycles is None:
@@ -1521,6 +1618,7 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
         for item in items:
             values = {k: v for k, v in item.items() if k in known}
             if cls is TranscriptEntry:
+                values.pop("_inline_ui_source", None)
                 # Older runtimes did not say whether the real row ending survived.
                 # Unknown completeness cannot authorize a completion receipt.
                 values["text_complete"] = item.get("text_complete") is True

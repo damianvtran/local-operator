@@ -1311,11 +1311,24 @@ class ScopedTeamRegistry:
             return row
         return self.global_registry.get_team(team_id, recovery_wait=recovery_wait)
 
-    def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Any | None:
+    def get_team_by_name(
+        self, name: str, *, recovery_wait: float | None = None, require_loaded: bool = False
+    ) -> Any | None:
         row = self.session_registry.get_team_by_name(name, recovery_wait=recovery_wait)
         if row is not None:
-            return row
-        return self.global_registry.get_team_by_name(name, recovery_wait=recovery_wait)
+            if not require_loaded:
+                return row
+            # An unloaded local shadow is unavailable, not permission to fall
+            # back to a same-name account team with different authority.
+            loaded = self.session_registry.get_team_by_name(
+                name, recovery_wait=recovery_wait, require_loaded=True
+            )
+            return loaded if loaded is not None and loaded.id == row.id else None
+        if not require_loaded:
+            return self.global_registry.get_team_by_name(name, recovery_wait=recovery_wait)
+        return self.global_registry.get_team_by_name(
+            name, recovery_wait=recovery_wait, require_loaded=True
+        )
 
     # -- writes: the SCOPE IS THE CALLER'S, never a default in here -----------
     def create_team(self, fields: Any, *, scope: Scope) -> Any:

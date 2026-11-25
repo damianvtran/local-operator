@@ -23,6 +23,7 @@ import contextlib
 import inspect
 import logging
 import math
+import shlex
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -43,6 +44,7 @@ from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     AskOption,
     AskQuestion,
@@ -79,8 +81,9 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.i18n.keys import session_remote_peek as _srp
 from local_operator.i18n.keys import tui_notices as _nt
-from local_operator.i18n.messages import Msg
+from local_operator.i18n.messages import Msg, render_resolved
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     MOVED_REASON,
@@ -135,7 +138,11 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
     freeze_new_store_state,
 )
-from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.history_window import (
+    DISPLAY_HISTORY_BYTES,
+    DISPLAY_HISTORY_MESSAGES,
+    DisplayHistoryWindow,
+)
 from local_operator.session.model_selection import (
     SelectionReading,
     StoredModelSelection,
@@ -594,6 +601,9 @@ _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
 _BIND_RETRY_DELAY_CAP_S = 0.5
 
+_RuntimeLocator = Callable[[], tuple[SessionRecord | None, int | None]]
+_PublicationWaiter = Callable[[_RuntimeLocator, float], Awaitable[SessionRecord]]
+
 #: Backoff for RETRYING the canonical re-sync a degraded delta owes, when that
 #: re-sync fails against a socket that is still up (the owner busy, a transient
 #: RPC error). Retrying is not optional bookkeeping: the degraded frame consumed
@@ -848,6 +858,18 @@ def resolve_frame_attachments(data: dict[str, Any], store: AttachmentStore) -> d
     return resolved if moved else data
 
 
+def _keep_inline_ui_overlay(messages: Sequence[AgentMessage], envelope: object) -> None:
+    if not isinstance(envelope, dict) or envelope.get("version") != 1:
+        return
+    overlays = envelope.get("messages")
+    if not isinstance(overlays, dict):
+        return
+    for message in messages:
+        if isinstance(message, Message) and isinstance(row := overlays.get(message.id), dict):
+            # Do not repeat the whole page in each Message's private snapshot.
+            message._inline_ui_overlay = {"version": 1, "messages": {message.id: row}}
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -856,7 +878,13 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     owner can relay through an older follower without killing its stream.
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
-    return cls.model_validate(data)
+    event = cls.model_validate(data)
+    if overlay := data.get("inline_ui"):
+        if isinstance(event, (AgentEndEvent, HistoryDeltaEvent)):
+            _keep_inline_ui_overlay(event.messages, overlay)
+        elif isinstance(event, MessageEndEvent):
+            _keep_inline_ui_overlay([event.message], overlay)
+    return event
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -2373,6 +2401,110 @@ class AttachedSession:
             return ""
         return str(getattr(team, "manager", "") or "")
 
+    def _cold_attachment_slots(
+        self, active_agent: str, team_name: str
+    ) -> tuple[str, str, dict[str, str]]:
+        """``(active_agent, active_team, effective_identity)`` for a COLD frame.
+
+        NO NAME-ONLY RECOVERY, on the cold side too. The checkpoint's
+        ``active_team`` is a NAME the last owner wrote (possibly another device,
+        possibly before a move or fork completed its binding). The warm restore
+        (``Session._restore_attachment``) refuses exactly that: with no
+        completed local binding (``move_team.needs_reauthorization``) the stored
+        team is kept only as an unresolved hint, ``active_team_name`` and
+        ``active_agent`` stay empty, and the warm frame publishes
+        ``active_team=""`` with the explicit empty identity
+        (``FrontendStateStore.refresh_from_session`` reads ``active_team_name``,
+        never the hint). The cold frame must say the same thing in all three cells:
+        painting the checkpoint's team would show an authority the runtime is
+        about to refuse, and the pane would flip when it engaged (the #2014
+        flip, inverted). ``effective_identity_for``'s own contract says the
+        same: ``team`` is the team in force, never merely a name on disk.
+
+        SAME SOURCE AS WARM, not just the same gate. The warm restore attaches
+        the team named by the session's attachment sidecar, and only when the
+        completed binding names that same team (``_verify_name``,
+        case-insensitive). So the team cells come from exactly there
+        (:meth:`_cold_bound_team`), never from the checkpoint's name: a
+        checkpoint that lags or was written elsewhere (naming ``admins`` beside a
+        ``lopdev`` binding) would otherwise paint ``admins`` while the runtime
+        attaches ``lopdev``. The checkpoint's ``active_agent`` is kept only where
+        it describes the same state — the same team (its manager slot), or no
+        team at all (a plain profile); beside a different or refused team it is
+        that team's manager slot, so it is replaced or dropped with it.
+
+        WHY THE BINDING CHECK IS ENOUGH HERE, without the warm attach's full
+        definition comparison. The binding is written only on this machine: by
+        an explicit local attach (which IS the authorization), by a fork
+        inheriting its parent's binding, or by a verified arrival after its
+        comparison succeeded (``check_arrival``); it is never admitted from a
+        peer's copy set, and the gate also requires it to name THIS team
+        (case-insensitive, as the warm ``_verify_name`` does) — so "bound" means
+        "locally authorized for this team when recorded". This frame is ownerless
+        display: it starts no runtime, publishes no tools and executes nothing.
+
+        The only place the authority is EXERCISED is the warm attach, which
+        re-runs the full comparison (``restoring=True``) before any team is in
+        force and, on a mismatch, refuses with a notice or raises — never runs
+        under a drifted definition. Definition drift since binding can therefore change what the
+        pane names for one frame, never what the runtime is allowed to do.
+
+        Any failure reading the binding is treated as unbound: fail-closed
+        display matches what the runtime will do.
+        """
+        bound = self._cold_bound_team()
+        if not bound:
+            if team_name:
+                # A team on the checkpoint with nothing bound: a name-only hint,
+                # and its manager slot falls with it.
+                return "", "", effective_identity_for(active_agent="", team="")
+            return active_agent, "", effective_identity_for(active_agent=active_agent, team="")
+        manager = self._cold_team_manager(bound)
+        if bound.casefold() != team_name.casefold():
+            active_agent = manager
+        return (
+            active_agent,
+            bound,
+            effective_identity_for(
+                active_agent=active_agent, team=bound, manager=manager, team_in_force=True
+            ),
+        )
+
+    def _cold_bound_team(self) -> str:
+        """The team the warm restore would attach, or ``""`` (best-effort).
+
+        The attachment sidecar's team, but only when the session's completed
+        local binding names that same team — the two checks the warm restore
+        makes before any team is in force. Any failure reading either is
+        treated as unbound: this is display, and fail-closed display matches
+        what the runtime will do.
+        """
+        from local_operator.agents import AgentRegistry
+        from local_operator.network.move_team import (
+            has_local_authority,
+            legacy_local_team,
+            read_local_attachment,
+        )
+        from local_operator.teams import TeamRegistry
+
+        directory = self._config_dir / "sessions" / self._session_id
+        try:
+            stored = read_local_attachment(directory)
+            team = stored.team if stored is not None else ""
+            if not team:
+                return ""
+            if has_local_authority(directory, team):
+                return team
+            # A legacy-local session the warm restore will grandfather: same
+            # read-only predicate, nothing written from a cold preview. The
+            # warm path refuses on an incomplete registry first, so must this
+            # (it raises ProfileRegistryUnavailable, caught below as no team).
+            AgentRegistry(self._config_dir).require_complete_metadata()
+            resolved = legacy_local_team(directory, team, TeamRegistry(self._config_dir))
+            return team if resolved is not None else ""
+        except Exception:  # noqa: BLE001 — unreadable evidence is no authority
+            return ""
+
     async def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
         """Fold the durable turn-end checkpoint over synthesised cold state.
 
@@ -2447,6 +2579,13 @@ class AttachedSession:
         # (``frontend_state._inherited_identity_fixups``), so the cold frame
         # and the attached frame agree on what the fork has.
         inherited = durable.session_id != self._session_id
+        # Threaded: it reads the session's local binding and the machine's team
+        # registry (directory + brief files), and every other read this open
+        # makes is off the loop for the same reason (agent review round 1,
+        # MINOR-3). Best-effort either way.
+        cold_agent, cold_team, cold_identity = await asyncio.to_thread(
+            self._cold_attachment_slots, durable.active_agent, durable.active_team
+        )
         restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
@@ -2486,8 +2625,10 @@ class AttachedSession:
                 # bound rather than empty: restoring the list without it would
                 # re-create the lie it exists to prevent.
                 "goal_history_truncated": durable.goal_history_truncated,
-                "active_agent": durable.active_agent,
-                "active_team": durable.active_team,
+                # Gated with the identity below, and for the same reason: see
+                # ``_cold_attachment_slots``.
+                "active_agent": cold_agent,
+                "active_team": cold_team,
                 # Issue #2014: the identity triple is DERIVED here, never copied
                 # from the checkpoint. Every checkpoint written before this field
                 # existed has no key for it, so a copy would hand the frame the
@@ -2500,19 +2641,9 @@ class AttachedSession:
                 # The manager's name is not on the checkpoint either, so it is
                 # resolved best-effort from THIS machine's registry (the same one
                 # the warm session reads) and falls back to the team name exactly
-                # as the shared rule does. Carried unconditionally, like the two
-                # slots above: identity survives a fork, so ``inherited`` does not
-                # gate it.
-                "effective_identity": effective_identity_for(
-                    active_agent=durable.active_agent,
-                    team=durable.active_team,
-                    # Threaded: it reads the machine's team registry (directory
-                    # + brief files), and every other read this open makes is
-                    # off the loop for the same reason (agent review round 1,
-                    # MINOR-3). Best-effort either way.
-                    manager=await asyncio.to_thread(self._cold_team_manager, durable.active_team),
-                    team_in_force=bool(durable.active_team),
-                ),
+                # as the shared rule does. Carried like the two slots above:
+                # identity survives a fork, so ``inherited`` does not gate it.
+                "effective_identity": cold_identity,
                 # Spend and occupancy are the conversation's history, not this
                 # process's: a resumed session that already cost money must not
                 # open reading zero (the same argument as
@@ -3744,6 +3875,8 @@ class AttachedSession:
         input_path: str | None = None,
         audio: list[dict[str, str]] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
+        inline_ui: bool = False,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3769,6 +3902,13 @@ class AttachedSession:
         cannot resolve (contract amendment 2). Images keep their peer staging
         (``prepare_peer_images``); documents travel the local owner's frame
         and nothing else in v1.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``).
+        Like the carriage fields it is OMITTED when absent/``None`` or
+        ``steer``, so a legacy send stays byte-identical on the wire; unlike
+        them a ``queue``/``both`` against an owner without ``busy-delivery-v1``
+        is REFUSED here, before a frame is dialled — never forwarded without
+        its mode, which would be a silent downgrade to an urgent steer.
         """
         if files and self.runtime_locality == "another-machine":
             # The owner is a PEER: its attachment store is a different one, so a
@@ -3793,6 +3933,20 @@ class AttachedSession:
             from local_operator.session.errors import DocumentCarriageUnsupported
 
             raise DocumentCarriageUnsupported()
+        if (
+            delivery
+            and delivery != "steer"
+            and not getattr(client, "_busy_delivery_supported", False)
+        ):
+            # An owner from before the delivery modes would silently DROP the
+            # key (its dispatch only passes literal parameters), delivering an
+            # urgent steer the sender explicitly did not ask for. The capability
+            # string is the owner's own statement that it honours the mode
+            # (``busy-delivery-v1``); the dispatch's parameter probe is the
+            # second, owner-side guard. Refuse, never downgrade.
+            from local_operator.session.runtime.types import BUSY_DELIVERY_UNSUPPORTED
+
+            raise ValueError(BUSY_DELIVERY_UNSUPPORTED)
         fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
         if input_mode is not None:
             fields["input_mode"] = input_mode
@@ -3808,9 +3962,18 @@ class AttachedSession:
             # (``DocumentCarriageUnsupported`` in the dispatch's parameter
             # probe) rather than forwarding the text without its files.
             fields["files"] = files
+        if delivery and delivery != "steer":
+            fields["delivery"] = delivery
+        if inline_ui is True:
+            fields["inline_ui"] = True
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
-    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+    async def bind_runtime(
+        self,
+        *,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """Bind a viewer before an explicitly requested owner control operation.
 
         ``deadline`` (``time.monotonic()``) replaces the foreground envelope with
@@ -3818,6 +3981,8 @@ class AttachedSession:
         the remote pilot (``network/cli.py``, ``PILOT_BIND_TIMEOUT_S``), which has
         no "next keystroke rejoins it" and whose failure means the act was not
         delivered. Everyone else keeps the short foreground default.
+        ``wait_for_publication`` is a narrower opt-in for a cold send: after
+        engage, the caller may wait once for discovery inside that deadline.
         """
         if deadline is None:
             # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
@@ -3829,7 +3994,10 @@ class AttachedSession:
             # 43112570841). Only a caller with its own budget changes the shape.
             await self._ensure_bound()
             return
-        await self._ensure_bound(deadline=deadline)
+        if wait_for_publication is None:
+            await self._ensure_bound(deadline=deadline)
+        else:
+            await self._ensure_bound(deadline=deadline, wait_for_publication=wait_for_publication)
 
     async def update_desktop_watch(
         self, *, visible: bool, can_notify: bool, timeout: float | None = None
@@ -4951,7 +5119,11 @@ class AttachedSession:
             logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
     async def _ensure_bound(
-        self, *, foreground: bool = True, deadline: float | None = None
+        self,
+        *,
+        foreground: bool = True,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
     ) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
@@ -5022,8 +5194,14 @@ class AttachedSession:
                 # suites park this seam with a ``(*, foreground)`` double, and an
                 # unconditional ``deadline=None`` made every warm raise TypeError.
                 await self._bind_under_lock(foreground=foreground)
-            else:
+            elif wait_for_publication is None:
                 await self._bind_under_lock(foreground=foreground, deadline=deadline)
+            else:
+                await self._bind_under_lock(
+                    foreground=foreground,
+                    deadline=deadline,
+                    wait_for_publication=wait_for_publication,
+                )
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
@@ -5105,7 +5283,13 @@ class AttachedSession:
                 if not self._foreground_waiting:
                     self._foreground_arrived.clear()
 
-    async def _bind_under_lock(self, *, foreground: bool, deadline: float | None = None) -> None:
+    async def _bind_under_lock(
+        self,
+        *,
+        foreground: bool,
+        deadline: float | None = None,
+        wait_for_publication: _PublicationWaiter | None = None,
+    ) -> None:
         """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
 
         Split out so the waiter accounting around the acquire reads as one
@@ -5298,6 +5482,14 @@ class AttachedSession:
             # down turns on the difference between "no owner" and "an owner that
             # published no live record" (§3.4).
             record, owner = await asyncio.to_thread(self._owner.locate)
+            if wait_for_publication is not None and not self._disposed:
+                # Only the publication-waiting callers opt in (every remote
+                # pilot verb since 2026-11-25), only after a successful engage, and
+                # only once. This can read the published record; it must
+                # neither engage again nor attempt to deliver the pending act.
+                wait, wait_for_publication = wait_for_publication, None
+                if record is None:
+                    record = await wait(self._owner.locate, _effective_deadline())
             if self._disposed:
                 # Same rule as the guard at the top of the loop: never
                 # swallow a failure an earlier attempt already produced.
@@ -5962,6 +6154,7 @@ class AttachedSession:
             lambda _projection: None,
             on_disconnected,
             events=True,
+            inline_ui=True,
             on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
@@ -6333,8 +6526,9 @@ class AttachedSession:
             # substitute when the attach push frame or the ``frontend_sync``
             # reply exceeds ``server._MAX_LINE_BYTES``. Reading that as "update
             # the peer" sent the operator to a remedy that cannot exist: the
-            # peer is on the same build, and the only fix is arriving on the
-            # device that holds the conversation. ``reset`` is neither — a
+            # peer is on the same build. Exact display replay still requires
+            # the owning device, but a bounded journal peek is independent of
+            # this display bind. ``reset`` is neither — a
             # cursor that stopped resolving — so it is answered by the re-sync
             # verdict in its own arm below, never by size and never by version.
             #
@@ -6368,10 +6562,28 @@ class AttachedSession:
                 # actually has, because a viewer on another device cannot paper
                 # over either of them with a local replay.
                 if window is not None and window.status == "full_required":
-                    raise ConnectionError(
-                        "this session's newest history is too large to send here; "
-                        "open the conversation on the device that holds it"
+                    # The legacy envelope cannot distinguish page admission
+                    # from the socket fallback. Name the possible bounds, not
+                    # a made-up exact size, and give non-binding owner reads.
+                    peek = shlex.join(
+                        [
+                            "lop",
+                            "network",
+                            "sessions",
+                            "--peer",
+                            self._owner.placement.home_device,
+                            "--peek",
+                            window.conversation_id,
+                        ]
                     )
+                    message = render_resolved(
+                        _srp.display_too_large(
+                            bytes=f"{DISPLAY_HISTORY_BYTES:,}",
+                            messages=str(DISPLAY_HISTORY_MESSAGES),
+                        )
+                    )
+                    # i18n: ignore literal CLI commands appended to localized prose
+                    raise ConnectionError(f"{message}\n{peek} --head=20\n{peek} --digest")
                 if window is not None and window.status == "reset":
                     # A CURSOR THAT STOPPED RESOLVING, not an old peer. The
                     # capture raced a compaction or a prune (``history_window``
@@ -6413,6 +6625,7 @@ class AttachedSession:
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
+        _keep_inline_ui_overlay(rows, window.inline_ui)
         # THE OWNER'S ENTRY TIMES FOR THE ROWS IT JUST SHIPPED. Tracked beside
         # ``rows`` as the window and any older pages are prepended, so the map
         # covers exactly the loaded interval: a row the owner could not stamp is
@@ -6502,6 +6715,7 @@ class AttachedSession:
         if client is None:
             raise ConnectionError("history owner is disconnected")
         page = DisplayHistoryWindow.model_validate(await client.history_page(before, anchor))
+        _keep_inline_ui_overlay(page.messages, page.inline_ui)
         if page.status != "reset":
             self._validate_display_window(page, epoch, cursor)
         return page
@@ -8829,8 +9043,8 @@ class AttachedSession:
             # because every other writer of that flag is fed by the owner
             # whose socket just closed — so the spinner never stops and the
             # next message routes into the steer branch, is dropped on the
-            # floor, and is receipted as "sends when this step finishes" for a
-            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # floor, and is receipted as "steering — may stop a running tool"
+            # for a step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
             # on the prompt path, and this is what lets a message reach it.
             self._end_turn_locally()
             self._notify_stopped()
@@ -11428,9 +11642,9 @@ class AttachedSession:
             raise ConnectionError("owner connection lost")
         images_wire = [_image_to_wire(image) for image in (images or [])]
         command = (
-            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            ContinuationCommand(message_id, self._session_id, text, images_wire, inline_ui=True)
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         # `self.epoch` is the copy-free read of the same field; this is the
         # captured baseline the observer below compares each event against.
@@ -11608,9 +11822,10 @@ class AttachedSession:
                 session_id=self._session_id,
                 text=text,
                 images=images_wire,
+                inline_ui=True,
             )
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         return await client.send_command(command, streaming=self._streaming)
 
@@ -11631,13 +11846,18 @@ class AttachedSession:
             return
         self._history = list(messages)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steer_message(Message.user(text, images))
+    def steer(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        delivery: str | None = None,
+    ) -> None:
+        self.steer_message(Message.user(text, images), delivery=delivery)
 
-    def steer_message(self, message: Message) -> None:
-        asyncio.create_task(self._send_steer_when_ready(message))
+    def steer_message(self, message: Message, delivery: str | None = None) -> None:
+        asyncio.create_task(self._send_steer_when_ready(message, delivery=delivery))
 
-    async def _send_steer_when_ready(self, message: Message) -> None:
+    async def _send_steer_when_ready(self, message: Message, delivery: str | None = None) -> None:
         """Retain a queued steer across silent reattach/takeover.
 
         THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
@@ -11674,7 +11894,7 @@ class AttachedSession:
             return
         target = self._takeover_target
         if target is not None:
-            target.steer_message(message)
+            target.steer_message(message, delivery=delivery)
             return
         client = self._client
         if client is None or not client.connected:
@@ -11688,6 +11908,8 @@ class AttachedSession:
             command_id=message.id,
             session_id=self._session_id,
             text=message.text,
+            delivery=delivery or "",
+            inline_ui=True,
             images=[
                 _image_to_wire(block)
                 for block in message.content

@@ -7,6 +7,7 @@ must not turn the later cleanup or promotion into an arbitrary filesystem action
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -209,6 +210,101 @@ def test_promote_refuses_a_symlinked_staging_source(tmp_path: Path) -> None:
     assert outcome.ok is False
     assert not (root / "sessions" / "staged").exists()
     assert outside.is_dir()
+
+
+@pytest.mark.parametrize("alias", ["staging", "staging-parent", "backup", "attachment"])
+def test_recovery_refuses_uncontained_stage_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str
+) -> None:
+    root = tmp_path / "config"
+    session_id = "opaque-session"
+    victim = root / "sessions" / session_id
+    victim.mkdir(parents=True)
+    attachment = victim / "attachment.json"
+    attachment.write_text("untouched session attachment")
+    staging = sync.staging_dir(root, session_id)
+    if alias == "staging":
+        staging.parent.mkdir(parents=True)
+        staging.symlink_to(victim, target_is_directory=True)
+    elif alias == "staging-parent":
+        staging.parent.parent.mkdir(parents=True)
+        staging.parent.symlink_to(victim.parent, target_is_directory=True)
+    else:
+        staging.mkdir(parents=True)
+    (staging / "ready.json").write_text('{"content_digest":"recorded"}')
+    backup = staging / mobility._SKILL_PIN_ORIGINAL
+    if alias == "backup":
+        backup.symlink_to(attachment)
+    else:
+        backup.write_text("staged original attachment")
+    if alias == "attachment":
+        (staging / "attachment.json").symlink_to(attachment)
+
+    # Record filesystem mutation attempts without changing the fixture.
+    attempts: list[Path] = []
+
+    def block_mutation(path: Path, *_args: Any, **_kwargs: Any) -> None:
+        attempts.append(path)
+        raise OSError("test intercepted an unsafe filesystem mutation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", block_mutation)
+        patch.setattr(Path, "unlink", block_mutation)
+        result, refusal, _target = mobility._finish_from_tombstone(
+            _server(root), session_id, owner_device="source"
+        )
+
+    assert not attempts, f"recovery attempted a mutation through {alias}: {attempts}"
+    assert result is None and refusal is not None
+    assert refusal["code"] == "unsafe_staging"
+    assert "symlink" in refusal["message"]
+    assert attachment.read_text() == "untouched session attachment"
+    assert backup.exists()
+
+
+def test_recovery_leaves_failed_skill_pin_digest_untouched(tmp_path: Path) -> None:
+    root = tmp_path / "config"
+    session_id = "opaque-session"
+    staging = sync.staging_dir(root, session_id)
+    staging.mkdir(parents=True)
+    (staging / "ready.json").write_text('{"content_digest":"recorded"}')
+    backup = staging / mobility._SKILL_PIN_ORIGINAL
+    backup.write_text("staged original attachment")
+    attachment = staging / "attachment.json"
+    attachment.write_text("staged pinned attachment")
+
+    result, refusal, _target = mobility._finish_from_tombstone(
+        _server(root), session_id, owner_device="source"
+    )
+
+    assert result is None and refusal is not None
+    assert refusal["code"] == "digest_mismatch"
+    assert attachment.read_text() == "staged pinned attachment"
+    assert backup.read_text() == "staged original attachment"
+
+
+def test_staging_accepts_a_hard_linked_pin_sidecar(tmp_path: Path) -> None:
+    """The pin stores the attachment's original bytes as a HARD LINK.
+
+    ``_promote`` keeps the pre-pin attachment as ``os.link``'d
+    ``.skill-pin-original`` so the source's digest still matches while the
+    attachment is rewritten, which leaves the staged sidecars carrying
+    ``st_nlink 2``. A no-alias predicate that also refused multiply-linked
+    entries would refuse every pinned staged copy — the shape an interrupted
+    publish leaves behind — so this pins the boundary: aliases are refused,
+    a hard link to the copy's own inode is not.
+    """
+    root = tmp_path / "config"
+    session_id = "opaque-session"
+    staging = sync.staging_dir(root, session_id)
+    staging.mkdir(parents=True)
+    (staging / "ready.json").write_text('{"content_digest":"recorded"}')
+    attachment = staging / "attachment.json"
+    attachment.write_text("staged pinned attachment")
+    os.link(attachment, staging / mobility._SKILL_PIN_ORIGINAL)
+
+    assert mobility._staging_for_verification(root, session_id, staging) == staging.resolve()
+    assert attachment.stat().st_nlink == 2
 
 
 def test_legitimate_move_still_uses_the_contained_paths(

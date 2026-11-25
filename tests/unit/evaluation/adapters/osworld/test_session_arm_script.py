@@ -186,16 +186,18 @@ def _run_rig(
 def _outcome(
     completed: subprocess.CompletedProcess[str], expect_status: str = "completed"
 ) -> dict[str, Any]:
-    # ``run_episode`` exits ``EXIT_EPISODE`` (1) for any non-``completed``
-    # ending -- ``agent_stop`` included -- and still prints the outcome JSON,
-    # so the status is read from the payload and the code is checked against
-    # it (not against 0).
-    expected_rc = 0 if expect_status == "completed" else 1
-    assert completed.returncode == expected_rc, completed.stderr[-4000:]
+    # ``run_episode`` exits 0 only for a ``scored`` score on a
+    # ``completed``/``truncated``/``agent_stop`` outcome, and ``EXIT_EPISODE``
+    # (1) otherwise -- a scored ``failed``/``cancelled`` included; it always
+    # prints the outcome JSON, so the code is checked against the payload's own
+    # status and score.
     text = completed.stdout.strip()
     start = text.find("{")
-    assert start != -1, text[-2000:]
+    assert start != -1, (text[-2000:], completed.stderr[-4000:])
     outcome: dict[str, Any] = json.loads(text[start:])
+    scored = (outcome.get("score") or {}).get("status") == "scored"
+    clean = outcome.get("status") in {"completed", "truncated", "agent_stop"}
+    assert completed.returncode == (0 if scored and clean else 1), completed.stderr[-4000:]
     assert outcome["status"] == expect_status, outcome
     return outcome
 
@@ -242,6 +244,11 @@ def test_a_whole_episode_runs_offline_and_scores(
 
     kinds = _record_kinds(run_root)
     assert kinds.count("action_output_epoch") == 3
+    (budget,) = _record_payloads(run_root, "session_budget")
+    assert budget["provider_usd_cap_micros"] is None
+    assert budget["per_cycle_usd_cap_micros"] is None
+    assert budget["session_turn_wall_s"] is None
+    assert budget["decision_groups_limit"] >= outcome["steps"]
     # The request observer's ONE serialized flush (blueprint §2): the real
     # session tree's request finals land in the record with the two money
     # figures kept separate, even on this zero-cost rig.

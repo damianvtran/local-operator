@@ -382,7 +382,12 @@ def fork_session(
     # so a failure here discards the whole directory rather than leaving a fork
     # whose inherited ``attachment.json`` names a persona it cannot resolve.
     try:
+        from local_operator.network.move_team import inherit_fork_binding
+
         _copy_roles_tree(parent_dir, fork_dir)
+        # Commit the authority last. A hard interruption can leave attachment
+        # bytes behind, but restore refuses them without this local record.
+        inherit_fork_binding(parent_dir, fork_dir)
     except BaseException:
         # BaseException, not Exception: a cancelled or interrupted copy leaves
         # the same half-fork an I/O error does, and the discard cannot raise
@@ -786,6 +791,8 @@ def _rewrite_fork_goal_judge(fork_dir: Path) -> None:
     payload = read_goal_record(fork_dir)
     if payload is None:
         return
+    # Cloning is not authorization to run a second unattended goal chain.
+    payload["recover"] = False
     judge = payload.get("judge")
     payload["judge"] = {
         **(judge if isinstance(judge, dict) else {}),

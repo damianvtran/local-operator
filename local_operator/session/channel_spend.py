@@ -1798,7 +1798,14 @@ def combine(
     return payload
 
 
-def web_search_record(*, channel: str, provider: str, usd: float | None) -> ChannelSpendRecord:
+def web_search_record(
+    *,
+    channel: str,
+    provider: str,
+    usd: float | None,
+    server_billed: bool = False,
+    usage_record_id: str = "",
+) -> ChannelSpendRecord:
     """One search/read record from the search ledger's own estimate (design §4.1).
 
     ``estimated`` with the client table's OWN id in ``price_version`` — the
@@ -1806,7 +1813,29 @@ def web_search_record(*, channel: str, provider: str, usd: float | None) -> Chan
     an estimate and can be migrated to a server catalogue without a wire
     change. ``usd is None`` (an unpriced search) stays ``amount=None``, never
     0: an unpriced operation is not a free one.
+
+    ``server_billed`` is the one exception to "estimated": a search whose
+    SERVER sent the charge (a Radient search's ``cost`` object) is a bill, not
+    a client-table guess, so it is recorded ``billed``/``server_reported`` with
+    no client ``price_version`` and with the server's ``usage_record_id``, which
+    is the only handle that ties the row to Radient's own usage ledger (PR
+    #4553 review round 1, R1-1). The image/audio tools record their Radient
+    bills the same way (``image_billing_provenance``/``audio_billing_provenance``).
     """
+    if server_billed:
+        return ChannelSpendRecord(
+            record_id=new_record_id(channel),
+            ts_ms=now_ms(),
+            channel=channel,
+            provider=provider,
+            units=1,
+            unit="searches" if channel == "search" else "reads",
+            amount_micro=usd_to_micro(usd),
+            billing_basis=BASIS_BILLED,
+            cost_source=COST_SOURCE_SERVER,
+            status=STATUS_OK,
+            usage_record_id=usage_record_id,
+        )
     return ChannelSpendRecord(
         record_id=new_record_id(channel),
         ts_ms=now_ms(),
@@ -1822,17 +1851,34 @@ def web_search_record(*, channel: str, provider: str, usd: float | None) -> Chan
     )
 
 
-def emit_web_spend(callback: Any, *, channel: str, provider: str, usd: float | None) -> None:
+def emit_web_spend(
+    callback: Any,
+    *,
+    channel: str,
+    provider: str,
+    usd: float | None,
+    server_billed: bool = False,
+    usage_record_id: str = "",
+) -> None:
     """Build and hand over ONE search/read record, best-effort.
 
     Called by the two web tools with the callback off their ``ToolContext``;
     ``None`` is the documented "this host does not track channels" value and
     skips QUIETLY. Never raises: a lost spend row must not fail a search.
+    ``server_billed``/``usage_record_id`` pass through to ``web_search_record``.
     """
     if not callable(callback):
         return
     try:
-        callback(web_search_record(channel=channel, provider=provider, usd=usd))
+        callback(
+            web_search_record(
+                channel=channel,
+                provider=provider,
+                usd=usd,
+                server_billed=server_billed,
+                usage_record_id=usage_record_id,
+            )
+        )
     except Exception:  # noqa: BLE001 — a lost spend row is not a failed search
         logger.debug("web channel-spend emission failed", exc_info=True)
 

@@ -189,6 +189,10 @@ def test_every_state_word_has_its_own_ink() -> None:
     assert _SEARCH_STATE_TOKENS["excluded"] == "muted"
     assert _SEARCH_STATE_TOKENS["needs setup"] == "muted"
     assert _SEARCH_STATE_TOKENS["auto free"] == "muted"
+    # Out of credits is the Radient state the user must act on (PR #4553 design
+    # round 1, D5), and the listed Radient spends like the auto one (D2).
+    assert _SEARCH_STATE_TOKENS["radient refused"] == "warning"
+    assert _SEARCH_STATE_TOKENS["enabled (credits)"] == "warning"
 
 
 @pytest.mark.asyncio

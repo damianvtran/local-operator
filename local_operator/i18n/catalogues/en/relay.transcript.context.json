@@ -1,44 +1,217 @@
 {
-  "relay.transcript.turn.condensed": {"role": "collapsed turn bar fallback label", "tone": "Quiet, concise chrome.", "note": "Used only when the model supplies no more specific segment label."},
-  "relay.transcript.turn.took": {"role": "collapsed turn duration clause", "tone": "Compact factual summary.", "note": "{duration} is already formatted, for example 31s or 2m14s. Never claim a duration when absent."},
-  "relay.transcript.turn.actions": {"role": "turn and tool-group action count", "tone": "Compact factual summary.", "note": "{label} is the formatted count, including a trailing + when the loaded history is partial. Translate the complete plural message; do not print {count} separately."},
-  "relay.transcript.turn.completed": {"role": "screen-reader completion state", "tone": "Short state word.", "note": "Appended to a completed condensed bar's accessible name."},
-  "relay.transcript.fold.unit": {"role": "tool-fold count unit", "tone": "Compact factual summary.", "note": "One complete unit per kind. shell, python and {name} are runtime/tool names and stay untranslated. The other arm formats a raw tool name; preserve placeholders and plural/select syntax exactly."},
-  "relay.transcript.fold.shell": {"role": "shell command count unit", "tone": "Compact factual summary.", "note": "shell is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains shell in every arm."},
-  "relay.transcript.fold.python": {"role": "Python evaluation count unit", "tone": "Compact factual summary.", "note": "python is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains python in every arm."},
-  "relay.transcript.fold.more": {"role": "tool-fold overflow unit", "tone": "Compact factual summary.", "note": "Follows at most five count units and counts actions hidden by that display cap, not additional tool types."},
-  "relay.transcript.fold.failed_label": {"role": "collapsed group accessible failure state", "tone": "Plain factual warning.", "note": "Screen-reader text accompanying the failure glyph; it does not claim a count."},
-  "relay.transcript.fold.partial_label": {"role": "head-cut count accessible explanation", "tone": "Plain factual limitation.", "note": "Explains that N+ is a minimum because earlier history has not loaded."},
-  "relay.transcript.older.failed": {"role": "history paging error", "tone": "Brief, non-blaming error.", "note": "Shown beside the existing Try again action at the top of the transcript."},
-  "relay.transcript.older.load": {"role": "history seam button", "tone": "Plain imperative.", "note": "Tappable row between the conversation's opening message and its newest rows when earlier messages exist but are not shown. Count-free on purpose: the number of missing messages is not known. Same wording as the desktop's ui.chat.canonical.older_history.load."},
-  "relay.transcript.older.loading": {"role": "history seam loading state", "tone": "Brief progress statement.", "note": "Announced to screen readers (status role) while earlier messages are fetched; shown beside a small progress bar. Same wording as the desktop's ui.chat.canonical.older_history.loading."},
-  "relay.transcript.older.start": {"role": "history seam end state", "tone": "Quiet statement.", "note": "Shown above the first message once every earlier message has been loaded; not an action. Same wording as the desktop's ui.chat.canonical.older_history.conversation_start."},
-  "relay.transcript.label.steered": {"role": "condensed segment label", "tone": "Compact past-tense state.", "note": "The segment followed a steering message."},
-  "relay.transcript.label.wake": {"role": "condensed segment label", "tone": "Compact noun.", "note": "The segment followed a scheduled wake."},
-  "relay.transcript.label.peer": {"role": "condensed segment label", "tone": "Compact noun phrase.", "note": "The segment followed a peer message."},
-  "relay.transcript.label.job": {"role": "condensed segment label", "tone": "Compact noun phrase.", "note": "The segment followed a background job result."},
-  "relay.transcript.label.ask": {"role": "condensed segment label", "tone": "Compact noun.", "note": "The segment contains a settled operator question."},
-  "relay.transcript.label.messages": {"role": "mixed quiet-group label", "tone": "Compact plural noun.", "note": "Used when receipts from multiple families form one quiet group."},
-  "relay.transcript.composer.queued": {"role": "composer queued prompt count", "tone": "Compact factual status.", "note": "Restores the pre-redesign queued-prompt count; {count} is the number of prompts waiting, not tool calls."},
-  "relay.transcript.session.unread_refused": {"role": "unread-state operation refusal", "tone": "Calm, explicit recovery guidance.", "note": "Explains that unread state could not be read and that no messages were marked read. Used by both bulk and row-level mark operations."},
-  "relay.transcript.message.show_more": {"role": "message fold button, folded state", "tone": "Plain imperative.", "note": "Visible label of a small button under the person's own message when a condensed turn cuts it to three lines. Pressing it shows the whole message. Must stay short; it sits on a 32 px button."},
-  "relay.transcript.message.show_less": {"role": "message fold button, open state", "tone": "Plain imperative.", "note": "Same button once the message is open; pressing it folds the message back to three lines."},
-  "relay.transcript.message.show_more_label": {"role": "message fold button accessible name, folded", "tone": "Plain imperative.", "note": "Screen-reader name. The visible label (relay.transcript.message.show_more) must be recognisable as the start of it. 'your message' is the message the person sent."},
-  "relay.transcript.message.show_less_label": {"role": "message fold button accessible name, open", "tone": "Plain imperative.", "note": "Screen-reader name once open. The visible label (relay.transcript.message.show_less) must be recognisable as the start of it."},
-  "relay.transcript.bridge.provenance": {"role": "bridge card provenance frame label", "tone": "Neutral, factual warning.", "note": "Under an inbound Team Bridge card on the phone transcript. Heads the framed body of a message a teammate or another agent sent through Team Bridge. Must say the content comes from outside and is not trusted. Same meaning as tui.bridge_card.frame.untrusted; keep the middle dot separator."},
-  "relay.transcript.bridge.loading": {"role": "bridge card body loading state", "tone": "Quiet status.", "note": "Under an inbound Team Bridge card on the phone transcript. Shown while the phone reads the message body from the computer. Keep the ellipsis character."},
-  "relay.transcript.bridge.pending": {"role": "bridge card body state: delivery not finished", "tone": "Calm, factual.", "note": "Under an inbound Team Bridge card on the phone transcript. The message exists but has not finished reaching the user's agent yet. Not a moderation decision. Same meaning as tui.bridge_card.body.pending."},
-  "relay.transcript.bridge.held": {"role": "bridge card body state: held for review", "tone": "Factual, never accusatory.", "note": "Under an inbound Team Bridge card on the phone transcript. Moderation is holding the message for review, so its text is not shown. No reason is ever given. Same meaning as tui.bridge_card.body.held."},
-  "relay.transcript.bridge.held_transient": {"role": "bridge card body state: screening not run yet", "tone": "Calm, factual.", "note": "Under an inbound Team Bridge card on the phone transcript. Screening has not happened yet; nobody has decided anything. Must not read as a moderation decision. Same meaning as tui.bridge_card.body.held_transient."},
-  "relay.transcript.bridge.refused": {"role": "bridge card body state: refused", "tone": "Factual, never accusatory.", "note": "Under an inbound Team Bridge card on the phone transcript. Moderation refused the message; no reason or category is shown. Same meaning as tui.bridge_card.body.refused."},
-  "relay.transcript.bridge.not_admitted": {"role": "bridge card body state: never admitted", "tone": "Factual.", "note": "Under an inbound Team Bridge card on the phone transcript. The message was not delivered to this agent. Same meaning as tui.bridge_card.body.not_admitted."},
-  "relay.transcript.bridge.unavailable": {"role": "bridge card body fallback", "tone": "Factual, quiet.", "note": "Under an inbound Team Bridge card on the phone transcript. The body cannot be shown and there is no more specific reason. Same meaning as tui.bridge_card.body.unavailable."},
-  "relay.transcript.bridge.signed_out": {"role": "bridge card body state: signed out", "tone": "Helpful, direct.", "note": "Under an inbound Team Bridge card on the phone transcript. Radient is the product/account name and stays untranslated. Same meaning as tui.bridge_card.body.signed_out."},
-  "relay.transcript.bridge.other_account": {"role": "bridge card body state: other account", "tone": "Factual.", "note": "Under an inbound Team Bridge card on the phone transcript. The message arrived for a different Radient account than the one signed in now. Radient stays untranslated."},
-  "relay.transcript.bridge.not_member": {"role": "bridge card body state: left the conversation", "tone": "Factual.", "note": "Under an inbound Team Bridge card on the phone transcript. The user left or was removed from the conversation, so the body cannot be read."},
-  "relay.transcript.bridge.offline": {"role": "bridge card body state: hub unreachable", "tone": "Helpful, direct.", "note": "Under an inbound Team Bridge card in the phone web transcript. The computer could not reach the Radient service to read the body. The card has no close action: the retry is to leave the conversation and reopen it, which remounts the card and fetches the body again. Radient stays untranslated. Same situation as tui.bridge_card.body.offline, but the TUI's close-and-reopen action does not exist here."},
-  "relay.transcript.bridge.deleted": {"role": "bridge card body state: deleted", "tone": "Factual.", "note": "Under an inbound Team Bridge card on the phone transcript. The sender or the service deleted the message."},
-  "relay.transcript.bridge.more_messages": {"role": "bridge card overflow count", "tone": "Compact factual summary.", "note": "Under an inbound Team Bridge card on the phone transcript. One card can group many messages; at most 20 are listed and this counts the rest. Preserve plural syntax and # exactly. Same meaning as tui.bridge_card.body.more_messages."},
-  "relay.transcript.jump.latest": {"role": "jump-to-latest chip, full label", "tone": "Plain imperative, quiet chrome.", "note": "Floating chip at the bottom of the phone transcript while the reader is scrolled up AND new messages arrived after they left the bottom. Pressing it scrolls to the newest row and resumes following. The chip never moves the transcript by itself. The down arrow is drawn outside this string, so do not add one."},
-  "relay.transcript.jump.latest_short": {"role": "jump-to-latest chip, narrow label", "tone": "One-word label.", "note": "The same chip at 380 px and below, where the full sentence does not fit. It must read as a natural shortening of relay.transcript.jump.latest, because the full string is still the accessible name."}
+  "relay.transcript.turn.condensed": {
+    "role": "collapsed turn bar fallback label",
+    "tone": "Quiet, concise chrome.",
+    "note": "Used only when the model supplies no more specific segment label."
+  },
+  "relay.transcript.turn.took": {
+    "role": "collapsed turn duration clause",
+    "tone": "Compact factual summary.",
+    "note": "{duration} is already formatted, for example 31s or 2m14s. Never claim a duration when absent."
+  },
+  "relay.transcript.turn.actions": {
+    "role": "turn and tool-group action count",
+    "tone": "Compact factual summary.",
+    "note": "{label} is the formatted count, including a trailing + when the loaded history is partial. Translate the complete plural message; do not print {count} separately."
+  },
+  "relay.transcript.turn.completed": {
+    "role": "screen-reader completion state",
+    "tone": "Short state word.",
+    "note": "Appended to a completed condensed bar's accessible name."
+  },
+  "relay.transcript.fold.unit": {
+    "role": "tool-fold count unit",
+    "tone": "Compact factual summary.",
+    "note": "One complete unit per kind. shell, python and {name} are runtime/tool names and stay untranslated. The other arm formats a raw tool name; preserve placeholders and plural/select syntax exactly."
+  },
+  "relay.transcript.fold.shell": {
+    "role": "shell command count unit",
+    "tone": "Compact factual summary.",
+    "note": "shell is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains shell in every arm."
+  },
+  "relay.transcript.fold.python": {
+    "role": "Python evaluation count unit",
+    "tone": "Compact factual summary.",
+    "note": "python is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains python in every arm."
+  },
+  "relay.transcript.fold.more": {
+    "role": "tool-fold overflow unit",
+    "tone": "Compact factual summary.",
+    "note": "Follows at most five count units and counts actions hidden by that display cap, not additional tool types."
+  },
+  "relay.transcript.fold.failed_label": {
+    "role": "collapsed group accessible failure state",
+    "tone": "Plain factual warning.",
+    "note": "Screen-reader text accompanying the failure glyph; it does not claim a count."
+  },
+  "relay.transcript.fold.partial_label": {
+    "role": "head-cut count accessible explanation",
+    "tone": "Plain factual limitation.",
+    "note": "Explains that N+ is a minimum because earlier history has not loaded."
+  },
+  "relay.transcript.older.failed": {
+    "role": "history paging error",
+    "tone": "Brief, non-blaming error.",
+    "note": "Shown beside the existing Try again action at the top of the transcript."
+  },
+  "relay.transcript.older.load": {
+    "role": "history seam button",
+    "tone": "Plain imperative.",
+    "note": "Tappable row between the conversation's opening message and its newest rows when earlier messages exist but are not shown. Count-free on purpose: the number of missing messages is not known. Same wording as the desktop's ui.chat.canonical.older_history.load."
+  },
+  "relay.transcript.older.loading": {
+    "role": "history seam loading state",
+    "tone": "Brief progress statement.",
+    "note": "Announced to screen readers (status role) while earlier messages are fetched; shown beside a small progress bar. Same wording as the desktop's ui.chat.canonical.older_history.loading."
+  },
+  "relay.transcript.older.start": {
+    "role": "history seam end state",
+    "tone": "Quiet statement.",
+    "note": "Shown above the first message once every earlier message has been loaded; not an action. Same wording as the desktop's ui.chat.canonical.older_history.conversation_start."
+  },
+  "relay.transcript.label.steered": {
+    "role": "condensed segment label",
+    "tone": "Compact past-tense state.",
+    "note": "The segment followed a steering message."
+  },
+  "relay.transcript.label.wake": {
+    "role": "condensed segment label",
+    "tone": "Compact noun.",
+    "note": "The segment followed a scheduled wake."
+  },
+  "relay.transcript.label.peer": {
+    "role": "condensed segment label",
+    "tone": "Compact noun phrase.",
+    "note": "The segment followed a peer message."
+  },
+  "relay.transcript.label.job": {
+    "role": "condensed segment label",
+    "tone": "Compact noun phrase.",
+    "note": "The segment followed a background job result."
+  },
+  "relay.transcript.label.ask": {
+    "role": "condensed segment label",
+    "tone": "Compact noun.",
+    "note": "The segment contains a settled operator question."
+  },
+  "relay.transcript.label.messages": {
+    "role": "mixed quiet-group label",
+    "tone": "Compact plural noun.",
+    "note": "Used when receipts from multiple families form one quiet group."
+  },
+  "relay.transcript.composer.queued": {
+    "role": "composer queued prompt count",
+    "tone": "Compact factual status.",
+    "note": "Restores the pre-redesign queued-prompt count; {count} is the number of prompts waiting, not tool calls."
+  },
+  "relay.transcript.session.unread_refused": {
+    "role": "unread-state operation refusal",
+    "tone": "Calm, explicit recovery guidance.",
+    "note": "Explains that unread state could not be read and that no messages were marked read. Used by both bulk and row-level mark operations."
+  },
+  "relay.transcript.message.show_more": {
+    "role": "message fold button, folded state",
+    "tone": "Plain imperative.",
+    "note": "Visible label of a small button under the person's own message when a condensed turn cuts it to three lines. Pressing it shows the whole message. Must stay short; it sits on a 32 px button."
+  },
+  "relay.transcript.message.show_less": {
+    "role": "message fold button, open state",
+    "tone": "Plain imperative.",
+    "note": "Same button once the message is open; pressing it folds the message back to three lines."
+  },
+  "relay.transcript.message.show_more_label": {
+    "role": "message fold button accessible name, folded",
+    "tone": "Plain imperative.",
+    "note": "Screen-reader name. The visible label (relay.transcript.message.show_more) must be recognisable as the start of it. 'your message' is the message the person sent."
+  },
+  "relay.transcript.message.show_less_label": {
+    "role": "message fold button accessible name, open",
+    "tone": "Plain imperative.",
+    "note": "Screen-reader name once open. The visible label (relay.transcript.message.show_less) must be recognisable as the start of it."
+  },
+  "relay.transcript.bridge.provenance": {
+    "role": "bridge card provenance frame label",
+    "tone": "Neutral, factual warning.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Heads the framed body of a message a teammate or another agent sent through Team Bridge. Must say the content comes from outside and is not trusted. Same meaning as tui.bridge_card.frame.untrusted; keep the middle dot separator."
+  },
+  "relay.transcript.bridge.loading": {
+    "role": "bridge card body loading state",
+    "tone": "Quiet status.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Shown while the phone reads the message body from the computer. Keep the ellipsis character."
+  },
+  "relay.transcript.bridge.pending": {
+    "role": "bridge card body state: delivery not finished",
+    "tone": "Calm, factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The message exists but has not finished reaching the user's agent yet. Not a moderation decision. Same meaning as tui.bridge_card.body.pending."
+  },
+  "relay.transcript.bridge.held": {
+    "role": "bridge card body state: held for review",
+    "tone": "Factual, never accusatory.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Moderation is holding the message for review (it can still be released or refused), so its text is not shown. No reason is ever given. Same meaning as tui.bridge_card.body.held."
+  },
+  "relay.transcript.bridge.held_transient": {
+    "role": "bridge card body state: screening not run yet",
+    "tone": "Calm, factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Screening has not happened yet; nobody has decided anything. Must not read as a moderation decision. Same meaning as tui.bridge_card.body.held_transient."
+  },
+  "relay.transcript.bridge.refused": {
+    "role": "bridge card body state: refused",
+    "tone": "Factual, never accusatory.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Moderation refused the message; no reason or category is shown. Same meaning as tui.bridge_card.body.refused."
+  },
+  "relay.transcript.bridge.not_admitted": {
+    "role": "bridge card body state: never admitted",
+    "tone": "Factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The message was not delivered to this agent. Same meaning as tui.bridge_card.body.not_admitted."
+  },
+  "relay.transcript.bridge.unavailable": {
+    "role": "bridge card body fallback",
+    "tone": "Factual, quiet.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The body cannot be shown and there is no more specific reason. Same meaning as tui.bridge_card.body.unavailable."
+  },
+  "relay.transcript.bridge.signed_out": {
+    "role": "bridge card body state: signed out",
+    "tone": "Helpful, direct.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. Radient is the product/account name and stays untranslated. Same meaning as tui.bridge_card.body.signed_out."
+  },
+  "relay.transcript.bridge.other_account": {
+    "role": "bridge card body state: other account",
+    "tone": "Factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The message arrived for a different Radient account than the one signed in now. Radient stays untranslated."
+  },
+  "relay.transcript.bridge.not_member": {
+    "role": "bridge card body state: left the conversation",
+    "tone": "Factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The user left or was removed from the conversation, so the body cannot be read."
+  },
+  "relay.transcript.bridge.offline": {
+    "role": "bridge card body state: hub unreachable",
+    "tone": "Helpful, direct.",
+    "note": "Under an inbound Team Bridge card in the phone web transcript. The computer could not reach the Radient service to read the body. The card retries by itself on a timer while it is on screen, so this says it is retrying; no user action is needed. Radient stays untranslated. Same meaning as tui.bridge_card.body.offline."
+  },
+  "relay.transcript.bridge.deleted": {
+    "role": "bridge card body state: deleted",
+    "tone": "Factual.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. The sender or the service deleted the message."
+  },
+  "relay.transcript.bridge.more_messages": {
+    "role": "bridge card overflow count",
+    "tone": "Compact factual summary.",
+    "note": "Under an inbound Team Bridge card on the phone transcript. One card can group many messages; at most 20 are listed and this counts the rest. Preserve plural syntax and # exactly. Same meaning as tui.bridge_card.body.more_messages."
+  },
+  "relay.transcript.jump.latest": {
+    "role": "jump-to-latest chip, full label",
+    "tone": "Plain imperative, quiet chrome.",
+    "note": "Floating chip at the bottom of the phone transcript while the reader is scrolled up AND new messages arrived after they left the bottom. Pressing it scrolls to the newest row and resumes following. The chip never moves the transcript by itself. The down arrow is drawn outside this string, so do not add one."
+  },
+  "relay.transcript.jump.latest_short": {
+    "role": "jump-to-latest chip, narrow label",
+    "tone": "One-word label.",
+    "note": "The same chip at 380 px and below, where the full sentence does not fit. It must read as a natural shortening of relay.transcript.jump.latest, because the full string is still the accessible name."
+  },
+  "relay.transcript.bridge.thread_reply": {
+    "role": "bridge card context: thread marker",
+    "tone": "Plain, terse.",
+    "note": "Inside an inbound Team Bridge card on the phone transcript, on the line under the untrusted-content caution: the message is a reply inside a thread, not a top-level post. Joined with ' · ' to the time it arrived (e.g. 'Thread reply · 14:56'). Same meaning as tui.bridge_card.context.thread_reply."
+  }
 }

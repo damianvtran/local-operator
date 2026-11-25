@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer} : affichage de {shown, number} sur {total, number} résultats correspondants — page suivante : {command}} other {{peer} : affichage de {shown, number} sur {total, number} — page suivante : {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer} : son build est antérieur à la recherche à distance, la recherche n’y a donc pas été exécutée — aucune ligne n’en provient} other {{peer} : son build est antérieur à la pagination à distance, cette liste n’est donc pas complète}}",
+  "cli.network_sessions.relay_unpaged": "le relais actif sur cet appareil est antérieur à la pagination et à la recherche à distance, donc aucun appareil n’a renvoyé de page ni de résultats de recherche — redémarrez le relais pour paginer ou lancer une recherche"
+}

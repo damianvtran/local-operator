@@ -1175,12 +1175,12 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
     refusal = _sessions_validation_error(SessionsParams(op="stop", prompt="p"))
     assert refusal is not None
     assert refusal.startswith("`prompt` applies to spawn/resume only. ")
-    assert "`stop` takes: session|target|pid, peer." in refusal
+    assert "`stop` takes: session|target|pid, peer, force." in refusal
     assert refusal.endswith("Call op='help' for the full per-op reference.")
     refusal = _sessions_validation_error(SessionsParams(op="list", session="a"))
     assert refusal is not None
     assert refusal.startswith("`session` does not apply to op='list' — it takes no address. ")
-    assert "`list` takes: peer, scope, include_stored, limit, query." in refusal
+    assert "`list` takes: peer, scope, include_stored, limit, query, cursor." in refusal
     refusal = _sessions_validation_error(SessionsParams(op="spawn", prompt="go", target="x"))
     assert refusal is not None and "creates a new session" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="info"))
@@ -1254,7 +1254,21 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
     # measured with this test's own ruler, pinned at 1327 (one-token headroom).
     # The rest of park's contract lives in op='help', not the schema.
-    assert count_text_tokens(params) <= 1327
+    # RE-MEASURED for `stop`'s `force` (runtime memory-runaway incident,
+    # 2026-11-24): one boolean whose description was trimmed to its safety
+    # clause ("operator-safety escalation (signals; cuts work)") — 1364 measured
+    # with this test's own ruler, pinned at 1365 (one-token headroom). When it
+    # is legitimate, and what the ladder does, live in op='help' and in every
+    # refusal that names it.
+    # RE-MEASURED for remote list paging (``fix/remote-session-list-paging``,
+    # 2026-11-25): one optional ``cursor`` string ("list: footer's next-page
+    # token.") — 1354 on origin/main, 1398 with it (+44: name, title,
+    # anyOf/null/default plumbing and the one clause). Round-1 remediation (CI
+    # ``context-budget`` red by 32) tightened other ``sessions`` clauses with no
+    # change of meaning: 1379 measured with this test's own ruler, pinned at
+    # 1380, one-token headroom. What a cursor is and when it is refused lives
+    # in op='help' and in the footer that mints it.
+    assert count_text_tokens(params) <= 1380
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -2244,6 +2258,10 @@ async def test_a_still_starting_resume_reports_starting_not_reopened(
     assert result.text.startswith("reopen requested")
     assert "still starting" in result.text
     assert "`lop exec --status feedface0001`" in result.text
+    # The owner's acceptance: a resume that did not start says NOT STARTED,
+    # and names no model, because no run exists yet to have used one.
+    assert "NOT STARTED" in result.text
+    assert " model" not in result.text
     assert (result.details or {}).get("readiness") == "starting"
 
 
@@ -2707,7 +2725,178 @@ async def test_list_scope_remote_and_peer_narrow_the_fetch(
     assert not result.is_error, result.text
     assert "local-stored" not in result.text
     assert "shared-one" in result.text
-    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER, "--limit=10"], 30.0)]
+
+
+def _paged_doc(
+    rows: int, *, total: int, cursor: str | None, paging: str = "paged", **overrides: Any
+) -> dict[str, Any]:
+    """The CLI's ``--json`` answer to a PAGED listing (``relay_paging`` set)."""
+    block: dict[str, Any] = {
+        "device_id": "d_b",
+        "name": PEER,
+        "reachable": True,
+        "reason": "",
+        "paging": paging,
+    }
+    if paging == "paged":
+        block.update(next_cursor=cursor, total=total)
+    doc: dict[str, Any] = {
+        "ok": True,
+        "sessions": [
+            {
+                "session_id": f"r{index:011x}",
+                "conversation_name": f"remote chat {index}",
+                "state": "stored",
+                "locality": "remote",
+                "peer": block,
+            }
+            for index in range(rows)
+        ],
+        "peers": {"d_b": block},
+        "relay_paging": True,
+    }
+    doc.update(overrides)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_a_remote_list_footer_names_the_next_page_and_the_cursor_reaches_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator report 2026-11-25: 417 rows on a node, at most 100 reachable.
+
+    The footer names the exact ``peer`` + ``cursor``; that cursor rides the
+    next call to the owner; ``total`` is the owner's whole count."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _paged_doc(100, total=417, cursor="tok-1"), calls=calls)
+    first = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "limit": 100}, None, None, _context(root)
+    )
+    assert not first.is_error, first.text
+    assert calls[-1][0] == ["network", "sessions", "--json", "--peer", PEER, "--limit=100"]
+    assert f"({PEER}: 100 of 417 shown — next page: peer='{PEER}' cursor='tok-1')" in first.text
+    assert "raise `limit`" not in first.text
+    details = first.details or {}
+    assert details["count"] == 100 and details["total"] == 417
+    assert details["next_cursors"] == {"d_b": "tok-1"}
+
+    _fake_mesh(monkeypatch, _paged_doc(17, total=417, cursor=None), calls=calls)
+    last = await execute_sessions(
+        "t",
+        {"op": "list", "peer": PEER, "limit": 100, "cursor": "tok-1"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not last.is_error, last.text
+    assert calls[-1][0] == [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        PEER,
+        "--limit=100",
+        "--cursor=tok-1",
+    ]
+    assert "next page" not in last.text and "next_cursors" not in (last.details or {})
+
+
+def test_a_cursor_without_a_peer_is_refused_naming_peer() -> None:
+    refusal = _sessions_validation_error(SessionsParams(op="list", cursor="tok"))
+    assert refusal is not None and "pass the `peer`" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="list", scope="remote", cursor="t"))
+    assert refusal is not None and "pass the `peer`" in refusal
+    assert _sessions_validation_error(SessionsParams(op="list", peer="p", cursor="t")) is None
+    # ``cursor`` belongs to list alone: any other op refuses it with THAT
+    # sentence, not the spawn default it used to fall through to (Q2).
+    stray = _sessions_validation_error(SessionsParams(op="info", session="s", cursor="t"))
+    assert stray is not None and "`cursor` applies to op='list' only." in stray
+    assert "op='spawn'" not in stray
+
+
+@pytest.mark.asyncio
+async def test_a_remote_query_is_forwarded_to_the_owner_not_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``query`` beside ``scope='remote'``/``peer`` runs on the owner's store."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _paged_doc(2, total=2, cursor=None), calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "scope": "remote", "query": "chat"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert calls[-1][0] == [
+        "network",
+        "sessions",
+        "--json",
+        "--all-peers",
+        "--limit=20",
+        "--query=chat",
+    ]
+    assert "remote chat 0" in result.text and "remote chat 1" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_scope_all_query_adds_each_peers_own_search_local_winning(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _session(root, "aaaa11112222", "the shard report")
+    doc = _paged_doc(2, total=2, cursor=None)
+    # The same id on the peer: the local match wins, as on the plain listing.
+    doc["sessions"][0]["session_id"] = "aaaa11112222"
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, doc, calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert calls[-1][0][-1] == "--query=shard"
+    ids = [row["session_id"] for row in (result.details or {})["rows"]]
+    assert ids == ["aaaa11112222", "r00000000001"]
+    assert "the shard report" in result.text and f"on {PEER}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_scope_local_query_asks_no_peer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _session(root, "aaaa11112222", "the shard report")
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _paged_doc(1, total=1, cursor=None), calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "scope": "local", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error and calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asked", [{"query": "chat"}, {"cursor": "tok"}, {}])
+async def test_an_older_owner_is_never_presented_as_complete(
+    root: Path, monkeypatch: pytest.MonkeyPatch, asked: dict[str, Any]
+) -> None:
+    rows = 0 if asked else 3
+    _fake_mesh(monkeypatch, _paged_doc(rows, total=0, cursor=None, paging="unsupported"))
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, **asked}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert f"{PEER}: its build predates remote paging/search" in result.text
+    assert ("no rows from it" in result.text) == bool(asked)
+
+
+@pytest.mark.asyncio
+async def test_an_older_local_relay_says_nothing_was_paged(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_mesh(
+        monkeypatch, _paged_doc(0, total=0, cursor=None, paging="unsupported", relay_paging=False)
+    )
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "cursor": "tok"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "this device's relay predates remote paging/search" in result.text
 
 
 @pytest.mark.asyncio
@@ -2735,7 +2924,7 @@ async def test_list_explicit_peer_never_reads_local_rows(
     assert [row["session_id"] for row in (result.details or {})["rows"]] == ["aaaa11112222"]
     assert (result.details or {})["total"] == 2
     assert "shared-one" in result.text and "second" not in result.text
-    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER, "--limit=1"], 30.0)]
 
 
 @pytest.mark.asyncio
@@ -2779,7 +2968,7 @@ async def test_list_explicit_peer_failure_never_falls_back_local(
     tool = build_sessions_tool(context)
     assert tool is not None
     result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None, context)
-    assert calls == [["network", "sessions", "--json", "--peer", PEER]]
+    assert calls == [["network", "sessions", "--json", "--peer", PEER, "--limit=1"]]
     assert not (result.details or {}).get("rows")
     if failure == "unreachable":
         assert not result.is_error
@@ -3099,8 +3288,8 @@ def test_mesh_field_refusals_name_the_local_route() -> None:
     ) == _sessions_validation_error(SessionsParams(op="peek", session="s", head=51))
     refusal = _sessions_validation_error(SessionsParams(op="list", peer="p", scope="local"))
     assert refusal is not None and "drop one" in refusal
-    refusal = _sessions_validation_error(SessionsParams(op="list", scope="remote", query="q"))
-    assert refusal is not None and "list with `scope='local'`" in refusal
+    # A remote ``query`` is forwarded to the owner now (no longer refused).
+    assert _sessions_validation_error(SessionsParams(op="list", scope="remote", query="q")) is None
     refusal = _sessions_validation_error(SessionsParams(op="resume", peer="p", all=True))
     assert refusal is not None and "set form" in refusal
     refusal = _sessions_validation_error(
@@ -3728,6 +3917,62 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     assert "waiting up to" in lines[1]
 
 
+@pytest.mark.asyncio
+async def test_a_forced_stop_receipt_does_not_reprint_the_pre_signal_wait(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1 on #4519, U7: the tool result is rendered once, AFTER the
+    outcome, so the SIGTERM rung's "waiting up to … before SIGKILL" announcement
+    under "killed" read as still pending. A forced receipt drops it and keeps the
+    ladder's other explanation lines.
+
+    Negative control: ``test_stop_puts_the_outcome_above_the_wait_lines`` — the
+    plain stop keeps its announcement lines unchanged.
+    """
+
+    class _Outcome:
+        pid = 4243
+        session_id = "aaaa00000002"
+        name = "runaway"
+        method = "sigkill"
+        reason = ""
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = 'killed "runaway"'
+
+    class _Record:
+        pid = 4243
+        session_id = "aaaa00000002"
+        conversation_name = "runaway"
+
+    seen: dict[str, Any] = {}
+
+    async def _stop(target: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        kwargs["on_wait"]('"runaway" (pid 4243) is leaving, but stalled; trying the ordinary stop')
+        kwargs["on_wait"]('waiting up to 2.5 min for "runaway" (pid 4243) to drain before SIGKILL')
+        return _Outcome()
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    monkeypatch.setattr(control, "stop_session", _stop)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000002", "force": True}, None, None, _context(root)
+    )
+    assert seen["force"] is True and seen["graceful_only"] is False
+    lines = result.text.splitlines()
+    assert lines[0] == 'killed "runaway"'
+    assert not any(line.startswith("waiting up to") for line in lines), lines
+    assert any("trying the ordinary stop" in line for line in lines), lines
+
+
 # ---------------------------------------------------------------------------
 # park — free a session's memory, keep its wakes and monitors armed
 # ---------------------------------------------------------------------------
@@ -3988,9 +4233,7 @@ def _owner_mesh(monkeypatch: pytest.MonkeyPatch, owner_root: Path) -> list[list[
 async def test_remote_peek_windows_match_the_owners_local_peek(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance: with `peer`, head/query/regex/digest/around_id/before_id/steps
-    return the same text as the equivalent LOCAL call on the owner — and the
-    session is STORED (no live record anywhere), which the v1 tail refused."""
+    """Stored remote journals keep window parity and report peer-only search/fold scope."""
     _, ids, _ = _big_journal(
         root, "abab12121212", rows=120, pad=40, custom_every=7, needle="needle-x", needle_row=30
     )
@@ -4011,14 +4254,23 @@ async def test_remote_peek_windows_match_the_owners_local_peek(
         remote = await _peek(root, {"op": "peek", "session": "abab12121212", "peer": PEER, **case})
         assert not local.is_error, (case, local.text)
         assert not remote.is_error, (case, remote.text)
-        assert remote.text == local.text, case
-        # ``bridge_taint`` is the one deliberate difference (#3796, S-60): the
-        # local peek judges the journal's own Team Bridge latch, while a mesh
-        # peer reports none, so any step it returns latches fail closed.
-        skip = {"peer", "bridge_taint"}
-        local_details = {k: v for k, v in local.details.items() if k not in skip}
-        remote_details = {k: v for k, v in remote.details.items() if k not in skip}
-        assert remote_details == local_details, case
+        if case.get("query"):
+            found = case["query"] != "no-such-needle"
+            assert remote.details["match_count"] == int(found)
+            assert remote.details["match_count_complete"] is True
+            assert f"match count: {int(found)} (whole transcript)" in remote.text
+            assert remote.details.get("match_id") == local.details.get("match_id")
+        elif case.get("digest"):
+            assert "digest fold (not the full transcript)" in remote.text
+            assert remote.details["steps_seen"] == local.details["steps_seen"]
+        else:
+            assert remote.text == local.text, case
+            skip = {"peer", "bridge_taint"}
+            local_details = {k: v for k, v in local.details.items() if k not in skip}
+            remote_details = {k: v for k, v in remote.details.items() if k not in skip}
+            assert remote_details == local_details, case
+        # The owner doesn't report its Team Bridge latch on the mesh, so
+        # any step it returns still latches fail closed (#3796, S-60).
         assert remote.details["peer"] == PEER
         assert "bridge_taint" not in local.details, case
         shown = remote.details.get("steps_shown") or remote.details.get("steps_seen")
@@ -4715,3 +4967,189 @@ async def test_the_hint_agrees_in_number_when_both_fields_name_the_team(
     )
     assert not result.is_error, result.text
     assert "the name and prompt name the team lopdev" in result.text, result.text
+
+
+def _stop_fixture(monkeypatch: pytest.MonkeyPatch, method: str, reason: str = "") -> AsyncMock:
+    """A stop whose ladder answers ``method``/``reason``; returns the ladder mock."""
+
+    class _Outcome:
+        pid = 4242
+        session_id = "aaaa00000001"
+        name = "stoppable"
+        wakes_dormant = 0
+        monitors_dormant = 0
+        line = "the ladder's own English line"
+
+        def __init__(self) -> None:
+            self.method = method
+            self.reason = reason
+
+    class _Record:
+        pid = 4242
+        session_id = "aaaa00000001"
+        conversation_name = "stoppable"
+
+    monkeypatch.setattr(
+        builtin,
+        "_sessions_target",
+        AsyncMock(
+            return_value=builtin._SessionsTarget(
+                record=_Record(), session_id="", candidates=[], candidates_stored=False, error=""
+            )
+        ),
+    )
+    ladder = AsyncMock(return_value=_Outcome())
+    monkeypatch.setattr(control, "stop_session", ladder)
+    return ladder
+
+
+@pytest.mark.asyncio
+async def test_stop_force_runs_the_cli_escalation_ladder(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``force=true`` is ``lop stop --force``: signals allowed, not idle-only.
+
+    2026-11-24: the idle-only stop refused a runaway runtime ("working right
+    now") with no way forward. Negative control: the same call without ``force``
+    keeps the graceful-only promise.
+    """
+    ladder = _stop_fixture(monkeypatch, "sigkill")
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001", "force": True}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert ladder.await_args is not None
+    kwargs = ladder.await_args.kwargs
+    assert (kwargs["force"], kwargs["graceful_only"]) == (True, False)
+    assert kwargs["_command"] == "sessions tool --force"
+    assert (result.details or {})["force"] is True
+
+    ladder = _stop_fixture(monkeypatch, "socket")
+    await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert ladder.await_args is not None
+    kwargs = ladder.await_args.kwargs
+    assert (kwargs["force"], kwargs["graceful_only"]) == (False, True)
+    assert kwargs["_command"] == "sessions tool"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "reason"),
+    [("refused", "busy"), ("refused", "unanswered"), ("busy", ""), ("draining", "")],
+)
+async def test_a_stop_refusal_names_the_escalation(
+    root: Path, monkeypatch: pytest.MonkeyPatch, method: str, reason: str
+) -> None:
+    """A refusal is never a dead end: it names ``force=true`` and when it is legitimate.
+
+    Negative control: a SUCCESSFUL stop carries no such line, and a forced call that
+    is still refused (identity unproven) does not offer the flag it already used.
+    """
+    _stop_fixture(monkeypatch, method, reason)
+    result = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "force=true" in result.text
+    assert "memory runaway" in result.text
+
+    _stop_fixture(monkeypatch, "socket")
+    ok = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001"}, None, None, _context(root)
+    )
+    assert "force=true" not in ok.text
+
+    _stop_fixture(monkeypatch, "refused", "")
+    forced = await execute_sessions(
+        "t", {"op": "stop", "session": "aaaa00000001", "force": True}, None, None, _context(root)
+    )
+    assert forced.is_error
+    assert "force=true" not in forced.text
+
+
+def test_force_is_a_stop_only_input_and_is_documented() -> None:
+    """The schema and the ``help`` reference expose ``force`` on ``stop`` only."""
+    assert "force" in builtin._SESSIONS_OP_FIELDS["stop"]
+    assert all(
+        "force" not in fields for op, fields in builtin._SESSIONS_OP_FIELDS.items() if op != "stop"
+    )
+    reference = builtin.render_sessions_reference()
+    stop_block = reference.split("`stop` —", 1)[1].split("\n`", 1)[0]
+    assert "force (" in stop_block and "force=true" in stop_block
+
+
+def test_the_forced_stop_approval_does_not_promise_idle_only() -> None:
+    plain = _describe_sessions_approval({"op": "stop", "session": "aaaa00000001"}, "~/x")
+    forced = _describe_sessions_approval(
+        {"op": "stop", "session": "aaaa00000001", "force": True}, "~/x"
+    )
+    assert "never signals" in plain
+    assert "never signals" not in forced
+    assert "SIGKILL" in forced and "aaaa00000001" in forced
+
+
+@pytest.mark.asyncio
+async def test_an_owner_refusal_is_the_tool_error_not_unreachable(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1 on #4592: an owner that ANSWERED with a refusal (bad
+    cursor) is the tool's error with the owner's sentence when ``peer`` was
+    named — never ``<peer>: unreachable`` beside zero rows."""
+    doc = _paged_doc(0, total=0, cursor=None)
+    block = doc["peers"]["d_b"]
+    block.update(refused="that cursor is not one this listing minted", refused_code="bad_cursor")
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "cursor": "bad!!"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "that cursor is not one this listing minted" in result.text
+    assert "unreachable" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_over_long_remote_query_is_refused_before_the_hop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q1: the owner's 512-char bound is checked tool-side first."""
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _paged_doc(0, total=0, cursor=None), calls=calls)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "query": "q" * 600}, None, None, _context(root)
+    )
+    assert result.is_error and "at most 512 characters" in result.text
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_names_only_remote_search_says_so_in_the_footer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, R1: an owner that searched names/ids only (the
+    asking link lacks ``view``) is labelled, so no reader takes it as a body search."""
+    doc = _paged_doc(2, total=5, cursor="tok-n")
+    doc["peers"]["d_b"]["search"] = "names"
+    _fake_mesh(monkeypatch, doc)
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "query": "chat", "limit": 2}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert f"2 of 5 matching 'chat' (names only) shown — next page: peer={PEER!r}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_older_local_relay_drops_the_raise_limit_hint(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1, Q3: beside the relay-too-old note, "raise `limit`" cannot help."""
+    _fake_mesh(
+        monkeypatch, _paged_doc(5, total=0, cursor=None, paging="unsupported", relay_paging=False)
+    )
+    result = await execute_sessions(
+        "t", {"op": "list", "peer": PEER, "limit": 2}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "this device's relay predates remote paging/search" in result.text
+    assert "raise `limit`" not in result.text

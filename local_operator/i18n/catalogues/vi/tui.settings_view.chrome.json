@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> dùng được mọi nơi, ctrl+enter cần báo phím nâng cao",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} hủy",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} xác nhận · {cancel_key} hủy",
   "tui.settings_view.chrome.capture.listening": "đang chờ nhấn phím",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "cần báo phím nâng cao",
   "tui.settings_view.chrome.capture.press_another": "hãy nhấn phím khác",
   "tui.settings_view.chrome.capture.saved": "đã lưu {shortcut}",
   "tui.settings_view.chrome.capture.takes_from": "lấy {shortcut} của “{victim}”",

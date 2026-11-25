@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "audit_id": "sv3",
+  "locale": "zh-CN",
+  "namespace": "tui.settings_view",
+  "record": "i18n/audits/evidence/zh-CN/tui.settings_view/sv3/record.json",
+  "record_note": "record.json is the independent auditor's own machine-readable receipt, copied byte-for-byte from the delegating manager's session scratchpad (~/.local-operator/sessions/7d612eac3fe3/scratchpad/zhcn-suggest/audit.json). The auditor audited the translator's receipt before it was applied; target_sha256 is the catalogue after applying that value byte-exact.",
+  "record_sha256": "541422392cc5fdbc4a719ecf6728c860d3507f618c9e0b539cbe40cd4688b2f8",
+  "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+  "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+  "target_sha256": "dbaf2d43a0751bcf86d27f5e36b03cc89f7ff754929ec401027051c6fdcaa3f1",
+  "verdict": "passed",
+  "commit_audited": "32270f862ee7 (worktree head; changed value audited from translator receipt, not yet applied)",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), not the translator; did not edit values",
+    "session": "08f810e0820c",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "ledger_receipt": {
+    "locale": "zh-CN",
+    "namespace": "tui.settings_view",
+    "source_sha256": "dc4b384cc5269cc1fb8bc5fb072d6d4b04e7de2901fdb69f88bf58db5300250c",
+    "context_sha256": "d81ec84bebf8429d3d4e0d7e42f12263ba3d93b51a20516bfdb7722e6ba325d7",
+    "target_sha256": "dbaf2d43a0751bcf86d27f5e36b03cc89f7ff754929ec401027051c6fdcaa3f1",
+    "translator": {
+      "agent": "i18n-translator (lopdev team)",
+      "session": "d0ab5f79ba1d",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "provenance": "translator's own receipt (translation.json in the delegating manager's scratchpad), value applied byte-exact by the integrating coder; no fallback observed"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team), not the translator; did not edit values",
+      "session": "08f810e0820c",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-23",
+      "result": "clean",
+      "findings": 0,
+      "unresolved_blocker_major": 0,
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "finding_ids": [],
+      "fallback_used": false,
+      "independent_from_translator": true,
+      "actual_model_source": "auditor's own receipt (auditor.model field)",
+      "independence_note": "the translator (i18n-translator d0ab5f79ba1d) and auditor (i18n-auditor 08f810e0820c) are the same model family (anthropic/claude-opus-5-5) running in different, independent sessions; the auditor did not edit values"
+    },
+    "status": "passed",
+    "note": "Scoped independent audit (round 3) of the zh-CN term fix for the settings-editor suggestion hint: editor.suggest_long 选建议 → 浏览建议, matching tui.settings_view.chrome footer.suggestions (浏览建议); suggest_medium keeps bare 浏览 (verb-only slot). Source commit 32270f862ee7. Auditor 08f810e0820c verdict clean for tui.settings_view and tui.settings_view.chrome: 0 blocker, 0 major, 0 minor, 0 nit. Same model family as the translator, independent sessions. Record: i18n/audits/evidence/zh-CN/tui.settings_view/sv3/record.json. Native-speaker review and rendered-frame certification not claimed.",
+    "evidence": "i18n/audits/evidence/zh-CN/tui.settings_view/sv3/record.json",
+    "round": "sv3"
+  }
+}

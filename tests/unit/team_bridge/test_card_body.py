@@ -334,6 +334,8 @@ def test_a_local_body_is_served_first_and_the_hub_only_checks_for_a_delete(
 
     answer = _resolve(tmp_path, wire)
 
+    card = answer.pop("card")
+    assert card["thread_reply"] is False and card["received_at"].endswith("Z")
     assert answer == {
         "v": 1,
         "items": [
@@ -1584,3 +1586,64 @@ async def test_read_only_prompt_returns_ids_only_without_purging_when_standing_r
         assert "sensitive excerpt body" not in ro_messages[0].text
         assert host._bridge_excerpt_memo == memo_before
         assert "bcmsg_00000001" in DisplayBodyStore(tmp_path).bodies(key, ["bcmsg_00000001"])
+
+
+# -- the card row's own facts (``card``: time and thread-reply) --------------
+#
+# The relay row carries no timestamp and no thread marker, so the answer does:
+# from the card's journal row only, on EVERY answer for a found card (a client
+# shows them beside a pending/held/unavailable state too), with no hub read.
+
+
+def _write_card_at(root: Path, details: dict[str, Any], ts: float) -> None:
+    _write_card(root, details)
+    path = root / "sessions" / SESSION / "transcript.jsonl"
+    row = json.loads(path.read_text().splitlines()[-1])
+    row["ts"] = ts
+    path.write_text(json.dumps(row, separators=(",", ":")) + "\n")
+
+
+def test_every_answer_carries_the_card_rows_time_and_thread_marker(tmp_path: Path) -> None:
+    store = _enroll(tmp_path)
+    assert _reserve(store, _epoch(store))
+    details = _details()
+    details["body"] += "thread_root_id: bcmsg_root1 (reply to)\n"
+    _write_card_at(tmp_path, details, 1795273012.454293)
+    wire = FakeWire()
+    expected = {"received_at": "2026-11-21T14:56:52.454293Z", "thread_reply": True}
+
+    full = _resolve(tmp_path, wire)
+    assert full["items"][0]["state"] == "pending"
+    assert full["card"] == expected
+    local = asyncio.run(resolve_card_body(tmp_path, SESSION, ENTRY_ID, wire=wire, local_only=True))
+    assert local["card"] == expected
+    assert wire.calls == []
+    # The answer stays v1: the field is additive.
+    assert full["v"] == 1
+
+
+def test_the_card_facts_ride_unavailable_answers_and_a_top_level_post(tmp_path: Path) -> None:
+    _store, turn, _key = _complete_turn(tmp_path)
+    assert turn.for_call() is not None
+    turn.settle(entry_id="e1", error=None, stop_reason="stop", aborted=False)
+    _write_card_at(tmp_path, _details(), 0.0)
+    answer = _resolve(tmp_path, FakeWire(access=BridgeSignInRequired("sign in")))
+    assert answer["items"][0]["reason"] == "signed_out"
+    assert answer["card"] == {"received_at": "1970-01-01T00:00:00Z", "thread_reply": False}
+
+
+def test_other_account_answers_still_carry_the_card_facts(tmp_path: Path) -> None:
+    _enroll(tmp_path)
+    _write_card(tmp_path, _details(account="acc_other"))
+    answer = _resolve(tmp_path, FakeWire(rows=[_hub_row()]))
+    assert answer["items"][0]["reason"] == "other_account"
+    assert set(answer["card"]) == {"received_at", "thread_reply"}
+
+
+def test_an_unusable_row_time_omits_received_at_only() -> None:
+    from local_operator.team_bridge.card_body import _card_facts
+
+    assert _card_facts({"is_thread_reply": False, "entry_ts": float("inf")}) == {
+        "thread_reply": False
+    }
+    assert _card_facts({"entry_ts": True}) == {"thread_reply": False}

@@ -417,3 +417,130 @@ async def test_redacted_thinking_is_counted_without_signature_bytes() -> None:
     assert (
         bound.native_context_tokens == len(THINKING["thinking"]) // 4 + len(REDACTED["data"]) // 4
     )
+
+
+# --- Earlier turns stay byte-stable across a thinking tool loop ----------------
+#
+# WHY: Sonnet/Opus/Haiku 5.5 (Bedrock and first-party) bind every signed
+# thinking block to ALL content that preceded it when it was produced. v0.113.0
+# appended the request-only inline-UI discovery hint as a TAIL user row; the
+# model then produced its thinking right after that row, and the next request
+# (where the hint had moved to the new tail) no longer carried it at the old
+# position — HTTP 400 "Content that preceded this block when it was created is
+# missing from this request" on the 2nd/3rd call of every tool turn. This test
+# drives a three-call turn through the real stream parser and body builder and
+# requires each request to be an exact prefix of the next, cache markers aside.
+
+THINKING_SPEC = ModelSpec(
+    provider="anthropic",
+    model_id="claude-sonnet-5-5",
+    reasoning_efforts=("low", "medium", "high"),
+    reasoning_effort="medium",
+)
+
+
+def _signed_tool_step(step: int) -> bytes:
+    return _sse(
+        [
+            ("message_start", {"message": {"id": f"msg_s{step}", "usage": {"input_tokens": 9}}}),
+            (
+                "content_block_start",
+                {
+                    "index": 0,
+                    "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                },
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "thinking_delta", "thinking": f"plan {step}"}},
+            ),
+            (
+                "content_block_delta",
+                {"index": 0, "delta": {"type": "signature_delta", "signature": f"sig-{step}"}},
+            ),
+            ("content_block_stop", {"index": 0}),
+            (
+                "content_block_start",
+                {
+                    "index": 1,
+                    "content_block": {"type": "tool_use", "id": f"tu_{step}", "name": "bash"},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "index": 1,
+                    "delta": {"type": "input_json_delta", "partial_json": f'{{"cmd": "s{step}"}}'},
+                },
+            ),
+            ("content_block_stop", {"index": 1}),
+            (
+                "message_delta",
+                {"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}},
+            ),
+            ("message_stop", {}),
+        ]
+    )
+
+
+def _without_cache_control(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _without_cache_control(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_control(v) for v in value]
+    return value
+
+
+@pytest.mark.parametrize("hint", [None, "Inline charts are available on this turn."])
+async def test_thinking_tool_loop_resends_every_earlier_turn_byte_identically(
+    hint: str | None,
+) -> None:
+    client = AnthropicClient()
+    scope = credential_scope(KEY)
+    history: list[Message] = [Message.user("go")]
+    bodies: list[dict[str, Any]] = []
+    for step in range(3):
+        request = ChatRequest(model=THINKING_SPEC, messages=list(history), inline_ui_hint=hint)
+        body = client._build_body(request, scope=scope)
+        assert body["thinking"] == {"type": "adaptive"}
+        bodies.append(body)
+
+        def handler(_: httpx.Request, step: int = step) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=_signed_tool_step(step),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            streamed = AnthropicClient(http_client=http)
+            events = [event async for event in streamed.stream(request, KEY)]
+        persisted = _persisted(events)
+        history += [
+            persisted,
+            Message(
+                role="tool",
+                tool_call_id=f"tu_{step}",
+                tool_name="bash",
+                content=[TextContent(text=f"out {step}")],
+            ),
+        ]
+
+    for earlier, later in zip(bodies, bodies[1:]):
+        before = _without_cache_control(earlier["messages"])
+        after = _without_cache_control(later["messages"])
+        assert after[: len(before)] == before
+        assert len(after) == len(before) + 2  # only the new assistant + tool result
+    signatures = [
+        block["signature"]
+        for message in bodies[-1]["messages"]
+        for block in message["content"]
+        if block.get("type") == "thinking"
+    ]
+    assert signatures == ["sig-0", "sig-1"]
+    if hint is not None:
+        # Request-only text still reaches the model, at a fixed position.
+        assert all(
+            body["messages"][0] == {"role": "user", "content": [{"type": "text", "text": hint}]}
+            for body in bodies
+        )

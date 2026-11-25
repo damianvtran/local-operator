@@ -43,9 +43,9 @@ import re
 import time
 import uuid
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence, TextIO
 
 from local_operator.harness.message_types import (
     SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -108,6 +108,12 @@ ENTRY_MESSAGE = "message"
 #: ``details = {"untrusted": bool}``). Defined here, beside the journal, because
 #: a fork cut must treat it as prefix state (``fork_snapshot``).
 PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
+#: The conversation's latched inline-UI head row (``Session.
+#: _settle_inline_ui_head_latch``; ``details = {"text": str | None,
+#: "compaction_id": str | None}``). Defined here, beside the journal, for the
+#: same reason as :data:`PROFILE_TRUST_CUSTOM_TYPE`: a fork cut must drop the
+#: rows decided under compactions the child does not keep (``fork_snapshot``).
+INLINE_UI_HEAD_LATCH_CUSTOM_TYPE = "inline_ui_head_latch_v1"
 ENTRY_COMPACTION = "compaction"
 ENTRY_CUSTOM = "custom"
 
@@ -223,6 +229,7 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         CHANNEL_SPEND_CUSTOM_TYPE,
+        "auxiliary_usage_v1",
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
         # Idle / pre-wake compaction's anti-thrash receipts
@@ -477,9 +484,138 @@ SHRUNK_KEY = "context_shrunk_here"
 #: ``tests/unit/session/test_credential_binding.py`` pins two providers' rows
 #: across a real compaction, so this member cannot be added back without
 #: addressing the granularity above first.
+#:
+#: ``todo_snapshot`` and ``wake_schedules`` are the same failure mode at a larger
+#: scale (incident 2026-11-24, session ``1375449bf925``: an 820 MB journal held
+#: 4,425 ``todo_snapshot`` rows / 403 MB and 3,028 ``wake_schedules`` rows /
+#: 27 MB, every one but the newest superseded, and the runtime sat at ~1.19 GB
+#: RSS a minute after boot). Each row is a FULL snapshot, not a delta:
+#: ``Session._persist_todo_snapshot`` writes the whole list whenever its
+#: fingerprint changes, and ``Session._persist_wake_schedules`` writes the whole
+#: schedule set on every arm/cancel/fire. Every reader was audited as
+#: newest-wins: ``latest_custom`` / ``latest_custom_entry`` in ``Session``
+#: (todo restore, wake restore, the aida/librarian cadence ``previous`` row),
+#: ``read_latest_custom`` / ``read_latest_custom_entry`` in ``wakes.arm``,
+#: ``projects``, ``todo_panel``, ``serving``, ``harness.subagent``,
+#: ``mobile.tui_handle`` and the aida/librarian proactive passes,
+#: ``network.carry``'s ``latest_custom_details``, ``mobile.durable``'s tracked
+#: set (it iterates, but overwrites one dict slot per type), and
+#: ``workspace_rest._no_wake_schedule``, which walks the journal BACKWARD and
+#: returns at the first match. Nothing renders or diffs older snapshots
+#: (``open_frame`` and the desktop reducer drop both types unpainted). The fork
+#: guard in the wake restore compares only the NEWEST row's ``ts`` with the
+#: fork instant, which the fold never changes.
+#:
+#: Literals are inline for the leaf-module reason above; the owners are
+#: ``session.session.TODO_SNAPSHOT_CUSTOM_TYPE`` and
+#: ``harness.wake.WAKE_SCHEDULES_CUSTOM_TYPE``, and
+#: ``tests/unit/session/test_transcript_footprint.py`` pins both.
 _COLLAPSIBLE_CUSTOM_TYPES = frozenset(
-    {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
+    {
+        "subagent_roster",
+        SESSION_SPEND_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
+        "todo_snapshot",
+        "wake_schedules",
+    }
 )
+
+#: The prefix every :meth:`TranscriptEntry.to_json` CUSTOM row opens with, up to
+#: and including its ``custom_type`` — read WITHOUT parsing the row so the open
+#: path can find superseded collapsible rows before materialising any of them
+#: (see :func:`_superseded_collapsible_lines`).
+#:
+#: SOUND, NOT COMPLETE, and only the first property is load-bearing. A line that
+#: matches IS a custom row of the captured type: the anchors are top-level keys of
+#: one JSON object, and an id or type value cannot hide an unescaped quote (the
+#: classes refuse ``"`` and ``\\``). A row this misses — a different key order,
+#: an escaped id, a payload whose first key is not ``custom_type`` — is simply
+#: loaded as before, so the cost of a miss is memory, never a dropped row.
+#: Whitespace after separators is tolerated so rows from a build that wrote
+#: ``json.dumps`` defaults still match.
+_CUSTOM_ROW_PREFIX = re.compile(
+    r'\{"id":\s*"[^"\\]*",\s*"ts":\s*[-+0-9.eE]+,\s*"type":\s*"custom",\s*'
+    r'"payload":\s*\{"custom_type":\s*"([^"\\]+)"'
+)
+
+
+def _superseded_collapsible_lines(handle: TextIO) -> tuple[frozenset[int], int]:
+    """Line numbers (0-based, physical) of superseded collapsible rows, and their bytes.
+
+    WHY THIS EXISTS (incident 2026-11-24, session ``96cf57e7acb7``): a 974 MB
+    journal whose 922 ``frontend_state_checkpoint_v1`` rows (670 MiB) were all
+    but one superseded. :meth:`Transcript.compact_file` drops exactly those rows,
+    but its only caller is the prune pass, and a session that never prunes a
+    tool output never folds — so every cold open parsed all 73,053 rows into
+    resident objects: 2,392 MiB of footprint from one ``Transcript(...)``
+    (measured on an APFS clone), re-paid by every wake that engaged the session
+    until swap filled the disk.
+
+    One streaming pass holding one line at a time. A row is a CANDIDATE when
+    :data:`_CUSTOM_ROW_PREFIX` matches, and only a candidate that also PARSES as
+    a custom row of that type may become "the newest" (PR #4513 R1): a crash
+    that tears the newest checkpoint mid-row, followed by an append that runs
+    onto it, leaves a line that still opens with the prefix — counting it would
+    make the fold delete the last valid copy, which the loader then drops as
+    malformed. The one line is parsed and discarded, so residency stays one row.
+
+    The caller passes the SAME handle the loader then reads (after ``seek(0)``,
+    PR #4513 R2): the returned numbers index that handle's line iteration, and a
+    journal replaced between two separate opens would have its rows skipped by
+    another file's numbers. The handle is text, utf-8, ``newline=""`` — the
+    loader's line splitting (universal newlines, so a stray ``\\r`` numbers the
+    same either way) with line endings left untranslated, so the byte counts
+    below and the fold's copy are exact; a binary read splits only on ``\\n``
+    and would number a stray ``\\r`` differently. A byte-corrupt journal raises
+    here as it would in the loader. For each
+    collapsible type the NEWEST matching line is kept and every older matching
+    line is returned — the same newest-wins rule
+    :meth:`Transcript._superseded_custom_indices` applies, so dropping these
+    yields exactly the list a prune-free ``compact_file`` would leave. A newer
+    row of the same type the prefix MISSED only makes the dropped ones more
+    superseded, never less. The byte total counts newlines: it is what a
+    rewrite frees on disk.
+    """
+    newest: dict[str, tuple[int, int]] = {}
+    superseded: set[int] = set()
+    dead_bytes = 0
+    for number, line in enumerate(handle):
+        match = _CUSTOM_ROW_PREFIX.match(line)
+        if match is None:
+            continue
+        custom_type = match.group(1)
+        if custom_type not in _COLLAPSIBLE_CUSTOM_TYPES:
+            continue
+        if not _is_loadable_custom_row(line, custom_type):
+            # Left for the loader to keep or drop exactly as before; it neither
+            # supersedes an earlier row nor can be superseded (R1).
+            continue
+        previous = newest.get(custom_type)
+        if previous is not None:
+            superseded.add(previous[0])
+            dead_bytes += previous[1]
+        # Bytes, not characters: this total is compared with what a rewrite
+        # frees on disk (``reclaimable_bytes`` vs ``compact_file``).
+        newest[custom_type] = (number, len(line.encode("utf-8")))
+    return frozenset(superseded), dead_bytes
+
+
+def _is_loadable_custom_row(line: str, custom_type: str) -> bool:
+    """Whether ``line`` loads as a custom row of ``custom_type`` (see R1 above).
+
+    Mirrors what :meth:`TranscriptEntry.from_json` needs (an object with an
+    ``id`` and a ``type``) plus the payload's ``custom_type`` that
+    ``latest_custom`` matches on. ``from_json`` itself is not called: it logs
+    every malformed row, and the loader already does that once.
+    """
+    try:
+        raw = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(raw, dict) or "id" not in raw or raw.get("type") != ENTRY_CUSTOM:
+        return False
+    payload = raw.get("payload")
+    return isinstance(payload, dict) and payload.get("custom_type") == custom_type
 
 
 @dataclass
@@ -492,11 +628,24 @@ class TranscriptEntry:
     type: str  # ENTRY_MESSAGE | ENTRY_COMPACTION | ENTRY_CUSTOM
     payload: dict[str, Any] = field(default_factory=dict)
 
+    # Envelope-only metadata: older journal readers ignore unknown envelope
+    # keys. The public payload is already prose, so even old journal and file
+    # readers cannot accidentally display component JSON.
+    inline_ui_source_version: int | None = None
+    inline_ui_source_blocks: tuple[tuple[int, str], ...] = ()
+
     def to_json(self) -> str:
-        return json.dumps(
-            {"id": self.id, "ts": self.ts, "type": self.type, "payload": self.payload},
-            separators=(",", ":"),
-        )
+        row: dict[str, Any] = {
+            "id": self.id,
+            "ts": self.ts,
+            "type": self.type,
+            "payload": self.payload,
+        }
+        if self.inline_ui_source_version is not None:
+            row["inline_ui_source_version"] = self.inline_ui_source_version
+            if self.inline_ui_source_blocks:
+                row["inline_ui_source_blocks"] = self.inline_ui_source_blocks
+        return json.dumps(row, separators=(",", ":"))
 
     @staticmethod
     def from_json(line: str) -> "TranscriptEntry | None":
@@ -509,10 +658,83 @@ class TranscriptEntry:
                 ts=float(raw.get("ts", 0.0)),
                 type=str(raw["type"]),
                 payload=dict(raw.get("payload", {})),
+                inline_ui_source_version=_parse_inline_ui_version(
+                    raw.get("inline_ui_source_version")
+                ),
+                inline_ui_source_blocks=_read_inline_ui_blocks(raw.get("inline_ui_source_blocks")),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             logger.warning("dropping malformed transcript line: %.120s", line)
             return None
+
+
+def _parse_inline_ui_version(value: object) -> int | None:
+    # Preserve positive future versions across journal rewrites without
+    # interpreting them; a malformed marker cannot make the row unreadable.
+    return value if type(value) is int and value > 0 else None
+
+
+def _read_inline_ui_blocks(value: object) -> tuple[tuple[int, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    blocks: list[tuple[int, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or type(item[0]) is not int
+            or not isinstance(item[1], str)
+            or item[0] < 0
+            or (blocks and item[0] <= blocks[-1][0])
+        ):
+            return ()
+        blocks.append((item[0], item[1]))
+    return tuple(blocks)
+
+
+def _message_entry(
+    id_: str, ts: float, type_: str, payload: dict[str, Any], message: Message | CustomMessage
+) -> TranscriptEntry:
+    entry = TranscriptEntry(id_, ts, type_, payload)
+    if not isinstance(message, Message) or message.role != "assistant":
+        return entry
+    if message._inline_ui_source_version != 1:
+        return entry
+    from local_operator.session.inline_ui_text import project_inline_ui
+    from local_operator.session.runtime.inline_ui_egress import (
+        is_text_block,
+        replace_text_content,
+    )
+
+    # Read the already privacy-filtered encoding; never recover text that the
+    # standard retained-message seam discarded. Preserve block order for replay.
+    blocks = tuple(
+        (i, block["text"])
+        for i, block in enumerate(payload.get("content", ()))
+        if is_text_block(block)
+    )
+    source = "".join(text for _, text in blocks)
+    text = project_inline_ui(source, streaming=False, source_version=1, capabilities=frozenset())[
+        "text"
+    ]
+    if text != source:
+        entry.inline_ui_source_version = 1
+        entry.inline_ui_source_blocks = blocks
+        replace_text_content(payload, text)
+    return entry
+
+
+def _replay_inline_ui_source(entry: TranscriptEntry, payload: dict[str, Any]) -> None:
+    if entry.inline_ui_source_version != 1 or not entry.inline_ui_source_blocks:
+        return
+    from local_operator.session.runtime.inline_ui_egress import is_text_block
+
+    content = [block for block in payload.get("content", []) if not is_text_block(block)]
+    for index, text in entry.inline_ui_source_blocks:
+        if index > len(content):
+            return  # Malformed optional source metadata cannot damage the prose row.
+        content.insert(index, {"type": "text", "text": text})
+    payload["content"] = content
 
 
 def encode_message_payload(
@@ -1662,6 +1884,7 @@ def read_custom_entries(
     max_rows: int | None = None,
     custom_messages: bool = False,
     min_ts: float | None = None,
+    strict: bool = False,
 ) -> list[TranscriptEntry]:
     """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
 
@@ -1701,7 +1924,8 @@ def read_custom_entries(
     which makes the cost proportional to the window the caller cares about,
     not to the journal's lifetime. A clock step backwards could hide a row
     written in that gap; callers pass a window, not an exact cut, so that is
-    the accepted trade.
+    the accepted trade. ``strict`` distinguishes an unreadable journal from an
+    empty result for consumers that must not mistake missing records for zero.
     """
     encoded = json.dumps(custom_type)
     if encoded != f'"{custom_type}"':
@@ -1709,12 +1933,16 @@ def read_custom_entries(
     if max_rows is not None and max_rows <= 0:
         return []
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = _resolved_transcript_path(directory)
+    path = _resolved_transcript_path(directory, read_only=strict)
     if path is None:
+        if strict:
+            raise FileNotFoundError("Cannot read the session journal")
         return []
     try:
         handle = path.open("rb")
     except OSError:
+        if strict:
+            raise
         return []
     entries: list[TranscriptEntry] = []
     seen_offsets: set[int] = set()
@@ -1743,6 +1971,8 @@ def read_custom_entries(
             while index != -1:
                 offset = read_start + index
                 located = _row_at_offset(handle, offset)
+                if located is None and strict:
+                    raise ValueError("Cannot decode a candidate session journal record")
                 if located is not None:
                     row_offset, entry = located
                     if row_offset not in seen_offsets and _matches(entry):
@@ -2763,6 +2993,12 @@ class Transcript:
         #: always has. Owned by the transcript rather than passed per call
         #: because both paths need the SAME store.
         self._attachments = AttachmentStore()
+        #: Bytes of superseded collapsible rows still ON DISK that this open
+        #: skipped in memory (see :meth:`_collapse_superseded_on_open`): the
+        #: rewrite was not ours to do (no writer lock, read-only, below the
+        #: threshold) or failed. Priced into :meth:`reclaimable_bytes`, and
+        #: reason enough for :meth:`compact_file` to run, which zeroes it.
+        self._load_collapsed_bytes = 0
         if self.path.exists():
             # STREAM the file rather than ``read_text().splitlines()``. The eager
             # form materialises the whole journal twice before the first row is
@@ -2783,8 +3019,31 @@ class Transcript:
             # raw newline or any other character ``splitlines`` would break on,
             # and both forms decode strictly (a byte-corrupt journal still
             # raises, which ``read_latest_custom_entry`` documents and pins).
-            with self.path.open(encoding="utf-8") as handle:
-                for line in handle:
+            #
+            # SUPERSEDED COLLAPSIBLE ROWS ARE NEVER MATERIALISED. Streaming bounds
+            # the copy of the file, not the rows: a journal that never ran
+            # ``compact_file`` (it runs only after a prune) kept every
+            # superseded checkpoint, and resident rows were 2.45x the file — see
+            # :func:`_superseded_collapsible_lines` for the incident. Those rows
+            # are skipped here (the list is then exactly what a prune-free
+            # ``compact_file`` leaves), and an owning writer also folds them off
+            # disk so the NEXT open does not pay the scan or the bytes again.
+            #
+            # ONE HANDLE for the scan, the fold's copy and the load (PR #4513
+            # R2): the skip list is line numbers, valid only for the file they
+            # were counted in. Opening the path twice let a journal replaced in
+            # between have its rows skipped by another file's numbers. After a
+            # fold the rows still come from this handle — the pre-fold inode,
+            # whose content minus ``skip`` is byte-for-byte the new file — so no
+            # number is ever applied to a file it was not counted in.
+            # ``newline=""``: same line splitting as the default, endings left
+            # untranslated so the fold copies bytes exactly (``json.loads``
+            # ignores the trailing ``\r\n`` either way).
+            with self.path.open(encoding="utf-8", newline="") as handle:
+                skip = self._collapse_superseded_on_open(handle)
+                for number, line in enumerate(handle):
+                    if number in skip:
+                        continue
                     if line.strip():
                         entry = TranscriptEntry.from_json(line)
                         if entry is not None:
@@ -2918,7 +3177,9 @@ class Transcript:
                 payload = {"kind": kind, **encode_message_payload(message, self._attachments)}
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
-                rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+                rows.append(
+                    _message_entry(message.id, time.time(), ENTRY_MESSAGE, payload, message)
+                )
             if _file_captures is not None:
                 from local_operator.session.file_provenance import NATIVE_TYPES
 
@@ -3047,7 +3308,7 @@ class Transcript:
                     "kind": kind,
                     **encode_message_payload(message, self._attachments),
                 }
-                rows.append(TranscriptEntry(entry.id, entry.ts, entry.type, payload))
+                rows.append(_message_entry(entry.id, entry.ts, entry.type, payload, message))
             return rows
 
         return await self._commit(build)
@@ -3431,6 +3692,27 @@ class Transcript:
                             continue
                         if later:
                             excluded.add(row.id)
+                    # THE HEAD-ROW LATCH IS COMPACTION STATE. On an Anthropic
+                    # thinking wire every signed thinking block is bound to ALL
+                    # content before it, including the latched head row at
+                    # ``messages[0]``; the latch is re-decided only at a
+                    # compaction that left no signed thinking. A row decided
+                    # under a marker this child drops describes history the
+                    # child does not replay: kept, it would outrank the row its
+                    # retained blocks were signed under, so every request
+                    # would rewrite their prefix (HTTP 400) and miss the
+                    # message cache. Drop those rows; ``latest_custom`` then
+                    # restores the newest surviving one, decided under the
+                    # governing marker or before it.
+                    dropped_markers = {row.id for row in compactions if row.id in excluded}
+                    excluded.update(
+                        row.id
+                        for row in self._entries
+                        if row.type == ENTRY_CUSTOM
+                        and row.payload.get("custom_type") == INLINE_UI_HEAD_LATCH_CUSTOM_TYPE
+                        and (row.payload.get("details") or {}).get("compaction_id")
+                        in dropped_markers
+                    )
                 if through_entry_id is not None:
                     # EPISODE FACTS ARE PREFIX STATE. A ``profile_trust`` row
                     # after the cut describes conversation the child does not
@@ -3648,6 +3930,144 @@ class Transcript:
                 "could not restore transcript mtime after a bookkeeping append",
                 exc_info=True,
             )
+
+    def _collapse_superseded_on_open(self, handle: TextIO) -> frozenset[int]:
+        """Find superseded collapsible rows before loading; fold them off disk when ours.
+
+        Returns the loader's line numbers to skip. Two outcomes, both bounded:
+
+        * an OWNING writer (not read-only, writer lock held) with at least
+          :data:`COMPACT_FILE_THRESHOLD_BYTES` to free streams a copy without
+          those lines and moves it over the journal with ``os.replace`` — the same
+          crash-safe dance as :meth:`_replace_file`, the same amortisation rule
+          as :meth:`compact_file` — and returns nothing to skip, because the
+          file now holds exactly the rows the loader should read;
+        * otherwise (a viewer, a second writer without the lock, a small
+          reclaim, or a rewrite that failed — ENOSPC is the realistic one, on
+          the full disk this incident produced) the rows stay on disk and are
+          only skipped in memory. That list is the one a prune-free
+          ``compact_file`` would leave, and the same method later takes the
+          bytes off disk (``_load_collapsed_bytes`` makes it run).
+
+        Never weaker than before: a scan or decode error propagates exactly as
+        the loader's own read would have raised it.
+
+        Returns with ``handle`` rewound to the start, and the returned numbers
+        index THAT handle's lines (the caller loads from it): see R2 in
+        ``__init__``. Even after a successful fold the skip list is returned,
+        because the caller still reads the pre-fold inode.
+
+        SOLE OWNERSHIP, not a share of the lock (PR #4513 Q1): the writer lock
+        is refcounted per process, so a second in-process ``Transcript`` on the
+        same directory — the parent's peek of a running in-process subagent —
+        also "holds" it while the child is appending. A fold there copied the
+        file, then replaced it over rows the child appended meanwhile (QA lost
+        2 and 7 of 20). So the fold needs this open to be the ONLY holder in the
+        process, checked here and again right before the rename
+        (:meth:`_rewrite_without_lines`); any other open takes the lockless
+        path and skips in memory.
+        """
+        skip, dead_bytes = _superseded_collapsible_lines(handle)
+        handle.seek(0)
+        if not skip:
+            return frozenset()
+        if (
+            not self._read_only
+            and self._writer_lock_held
+            and dead_bytes >= COMPACT_FILE_THRESHOLD_BYTES
+            and self._sole_writer()
+        ):
+            try:
+                folded = self._rewrite_without_lines(handle, skip)
+            except OSError as exc:
+                handle.seek(0)
+                folded = False
+                logger.warning(
+                    "transcript: could not fold %d superseded rows (%d bytes) out of %s "
+                    "on open (%s); skipping them in memory instead",
+                    len(skip),
+                    dead_bytes,
+                    self.path,
+                    exc,
+                )
+            else:
+                handle.seek(0)
+                if not folded:
+                    logger.info(
+                        "transcript: another holder of %s appeared mid-fold; "
+                        "skipping superseded rows in memory instead",
+                        self.path,
+                    )
+                else:
+                    logger.info(
+                        "transcript: folded %d superseded rows (%d bytes) out of %s on open",
+                        len(skip),
+                        dead_bytes,
+                        self.path,
+                    )
+                    # The rows are off disk; the skip list still applies to the
+                    # handle the caller loads from (the pre-fold inode).
+                    return skip
+        self._load_collapsed_bytes = dead_bytes
+        return skip
+
+    def _sole_writer(self) -> bool:
+        """Whether this object is the process's only holder of the writer lock (Q1)."""
+        return compression.writer_holders(self.directory) == 1
+
+    def _rewrite_without_lines(self, source: TextIO, skip: frozenset[int]) -> bool:
+        """Copy ``source`` minus ``skip`` to a temp file and replace the journal.
+
+        ``True`` when the journal was replaced; ``False`` when another in-process
+        holder of the writer lock appeared during the copy, in which case the
+        journal is untouched and the caller skips in memory (Q1: its appends
+        since the copy began would be lost by the rename).
+
+        Line-for-line VERBATIM, BYTES included: ``source`` is the loader's own
+        handle opened with ``newline=""`` and the sink is written the same way,
+        so a ``\r\n`` journal stays ``\r\n`` and no surviving row changes by a
+        byte. fsync before ``os.replace``: the replaced file is the whole
+        conversation, and a crash must leave either the old journal or a
+        complete new one; the directory is fsynced after it (best-effort) so the
+        rename itself survives a power loss (R4). The original atime/mtime are
+        carried over (R3): mtime reads as "last activity" (session lists sort
+        by it), and a fold on an idle boot is not activity. A partial temp file
+        is removed on any failure; the original is never touched.
+
+        The temp name is ``transcript.jsonl.fold``, NOT ``compact_file``'s
+        ``.compact`` (Q1: a fold would truncate and rename a file a compaction
+        was writing). It is fixed rather than ``mkstemp``-unique on purpose:
+        only the process's sole lock holder folds (the flock excludes other
+        processes, :meth:`_sole_writer` other objects), so it has exactly one
+        possible writer, and a fixed name means a crash mid-fold leaves at most
+        one orphan, overwritten by the next fold — a unique name would strand a
+        journal-sized file per crash on the very disk this incident filled.
+        """
+        stat = os.fstat(source.fileno())
+        tmp = self.path.with_suffix(self.path.suffix + ".fold")
+        replaced = False
+        try:
+            with tmp.open("w", encoding="utf-8", newline="") as sink:
+                _keep_private(sink.fileno())
+                for number, line in enumerate(source):
+                    if number not in skip:
+                        sink.write(line)
+                sink.flush()
+                os.fsync(sink.fileno())
+            os.utime(tmp, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            # Re-checked as late as possible: a holder that arrived during the
+            # copy may already have appended rows the temp file does not have.
+            if self._sole_writer():
+                os.replace(tmp, self.path)
+                replaced = True
+        finally:
+            # One cleanup for every way out: a failure, an interrupt, or a
+            # holder that appeared mid-copy all leave the journal untouched.
+            if not replaced:
+                tmp.unlink(missing_ok=True)
+        if replaced:
+            compression._fsync_dir(self.directory)
+        return replaced
 
     def _index_entry(self, entry: TranscriptEntry) -> None:
         if entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE):
@@ -4057,9 +4477,10 @@ class Transcript:
         """
         prunes = self.pending_prunes()
         superseded = self._superseded_custom_indices()
-        if not prunes and not superseded:
+        if not prunes and not superseded and not self._load_collapsed_bytes:
             return 0
-        total = 0
+        # Rows the open skipped in memory but left on disk: a fold frees them too.
+        total = self._load_collapsed_bytes
         boundary: TranscriptEntry | None = None
         newest_prune = max(
             (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
@@ -4114,7 +4535,7 @@ class Transcript:
         async with self._lock:
             prunes = self.pending_prunes()
             superseded = self._superseded_custom_indices()
-            if not prunes and not superseded:
+            if not prunes and not superseded and not self._load_collapsed_bytes:
                 return 0
             before = self.path.stat().st_size if self.path.exists() else 0
             # WHERE the newest prune sat, before the entries carrying that fact
@@ -4178,6 +4599,9 @@ class Transcript:
                         worker.result()
                         break
             self._entries = folded
+            # The rewrite came from ``_entries``, which never held the rows the
+            # open skipped, so they are off disk now too.
+            self._load_collapsed_bytes = 0
             self._history_generation += 1
             self._display_window_cache = None
             self._entry_ids.clear()
@@ -4266,7 +4690,7 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
         return entry
     provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
-    return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+    return replace(entry, payload=payload)
 
 
 def _journal_injection_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
@@ -5415,7 +5839,11 @@ def _entry_to_message(
         # and this is the transcript's one row decoder — replay and the by-id
         # readers all call it — so repairing here heals the row for every
         # consumer of the transcript, not one wire serializer at a time.
-        return _without_blank_user_text(Message.model_validate(payload))
+        _replay_inline_ui_source(entry, payload)
+        message = _without_blank_user_text(Message.model_validate(payload))
+        if isinstance(message, Message) and message.role == "assistant":
+            message._inline_ui_source_version = entry.inline_ui_source_version
+        return message
     except Exception:
         logger.warning("dropping unparseable transcript message entry %s", entry.id)
         return None

@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number} с",
   "wire.session_status.duration_minutes": "{count, number} мин",
   "wire.session_status.duration_hours_minutes": "{hours, number} ч {minutes, number} мин",
-  "wire.session_status.duration_days_hours": "{days} д {hours, number} ч"
+  "wire.session_status.duration_days_hours": "{days} д {hours, number} ч",
+  "wire.session_status.booting": "запускается · {duration}",
+  "wire.session_status.booting_not_answering": "не отвечает · запускается уже {duration}"
 }

@@ -81,6 +81,7 @@ from local_operator.i18n.text import tr
 #: lives at SESSION level (``local_operator.session.aside``) because a prompt
 #: owned by this widget was a prompt the desktop path never sent at all.
 from local_operator.session.aside import ASIDE_PROMPT  # noqa: F401 — re-export
+from local_operator.tui import hotkey_hints
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets import overlay
 from local_operator.tui.widgets.assistant import flatten
@@ -1226,7 +1227,10 @@ class AsidePanel(Static):
             # the key in the window where it is the only one that works.
             hints.append((ASIDE_COPY_KEY, "copy"))
         if self._can_fork:
-            hints.append(("^f", "fork into the chat"))
+            # The LIVE key, not the `^f` shorthand this row taught before the
+            # action was remappable: a remap must not leave the footer naming a
+            # key that no longer forks (R2).
+            hints.append((hotkey_hints.live_key(self, "keymap.fork_aside"), "fork into the chat"))
         # "again" only once there IS a first time. On a card the user has just
         # opened with a bare `/btw`, it names a history that does not exist.
         hints.append(("enter", "ask again" if self._turns else "ask"))
@@ -1279,6 +1283,16 @@ class AsidePanel(Static):
         if can_fork == self._can_fork:
             return
         self._can_fork = can_fork
+        self._repaint()
+
+    def keymap_hints_changed(self) -> None:
+        """Recompose the footer after a live remap (Q12).
+
+        The fork hint embeds the live key, and the card repaints on stream
+        deltas and settles — none of which a remap triggers, so an open card
+        would keep teaching the key the user just replaced. ``_repaint`` is the
+        card's own composition path and a no-op while it is closed.
+        """
         self._repaint()
 
     def _repaint(self) -> None:

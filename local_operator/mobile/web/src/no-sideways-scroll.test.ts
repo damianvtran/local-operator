@@ -14,9 +14,10 @@
  *   that must not break mid-number), and refusing it would push those cells to
  *   truncate a number, which is the false reading D1 removed.
  *
- * A file that genuinely needs one of these goes in ALLOWED with the measured
- * reason. It is empty: every former rail was replaced (filter strip and status
- * tray fit by priority, the library categories and markdown wrap).
+ * Keep exceptions local to the individual rail. The inline data grid is
+ * focusable and independent of the viewport: the 390px browser repro moved
+ * the last column 40px with ArrowRight without moving the document. Otherwise
+ * wide named columns would truncate exact values or lose their association.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -24,8 +25,7 @@ import { describe, expect, it } from "vitest";
 
 const SRC = join(__dirname);
 const REFUSED = /\boverflow-x-(?:auto|scroll)\b|\bwhitespace-pre(?![-\w])/g;
-/** `path` → reason. Empty on purpose; see the module note. */
-const ALLOWED: Record<string, string> = {};
+const INLINE_GRID_RAIL = '<div className={wide ? "overflow-x-auto rounded-md focus-visible:outline-accent" : undefined} {...(wide ? {';
 
 function sources(directory: string): string[] {
 	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -57,13 +57,15 @@ describe("the phone never scrolls sideways", () => {
 		const offenders: string[] = [];
 		for (const path of sources(SRC)) {
 			const name = relative(SRC, path).replaceAll("\\", "/");
-			if (name in ALLOWED) continue;
 			readFileSync(path, "utf8")
 				.split("\n")
 				.forEach((line, index) => {
 					// Prose in comments may NAME a class (this file's own note does).
 					const code = stripComments(line);
-					for (const match of code.matchAll(REFUSED)) offenders.push(`${name}:${index + 1}: ${match[0]}`);
+					for (const match of code.matchAll(REFUSED)) {
+						if (name === "components/inline-ui.tsx" && code.trim() === INLINE_GRID_RAIL && match[0] === "overflow-x-auto") continue;
+						offenders.push(`${name}:${index + 1}: ${match[0]}`);
+					}
 				});
 		}
 		expect(

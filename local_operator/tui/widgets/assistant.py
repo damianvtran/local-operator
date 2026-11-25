@@ -179,6 +179,28 @@ def rail_rows(text: Text) -> Text:
     return railed
 
 
+def muted_rows(text: Text) -> Text:
+    """Re-ink prose in the transcript's SECONDARY ink — mid-turn narration.
+
+    By response draws a turn's steps in a column: the remarks the model made
+    while it worked, then the work they announced. Those remarks are not the
+    answer, and the prototype tells them apart by INK rather than by shape or
+    indent — so the whole flattened message takes ``muted`` here, at paint
+    time, the same way :func:`rail_rows` resolves the rail's ink.
+
+    The style is appended LAST so it outranks every span the markdown theme
+    painted inside the text (inline code, links, headings). That is deliberate:
+    a remark is a passing note, and a heading in it must not stay the brightest
+    thing in the step. Non-colour attributes ride along untouched — emphasis,
+    code fences and list structure stay exactly as the answer renders them; the
+    difference is ink alone, which is the one channel the design's no-colour
+    rule does not need for this distinction (the step's bar and indent carry
+    that).
+    """
+    text.stylize(Style(color=theme_mod.semantic_color("muted")), 0, len(text))
+    return text
+
+
 def flatten(renderable: RenderableType, width: int, console: Console | None = None) -> Text:
     """A rich renderable's rendered rows, as ONE styled ``Text``.
 
@@ -509,6 +531,13 @@ class AssistantBlock(TranscriptBlock):
         #: MESSAGE (has it stopped), which neither repair changes, so both rebuild
         #: freely and the rail survives exactly as it was painted.
         self._settled: bool = False
+        #: The tool fold's By-response ink: True for a mid-turn remark, which
+        #: draws in ``muted`` while the answer keeps ``fg`` (see
+        #: :func:`muted_rows`). Owned by
+        #: :class:`~local_operator.tui.tool_fold.ToolFoldLayer`, which sets it
+        #: from the layout mode and the ``is_narration`` classification the
+        #: block already carries — never from a second rule here.
+        self._fold_muted: bool = False
 
     def update_text(self, text: str) -> None:
         """Apply ``text`` as the accumulated message content.
@@ -791,6 +820,12 @@ class AssistantBlock(TranscriptBlock):
         # and finalize_text alike.
         rail_cols = self._rail_cols()
         self._painted_rail_cols = rail_cols
+        # Before the rail, so the rail's own glyph and gutter keep the ink the
+        # rail owns: re-inking afterwards would paint the rail muted too, and
+        # the narration form would lose the one mark that says "this block is a
+        # message" on a frame where its text is already quieter.
+        if self._fold_muted:
+            text = muted_rows(text)
         if rail_cols:
             text = rail_rows(text)
         # Counted from the RAILED text, because that is what gets painted. The
@@ -1016,6 +1051,29 @@ class AssistantBlock(TranscriptBlock):
             return Text("")
         lane = width if width is not None else self._flat_width()
         return flatten(_markdown(self._full_text), lane, self._flat_console())
+
+    def set_fold_muted(self, muted: bool) -> None:
+        """Draw this message in the step's secondary ink (By response).
+
+        Called by :class:`~local_operator.tui.tool_fold.ToolFoldLayer` for a
+        narration block in the By-response layout. Rebuilds the applied rows
+        the same way :meth:`retheme` does — through ``_finalized`` and the
+        full-message flatten — because a settled message's rows are cached
+        flattened text with the old ink baked into their spans, so changing the
+        flag without a rebuild paints nothing.
+        """
+        if muted == self._fold_muted:
+            return
+        self._fold_muted = muted
+        if not self._full_text:
+            return
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            self._apply_rows(rows)
+        finally:
+            self._finalized = was_finalized
 
     def retheme(self) -> None:
         """Re-flatten in the new ramp, dropping every theme-baked cache.

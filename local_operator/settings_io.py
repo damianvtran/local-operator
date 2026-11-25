@@ -72,11 +72,13 @@ from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
 from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
+from local_operator.i18n.keys import wire_runtime_memory as _rm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
 from local_operator.i18n.keys import wire_settings_hub_org as _ho
 from local_operator.i18n.keys import wire_settings_keymap as _wk
+from local_operator.i18n.keys import wire_settings_transcript_display as _td
 from local_operator.i18n.keys import wire_voice as _wv
 from local_operator.i18n.messages import Msg as _Msg
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
@@ -105,6 +107,7 @@ from local_operator.ui_console.policy import (
     DEFAULT_OWNER_LIMIT,
     DEFAULT_USER_RESERVED,
 )
+from local_operator.web_defaults import WEB_SEARCH_PROVIDER_IDS
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
@@ -128,6 +131,10 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_defaults",
     "wire.settings.hub_org",
     "wire.settings.keymap",
+    # The transcript layout switch (`display.transcript_display`): its own child
+    # namespace so its six English keys never move the audited `wire.settings`
+    # source hash — the `hub_org` pattern.
+    "wire.settings.transcript_display",
     "wire.aida_cadence",
     "wire.host_speed",
     "wire.guardrails",
@@ -141,6 +148,9 @@ _CHILD_SETTINGS_NAMESPACES = (
     # now fails for any child namespace left out of this tuple.
     "wire.phone_access",
     "wire.voice",
+    # The per-runtime memory guard (``session.runtime_memory.*``): its own child
+    # namespace so its rows never move the audited ``wire.settings`` hash.
+    "wire.runtime_memory",
 )
 
 
@@ -229,6 +239,29 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.command_palette": (_wk.command_palette_label, _wk.command_palette_help),
+    "keymap.toggle_sidebar": (_wk.toggle_sidebar_label, _wk.toggle_sidebar_help),
+    "keymap.focus_sidebar": (_wk.focus_sidebar_label, _wk.focus_sidebar_help),
+    "keymap.aside": (_wk.aside_label, _wk.aside_help),
+    "keymap.fork_aside": (_wk.fork_aside_label, _wk.fork_aside_help),
+    "keymap.toggle_todos": (_wk.toggle_todos_label, _wk.toggle_todos_help),
+    "keymap.toggle_subagents": (_wk.toggle_subagents_label, _wk.toggle_subagents_help),
+    "keymap.toggle_pin": (_wk.toggle_pin_label, _wk.toggle_pin_help),
+    "keymap.toggle_asks": (_wk.toggle_asks_label, _wk.toggle_asks_help),
+    "keymap.prev_session": (_wk.prev_session_label, _wk.prev_session_help),
+    "keymap.next_session": (_wk.next_session_label, _wk.next_session_help),
+    "keymap.cycle_effort": (_wk.cycle_effort_label, _wk.cycle_effort_help),
+    "keymap.clear_transcript": (_wk.clear_transcript_label, _wk.clear_transcript_help),
+    "keymap.transcript_up": (_wk.transcript_up_label, _wk.transcript_up_help),
+    "keymap.transcript_down": (_wk.transcript_down_label, _wk.transcript_down_help),
+    "keymap.transcript_half_up": (_wk.transcript_half_up_label, _wk.transcript_half_up_help),
+    "keymap.transcript_half_down": (
+        _wk.transcript_half_down_label,
+        _wk.transcript_half_down_help,
+    ),
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
 }
 
 
@@ -594,6 +627,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ns.description()),
     ),
+    # The busy-send delivery default (``delivery.busy_default``). Its own
+    # section rather than leaving the row under ``appearance``, where it was
+    # born under its old TUI-only name: the row is neutral between the TUI
+    # and the desktop app (one shared config.yml, one LIVE read per send),
+    # and an ``appearance`` header on a ``delivery`` path says nothing. The
+    # section TITLE is the contract's "Message sending" (architect D1).
+    Section(
+        "composer",
+        _t(_ws.composer_title()),
+        Scope.LIVE,
+        _t(_ws.composer_description()),
+    ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
     # DESCRIPTION is where this page teaches the capture gesture, and
@@ -898,6 +943,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.heavy_jobs_title()),
         Scope.LIVE,
         _t(_ws.heavy_jobs_description()),
+    ),
+    # The PER-RUNTIME ceiling (``session/runtime/runtime_memory.py``), run by the
+    # wake supervisor every minute. Its own section, not ``memory_guard``: that
+    # one bounds a COMMAND and kills only its group; this one ends a whole
+    # session runtime. LIVE: the supervisor reads a fresh ``ConfigManager`` on
+    # every pass.
+    Section(
+        "runtime_memory_guard",
+        _t(_rm.section_title()),
+        Scope.LIVE,
+        _t(_rm.section_description()),
     ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
@@ -2958,6 +3014,33 @@ SETTINGS: tuple[Setting, ...] = (
             ),
         ),
     ),
+    Setting(
+        key="display.transcript_display",
+        # FLAT-DOTTED like every other ``display.*`` key: the dot is part of a
+        # literal top-level key, which is what ``tui/settings.py`` reads. Written
+        # as a nested tuple this key would be stored where nothing looks for it.
+        path=("display.transcript_display",),
+        section="appearance",
+        label=_t(_td.label()),
+        kind=Kind.ENUM,
+        # A literal, not an import (this module must stay off the consumers'
+        # import path); ``tests/unit/test_settings_io.py``'s ``_consumer_defaults``
+        # pins it to ``tui.settings.DEFAULT_TRANSCRIPT_DISPLAY``.
+        default="by-turn",
+        help=_t(_td.help()),
+        choices=(
+            Choice(
+                "by-turn",
+                _t(_td.choice_by_turn_label()),
+                _t(_td.choice_by_turn_description()),
+            ),
+            Choice(
+                "by-response",
+                _t(_td.choice_by_response_label()),
+                _t(_td.choice_by_response_description()),
+            ),
+        ),
+    ),
     # -- notification sound (notification-sounds design §1.2) ------------------
     # Genuinely NESTED paths (``values.notifications.sound.*``), unlike the
     # flat ``display.*`` keys above: the consumer is
@@ -3334,6 +3417,36 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices(
             _t(_ws.tui_sidebar_show_subagents_choice_true_description()),
             _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="delivery.busy_default",
+        path=("delivery", "busy_default"),
+        section="composer",
+        # LIVE: read at submit time (``_busy_delivery_mode``), so a /settings
+        # write changes the next send in this session with no relaunch. The
+        # desktop reads the same row at send time, so a write made in the TUI
+        # reaches it at its next focus.
+        label=_t(_ws.delivery_busy_default_label()),
+        kind=Kind.ENUM,
+        default="steer",
+        help=_t(_ws.delivery_busy_default_help()),
+        choices=(
+            Choice(
+                "steer",
+                _t(_ws.delivery_busy_default_choice_steer_label()),
+                _t(_ws.delivery_busy_default_choice_steer_description()),
+            ),
+            Choice(
+                "queue",
+                _t(_ws.delivery_busy_default_choice_queue_label()),
+                _t(_ws.delivery_busy_default_choice_queue_description()),
+            ),
+            Choice(
+                "both",
+                _t(_ws.delivery_busy_default_choice_both_label()),
+                _t(_ws.delivery_busy_default_choice_both_description()),
+            ),
         ),
     ),
     # -- hotkeys ------------------------------------------------------------
@@ -4737,17 +4850,9 @@ SETTINGS: tuple[Setting, ...] = (
         # "exactly these" would be surprised by the chain -- and that surprise is
         # the documented cost of not writing a freezing migration.
         help=_t(_ws.web_search_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.excluded_providers",
@@ -4762,17 +4867,9 @@ SETTINGS: tuple[Setting, ...] = (
         # empty priority list does.
         empty_unsets=True,
         help=_t(_ws.web_search_excluded_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.timeout_seconds",
@@ -4806,6 +4903,20 @@ SETTINGS: tuple[Setting, ...] = (
         # for the "which page do I fetch next" decision. Only the deepseek
         # provider consumes it; every other provider already returns snippets.
         help=_t(_ws.web_search_deepseek_evidence_help()),
+    ),
+    Setting(
+        key="web_search.claude_subscription_search",
+        path=("web_search", "claude_subscription_search"),
+        section="web_search",
+        label=_t(_ws.web_search_claude_subscription_search_label()),
+        kind=Kind.BOOL,
+        default=False,
+        # Off by default (operator decision 2026-11-24): Anthropic draws a
+        # third-party harness's use of a Claude plan from EXTRA USAGE, so letting
+        # the sign-in serve search spends money the user never chose to spend on
+        # it. Even when on, the leg is ordered with the paid legs (after Radient).
+        # The Anthropic API-key leg is unaffected by this key.
+        help=_t(_ws.web_search_claude_subscription_search_help()),
     ),
     Setting(
         key="web_search.read_enabled",
@@ -5117,6 +5228,75 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help=(_t(_ws.tools_defer_help())),
     ),
+    # LIVE: ``mcp.manager.read_result_normalization_mode`` reads a fresh
+    # ConfigManager per MCP result. Path and default mirror
+    # ``tools.result_normalize.RESULT_NORMALIZATION_{PATH,DEFAULT}`` (not
+    # imported, to keep this module cheap; pinned by the consumer-defaults
+    # test). ``off`` is the byte-identical escape hatch for a server whose
+    # exact markup matters, and the A/B switch for cost benchmarks.
+    Setting(
+        key="mcp.result_normalization",
+        path=("mcp", "result_normalization"),
+        section="tools",
+        label=_t(_ws.mcp_result_normalization_label()),
+        kind=Kind.ENUM,
+        default="prose-links",
+        help=_t(_ws.mcp_result_normalization_help()),
+        choices=(
+            Choice(
+                "prose-links",
+                _t(_ws.mcp_result_normalization_choice_prose_links_label()),
+                _t(_ws.mcp_result_normalization_choice_prose_links_description()),
+            ),
+            Choice(
+                "strip-links",
+                _t(_ws.mcp_result_normalization_choice_strip_links_label()),
+                _t(_ws.mcp_result_normalization_choice_strip_links_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.mcp_result_normalization_choice_off_label()),
+                _t(_ws.mcp_result_normalization_choice_off_description()),
+            ),
+        ),
+    ),
+    # LIVE: ``mcp.manager.read_result_text_rendering`` reads it per MCP
+    # result. Path and default mirror
+    # ``tools.result_normalize.RESULT_TEXT_RENDERING_{PATH,DEFAULT}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). Renders exactly two JSON shapes -- a search hit list and a single
+    # ``{url, content, ...}`` fetched page -- as lossless text (every field
+    # kept), only while ``mcp.result_normalization`` is not ``off``. A bool so
+    # a cost benchmark can A/B it, and an escape hatch for a consumer that
+    # wants the JSON.
+    Setting(
+        key="mcp.result_text_rendering",
+        path=("mcp", "result_text_rendering"),
+        section="tools",
+        label=_t(_ws.mcp_result_text_rendering_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.mcp_result_text_rendering_help()),
+    ),
+    # LIVE: ``mcp.manager.read_search_snippet_chars`` reads it per MCP search
+    # result. Path, default and maximum mirror
+    # ``tools.result_normalize.SEARCH_SNIPPET_CHARS_{PATH,DEFAULT,MAX}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). It clips only the snippet fields of a search tool's JSON hit list
+    # (titles and URLs never), and only while ``mcp.result_normalization`` is
+    # not ``off``. 0 keeps snippets whole. 400, not web_search's 320: 320 hid
+    # the subject of one of 43 cited search discoveries on the replayed run.
+    Setting(
+        key="mcp.search_snippet_chars",
+        path=("mcp", "search_snippet_chars"),
+        section="tools",
+        label=_t(_ws.mcp_search_snippet_chars_label()),
+        kind=Kind.INT,
+        default=400,
+        help=_t(_ws.mcp_search_snippet_chars_help()),
+        minimum=0,
+        maximum=100_000,
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than
@@ -5174,6 +5354,32 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.FLOAT,
         default=0.8,
         help=(_t(_ws.bash_memory_soft_fraction_help())),
+    ),
+    # -- runtime_memory_guard -------------------------------------------------
+    # ``path`` mirrors ``runtime_memory.RUNTIME_MEMORY_*_PATH``; the defaults are
+    # pinned against that module by ``tests/unit/test_settings_io.py`` rather than
+    # imported, for the cheap-CLI reason the ``memory_guard`` rows give.
+    Setting(
+        key="session.runtime_memory.enabled",
+        path=("session", "runtime_memory", "enabled"),
+        section="runtime_memory_guard",
+        label=_t(_rm.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_rm.enabled_help()),
+        choices=_bool_choices(
+            _t(_rm.enabled_choice_true_description()),
+            _t(_rm.enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="session.runtime_memory.limit_mb",
+        path=("session", "runtime_memory", "limit_mb"),
+        section="runtime_memory_guard",
+        label=_t(_rm.limit_mb_label()),
+        kind=Kind.INT,
+        default=8192,
+        help=_t(_rm.limit_mb_help()),
     ),
     # -- heavy_jobs ---------------------------------------------------------
     # ``path`` mirrors ``heavy_lease.HEAVY_JOBS_ENABLED_PATH``; pinned by
@@ -6997,6 +7203,16 @@ def coerce(setting: Setting, text: str) -> Any:
         # a desktop value is an accelerator, not a Textual key string.
         if setting.hotkey_scope == "desktop":
             return _keymap.normalize_desktop_key(text, action_id=setting.key)
+        if setting.hotkey_scope == "composer":
+            # The RAW spelling is what the grammar judges: canonicalising
+            # first would collapse a repeated modifier (``ctrl+ctrl+enter``)
+            # before the refusal sees it and store a chord the operator never
+            # asked for (``ctrl+enter``). Validation raises before the
+            # canonical form below is returned, so order matters here.
+            problem = _keymap.validate_key(text, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            return _keymap.normalize_composer_key(text)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -7343,6 +7559,15 @@ def write_setting(
         # Textual key string).
         if setting.hotkey_scope == "desktop":
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        elif setting.hotkey_scope == "composer":
+            # Validated RAW for the same reason as the `coerce` arm: this
+            # writer receives raw JSON straight from the wire, so a
+            # repeated-modifier spelling must be refused here rather than
+            # canonicalised into the chord it spells as its own collapse.
+            problem = _keymap.validate_key(value, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            value = _keymap.normalize_composer_key(value)
         else:
             value = _keymap.normalize_key(value)
     if setting.validate_value is validate_tier_value:

@@ -1,0 +1,20 @@
+{
+  "auditor": {"agent": "i18n-auditor (lopdev team)", "session": "30a0ce64e122", "model": "anthropic/claude-opus-5-5 (no fallback observed)", "date": "2026-11-23", "independent_from_translator": true},
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "c3ba6a516c6a"},
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/ru.json (sha256 e5ec4d20f0585a1628e818f9e663333539a93c2daf6b23c303fdc8fa8f3a358e; briefed path under session eac1855834c5 did not exist, located by the briefed ls fallback; translator notes: notes.md alongside)",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+  },
+  "context_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.context.json": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+    "local_operator/i18n/catalogues/en/tui.projects.context.json": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0"
+  },
+  "per_namespace": {
+    "tui.app": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "member_count: args (count plural, shown simple) identical to EN via runtime.message_arguments; selectors one/few/many/other per glossary ru row; other = genitive singular 'участника', matching repo convention (tui.app.skills.led_by, style guide §Plurals). Rendered with local_operator.i18n.runtime.render_message: 0→'0 участников'(12) 1→'1 участник'(10) 2→'2 участника'(11) 5→'5 участников'(12) 11→13 21→'21 участник'(11) 100→'100 участников'(14) — all ≤ maxCells 14. Correction to translator note: ru reaches 15 cells at 4-digit counts (1000), not only at 10^6; unrealistic roster size, not a finding. 'участник' = style-guide member term and led_by on the same line. team_aliases 'псевдонимы: {aliases}': plural label reads correctly for a list, matches tui.team_authoring.aliases. team_no_description 'без описания' (12/30 cells) idiomatic; correctly distinct from tui.projects.detail.no_description 'описания пока нет' (EN 'no description yet'). team_fallback_facts 'команда' = glossary/team_placeholder. No raw bidi/format controls."},
+    "tui.projects": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "team_detail: args manager/count/shown identical; ' · ' separator kept; {manager} untranslated; selectors one/few/many/other, other 'роли' (genitive sg) per convention. Rendered 0 'manager · 0 ролей', 1 '… 1 роль', 2 '… 2 роли', 5 '… 5 ролей', 21 '… 21 роль', 100 '… 100 ролей'. 'роль' matches tui.authoring.role. No maxCells hint; length ≈ EN."}
+  },
+  "validator": "Repo check.py not run against these values (not applied to a catalogue; read-only brief, no tree copy). Mechanical checks executed instead with the repo's own runtime parser/renderer (.venv python, worktree on sys.path): message_arguments, plural_selectors, render_message for counts 0,1,2,5,11,21,22,100. Translator reports check_catalogues()=0 problems on a merged clone (their claim, not re-run here)."
+}

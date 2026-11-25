@@ -83,6 +83,7 @@ from rich.cells import cell_len
 
 from local_operator import heavy_lease, memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
+from local_operator.atomic_files import atomic_write_text, discard_temp, unique_temp
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
 from local_operator.guardrails import spawned as guard_spawned
@@ -133,6 +134,7 @@ from local_operator.harness.wake import (
 )
 from local_operator.harness.wake_types import WakeOrigin
 from local_operator.i18n.keys import cli_failures as _cli_failures
+from local_operator.i18n.keys import wire_runtime_memory as _rmw
 from local_operator.i18n.keys import wire_sessions as _ws
 from local_operator.i18n.text import tr
 from local_operator.imaging import (
@@ -413,6 +415,31 @@ READ_LINE_CAP = 2000
 #: spill handle, because spilling a copy of a file that is already on disk
 #: would double the bytes for nothing.
 READ_OUTPUT_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS
+#: Char budget for a ``read`` WITH an explicit ``range``. An explicit range is
+#: an explicit request: the model already narrowed to the span it wants, so
+#: clipping that span at 8 KiB only buys a paging call (on the long-coding
+#: bench, 5/5 truncated file reads were paged on within 3 calls). Measured over
+#: the fixture repos' non-test sources rendered with line numbers: 21/49 exceed
+#: 8 KiB (p50 5.3k, p90 24.6k, max 188k), so doubling the budget returns most
+#: requested spans whole while still bounding a ``range="1-"``.
+#:
+#: DELIBERATELY 16 KiB, not 32, for two reasons that both bind:
+#:
+#: * It must fit ``harness.replay_bound.READ_REPLAY_BOUND_CHARS`` (16 KiB +
+#:   1 KiB footer room). That bound middle-elides every ``read`` result on
+#:   EVERY request, the current turn included, so a 32 KiB span arrived cut in
+#:   the middle with the clamp footer pointing past the gap (PR #4566 round 1,
+#:   M1/Q1). A unit test pins this budget plus footer under that bound.
+#: * A delivered result is re-sent on every later turn until compaction, and a
+#:   ``range`` rides in the result's details, so reads of different spans of
+#:   one file are never superseded. On a long session a 32 KiB span re-sent
+#:   per turn (~8k tokens) costs far more than the one ~2k-token paging call it
+#:   saves; 16 KiB halves that standing cost and still removes the common page.
+#:
+#: Whole-file reads keep :data:`READ_OUTPUT_LIMIT_CHARS` (and ``.py`` its
+#: structural summary); bash keeps its 8 KiB clamp, whose log-tail rationale is
+#: unchanged.
+READ_RANGE_OUTPUT_LIMIT_CHARS = 16 * 1024
 
 #: Char budget for an internal-URL read (``skill://``, ``guide://``, ``mcp://``)
 #: before it is shaped into a map. DELIBERATELY 16 KiB rather than
@@ -670,19 +697,22 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
     NEVER A DIRECTORY: ``root`` is the session's scratchpad, which lives under
     ``sessions/<id>/`` — the tree the session-deletion guard
     (``tests/unit/session/test_no_session_deletion.py``) protects. The only
-    entries this function unlinks or replaces are the two fixed names
-    ``bin/<launcher-name>`` and ``bin/.<launcher-name>.<pid>.tmp``, and each is
-    ``lstat``-ed first: anything that is a real directory (not a symlink to one)
-    makes the shim give up, so a user's or another tool's directory at either
-    name is left byte-for-byte alone and the call falls back to no injection.
+    entry this function replaces is the fixed name ``bin/<launcher-name>``, and it
+    is ``lstat``-ed first: a real directory there (not a symlink to one) makes
+    the shim give up, so a user's or another tool's directory is left
+    byte-for-byte alone and the call falls back to no injection. The staging
+    entry is a per-write name (:func:`local_operator.atomic_files.unique_temp`):
+    two bash calls of one process building the shim at once each stage their
+    own, ``symlink_to``/``copyfile`` cannot land on anything pre-existing at a
+    name nobody else picks, and the only thing ever removed is this call's own
+    staging entry after a failure.
     """
     bin_dir = root / "bin"
     target = bin_dir / launcher.name
-    staged = bin_dir / f".{launcher.name}.{os.getpid()}.tmp"
     desired = _stable_launcher(launcher)
     try:
         bin_dir.mkdir(parents=True, exist_ok=True)
-        if _is_real_directory(target) or _is_real_directory(staged):
+        if _is_real_directory(target):
             return None
         if target.is_symlink():
             # ``exists()`` follows the link: a pruned generation reads as gone.
@@ -690,14 +720,17 @@ def _launcher_shim_dir(root: Path, launcher: Path) -> Path | None:
                 return bin_dir
         elif target.is_file():
             return bin_dir
-        with contextlib.suppress(FileNotFoundError):
-            staged.unlink()
+        staged = unique_temp(target, hidden=True)
         try:
-            staged.symlink_to(desired)
-        except OSError:
-            shutil.copyfile(launcher, staged)
-            staged.chmod(0o755)
-        os.replace(staged, target)
+            try:
+                staged.symlink_to(desired)
+            except OSError:
+                shutil.copyfile(launcher, staged)
+                staged.chmod(0o755)
+            os.replace(staged, target)
+        except BaseException:
+            discard_temp(staged)
+            raise
         return bin_dir
     except OSError:
         logger.debug("could not build the lop shim directory under %s", root, exc_info=True)
@@ -2771,9 +2804,7 @@ def _rg_config_path() -> str | None:
         if not path.exists() or path.read_text(encoding="utf-8") != body:
             # Atomic replace: a concurrent `bash` call in another task must never
             # read a half-written config (review n2).
-            tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-            tmp.write_text(body, encoding="utf-8")
-            os.replace(tmp, path)
+            atomic_write_text(path, body)
         return str(path)
     except Exception:  # noqa: BLE001 — a missing nicety must never fail the command
         return None
@@ -2895,6 +2926,20 @@ async def _acquire_heavy_lease(
                 )
             )
         return None
+    if heavy.polls_lease:
+        # Leasing this line would hold the slot its own loop waits on (the
+        # 2026-11-22 self-wait: ~21 min, two other sessions timed out). Refuse
+        # before taking a slot; the remedy is to split the wait from the build.
+        return _error(
+            tool_call_id,
+            "bash",
+            "HEAVY JOB NOT STARTED: this command is heavy and also polls the heavy-job "
+            "lease in a loop (`lop services status`). A heavy command holds the slot for "
+            "its whole run, so the loop would wait for the slot it is holding and never "
+            "finish.\nRun the heavy command on its own, without the loop: the bash tool "
+            "queues it for the slot and runs it when free, so no polling is needed. "
+            "Or run only the heavy part as `lop services heavy run -- <heavy command>`.",
+        )
     session_id = (getattr(context, "session_id", None) if context else None) or os.environ.get(
         "LOCAL_OPERATOR_SESSION_ID", ""
     )
@@ -4513,6 +4558,109 @@ def _bash_output_summary(stdout: str, stderr: str) -> str:
         f"--- stderr ---\n{stderr}" if stderr else "--- stderr ---\n(empty)",
     ]
     return "\n".join(parts)
+
+
+#: BSD sed's complaints when handed GNU's ``sed -i 's/a/b/' FILE``: BSD reads
+#: the script as ``-i``'s backup suffix, then parses FILE as the script, so the
+#: message depends on FILE's first character, read as a sed command. Measured
+#: with real ``sed -i 's/a/b/' <file>`` runs on macOS (PR #4566 round 1, m1):
+#:
+#: * ``invalid command code`` -- ``README.md``, ``Makefile``, ``./x.py``, ``util.js``
+#: * ``extra characters at the end of`` -- ``x.py``, ``lib/a.py``, ``docs/b.md``,
+#:   ``package.json``, absolute paths
+#: * ``unterminated substitute pattern`` -- ``src/main.py``, ``s.py``
+#: * ``command a|c|i expects`` -- ``app.py``, ``config.py``, ``index.ts``
+#: * ``undefined label`` -- ``tests/x.py``, ``bin.sh``
+#: * ``unterminated transform source string`` -- ``yarn.lock``
+#: * ``unused label`` -- ``:x.py``
+#: * ``-I or -i may not be used with stdin`` -- ``requirements.txt``, ``w.py``
+#:   (``r``/``w``/``#`` consume the rest as a filename or comment)
+#:
+#: In the long-coding bench both LOP and Claude Code re-sent the failing GNU
+#: form once before switching (one wasted call per occurrence). Anchored on
+#: BSD's ``sed: `` prefix so GNU sed's wording (``sed: -e expression #1``)
+#: and unrelated stderr never match; the command gate
+#: (:data:`_GNU_SED_INPLACE_CMD_RE`) is what makes a list this wide safe, since
+#: several of these messages also follow an ordinary bad script.
+#: BSD echoes the script it parsed in quotes WITH sed's appended newline, so the
+#: real complaint spans two lines (``sed: 1: "f\n": invalid command code f``);
+#: ``[^"]*`` crosses that newline where ``.*`` would not, which is why a
+#: single-line fixture once passed while real output never matched.
+_BSD_SED_INPLACE_RE = re.compile(
+    r'^sed: (?:\d+: "[^"]*": (?:invalid command code|extra characters at the end of'
+    r"|unterminated substitute pattern|unterminated transform source string"
+    r"|command [aci] expects|undefined label|unused label)"
+    r"|-I or -i may not be used with stdin)",
+    re.MULTILINE,
+)
+#: A ``sed`` invocation whose ``-i`` (alone or ending a flag cluster such as
+#: ``-Ei``) is followed by a separate argument that is not an empty suffix:
+#: GNU's form. ``sed -i '' …`` and an attached suffix (``-i.bak``) are BSD-
+#: correct and never match, and neither does a sed with no ``-i`` at all, so
+#: ``echo a | sed 'foo'`` failing with ``invalid command code`` gets no
+#: in-place advice (round 1, m2). Stops at a shell separator so a later
+#: command's ``-i`` is not attributed to this sed.
+#:
+#: Round 2 (m2, n1), each form measured against real BSD sed on macOS:
+#:
+#: * ``sed`` may follow ``/`` (``/usr/bin/sed``) or a quote opening a nested
+#:   shell's script (``bash -c "sed -i …"``), not just whitespace/separators.
+#: * ``-i''`` / ``-i""`` reach sed as a bare ``-i`` (the shell drops the empty
+#:   quotes), so they fail exactly like ``-i`` and are treated as it.
+#: * Only OPTION tokens (``-…``, plus the argument ``-e``/``-f`` take) may sit
+#:   between ``sed`` and ``-i``: BSD's getopt stops at the first operand, so a
+#:   `` -i `` inside the script text (``sed 's/a -i b' f``) is not a flag and
+#:   gets no in-place advice, while ``sed -e 's/a/b/' -i f`` still does.
+#:   A token is quote-aware (``'…'`` / ``"…"`` count as one span), so a script
+#:   holding spaces is never split into fake option tokens.
+#:
+#: Round 3 (M1): every option token must have exactly ONE parse. The generic
+#: ``-…`` branch used to accept ``-e``/``-f`` too, so ``-e -n`` read either as
+#: one option-plus-argument or as two bare options; on a command with no ``-i``
+#: to find, the engine retried every split of the run -- 2^n. ``sed`` + ``-e -n``
+#: x24 took >20 s and a 10 KB run of `` -e`` >100 s, synchronously inside
+#: ``execute_bash`` on the event loop. The lookahead bars the generic branch
+#: from a letters-only flag ending in ``e``/``f``, so such a flag can only take
+#: its argument, and each token now has one reading: the scan is linear. A side
+#: effect is also the correct BSD reading: in ``sed -e -i f`` the ``-i`` is
+#: ``-e``'s script, not a flag, so it gets no in-place advice.
+_SED_TOKEN = r"""(?:[^\s|;&'"]|'[^']*'|"[^"]*")+"""
+_GNU_SED_INPLACE_CMD_RE = re.compile(
+    r"(?:^|[\s;&|(`\"'/])sed"
+    rf"(?:\s+(?:-[A-Za-z]*[ef]\s+{_SED_TOKEN}|-(?![A-Za-z]*[ef](?:\s|$)){_SED_TOKEN}))*?"
+    r"\s+-[A-Za-z]*i(?:''|\"\")?\s+(?!''|\"\")\S"
+)
+#: One line, not a man page: the fix is a single argument and the model already
+#: knows ``sed``.
+BSD_SED_INPLACE_HINT = "macOS BSD sed: `-i` takes a suffix argument; use `sed -i '' …`."
+#: Commands longer than this get no sed hint (see :func:`_bsd_sed_hint`).
+_SED_HINT_MAX_COMMAND = 4096
+
+
+def _bsd_sed_hint(command: str, stderr: str) -> str | None:
+    """The BSD ``sed -i`` hint for this result, or ``None``.
+
+    Darwin only, because the hint is only true where ``sed`` is BSD's; a Linux
+    host's GNU sed takes ``-i`` with no argument, and the advice would be wrong
+    there. Needs BOTH a GNU-form ``-i`` in ``command`` and a BSD complaint in
+    ``stderr``: either alone is a different mistake. Returned once per result
+    however many matching lines stderr holds.
+    """
+    if sys.platform != "darwin" or not stderr:
+        return None
+    # Belt and braces for M1 (round 3): the regex is linear now, but it still
+    # runs synchronously on the event loop for every failed bash call, so a
+    # future edit that reintroduces an ambiguous branch must not be able to
+    # freeze the TUI on a huge command. The substring precheck skips the regex
+    # for the overwhelmingly common failure with no ``sed`` in it, and the
+    # length cap bounds the worst case; a GNU-form ``sed -i`` one-liner is far
+    # below it, and a command past it just loses a one-line hint. No ``"-i"``
+    # precheck: a flag cluster (``sed -Ei``) holds no ``-i`` substring.
+    if len(command) > _SED_HINT_MAX_COMMAND or "sed" not in command:
+        return None
+    if not _GNU_SED_INPLACE_CMD_RE.search(command):
+        return None
+    return BSD_SED_INPLACE_HINT if _BSD_SED_INPLACE_RE.search(stderr) else None
 
 
 def _stream_budgets(stdout: str, stderr: str, budget: int, failed: bool) -> tuple[int, int]:
@@ -6305,6 +6453,12 @@ async def execute_bash(
         # Under the exit code, not last: the tool card keeps the HEAD of a
         # result, and this line is an instruction the agent must act on.
         parts.insert(1, worktree_notice)
+    sed_hint = _bsd_sed_hint(params.command, stderr)
+    if sed_hint:
+        # Same head slot as worktree_notice, for the same reason: the tool card
+        # keeps the head, and the line is the one action that ends the retry.
+        # Its own line, so stdout/stderr bodies stay byte-for-byte what ran.
+        parts.insert(1, sed_hint)
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     if pad_exceeded:
@@ -6664,7 +6818,7 @@ class ReadParams(BaseModel):
         default=None,
         description=(
             "Optional 1-based inclusive line range 'start-end' (e.g. '10-40') "
-            "or 'start-' to read to the end. Applies to files and to "
+            "or 'start[-]' to the end. Applies to files and to "
             "spill:// handles; on a spill search ('?q=') it selects which "
             "MATCHES to return, not which lines. Ignored for other internal URLs."
         ),
@@ -6678,11 +6832,17 @@ class ReadParams(BaseModel):
     )
 
 
-_LINE_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)?$")
+# The dash group is optional so a bare start line (``"76"``) parses: models
+# send it often enough that rejecting it cost a whole retry call each time.
+_LINE_RANGE_RE = re.compile(r"^(\d+)(?:\s*-\s*(\d+)?)?$")
 
 
 def _parse_line_range(spec: str) -> tuple[int, int | None]:
-    """Parse a ``'start-end'`` / ``'start-'`` range spec.
+    """Parse a ``'start-end'`` / ``'start-'`` / bare ``'start'`` range spec.
+
+    A bare start means ``'start-'``: it is a superset of any plausible reading
+    (one line, or "from here"), and the clamp footer already names the
+    continuation if the rest does not fit, so nothing is lost by reading on.
 
     Raises :class:`InvalidToolArgumentsError` (a ``ValueError`` subclass, so
     existing ``except ValueError`` callers are unaffected) because every
@@ -6701,7 +6861,7 @@ def _parse_line_range(spec: str) -> tuple[int, int | None]:
     match = _LINE_RANGE_RE.match(spec.strip())
     if not match:
         raise InvalidToolArgumentsError(
-            f"invalid line range '{spec}' (expected 'start-end' or 'start-')"
+            f"invalid line range '{spec}' (expected 'start-end', 'start-' or 'start')"
         )
     start = int(match.group(1))
     if start < 1:
@@ -6726,7 +6886,7 @@ def _number_lines(lines: list[str], start: int, span: int | None = None) -> str:
     return "\n".join(f"{start + i:>{width}}| {line}" for i, line in enumerate(lines))
 
 
-def _fits_output_budget(body: str) -> bool:
+def _fits_output_budget(body: str, limit: int = READ_OUTPUT_LIMIT_CHARS) -> bool:
     """Whether a rendered ``read`` body escapes the per-result clamp.
 
     One definition of the threshold, because two callers must agree on it to
@@ -6737,12 +6897,20 @@ def _fits_output_budget(body: str) -> bool:
     restatements of ``len(body) <= READ_OUTPUT_LIMIT_CHARS`` would let a
     future edit to one of them stop the scan early on a body that then gets
     clamped, which is precisely the ``None`` leak the footer must never see.
+    The ranged callers therefore all pass the same
+    :data:`READ_RANGE_OUTPUT_LIMIT_CHARS`.
     """
-    return len(body) <= READ_OUTPUT_LIMIT_CHARS
+    return len(body) <= limit
 
 
 def _clamp_file_body(
-    body: str, path: Path, start: int, total: int, *, display: str | None = None
+    body: str,
+    path: Path,
+    start: int,
+    total: int,
+    *,
+    display: str | None = None,
+    limit: int = READ_OUTPUT_LIMIT_CHARS,
 ) -> str:
     """Hold one ``read`` result inside the char budget.
 
@@ -6763,15 +6931,15 @@ def _clamp_file_body(
     gate escalates to an approval prompt, while ``scratchpad://big.md`` is the
     same continuation the caller already made (QA round 1, Q3).
     """
-    if _fits_output_budget(body):
+    if _fits_output_budget(body, limit):
         return body
-    clipped = body[:READ_OUTPUT_LIMIT_CHARS]
+    clipped = body[:limit]
     cut = clipped.rfind("\n")
     if cut > 0:
         clipped = clipped[:cut]
     next_line = start + len(clipped.splitlines())
     return (
-        f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
+        f"{clipped}\n\n[truncated at {limit} chars; "
         f"{total - next_line + 1} of {total} lines not shown. Continue with "
         f'read(path="{display or path}", range="{next_line}-{next_line + 200}") '
         f"or narrow with grep]"
@@ -7837,7 +8005,7 @@ _LINE_BREAK_RE = re.compile(f"[{_LINE_BREAK_CHARS}\r]")
 #: exactly the same character (see :func:`_stream_text_window`). This is what
 #: bounds peak memory for an open-ended ``range="30000-"``, where "the
 #: requested lines" is the whole tail of the file.
-_RANGED_KEEP_CHARS = READ_OUTPUT_LIMIT_CHARS
+_RANGED_KEEP_CHARS = READ_RANGE_OUTPUT_LIMIT_CHARS
 
 
 class _RangedRead(NamedTuple):
@@ -8054,7 +8222,7 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
         with path.open("rb") as handle:
             binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
             body = _number_lines(lines, start, span=window_lines)
-            if total_lines is None and not _fits_output_budget(body):
+            if total_lines is None and not _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # The head would be clamped and the footer needs the exact
                 # count, so recover it: the same scanner with retention off,
                 # over the same bytes, never a second divergent splitter.
@@ -10520,7 +10688,7 @@ async def _read_path(
             # keep fewer lines than the window holds, and the width must
             # still be the one the full window renders with.
             body = _number_lines(ranged.lines, start, span=ranged.window_lines)
-            if _fits_output_budget(body):
+            if _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # No footer, so the file's exact total was never needed and
                 # the scan was allowed to stop as soon as the window was
                 # complete (see _stream_text_window): this is the common
@@ -10533,7 +10701,14 @@ async def _read_path(
                 # exact total with a count-only pass over the same bytes
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
-                rendered = _clamp_file_body(body, path, start, total, display=display_path)
+                rendered = _clamp_file_body(
+                    body,
+                    path,
+                    start,
+                    total,
+                    display=display_path,
+                    limit=READ_RANGE_OUTPUT_LIMIT_CHARS,
+                )
             return _text(
                 tool_call_id,
                 "read",
@@ -18209,8 +18384,8 @@ class SessionsParams(BaseModel):
     target: str | None = Field(
         default=None,
         description=(
-            "info/resume/stop/peek: an exact name/id wins over a name/id/cwd "
-            "substring (live, then stored); a team role word is refused."
+            "info/resume/stop/peek: exact name/id beats a name/id/cwd "
+            "substring (live, then stored); team role words are refused."
         ),
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
@@ -18221,14 +18396,11 @@ class SessionsParams(BaseModel):
     # Both sit with the ADDRESSES because they modify addressing, not content.
     peer: str | None = Field(
         default=None,
-        description=(
-            "Remote (mesh): the device holding the session — a name or id; on `list`, "
-            "selects only that device's rows."
-        ),
+        description=("Remote (mesh): the session's device (name/id); on `list`, only its rows."),
     )
     scope: Literal["all", "local", "remote"] = Field(
         default="all",
-        description="list: all (default), local, or remote; peer selects only its device.",
+        description="list: all (default), local, or remote.",
     )
     prompt: str | None = Field(
         default=None,
@@ -18265,24 +18437,28 @@ class SessionsParams(BaseModel):
     paused: bool = Field(default=False, description="resume set: interrupted/retired.")
     failed: bool = Field(default=False, description="resume set: error.")
     all: bool = Field(default=False, description="resume set: all stored, non-live.")
-    dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
+    dry_run: bool = Field(default=False, description="resume set: preview only.")
     include_stored: bool = Field(
         default=False,
-        description="list: include stored (not running) sessions.",
+        description="list: also stored (idle) ones.",
     )
     limit: int = Field(
         default=20,
         ge=1,
         le=100,
-        description="list: max rows; resume: cap on the set.",
+        description="list: max rows; resume: set cap.",
     )
     query: str | None = Field(
         default=None,
-        description="list: search stored sessions by name/content; peek: locate a step.",
+        description="list: search by name/content; peek: locate a step.",
     )
+    # A remote listing's next page (the owner's ``net_catalog`` cursor). One
+    # short clause: the schema is billed on every request, and the footer of a
+    # remote list that has more names the exact `peer` + `cursor` to pass.
+    cursor: str | None = Field(default=None, description="list: footer's next-page token.")
     # --- peek windows (design §8; PR B) -------------------------------------
     steps: int | None = Field(default=None, description="peek: last N steps (default 12, max 50).")
-    head: int | None = Field(default=None, description="peek: first N steps instead of the tail.")
+    head: int | None = Field(default=None, description="peek: first N steps, not the tail.")
     before_id: str | None = Field(
         default=None, description="peek: steps just before this entry id."
     )
@@ -18290,7 +18466,23 @@ class SessionsParams(BaseModel):
         default=None, description="peek: window centred on this entry id."
     )
     regex: bool = Field(default=False, description="peek: `query` is a regex.")
-    digest: bool = Field(default=False, description="peek: compact fold instead of steps.")
+    digest: bool = Field(default=False, description="peek: compact fold, not steps.")
+    # --- stop escalation (runtime memory-runaway incident, 2026-11-24) -------
+    # The idle-only stop refused a runaway that was "working" (its wake turn
+    # had been open since boot) while it drove the host into swap, and the
+    # refusal named no way forward. `force` is that way forward, kept OFF by
+    # default so the tool's promise (never signals, never cuts work) holds
+    # unless the caller says this is an operator-safety stop.
+    #
+    #
+    # ONE SHORT CLAUSE, ON PURPOSE (agent review round 1 on #4519, R2): the field
+    # ships in every request's start context and its first description put
+    # ``scripts/bench_context_budget.py`` 21 tokens over. The contract lives where
+    # a caller meets it: the stop op's reference (``sessions(op='help')``,
+    # ``_SESSIONS_OP_DOCS["stop"]``) and the refusal itself, which names
+    # ``force=true`` and when it is legitimate. The `peer`/`include_stored`
+    # descriptions were tightened (same meaning) to pay for the rest.
+    force: bool = Field(default=False, description="stop: signals even if busy.")
 
 
 #: The window fields, which only ``peek`` has a meaning for — ONE ordered
@@ -18308,7 +18500,7 @@ _SESSIONS_PEEK_FIELDS = frozenset(_SESSIONS_PEEK_WINDOW_FIELDS) | frozenset({"re
 #: intent, and reporting success for a call the caller did not make is the one
 #: failure this table exists to prevent (design note §3.2).
 _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
-    "list": frozenset({"op", "include_stored", "limit", "query", "peer", "scope"}),
+    "list": frozenset({"op", "include_stored", "limit", "query", "cursor", "peer", "scope"}),
     "info": frozenset({"op", "session", "target", "pid", "peer"}),
     "spawn": frozenset(
         {
@@ -18340,7 +18532,7 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
             "peer",
         }
     ),
-    "stop": frozenset({"op", "session", "target", "pid", "peer"}),
+    "stop": frozenset({"op", "session", "target", "pid", "peer", "force"}),
     # ``park`` takes the stop's addresses, all OPTIONAL: no address parks the
     # calling session once its turn ends (``_sessions_park``), which is why it
     # is not in ``_SESSIONS_TARGET_OPS`` (that set REQUIRES an address).
@@ -18501,9 +18693,11 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " only that remote device.",
         example="sessions(op='list', include_stored=True)",
         refusals=(
-            "takes no address and no `prompt`/`name`; `query` reads THIS machine's"
-            " store and is refused beside `peer`/`scope='remote'`; `include_stored`"
-            " widens only the local half and is refused beside `peer`/`scope='remote'`.",
+            "takes no address and no `prompt`/`name`; `query` searches each device's"
+            " own store (remote matches come from that device); a remote device with"
+            " more rows names its next page as `peer` + `cursor`, and `cursor` is"
+            " refused without `peer`; `include_stored` widens only the local half and"
+            " is refused beside `peer`/`scope='remote'`.",
         ),
     ),
     "info": _SessionsOpDoc(
@@ -18551,14 +18745,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " subagent or a job), or one due a wake inside the hold window, is refused"
         " with the reason. Its wakes and monitors go DORMANT until it is reopened —"
         " to free memory and keep them armed, use `park`. With `peer`, always"
-        " refused — an idle-only remote stop is not on the wire yet.",
+        " refused — an idle-only remote stop is not on the wire yet. `force=true`:"
+        " operator-safety escalation, only when the operator asked for it to end or"
+        " it is a memory runaway — identity-checked SIGTERM, bounded drain, then"
+        " SIGKILL; cuts work in flight, never for tidying.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
             " calling session cannot stop itself; a working or wake-due session is"
             " refused; a remote (`peer`) target is always refused; an owner too old"
             " to promise an idle-only stop is refused; an owner that does not answer"
-            " is refused rather than signalled.",
+            " is refused rather than signalled. `force=true` lifts only the working,"
+            " wake-due, too-old and no-answer refusals; unproven identity stays refused.",
         ),
     ),
     "park": _SessionsOpDoc(
@@ -18862,8 +19060,10 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "`peer` applies to the mesh ops (list/info/spawn/resume/stop/peek) — "
                 f"not to op='{op}'.",
             )
-        if field == "scope":
-            return _sessions_stray_field_refusal(op, "`scope` applies to op='list' only.")
+        if field in ("scope", "cursor"):
+            # ``cursor`` is a remote listing's next page; without this branch
+            # it fell through to the spawn default (QA round 1, Q2 on #4592).
+            return _sessions_stray_field_refusal(op, f"`{field}` applies to op='list' only.")
         if op == "list":
             return _sessions_stray_field_refusal(
                 op, f"`{field}` applies to other ops; list takes no `{field}`."
@@ -18880,11 +19080,13 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "`peer` narrows the REMOTE rows and `scope='local'` shows none of "
                 "them — drop one.",
             )
-        if "query" in given and (peer or params.scope == "remote"):
+        # A REMOTE ``query`` is forwarded: each owner runs the store search on
+        # its own disk (``relay._catalog_page``), so it is no longer refused.
+        # A ``cursor`` is ONE owner's position, so it needs that owner named.
+        if "cursor" in given and not peer:
             return _sessions_stray_field_refusal(
                 op,
-                "`query` searches THIS device's store, so it cannot ride a "
-                "`peer`/remote listing — drop `query`, or list with `scope='local'`.",
+                "`cursor` is one device's next page — pass the `peer` its footer named.",
             )
         if "include_stored" in given and peer:
             return _sessions_stray_field_refusal(
@@ -19057,6 +19259,10 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             # prompt says that instead of asking the operator to approve an act
             # that will not happen (UX round 1 U3, design round 1 D5).
             return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        if args.get("force") is True:
+            # The escalation SIGNALS and can cut a turn, so the prompt must not
+            # carry the idle-only promise the plain stop's prompt makes.
+            return _runtime_memory_copy(_rmw.approval_stop_local_force(address=address))
         # The idle-only precondition is the promise now: a working session is
         # refused, so "ends its current run" over-promised (design round 1 D5,
         # UX round 1 U5).
@@ -19557,6 +19763,15 @@ def _sessions_peer_status(row: Mapping[str, Any]) -> str:
     block = row.get("peer") or {}
     if block.get("reachable") is False:
         return "link down; status unknown"
+    # A BOOTING SESSION IS NOT A STOPPED ONE (PR #4572 QA Q6). The owner lists
+    # it ``stored`` plus a ``boot_state`` claim, and ``PeerRow`` does not carry
+    # that claim, so the ladder below would say "not running"; ``info``/``list``
+    # say "starting · 12s" or "not answering · starting for 45s" instead.
+    from local_operator.resume import english_status_render, session_row_state_words
+
+    booting = row.get("boot_state") and session_row_state_words(row, render=english_status_render)
+    if booting and booting != str(row.get("state") or ""):
+        return booting
     from local_operator.network.projection import PeerRow
     from local_operator.resume import SessionRow
     from local_operator.session.catalog import status_of
@@ -19748,6 +19963,161 @@ def _session_row_brief(
     return "- " + ", ".join(bits)
 
 
+async def _sessions_remote_fetch(
+    tool_call_id: str, params: SessionsParams, peer: str, context: ToolContext | None
+) -> ToolResult | tuple[list[dict[str, Any]], list[str], dict[str, Any], bool | None]:
+    """The remote half of ``list``: ``(rows, notes, peer blocks, relay paging)``.
+
+    A ``cursor`` or ``query`` (and a ``peer``/remote ``limit``) asks each owner
+    for its PAGED read (``relay._catalog_page``), so a store past the owner's
+    ~200-row default cap is reachable and a search runs on the owner's own
+    disk. An unaddressed ``scope='all'`` listing with neither keeps the
+    federated read exactly, so the default call costs what it did.
+    ``relay paging`` is the CLI's ``relay_paging`` (``None`` = not asked).
+    """
+    from local_operator.network.wire import CATALOG_PAGE_MAX_TOKEN
+    from local_operator.resume import peer_reason_words
+
+    query = (params.query or "").strip() or None
+    if query is not None and len(query) > CATALOG_PAGE_MAX_TOKEN:
+        # Checked before the hop: every owner refuses a longer one (QA Q1).
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"`query` must be at most {CATALOG_PAGE_MAX_TOKEN} characters for a remote listing.",
+        )
+    paged = bool(peer or params.scope == "remote" or params.cursor or query)
+    argv = (
+        _mesh_doc_argv(peer, limit=params.limit, cursor=params.cursor, query=query)
+        if paged
+        else _mesh_doc_argv(peer)
+    )
+    early, payload = await _mesh_op(tool_call_id, "sessions", argv, _MESH_LIST_TIMEOUT_S, context)
+    if early is not None:
+        return early
+    notes: list[str] = []
+    refusal = _mesh_refusal_sentence(payload)
+    if refusal and not peer and str(payload.get("code") or "") == "relay_unavailable":
+        # THE DEGRADE: a relay that cannot be asked is a NOTE on what was
+        # readable, never an empty remote half dressed as a result.
+        return [], [f"no remote rows: {refusal}"], {}, None
+    if refusal:
+        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+    rows = [
+        row
+        for row in payload.get("sessions") or []
+        if isinstance(row, dict) and row.get("locality") == "remote"
+    ]
+    raw_peers = payload.get("peers")
+    peers: dict[str, Any] = raw_peers if isinstance(raw_peers, dict) else {}
+    for device_id, block in sorted(peers.items()):
+        if not isinstance(block, dict):
+            continue
+        if isinstance(block.get("refused"), str):
+            # The owner ANSWERED and refused this ask (QA Q1): its sentence,
+            # never "unreachable". A named `peer` gets it as the error itself.
+            if peer:
+                return _error(tool_call_id, "sessions", str(block["refused"]))
+            notes.append(f"{block.get('name') or device_id}: refused ({block['refused']})")
+        elif not block.get("reachable"):
+            notes.append(
+                f"{block.get('name') or device_id}: unreachable "
+                f"({peer_reason_words(str(block.get('reason') or ''))})"
+            )
+    # ``None`` unless the CLI said: this build's CLI always reports it for a
+    # paged ask, so its absence is a document this tool cannot classify.
+    relay_paging = payload.get("relay_paging") if paged else None
+    return rows, notes, peers, (relay_paging if isinstance(relay_paging, bool) else None)
+
+
+def _sessions_peer_row_count(rows: Sequence[Mapping[str, Any]], device_id: str) -> int:
+    return sum(
+        1 for row in rows if str((row.get("peer") or {}).get("device_id") or "") == device_id
+    )
+
+
+def _sessions_remote_beyond(
+    peers: Mapping[str, Any], remote_rows: Sequence[Mapping[str, Any]]
+) -> int:
+    """Rows paged owners hold BEYOND what they sent (their ``total`` minus their page)."""
+    beyond = 0
+    for device_id, block in peers.items():
+        if not isinstance(block, dict) or block.get("paging") != "paged":
+            continue
+        total = block.get("total")
+        if isinstance(total, int) and not isinstance(total, bool):
+            beyond += max(0, total - _sessions_peer_row_count(remote_rows, str(device_id)))
+    return beyond
+
+
+def _sessions_page_notes(
+    peers: Mapping[str, Any],
+    remote_rows: Sequence[Mapping[str, Any]],
+    shown: Sequence[Mapping[str, Any]],
+    relay_paging: bool | None,
+    *,
+    query: str,
+    asked_cursor: str | None,
+) -> list[str]:
+    """The footer lines for a paged remote read: the next page, NAMED, per owner.
+
+    Model-facing (this tool's result text), so English by design. The line
+    names the exact ``peer`` + ``cursor`` to pass, because "there is more" with
+    no way to ask for it is the defect this exists to fix. An owner (or this
+    device's relay) too old to page is said to be so: its capped answer must
+    never read as the whole store, nor as a search of it.
+    """
+    if relay_paging is None:
+        return []
+    if relay_paging is False:
+        return [
+            "(this device's relay predates remote paging/search — restart it to page "
+            "or search other devices; no remote page or search was answered)"
+        ]
+    notes: list[str] = []
+    for device_id, block in sorted(peers.items()):
+        if not isinstance(block, dict) or not block.get("reachable") or block.get("refused"):
+            continue
+        label = str(block.get("name") or device_id)
+        if block.get("paging") == "unsupported":
+            what = "search" if query else "page"
+            outcome = (
+                "no rows from it"
+                if query or asked_cursor
+                else "its default (capped) listing is shown"
+            )
+            notes.append(
+                f"({label}: its build predates remote paging/search, so it could not "
+                f"{what} its listing — {outcome})"
+            )
+            continue
+        cursor = block.get("next_cursor")
+        total = block.get("total")
+        if not isinstance(total, int) or isinstance(total, bool):
+            continue
+        count = _sessions_peer_row_count(shown, str(device_id))
+        sent = _sessions_peer_row_count(remote_rows, str(device_id))
+        # A ``list``-only link gets a names/ids search (relay R1): say so.
+        names_only = " (names only)" if query and block.get("search") == "names" else ""
+        scope_text = f" matching {query!r}{names_only}" if query else ""
+        query_text = f" query={query!r}" if query else ""
+        if count < sent:
+            # THE SHARED ``limit`` CUT THIS OWNER'S PAGE (several devices, or
+            # local rows first): its cursor points past rows never shown, so
+            # following it would skip them. Name the device-addressed read,
+            # which starts that owner's own walk from its first row.
+            notes.append(
+                f"({label}: {count} of {total}{scope_text} shown — more: "
+                f"peer={label!r}{query_text})"
+            )
+        elif isinstance(cursor, str):
+            notes.append(
+                f"({label}: {count} of {total}{scope_text} shown — next page: "
+                f"peer={label!r} cursor={cursor!r}{query_text})"
+            )
+    return notes
+
+
 async def _sessions_list(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
@@ -19766,14 +20136,13 @@ async def _sessions_list(
     from a listing must never read as "asked, and nothing is held". A peer that
     did not answer is NAMED, whether or not it held rows.
     """
-    if params.query and params.query.strip():
-        # ``query`` is its own LOCAL mode (it searches this device's store) and
-        # the validator refuses it beside `peer`/`scope='remote'`; on `local`/
-        # `all` it keeps today's search semantics exactly.
+    query = (params.query or "").strip()
+    if query and not params.peer and params.scope != "remote":
+        # ``query`` on `local`/`all` keeps the LOCAL store search exactly; on
+        # `all` that op also appends each peer's own search of ITS store.
         return await _sessions_list_query(tool_call_id, params, context)
 
     from local_operator.info.collect import session_rows
-    from local_operator.resume import peer_reason_words
 
     peer = str(params.peer or "").strip()
     # An explicit device is an address, not just a filter on a federated
@@ -19798,35 +20167,13 @@ async def _sessions_list(
 
     remote_rows: list[dict[str, Any]] = []
     notes: list[str] = []
+    remote_peers: dict[str, Any] = {}
+    relay_paging: bool | None = None
     if scope in ("all", "remote"):
-        early, payload = await _mesh_op(
-            tool_call_id,
-            "sessions",
-            _mesh_doc_argv(peer),
-            _MESH_LIST_TIMEOUT_S,
-            context,
-        )
-        if early is not None:
-            return early
-        refusal = _mesh_refusal_sentence(payload)
-        if refusal and not peer and str(payload.get("code") or "") == "relay_unavailable":
-            # THE DEGRADE: a relay that cannot be asked is a NOTE on what was
-            # readable, never an empty remote half dressed as a result.
-            notes.append(f"no remote rows: {refusal}")
-        elif refusal:
-            return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
-        else:
-            remote_rows = [
-                row
-                for row in payload.get("sessions") or []
-                if isinstance(row, dict) and row.get("locality") == "remote"
-            ]
-            for device_id, block in sorted((payload.get("peers") or {}).items()):
-                if isinstance(block, dict) and not block.get("reachable"):
-                    notes.append(
-                        f"{block.get('name') or device_id}: unreachable "
-                        f"({peer_reason_words(str(block.get('reason') or ''))})"
-                    )
+        fetched = await _sessions_remote_fetch(tool_call_id, params, peer, context)
+        if isinstance(fetched, ToolResult):
+            return fetched
+        remote_rows, notes, remote_peers, relay_paging = fetched
 
     merged: list[dict[str, Any]] = []
     if scope in ("all", "local"):
@@ -19855,13 +20202,32 @@ async def _sessions_list(
             seen.add(session_id)
         deduped.append(row)
     shown = deduped[: params.limit]
+    # A paged owner answered ONE page and its whole count, so the total is the
+    # rows in hand plus what each owner said it holds beyond its page.
+    beyond = _sessions_remote_beyond(remote_peers, remote_rows)
+    page_notes = _sessions_page_notes(
+        remote_peers, remote_rows, shown, relay_paging, query=query, asked_cursor=params.cursor
+    )
     details: dict[str, Any] = {
         "op": "list",
         "count": len(shown),
-        "total": len(deduped),
+        "total": len(deduped) + beyond,
         "scope": scope,
         "rows": shown,
     }
+    # Only a cursor whose page was SHOWN whole is a resume point (see
+    # ``_sessions_page_notes``); a cut page restarts with ``peer`` alone.
+    next_pages = {
+        device_id: block["next_cursor"]
+        for device_id, block in remote_peers.items()
+        if isinstance(block, dict)
+        and isinstance(block.get("next_cursor"), str)
+        and _sessions_peer_row_count(shown, str(device_id))
+        == _sessions_peer_row_count(remote_rows, str(device_id))
+    }
+    if next_pages:
+        details["next_cursors"] = next_pages
+    notes = page_notes + notes
     if notes:
         details["notes"] = notes
     # The sidecar reads happen OFF the loop, the same pattern ``list query=``
@@ -19880,7 +20246,12 @@ async def _sessions_list(
         )
         for row, team in zip(shown, row_teams)
     ]
-    if len(deduped) > len(shown):
+    # A PAGED remote answer names its next page per owner (``page_notes``);
+    # "raise `limit`" would be wrong there — the rest is past the owner's page.
+    # Nor beside the relay-too-old note: no `limit` reaches past it (QA Q3).
+    if len(deduped) > len(shown) and not (
+        (scope == "remote" and relay_paging is True) or relay_paging is False
+    ):
         if scope == "local":
             lines.append(
                 f"({len(deduped)} rows available; {len(shown)} shown — raise `limit` "
@@ -19976,20 +20347,59 @@ async def _sessions_list_query(
             lines.append(
                 f"- [stored] {name}, session {session_id}, last active {age_text} ago{binding}"
             )
+    # ``scope='all'``: each peer runs the SAME store search on its own disk
+    # (``relay._catalog_page``) and answers only rows its listing already
+    # shows — no snippet or digest leaves the owner. A local match wins a
+    # shared id, as on the plain listing; ``scope='local'`` asks nobody.
+    notes: list[str] = []
+    remote_shown: list[dict[str, Any]] = []
+    remote_peers: dict[str, Any] = {}
+    if params.scope == "all":
+        fetched = await _sessions_remote_fetch(tool_call_id, params, "", context)
+        if isinstance(fetched, ToolResult):
+            return fetched
+        remote_rows, fetch_notes, remote_peers, relay_paging = fetched
+        from local_operator.network.types import row_without_stored_claims
+
+        local_ids = {str(row.get("session_id") or "") for row in rows}
+        room = max(0, params.limit - len(rows))
+        remote_shown = [
+            row_without_stored_claims(row)
+            for row in remote_rows
+            if str(row.get("session_id") or "") not in local_ids
+        ][:room]
+        notes = (
+            _sessions_page_notes(
+                remote_peers,
+                remote_rows,
+                remote_shown,
+                relay_paging,
+                query=(params.query or "").strip(),
+                asked_cursor=None,
+            )
+            + fetch_notes
+        )
+        lines.extend(_session_row_brief(row, context) for row in remote_shown)
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
-        "count": len(rows),
-        "rows": rows,
+        "count": len(rows) + len(remote_shown),
+        "rows": rows + remote_shown,
     }
+    if notes:
+        details["notes"] = notes
     if not lines:
         text = f"no sessions match {params.query!r} (searched the store: names and recent content)"
+        if notes:
+            text += "\n" + "\n".join(notes)
     else:
         text = "\n".join(lines)
         text += (
             "\n(matched by the store search — names and recent content; it locates "
             "sessions, not positions inside them)"
         )
+        if notes:
+            text += "\n" + "\n".join(notes)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -20477,6 +20887,10 @@ async def _sessions_stop_mesh(
 #: shape of an independently-owned namespace, so adding these receipts could not
 #: move any already-audited locale's bytes (agent review round 1 R2).
 _sessions_copy = tr("wire.sessions")
+#: The force-stop escalation's copy (runtime memory-runaway incident). Its own
+#: namespace, shared with the guard's settings rows, so adding it could not move
+#: the audited ``wire.sessions`` bytes.
+_runtime_memory_copy = tr("wire.runtime_memory")
 
 
 def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
@@ -20514,11 +20928,21 @@ def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
-    """End an idle owner without inheriting the CLI's signal escalation.
+    """End an idle owner without inheriting the CLI's signal escalation — unless asked.
 
     ``force=False`` alone still permits SIGKILL in the legacy ladder. The
     explicit graceful-only mode also requires an owner-side idle latch, so
     pending work is refused rather than discarded by a cooperative socket stop.
+
+    ``params.force`` is the operator-safety escalation: the CLI's own ladder
+    (``control.stop_session(force=True)``, exactly ``lop stop --force``), which
+    stages the stop marker ``process._route_signal`` requires before it honours
+    a SIGTERM, waits out the receiver's bounded drain and then SIGKILLs the
+    identity-proven pid. WHY THE TOOL GROWS IT: on 2026-11-24 a runaway runtime
+    (2+ GB, wake turn open since boot) answered every idle-only stop with
+    "working right now", and the only signal anyone then sent was a bare SIGTERM
+    with no marker, which the gate rightly refused — so the session that was
+    taking the host into swap could not be stopped by the agent asked to stop it.
     """
     if str(params.peer or "").strip():
         # The remote transport does not yet carry the idle-only capability.
@@ -20548,12 +20972,14 @@ async def _sessions_stop(
         return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_self_refused()))
 
     waited: list[str] = []
+    force = params.force is True
     outcome = await control.stop_session(
         target.record,
         timeout_s=control.DEFAULT_TIMEOUT_S,
-        force=False,
-        graceful_only=True,
-        _command="sessions tool",
+        force=force,
+        graceful_only=not force,
+        # The marker names its author: the escalation is a distinct request.
+        _command="sessions tool --force" if force else "sessions tool",
         on_wait=waited.append,
     )
     # SAY WHAT THE STOP COST, AND OFFER PARK. The 2026-11-12 field gap: an agent
@@ -20584,7 +21010,23 @@ async def _sessions_stop(
     # the wait lines describe an attempt while ``outcome.line`` describes what
     # happened — the headline has to be the outcome, or the reader sees the
     # interim step and has to expand to learn the result (design round 1 D4).
-    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    if force:
+        details["force"] = True
+        # The SIGTERM rung's pre-signal announcement (``control._wait_line``,
+        # "waiting up to … before SIGKILL") is for a front end that paints WHILE
+        # it waits. This result is rendered once, after the outcome, so the line
+        # under "stopped"/"killed" read as still pending (UX round 1 on #4519,
+        # U7). Only the forced path reaches that rung; the ladder's other
+        # announcements (a stalled drain's decision line) still explain the stop.
+        waited = [line for line in waited if not line.startswith("waiting up to ")]
+    refused = outcome.method in ("refused", "busy", "draining")
+    if refused and not force:
+        # A REFUSAL IS NEVER A DEAD END (the 2026-11-24 runaway): the line names
+        # the escalation and when it is legitimate, so a caller holding an
+        # operator-safety reason knows the next call, and one without it knows
+        # this refusal is the answer.
+        waited.append(_runtime_memory_copy(_rmw.stop_force_hint()))
+    render = _error if refused else _text
     return render(
         tool_call_id,
         "sessions",
@@ -20770,6 +21212,7 @@ from local_operator.session.peek import (  # noqa: E402,F401 — see the comment
     _PeekDigest,
     _PeekWindow,
     _walk_steps,
+    digest_receipt,
 )
 
 
@@ -20878,18 +21321,17 @@ def _sessions_peek_mesh_journal(
     # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
     peeked: bool
     if mode == "digest":
-        raw_digest = payload.get("digest")
-        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        digest, text = digest_receipt(payload.get("digest"))
         details.update(
             steps_seen=digest.get("steps_seen"),
             tool_calls=digest.get("tool_calls"),
             has_older=digest.get("has_older"),
+            fold_version=digest["fold_version"],
         )
-        text = str(digest.get("text") or "")
         # Fail closed: only an owner's explicit "zero steps" counts as empty.
         peeked = digest.get("steps_seen") != 0
     else:
-        window = window_from_wire(payload.get("window") or {})
+        window = window_from_wire(payload.get("window") or {}, mode=mode)
         details.update(
             steps_shown=len(window.steps),
             has_older=window.has_older,
@@ -20899,6 +21341,10 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        if mode == "search":
+            details.update(
+                match_count=window.match_count, match_count_complete=window.match_count_complete
+            )
         # A miss is this harness's own sentence about an empty window; any
         # step the owner returned is transcript content.
         peeked = bool(window.steps)
@@ -21384,9 +21830,29 @@ def _mesh_pilot_timeout_s() -> float:
     return PILOT_ACT_TIMEOUT_S + 60.0
 
 
-def _mesh_doc_argv(peer: str) -> list[str]:
-    """The catalogue read: one device's rows (``--peer``) or every device's."""
-    return ["network", "sessions", "--json"] + (["--peer", peer] if peer else ["--all-peers"])
+def _mesh_doc_argv(
+    peer: str,
+    *,
+    limit: int | None = None,
+    cursor: str | None = None,
+    query: str | None = None,
+) -> list[str]:
+    """The catalogue read: one device's rows (``--peer``) or every device's.
+
+    ``limit``/``cursor``/``query`` make it the owner's PAGED read
+    (``relay._catalog_page``): without them an owner answers its capped default
+    listing (~200 stored rows), so a store past that cap was unreachable. Each
+    rides as ``--flag=value``, one token, so a value starting with ``-`` is not
+    parsed as the next option.
+    """
+    argv = ["network", "sessions", "--json"] + (["--peer", peer] if peer else ["--all-peers"])
+    if limit is not None:
+        argv.append(f"--limit={limit}")
+    if cursor is not None:
+        argv.append(f"--cursor={cursor}")
+    if query is not None:
+        argv.append(f"--query={query}")
+    return argv
 
 
 def _mesh_engage_argv(peer: str, address: str) -> list[str]:
@@ -21685,11 +22151,15 @@ def _sessions_open_body(
             # run appeared, and the ledger still says ``starting`` — so the
             # ONLY true sentence is that the reopen was REQUESTED. A receipt
             # that said "reopened" here was the silent no-op this path exists
-            # to make visible (see ``SESSIONS_READY_GRACE_S``).
+            # to make visible (see ``SESSIONS_READY_GRACE_S``). The owner's
+            # acceptance also requires the plain verdict NOT STARTED, and no
+            # model: no run exists yet, so naming one would claim it executed.
+            # The "reopen requested" lead stays first because callers and tests
+            # key on it; the verdict follows it.
             requested = f"reopen requested {named}" if named else "reopen requested"
             text = (
-                f"{requested}{where} — the exec job is still starting, so the session "
-                "is not confirmed live yet; follow it with "
+                f"{requested}{where} — NOT STARTED: the exec job is still starting, so "
+                "no run has begun and the session is not confirmed live yet; follow it with "
                 f"`lop exec --status {details.get('job_id')}` (or `lop sessions`)."
             )
             if details.get("sidebar_visibility") == "hidden":
@@ -21811,6 +22281,10 @@ async def _sessions_spawn_mesh(
     argv, problem = _mesh_create_argv(peer, params)
     if problem:
         return _error(tool_call_id, "sessions", problem)
+    # Pass only the host-owned source directory name to this create command.
+    # _sessions_open_env must still clear the audit id for every child.
+    if context is not None and context.session_dir:
+        argv += ["--source-session", Path(context.session_dir).name]
     early, payload = await _mesh_op(
         tool_call_id, "sessions", argv, _MESH_CREATE_ENGAGE_TIMEOUT_S, context
     )
@@ -21836,6 +22310,13 @@ async def _sessions_spawn_mesh(
     elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
+    from local_operator.skills.manifest import (
+        skill_transfer_receipt,
+        skill_transfer_status,
+    )
+
+    if status := skill_transfer_status(payload.get("skill_selection")):
+        lines.append(skill_transfer_receipt(status)["message"])
     notice = str(payload.get("unattended_notice") or "")
     if notice:
         lines.append(notice)
@@ -31034,10 +31515,63 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
         if problem is None or (problem.details or {}).get("error_code") == "tab_closed":
             state.surface_id = ""
             return ""
-        return f"{_host_label(host)} could not close the tab; ownership retained for retry"
+        # The host's OWN code and sentence, not a generic "could not close":
+        # the reason decides what unsticks the tab (a password-manager prompt
+        # the user must dismiss is not a wedged host), and the generic form hid
+        # it in every stranding incident of 2026-11-17. `problem` is already
+        # `format_error`'s rendering of the BridgeError, so its text carries
+        # the code; the code is appended only if that rendering ever omits it.
+        code = str((problem.details or {}).get("error_code") or "")
+        reason = " ".join(
+            str(getattr(part, "text", "")).strip() for part in problem.content
+        ).strip()
+        if code and code not in reason:
+            reason = f"{code}: {reason}" if reason else code
+        return (
+            f"{_host_label(host)} could not close the tab ({reason or 'no reason given'}); "
+            "ownership retained for retry"
+        )
     code, out = await _run_cmux(["close-surface", "--surface", surface])
     state.surface_id = ""
     return "" if code == 0 else out or f"cmux exited {code}"
+
+
+async def _close_stranded_quietly(resource: Any) -> list[str] | None:
+    """Retry the resource's stranded tabs; ``None`` when there were none.
+
+    Returns the host's per-tab failure reasons (empty when all closed). Never
+    raises: the caller is a user-facing action whose own outcome must not be
+    replaced by a fault in settling an OLDER tab — that tab stays owed in the
+    record for teardown and ``lop browser cleanup``.
+    """
+    from local_operator.browser_bridge.resources import STRANDED_FIELD
+
+    if not resource.record.get(STRANDED_FIELD):
+        return None
+    try:
+        return await resource.close_stranded()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.warning("browser: retrying stranded tabs failed", exc_info=True)
+        return [str(exc) or type(exc).__name__]
+
+
+def _with_stranded_note(result: ToolResult, failures: list[str] | None) -> ToolResult:
+    """Tell the model what happened to its stranded tabs, if it had any."""
+    if failures is None:
+        return result
+    if failures:
+        note = (
+            f"{len(failures)} earlier tab(s) this session still owns could not be closed "
+            f"({'; '.join(failures)}); they stay owed and are retried at session end."
+        )
+    else:
+        note = "Also closed earlier tab(s) this session had lost track of."
+    # Appended in place (the same idiom the access-prompt copy uses) so the
+    # result's error flag and details survive; a "No browser surface open."
+    # that now reports real work is no longer elidable.
+    result.content.append(TextContent(text=f" {note}"))
+    result.useless = False
+    return result
 
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
@@ -31062,6 +31596,15 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
     surface = state.surface_id
     problem = await close_browser_surface(state)
     if problem:
+        # A host refusal already ends "ownership retained for retry"
+        # (`close_browser_surface`, whose text session teardown also shows);
+        # repeating the disposition here read as a stutter (QA Q1, PR #4189).
+        if state.surface_id and problem.endswith("ownership retained for retry"):
+            return _error(
+                tool_call_id,
+                "browser",
+                f"Browser surface {surface} could not be closed: {problem}.",
+            )
         disposition = "ownership retained" if state.surface_id else "dropped the handle"
         return _error(
             tool_call_id,
@@ -31498,11 +32041,22 @@ async def _execute_browser_owned(
         if resource.record.get("terminal"):
             return _error(tool_call_id, "browser", "Browser scope ended; resume before browsing.")
         if action == "open" and not state.surface_id:
+            # A fresh tab is about to take a host slot: first retry any older
+            # tab this session lost track of (see resources.STRANDED_FIELD), so
+            # a session cannot climb toward the host's tab cap one stranded tab
+            # at a time. Best-effort — the open must not fail because an OLD tab
+            # would not close; it stays owed for close/teardown/cleanup.
+            await _close_stranded_quietly(resource)
             resource.allocate()
         failed_close = False
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if action == "close":
+                # 'close' also settles tabs this session owns but no longer
+                # holds the live handle for; otherwise the model's explicit close
+                # (and its "No browser surface open.") would leave them behind.
+                result = _with_stranded_note(result, await _close_stranded_quietly(resource))
             if action in ("request_access", "await_access", "cancel_access"):
                 access_state = (result.details or {}).get("state")
                 if action == "cancel_access" and not result.is_error:
@@ -35072,6 +35626,51 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+#: Lead of the continuation line that carries a held-back tier/effort edit's
+#: reason (``AsyncJob.model_selection_note``). It is ALSO an entry of
+#: ``tool_card._HARNESS_ADVISORY_LEADS``, which is what makes the operator's
+#: tool card WRAP the line instead of cropping it to one row: as the tail of
+#: the ``[selection: …]`` line the 215-225-character reason lost everything
+#: past cell 27 (100 columns) or 77 (150 columns), remedy included (design
+#: review D1). Spelled with ``selection`` rather than a bare ``not applied:``
+#: because the card recognises leads by text alone -- a captured row carries no
+#: provenance -- and a bare ``not applied:`` is an opening a program's stdout
+#: could plausibly wear (the R2-2 narrowing rule on that list). Change it here
+#: and in that list together; the card's wrap test fails until both move.
+SELECTION_NOTE_LEAD = "  selection not applied: "
+
+
+def _selection_tag(source: str) -> str:
+    """The `` [selection: <layer>]`` tag on a launch/resume receipt line.
+
+    The tag is where the operator -- and the delegating model -- read which
+    layer chose the child's model. It stays short on purpose: why a live
+    edit was held back is a separate line, :func:`_selection_note_line`.
+    """
+    if not source:
+        return ""
+    # i18n: ignore model-facing tool output, English-only
+    return f" [selection: {source}]"
+
+
+def _selection_note_line(source: str, note: str) -> str:
+    """Why a live tier/effort edit was NOT applied, on its own receipt line.
+
+    ``note`` is ``AsyncJob.model_selection_note`` (provider ceiling, mesh
+    replica). A held-back edit is part of the "which layer chose the model"
+    answer -- a reason only in the log reads here as though the edit took
+    effect -- so it rides the receipt directly under the ``[selection: …]``
+    line. It is its OWN line, led by :data:`SELECTION_NOTE_LEAD`, rather than
+    the tag's tail, because the tool card crops every captured line to one row
+    and only a recognised advisory lead wraps (design review D1). Emitted only
+    with a selection source, exactly as the note used to sit inside the tag.
+    """
+    if not source or not note:
+        return ""
+    # i18n: ignore model-facing tool output, English-only
+    return f"\n{SELECTION_NOTE_LEAD}{note}"
+
+
 def _not_applied_note(entry: Mapping[str, Any]) -> str:
     """Say so when a tier or model this call passed was NOT applied.
 
@@ -35153,6 +35752,15 @@ def _resumed_line(
     model from its previous run, and a different model is a different bill.
     The line says which model applies, and says so again when it changed, so
     the delegating model learns it from the call that caused it.
+
+    TENSE: this line is written as soon as ``resume_async`` returns, BEFORE the
+    child is built (``harness/subagent.py``), so the row's ``model_label`` is the
+    model chosen for the resume, not one that has executed. The clause is
+    therefore future ("will run on X"); a bare "resumed as job N on X" read as a
+    finished run. The model that actually served the run is disclosed later, on
+    the ``wait`` header and job listing, where it is known (owner acceptance,
+    model-provenance lane). Only the PREVIOUS run keeps the past tense, because
+    it really did run.
     """
     line = f"- {label} ({from_id}): resumed as job {new_job_id}"
     model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
@@ -35167,15 +35775,17 @@ def _resumed_line(
         # The note names the model's source, so the clause must not name a
         # second one: "on this session's model (X) (its parent's model could not
         # be found; ...)" would state two sources for one model (review R7).
-        line += f" on {model} ({note})"
+        line += f" \u2014 will run on {model} ({note})"  # i18n: ignore model-facing tool output
         return line
     if callable(on_parent) and new_job_id and on_parent(new_job_id):
         # Inherited from an ancestor rather than from this session (D9.4): "on
         # this session's model" would be false, and a bare "on <model>" reads
         # as a pin.
-        line += f" on its parent's model ({model})"
+        # i18n: ignore model-facing tool output
+        line += f" \u2014 will run on its parent's model ({model})"
     else:
-        line += f" {_model_clause(model, owns, session_model)}"
+        # i18n: ignore model-facing tool output
+        line += f" \u2014 will run {_model_clause(model, owns, session_model)}"
     if previous_model and previous_model != model:
         line += f" (its previous run was on {previous_model})"
     return line
@@ -35307,6 +35917,11 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                "model_selection_note": (
+                    str(getattr(context.jobs.get(job_id), "model_selection_note", "") or "")
+                    if context and context.jobs
+                    else ""
+                ),
                 # WHAT THIS CALL ASKED FOR, kept beside what the launch
                 # decided: the two can differ now, and only the pair says
                 # whether the caller's pick was applied (see
@@ -35324,12 +35939,14 @@ async def execute_task(
         return _error(tool_call_id, "task", f"could not launch subagent(s): {detail}")
     lines = [
         _launched_line(entry, context)
-        + (
-            f" [selection: {entry['model_selection_source']}]"
-            if entry.get("model_selection_source")
-            else ""
-        )
+        + _selection_tag(str(entry.get("model_selection_source") or ""))
         + _not_applied_note(entry)
+        # After ``_not_applied_note`` so that same-line bracket stays on the
+        # launch line; the held-back reason is its own wrapped line below it.
+        + _selection_note_line(
+            str(entry.get("model_selection_source") or ""),
+            str(entry.get("model_selection_note") or ""),
+        )
         + (f"\n  {entry['brief_notice']}" if entry.get("brief_notice") else "")
         for entry in launched
     ]
@@ -36567,7 +37184,7 @@ class HubParams(BaseModel):
     range: str | None = Field(
         default=None,
         description=(
-            "op='peek': transcript steps to read, as 'start-end' or 'start-' "
+            "op='peek': transcript steps to read, as 'start-end' or 'start[-]' "
             "(1-based, stable across peeks); steps= reads the last N."
         ),
     )
@@ -37297,6 +37914,7 @@ async def _execute_hub_parent(
                 # surface where a dropped pick reads as honoured, and a resume
                 # is a launch that costs money.
                 source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
+                note = str(getattr(comms.job(new_job_id), "model_selection_note", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,
@@ -37306,10 +37924,11 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (f" [selection: {source}]" if source else "")
+                    + _selection_tag(source)
                     + _not_applied_note(
                         {"model_selection_source": source, "model_pick": params.model}
                     )
+                    + _selection_note_line(source, note)
                 )
             else:
                 lines.append(f"- {label} ({from_id}): failed \u2014 {error}")
@@ -38015,44 +38634,9 @@ async def execute_ask(
     # so the blocking arm and the queued arm cannot disagree about what was asked.
     questions = list(params.questions or ())
     if callable(enqueue):
-        # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
-        # the unchanged enqueue: one awaited clearance check, whose ONLY
-        # diverting outcome is a ``clear``/``resolve`` mapping. Everything
-        # else — flag off, secret, re-raise, timeout, provider error,
-        # unparseable text — comes back as ``None`` and falls through to the
-        # enqueue call below, byte-for-byte today's.
-        #
-        # The try/except is the LAST line of the design's double guard (the
-        # callable owns the policy; this guard means even a contract breach —
-        # a broken gate that raises — cannot cost the ask). ``except
-        # Exception`` and not ``BaseException``, deliberately:
-        # ``asyncio.CancelledError`` must keep propagating so an aborted turn
-        # aborts.
-        gate: Any = getattr(context, "gate_ask", None) if context is not None else None
-        if callable(gate):
-            try:
-                # ``cast`` for the same reason the enqueue call below carries it:
-                # ``callable()`` narrows an ``Any`` to ``(...) -> object``, and
-                # an un-cast ``await`` on that narrowing is a pyright error
-                # about a value whose real shape is an awaited mapping-or-None.
-                verdict: Any = await cast("Any", gate)(
-                    questions, params.timeout, tool_call_id=tool_call_id
-                )
-            except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
-                verdict = None
-            if isinstance(verdict, Mapping):
-                # THE DIVERSION: no enqueue, no queue entry, no events. The
-                # result carries the hidden marker (design §3) and the
-                # decision-point note, so the model learns what happened and
-                # every human surface filters the row pair (the marker is
-                # persisted with the result; predicates live in
-                # ``harness/rows.py``).
-                return _text(
-                    tool_call_id,
-                    "ask",
-                    str(verdict.get("text") or ""),
-                    details=dict(verdict.get("details") or {}),
-                )
+        # The agent can decide whether to ask before calling the tool. Once it
+        # does, only the queue can admit or refuse the question: a clearance
+        # fork cannot answer for the operator or hide a valid call.
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.

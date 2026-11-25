@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.agent_profiles import AgentProfile, load_seed
+from local_operator.agent_profiles import load_seed
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness import subagent as subagent_mod
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.subagent import (
@@ -30,6 +32,7 @@ from local_operator.harness.subagent import (
     resolve_launch_target,
 )
 from local_operator.harness.types import ModelSpec
+from local_operator.network.move_team import TeamIdentityRefused
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.teams import (
@@ -39,6 +42,18 @@ from local_operator.teams import (
     escalation_preamble,
 )
 from tests.unit.harness.test_comms import ChangeSignal, wait_for
+
+
+def _agent_fields(**fields: Any) -> AgentEditFields:
+    """``AgentEditFields`` from only the fields a test names.
+
+    Every unnamed field defaults to ``None`` (leave/unset) at runtime, but
+    pyright's synthesized pydantic ``__init__`` demands each ``Field(None, ...)``
+    field be spelled. Unpacking keeps the runtime model identical — the same
+    reason the repo's other ``_edit_fields(**overrides)`` helpers exist.
+    """
+    return AgentEditFields(**fields)
+
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -124,12 +139,21 @@ def make_root(tmp_path: Path, registry: TeamRegistry | None, team: str | None = 
         transcript=Transcript(tmp_path / "root"),
         system_blocks_provider=lambda: ["stable", "env"],
         team_registry=registry,
+        agent_registry=AgentRegistry(registry.config_dir) if registry is not None else None,
     )
     if team is not None and registry is not None:
         found = registry.get_team_by_name(team)
         assert found is not None
         session.attach_team(found)
     return session
+
+
+def add_agent_slots(teams: TeamRegistry, name: str, *roles: str) -> None:
+    team = teams.get_team_by_name(name)
+    assert team is not None
+    teams.update_team(
+        team.id, TeamEditFields(members=[*team.members, *[TeamMember(role=role) for role in roles]])
+    )
 
 
 async def build(parent: Session, agent: str, job_id: str, prompt: str = "work"):
@@ -170,6 +194,8 @@ def test_depth_one_member_bytes_are_frozen(tmp_path, teams):
     text, _ = _effective_prompt("implement the button", "task", root, target)
     assert text == FROZEN_ORG_TASK_BYTES
     # ...and identical to the legacy no-target path, for a role too.
+    add_agent_slots(teams, "org", "reviewer", "scout")
+    root.attach_team(teams.get_team_by_name("org"))
     for role in ("task", "coder", "reviewer", "scout"):
         with_target, _ = _effective_prompt(
             "implement the button", role, root, resolve_launch_target(role, root)
@@ -197,6 +223,7 @@ def test_a_plain_child_with_no_team_is_unchanged(tmp_path, config):
 
 @pytest.mark.asyncio
 async def test_depth_two_and_three_carry_the_member_preamble(tmp_path, teams):
+    add_agent_slots(teams, "org", "manager")
     root = make_root(tmp_path, teams)
     org = teams.get_team_by_name("org")
     assert org is not None
@@ -244,6 +271,7 @@ def test_a_bare_name_with_only_a_team_slot_is_a_team_launch(tmp_path, teams):
 
 
 def test_a_bare_name_with_an_agent_slot_too_stays_an_agent_launch(tmp_path, teams):
+    AgentRegistry(teams.config_dir).create_agent(_agent_fields(name="pod", tags=["role"]))
     org = teams.get_team_by_name("org")
     assert org is not None
     teams.update_team(
@@ -316,7 +344,7 @@ async def test_a_team_launch_stamps_the_team_prefixed_agent_on_job_and_origin(tm
 @pytest.mark.parametrize(
     ("agent", "message"),
     [
-        ("team:nosuch", "unknown team 'nosuch'"),
+        ("team:nosuch", "'nosuch' is outside the recorded roster"),
         ("team:pod:2", "per copy"),
         ("team:", "no team name"),
     ],
@@ -337,17 +365,12 @@ def test_no_registry_is_an_unknown_team(tmp_path, config):
 
 
 @pytest.mark.parametrize("manager", ["scout", "quiet"])
-def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager, monkeypatch):
+def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager):
     pod = teams.get_team_by_name("pod")
     assert pod is not None
     teams.update_team(pod.id, TeamEditFields(manager=manager))
-    quiet = AgentProfile(name="quiet", description="d", may_delegate=False)
-    real = subagent_mod._resolve_role
-    monkeypatch.setattr(
-        subagent_mod,
-        "_resolve_role",
-        lambda agent, parent: quiet if agent == "quiet" else real(agent, parent),
-    )
+    if manager == "quiet":
+        AgentRegistry(teams.config_dir).create_agent(_agent_fields(name="quiet", tags=["role"]))
     root = make_root(tmp_path, teams)
     with pytest.raises(TeamLaunchError, match="cannot delegate"):
         resolve_launch_target("team:pod", root)
@@ -356,27 +379,105 @@ def test_a_manager_that_cannot_delegate_is_an_error(tmp_path, teams, manager, mo
 # -- D3 / N3: cycles and the cap -----------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_cycle_is_an_error(tmp_path, teams):
+def test_a_cycle_is_refused_before_recording_authority(tmp_path, teams):
     pod = teams.get_team_by_name("pod")
     assert pod is not None
     teams.update_team(
         pod.id,
         TeamEditFields(members=[TeamMember(role="coder"), TeamMember(role="org", kind="team")]),
     )
-    root = make_root(tmp_path, teams)
-    with pytest.raises(TeamLaunchError, match=r"cycle: team 'org' is already above"):
-        resolve_launch_target("team:org", root)  # A -> A
-    lead, _, _ = await build(root, "team:pod", "job-lead")
-    with pytest.raises(TeamLaunchError, match=r"cycle: team 'org'.*\(org > pod\)"):
-        resolve_launch_target("team:org", lead)  # A -> B -> A
-    await lead.dispose()
-    await root.dispose()
+    with pytest.raises(TeamIdentityRefused, match="org: delegation cycle: org > pod > org"):
+        make_root(tmp_path, teams)
+
+
+@pytest.mark.asyncio
+async def test_a_roster_naming_unprofiled_members_still_attaches_and_launches(tmp_path, teams):
+    """A plain role name and a ``team:`` slot naming no team are legitimate
+    roster entries (teams guide: such a team "still launches"; the org chart
+    draws a missing team as an unresolved node). Attach must record them, not
+    refuse the whole team; the member launches as a full child and the missing
+    team stays the launch error it always was."""
+    teams.create_team(
+        TeamEditFields(
+            name="plain",
+            manager="manager",
+            members=[TeamMember(role="worker"), TeamMember(role="ghost", kind="team")],
+        )
+    )
+    root = make_root(tmp_path, teams, team="plain")
+    authority = root._team_authority
+    assert authority is not None
+    record, profile, prompt = authority.roles["worker"]
+    assert (record["kind"], profile, prompt) == ("plain", None, "")
+    assert authority.absent_teams == frozenset({"ghost"})
+    child, target, _ = await build(root, "worker", "job-1")
+    assert target.role == "worker" and target.depth == 1
+    with pytest.raises(TeamLaunchError):
+        resolve_launch_target("team:ghost", root)
+    for session in (child, root):
+        await session.dispose()
+
+
+def _record_on(teams: TeamRegistry, agents_root: Path) -> dict[str, Any]:
+    from local_operator.network.move_team import _snapshot
+
+    team = teams.get_team_by_name("plain")
+    assert team is not None
+    return _snapshot(team, teams, AgentRegistry(agents_root), max_depth=3).record()
+
+
+def test_a_missing_definition_waits_only_when_the_record_attested_one(tmp_path, config):
+    """The fail-closed split the plain-role record exists for: a record that
+    attested a REAL role or team which this device lacks is a definitions-sync
+    wait (``is_pending_definition``); a record that attested NO definition
+    matches a device that has none; and a definition appearing where the record
+    attested none is a refusal, never a wait."""
+    from local_operator.network.move_team import _compare, is_pending_definition
+
+    teams = TeamRegistry(config)
+    teams.create_team(
+        TeamEditFields(
+            name="plain",
+            manager="manager",
+            members=[TeamMember(role="worker"), TeamMember(role="pod", kind="team")],
+        )
+    )
+    bare = tmp_path / "bare-agents"
+    without = _record_on(teams, bare)  # neither ``worker`` nor ``pod`` exists
+    _compare(without, _record_on(teams, bare), local=False, exact_revision=True)
+
+    defined = tmp_path / "defined-agents"
+    AgentRegistry(defined).create_agent(
+        _agent_fields(name="worker", description="w", tags=["role"])
+    )
+    with_role = _record_on(teams, defined)
+    assert with_role["delegation"]["roles"]["worker"]["kind"] == "role"
+    with pytest.raises(TeamIdentityRefused) as waiting:
+        _compare(with_role, without, local=False, exact_revision=True)
+    assert is_pending_definition(waiting.value), waiting.value
+    with pytest.raises(TeamIdentityRefused) as widened:
+        _compare(without, with_role, local=False, exact_revision=True)
+    assert not is_pending_definition(widened.value), widened.value
+    # The definition appeared; it is not "unavailable" (R2).
+    assert "differs from the recorded one" in str(widened.value), widened.value
+
+    # Manager ``worker`` (already a role key), so the roles set is unchanged and
+    # only the team comparison can decide the next two cases (R1).
+    teams.create_team(TeamEditFields(name="pod", manager="worker"))
+    with_team = _record_on(teams, bare)
+    with pytest.raises(TeamIdentityRefused) as team_waiting:
+        _compare(with_team, without, local=False, exact_revision=False)
+    assert is_pending_definition(team_waiting.value), team_waiting.value
+    with pytest.raises(TeamIdentityRefused) as team_widened:
+        _compare(without, with_team, local=False, exact_revision=False)
+    assert not is_pending_definition(team_widened.value), team_widened.value
+    assert "team definition 'pod' does not match" in str(team_widened.value)
 
 
 @pytest.mark.asyncio
 async def test_a_launch_past_the_cap_is_an_error(tmp_path, teams, config):
     (config / "config.yml").write_text("values:\n  subagents:\n    max_team_depth: 2\n")
+    add_agent_slots(teams, "org", "manager")
     root = make_root(tmp_path, teams)
     child, _, _ = await build(root, "manager", "job-1")
     grand, target, _ = await build(child, "task", "job-2")
@@ -450,6 +551,8 @@ def test_the_escalation_text_is_frozen():
 
 @pytest.mark.asyncio
 async def test_non_delegating_roles_hold_no_task_at_any_depth_inside_a_sub_team(tmp_path, teams):
+    add_agent_slots(teams, "org", "scout")
+    add_agent_slots(teams, "pod", "manager", "scout")
     root = make_root(tmp_path, teams)
     lead, _, _ = await build(root, "team:pod", "job-lead")
     mgr2, _, _ = await build(lead, "manager", "job-m2")
@@ -609,3 +712,22 @@ def test_a_legacy_record_resumes_under_the_roots_team(tmp_path, teams):
     carried = comms._carried_launch(comms._records["job-1"])
     assert isinstance(carried, CarriedLaunch)
     assert (carried.team_name, carried.depth) == ("org", 1)
+
+
+def test_large_but_finite_fanout_refuses_with_a_named_bound(tmp_path, teams):
+    from local_operator.teams import HUB_TEAM_MEMBERS_MAX_ITEMS
+
+    names = [f"leaf{n}" for n in range(HUB_TEAM_MEMBERS_MAX_ITEMS)]
+    for name in names:
+        teams.create_team(TeamEditFields(name=name))
+    org = teams.get_team_by_name("org")
+    assert org is not None
+    # The hub accepts each individual roster, but the closure also includes
+    # the leaves' manager definition and exceeds its overall budget by one.
+    teams.update_team(
+        org.id, TeamEditFields(members=[TeamMember(role=n, kind="team") for n in names])
+    )
+    with pytest.raises(
+        TeamIdentityRefused, match=rf"org: delegation exceeds the {len(names)}-slot bound"
+    ):
+        make_root(tmp_path, teams)

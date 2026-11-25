@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.ask_receipts",
+  "history_sha256": "6094aa66302303f1846aa31a2f6fb1aeef02f2b01f30c1c35526f26937c62752",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507",
+      "context_sha256": "48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa",
+      "target_sha256": "a0177717f0ce4fbf20f3b310020c9df6c1931c0530dfab1c070dbe4c01cbf1a1",
+      "translator": {
+        "agent": "coding agent (translator role, this lane's earlier session); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-id-harness); not the translator, did not author these keys",
+        "session": "c4e600431e1c",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor (both fixed), 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 6 keys of wire.ask_receipts in zh-CN against en source 1ae74bc10135dee17828f58af819fc521bd1e15024b3ce466cca20e49e102507 and sidecar 48222d4c8f3d776444973f6e4b1bfc5052552dada49708c06c7faa0e53e78dfa; target a0177717f0ce4fbf20f3b310020c9df6c1931c0530dfab1c070dbe4c01cbf1a1 recomputed from the file after the audit edits. Method: read docs/I18N.md, glossary, the locale style guide and the sidecar; compared with the shipped relay.ask / relay.asks sibling renderings of the same states; rendered every key with local_operator.i18n.messages.render for surface remote/tui/chat/desktop/other x reason answered_in_chat/moot/absent/unknown and waited 45s/3h/42m; checked placeholder and ICU select arm parity, NFC, no manual bidi controls, no English word inside a translated sentence, and cell widths against maxCells. Edits by the auditor (translator of record unchanged): response.dismissed: ASCII `, ` between the two select groups -> full-width `，`; timeout.timed_out: `{waited} 后` -> `{waited}后` (no space between Latin token and CJK). Pre-audit target sha256 6e91f615c3381d7d7cf4f955751680b897f22a7a674bbd205b54bf4659bbe967. Findings: [minor, fixed] response.dismissed joined the surface and reason clauses with an ASCII comma+space; zh-CN style guide requires full-width ，and no space beside CJK in prose. Changed to `，`. | [minor, fixed] timeout.timed_out put a space between the Latin/digit {waited} token and 后; the style guide forbids spaces between CJK and Latin/digit runs. Removed. Evidence is this auditor's own command output in the lane session, not an external report."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.ask_receipts",
+      "source_sha256": "ba2d2d97a57ec5f9decce90958168099fc1c81ae0882e75cab46f93af6262ad9",
+      "context_sha256": "88e59cd44fc0809d7737c6cabc4fc7b22a4c0d9d9a41bd9e976b03837ca82464",
+      "target_sha256": "e44d3de95914175eb52c1a8bc375b4adce1cd5ad5c4b25e7f1ae2dcc1b8db8a5",
+      "translator": {
+        "agent": "coding agent (translator role, lane feat/ask-withdrawn-row); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane ask-withdrawn-row); not the translator, did not author these keys",
+        "session": "543775e3bdf9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of every key of the namespace (delta for the six unchanged keys, fresh audit of wire.ask_receipts.withdrawn.by_agent)"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of all 7 keys of wire.ask_receipts in zh-CN against en source ba2d2d97a57ec5f9decce90958168099fc1c81ae0882e75cab46f93af6262ad9 and sidecar 88e59cd44fc0809d7737c6cabc4fc7b22a4c0d9d9a41bd9e976b03837ca82464; target e44d3de95914175eb52c1a8bc375b4adce1cd5ad5c4b25e7f1ae2dcc1b8db8a5 recomputed from the file bytes. Delta: the six earlier keys (name.secret_question, response.answered/declined/dismissed/late, timeout.timed_out) are byte-identical in copy to the rows audited in fa01d5672 (compared with git show origin/main: no earlier-key string changed in any locale); their prior verdict stands and is re-attested here at the new source/sidecar hashes, which changed only by the added key. Findings carried from that audit (e.g. the advisory dismissed width budget) are unchanged and not re-opened. New key wire.ask_receipts.withdrawn.by_agent = '已由智能体撤回': meaning checked against the sidecar (the agent retracted the ask and no longer needs an answer; the agent is the actor; not 'deleted', not 'cancelled by you'); consistency checked against the shipped relay.asks.status.withdrawn and this namespace's other state phrases: 撤回 = relay.asks.status.withdrawn 已撤回; 智能体 per glossary and response.declined; 已 state prefix like 已回答/已拒绝; no final 。 per style guide. Method: read docs/I18N.md, glossary, the zh-CN style guide and the sidecar; rendered the key with local_operator.i18n.messages.render (no params) and composed the receipt row 'a-745e · “Settings layout” — <phrase>' together with the other keys (answered, declined, late, timed_out waited=42m, dismissed remote/other); checked key/placeholder parity with en (no ICU arguments in the new key), NFC, no manual bidi controls, no English word in the phrase, and cell width against the sidecar maxCells 40 (well within). No catalogue edits. No findings.  Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

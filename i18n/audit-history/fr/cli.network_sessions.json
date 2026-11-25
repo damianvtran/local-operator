@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.network_sessions",
+  "history_sha256": "e6073a08d7ff28068c5b5abcf6b247b290ab235372eddee43ecded755cf27f10",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.network_sessions",
+      "source_sha256": "708e6844069a8a325b61489992a278cca8cec53815d89791bdde3b0a8494f369",
+      "translator": {
+        "agent": "i18n translator (lopdev team `task` agent, session bc8e8836e24d; TRANSLATOR.md receipt)",
+        "session": "bc8e8836e24d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer agent (lopdev team, session/job b6f8f687b150; independent of the translator)",
+        "session": "b6f8f687b150",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Target fr/cli.network_sessions.json sha256 1212fa510d1cdd1e8f2a6e08b6bf549e795a6917356325f8f9345ee4827a2d2e (3/3 keys). Round 1 passed: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167015910. Pass retained in round 2 by byte identity: https://github.com/damianvtran/local-operator/pull/4592#issuecomment-7167516072. Non-gating findings: T1 minor (relay_unpaged), deferred. Independent LLM audit per round on the same model family as the translator; no cross-model, native-speaker or visual RTL/overflow audit claimed."
+    }
+  ]
+}

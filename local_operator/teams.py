@@ -1995,7 +1995,9 @@ class TeamRegistry:
         """
         return self._find_cached_team_by_name(name) or self._find_cached_team_by_alias(name)
 
-    def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Team | None:
+    def get_team_by_name(
+        self, name: str, *, recovery_wait: float | None = None, require_loaded: bool = False
+    ) -> Team | None:
         """Resolve a team by its KEY: casefold name first, alias fallback.
 
         Writers keep the two namespaces disjoint casefolded --
@@ -2003,13 +2005,22 @@ class TeamRegistry:
         team's name or alias, and an alias that equals any team's name or
         another team's alias -- so whichever kind matches, the answer is
         unambiguous. The name-first order makes resolution deterministic even
-        for a hand-edited row the writers' rule predates.
+        for a hand-edited row the writers' rule predates. Identity checks use
+        ``require_loaded``: the metadata-only fallback during a concurrent
+        publish cannot distinguish unread briefs from deliberately empty ones.
         """
         self._refresh_if_needed(wait=recovery_wait)
         team = self._find_cached_team_by_name(name)
         if team is None:
             team = self._find_cached_team_by_alias(name)
-        return self._load_briefs(team) if team is not None else None
+        if team is None:
+            return None
+        team = self._load_briefs(team)
+        if require_loaded and (
+            team.id not in self._briefs_loaded or team is not self._teams.get(team.id)
+        ):
+            return None
+        return team
 
     def _assert_keys_available(
         self,

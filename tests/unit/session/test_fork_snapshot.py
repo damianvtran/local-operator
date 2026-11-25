@@ -11,7 +11,11 @@ import pytest
 from local_operator.harness.types import Message, MessageRole, TextContent, ToolCall
 from local_operator.session.errors import ForkRefused
 from local_operator.session.session import _paired_prefix
-from local_operator.session.transcript import ENTRY_COMPACTION, Transcript
+from local_operator.session.transcript import (
+    ENTRY_COMPACTION,
+    INLINE_UI_HEAD_LATCH_CUSTOM_TYPE,
+    Transcript,
+)
 from local_operator.spawn.policy import fork_mode, parse_fork_args
 
 
@@ -461,3 +465,79 @@ async def test_snapshot_copy_error_releases_lock_and_preserves_parent(
         await parent.fork_snapshot()
     assert not parent._lock.locked()
     assert parent.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_cut_drops_head_latch_rows_decided_under_a_dropped_compaction(
+    tmp_path: Path,
+) -> None:
+    """A cut fork keeps the head-row latch its retained signed blocks were bound to.
+
+    On an Anthropic thinking wire the inline-UI hint is a fixed head row at
+    ``messages[0]``, and every signed thinking block is bound to ALL content
+    before it. The latch is re-decided only at a compaction that kept no signed
+    thinking, and each row records the marker it was decided under. Here the
+    latch moves from A (under the first compaction) to B (under the second).
+    A cut between the two anchors replays the first summary, so the child's
+    signed blocks were bound to A: a child restoring B would rewrite their
+    prefix on every request (HTTP 400) and miss the message cache.
+    """
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    old = message("user", "OLD1")
+    first = message("assistant", "first kept")
+    await parent.append_messages([old, first])
+    await parent.append_custom(
+        INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": "HINT-A", "compaction_id": None}
+    )
+    c1 = await parent.append_compaction(
+        summary="SUMMARY-1", first_kept_entry_id=first.id, tokens_before=10
+    )
+    await parent.append_custom(
+        INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": "HINT-A", "compaction_id": c1.id}
+    )
+    second = message("user", "SECOND")
+    await parent.append_messages([second, message("assistant", "second answer")])
+    c2 = await parent.append_compaction(
+        summary="SUMMARY-2", first_kept_entry_id=second.id, tokens_before=10
+    )
+    newer = await parent.append_custom(
+        INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": "HINT-B", "compaction_id": c2.id}
+    )
+    await parent.append_message(message("user", "THIRD"))
+    before = parent.path.read_bytes()
+
+    fork_id, _, landed = await parent.fork_snapshot(through_entry_id=first.id)
+
+    child = Transcript(parent.directory.parent / fork_id)
+    assert landed == first.id
+    assert child.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) == {
+        "text": "HINT-A",
+        "compaction_id": c1.id,
+    }
+    assert newer.id not in child.path.read_text()
+    # The parent keeps its own, newer latch.
+    assert (parent.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) or {}).get("text") == "HINT-B"
+    assert parent.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_uncut_fork_keeps_the_newest_head_latch(tmp_path: Path) -> None:
+    """A whole-copy fork keeps every compaction, so it keeps the newest latch."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    first = message("user", "FIRST")
+    await parent.append_messages([message("user", "OLD"), first])
+    c1 = await parent.append_compaction(
+        summary="SUMMARY-1", first_kept_entry_id=first.id, tokens_before=10
+    )
+    await parent.append_custom(
+        INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": "HINT-B", "compaction_id": c1.id}
+    )
+    await parent.append_message(message("assistant", "answer"))
+
+    fork_id, _, _ = await parent.fork_snapshot()
+
+    child = Transcript(parent.directory.parent / fork_id)
+    assert child.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) == {
+        "text": "HINT-B",
+        "compaction_id": c1.id,
+    }

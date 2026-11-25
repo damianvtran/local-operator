@@ -628,6 +628,54 @@ async def test_frame_index_fallback_preserves_ready_facts_without_projection(
 
 
 @pytest.mark.asyncio
+async def test_a_stale_large_index_serves_building_without_decoding_under_the_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First-paint S1: the projection-less fallback of an index this process must
+    re-decode (>= 20 MB, republished since its last parse) answers ``building``
+    at once instead of decoding the document inside the open; the decode runs
+    after the hold, and the next read carries the facts.
+
+    Mutant: drop ``hydration_bytes=`` from ``_defer_for_paint`` -> ``_read_raw``
+    runs under the hold and the frame waits on it.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=4)
+        assert ti.refresh_index(harness.root, harness.session_id) is not None
+        cache = ti.index_path(harness.root, harness.session_id)
+        with cache.open("a", encoding="utf-8") as handle:
+            handle.write(" " * (20 << 20))  # identity changes: the memo is stale
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        reads: list[bool] = []
+        real_read = ti._read_raw
+
+        def read_spy(*args: Any, **kwargs: Any) -> Any:
+            reads.append(True)
+            return real_read(*args, **kwargs)
+
+        monkeypatch.setattr(ti, "_read_raw", read_spy)
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            response = await harness.client.get(url, params=params)
+            assert response.status_code == 200
+            first = response.json()["result"]
+            assert first["runs_state"] == "building"
+            assert ti.refresh_deferred(harness.root, harness.session_id)
+            assert reads == [], "the index was decoded inside the open it was deferred for"
+        finally:
+            release()
+            entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
+            if entry is not None:
+                assert await asyncio.wait_for(entry[1], 30) is not None
+        assert reads, "the deferred decode never ran after the hold"
+        after = await harness.client.get(url, params=params)
+        assert after.status_code == 200
+        assert after.json()["result"]["runs_state"] == "ready"
+
+
+@pytest.mark.asyncio
 async def test_held_disk_hit_preserves_first_frame_grouping_without_full_hydration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "relay.transcript",
-  "history_sha256": "db273846544c4b0f92ae61b8f13a41a4df3592640673bfbc0f275cb4fa88fef3",
+  "history_sha256": "e1da41fb71fd444a3b22e0db885950a1c3da52ad0edcd79fd88c6112b38a5096",
   "entries": [
     {
       "locale": "fr",
@@ -118,6 +118,105 @@
         "relay.transcript.jump.latest_short"
       ],
       "note": "2 new keys relay.transcript.jump.{latest,latest_short} (jump-to-latest chip on the phone web transcript; en 'Jump to latest' / 'Latest'). Independent audit of the whole relay.transcript namespace for this locale at en sha 64d6a705…: key order, ICU placeholder parity, NFC and plural categories verified mechanically; 0 BLOCKER/MAJOR. Pre-existing keys unchanged and carry their prior passed audit. fr 'Aller au plus récent' / 'Plus récent': passed. Infinitive label; 'aller au' matches shipped TUI 'aller au premier sous-agent'. NIT-1: the bare short 'Plus récent' can read as a sort option ('most recent first'); acceptable because the chip sits at the transcript bottom with a down arrow and the full label is the accessible name. No change required. 20/11 chars."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "3208bd4957cba1d980178caa74a4f03655554c85a046cbd01d52b6d7d3cf192a",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "not-performed"
+      },
+      "status": "pending",
+      "note": "Translation-only scoped pass; independent audit required. i18n/receipts/bridge-card-reread-translator-fr-e896d2db9139.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "6aec043147ea745a29dd76cb62b973fbd8422036e373be727a78b5b2953adcd1",
+      "target_sha256": "3208bd4957cba1d980178caa74a4f03655554c85a046cbd01d52b6d7d3cf192a",
+      "translator": {
+        "agent": "i18n-translator (lopdev translation pass)",
+        "session": "e896d2db9139",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 → openai/gpt-6.1-sol; provider quota failure",
+        "date": "2026-11-21"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "9af46213ad99",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota before audit",
+        "date": "2026-11-21",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Scoped bridge-card delta independently passed; untouched values retain prior audits. Evidence: i18n/receipts/bridge-card-copy-audit-9af46213ad99.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "bf64e8fc10eb8b4b3ccf29fc05079a0a22192a650c2c034682b7e55f152bf374",
+      "target_sha256": "79af01c3f8a972fb2b291bc72fb31737c43a9005e6cd20e1d3428795eea44cbe",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "d0cedb4296eb",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit began",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-fr-d0cedb4296eb.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "87a3e3d62fddefb9212eeba2d1981e15ebf532237c5034d56f464ab47dde0af1",
+      "target_sha256": "f788f4f76e19c6e8d1e43bc53ae7efec43e7fb47632f5dd5c21486c891a39631",
+      "translator": {
+        "agent": "merged audited translations: i18n-translator (lopdev session e896d2db9139) for the bridge-card keys; coder relay-jtl-coder (session c2f4e7591c05) for the relay.transcript.jump keys; this merge performed no new translation",
+        "model": "openai/gpt-6.1-sol for the bridge-card pass; radient/auto for the jump pass",
+        "date": "2026-11-22"
+      },
+      "auditor": {
+        "agent": "independent-translation-auditor (lopdev reviewer)",
+        "session": "d0cedb4296eb",
+        "model": "openai/gpt-6.2-sol",
+        "fallback": "anthropic/claude-opus-5-5 -> openai/gpt-6.2-sol due to provider quota, before semantic audit began",
+        "date": "2026-11-22",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.bridge.held",
+        "relay.transcript.bridge.offline",
+        "relay.transcript.bridge.thread_reply"
+      ],
+      "note": "Merged-namespace re-attestation (2-space re-serialization; parsed content identical to the prior pass) after combining PR #4408's bridge-card copy with main's relay.transcript.jump keys; the other 40 values are byte-identical to origin/main and retain their prior audits. Evidence: i18n/receipts/bridge-card-merged-relay-audit-fr-reserialized-d0cedb4296eb.json"
     }
   ]
 }

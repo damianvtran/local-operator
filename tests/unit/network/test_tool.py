@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import ToolContext, ToolResult
 from local_operator.network import cli as net_cli
 from local_operator.network import tool as net_tool
 from local_operator.network.tool import NetworkParams
@@ -2129,6 +2129,36 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
     assert not result.is_error
     assert _text(result).endswith("on it")
+
+
+def test_the_tools_create_names_its_own_source_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = "aabbeeff1122"
+    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "000000000000")
+    forwarded: list[str | None] = []
+
+    async def fake_cli(
+        argv: list[str], timeout: float, *, source_session: str | None = None
+    ) -> tuple[int, str, str]:
+        assert "--create" in argv
+        forwarded.append(source_session)
+        return 0, json.dumps({"ok": True, "session_id": "112233445566"}), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+
+    async def create() -> ToolResult:
+        return await net_tool.execute_network(
+            "create",
+            {"action": "sessions", "peer": "device-b", "create": True},
+            None,
+            None,
+            ToolContext(session_dir=str(tmp_path / "sessions" / source)),
+        )
+
+    result = asyncio.run(create())
+    assert not result.is_error
+    assert forwarded == [source]
 
 
 def test_the_tools_create_is_attributed_to_an_agent() -> None:

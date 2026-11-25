@@ -15,5 +15,7 @@
   "tui.transcript.group.steered": "{count, plural, one {{label} réorientation} many {{label} réorientations} other {{label} réorientations}}",
   "tui.transcript.hub.reply_requested": "Réponse demandée",
   "tui.transcript.hub.steered": "Réorienté",
-  "tui.transcript.hub.from": "De {identity}"
+  "tui.transcript.hub.from": "De {identity}",
+  "tui.transcript.jump_to_latest": "Aller au plus récent",
+  "tui.transcript.jump_to_latest.short": "Récent"
 }

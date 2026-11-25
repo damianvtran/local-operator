@@ -1,7 +1,13 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCommand } from "./api";
-import { getPendingContinuation, submitContinuation } from "./continuation-command";
+import {
+	getPendingContinuation,
+	settleWakingContinuation,
+	submitContinuation,
+} from "./continuation-command";
+import { clearHeldContinuations } from "./continuation-memory";
+import { clearPrivateSessionStorage } from "./private-storage";
 
 vi.mock("./api", () => ({ sendCommand: vi.fn() }));
 
@@ -13,6 +19,8 @@ const mockedSendCommand = vi.mocked(sendCommand);
 vi.stubGlobal("crypto", { randomUUID: vi.fn(() => "12345678-1234-4678-9234-567812345678") });
 
 afterEach(() => {
+	vi.restoreAllMocks();
+	clearHeldContinuations();
 	localStorage.clear();
 	mockedSendCommand.mockReset();
 });
@@ -60,11 +68,15 @@ describe("submitContinuation", () => {
 		await submitContinuation("root", "prompt", "Edited draft", [
 			{ data_b64: "edited-image", mime_type: "image/png" },
 		]);
+		/* A fresh prompt's wire body is its envelope plus the transport-only
+		   `accept_waking` opt-in (the relay pops it before validation); the
+		   replayed steer above stays byte-identical to its stored envelope. */
 		expect(mockedSendCommand.mock.calls[2]?.[1]).toEqual({
 			op: "prompt",
 			command_id: "12345678-1234-4678-9234-567812345678",
 			text: "Edited draft",
 			images: [{ data_b64: "edited-image", mime_type: "image/png" }],
+			accept_waking: true,
 		});
 		expect(mockedSendCommand.mock.calls[2]?.[1]).not.toBe(mockedSendCommand.mock.calls[1]?.[1]);
 		expect(localStorage.getItem("lo-mobile-command:root")).toBeNull();
@@ -154,6 +166,96 @@ describe("submitContinuation", () => {
 			now.mockRestore();
 		}
 	});
+
+	describe("when localStorage cannot hold the retry copy", () => {
+		/* iOS Safari gives the whole origin ~5 M characters; two screenshots are
+		   ~2.9 M. A second image-bearing envelope used to throw BEFORE the request,
+		   surfacing as the composer's catch-all banner with no Retry control. */
+		const quota = () =>
+			vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+				throw new DOMException("quota", "QuotaExceededError");
+			});
+
+		it("still sends, and holds the envelope in memory for an in-page retry", async () => {
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(
+				submitContinuation("rotom", "prompt", "with screenshots", [
+					{ data_b64: "AAAA", mime_type: "image/png" },
+				]),
+			).rejects.toThrow("Load failed");
+			expect(mockedSendCommand).toHaveBeenCalledOnce();
+			expect(localStorage.getItem("lo-mobile-command:rotom")).toBeNull();
+			/* The retry affordance exists, under the same UUID. */
+			const pending = getPendingContinuation("rotom");
+			expect(pending?.command_id).toBe("12345678-1234-4678-9234-567812345678");
+
+			mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+			const retry = await submitContinuation("rotom", "prompt", "edited draft");
+			/* The wire body is the envelope plus the transport-only opt-in. */
+			expect({ ...retry.envelope, accept_waking: true }).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+			expect(getPendingContinuation("rotom")).toBeNull();
+		});
+
+		it("sends an envelope over the per-envelope bound instead of refusing it", async () => {
+			mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt sent" });
+			const huge = "A".repeat(4 * 1024 * 1024 + 1);
+			await expect(
+				submitContinuation("big", "prompt", "x", [{ data_b64: huge, mime_type: "image/png" }]),
+			).resolves.toMatchObject({ ok: true });
+			expect(mockedSendCommand).toHaveBeenCalledOnce();
+			expect(getPendingContinuation("big")).toBeNull();
+		});
+
+		it("is emptied with the rest of the private state", async () => {
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("rotom", "prompt", "private words")).rejects.toThrow();
+			expect(getPendingContinuation("rotom")).not.toBeNull();
+			clearPrivateSessionStorage();
+			expect(getPendingContinuation("rotom")).toBeNull();
+		});
+
+		it("persists later envelopes normally once storage recovers, keeping the held one retryable", async () => {
+			const spy = quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("a", "prompt", "one")).rejects.toThrow();
+			spy.mockRestore();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("b", "prompt", "two")).rejects.toThrow();
+			expect(localStorage.getItem("lo-mobile-command:b")).not.toBeNull();
+			expect(localStorage.getItem("lo-mobile-command:a")).toBeNull();
+			expect(getPendingContinuation("a")).not.toBeNull();
+		});
+
+		it("expires a held envelope after the 24 h TTL like a persisted one", async () => {
+			let clock = 1_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			quota();
+			mockedSendCommand.mockRejectedValueOnce(new Error("Load failed"));
+			await expect(submitContinuation("ttl", "prompt", "old")).rejects.toThrow();
+			clock += 23 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).not.toBeNull();
+			clock += 2 * 60 * 60 * 1000;
+			expect(getPendingContinuation("ttl")).toBeNull();
+		});
+
+		it("does not refresh a legacy raw envelope's age on every read while the write is refused", async () => {
+			let clock = 5_000_000;
+			vi.spyOn(Date, "now").mockImplementation(() => clock);
+			const legacy = {
+				op: "prompt",
+				command_id: "12345678-1234-4678-9234-567812345678",
+				text: "legacy",
+			};
+			localStorage.setItem("lo-mobile-command:old", JSON.stringify(legacy));
+			quota();
+			expect(getPendingContinuation("old")?.text).toBe("legacy");
+			expect(localStorage.getItem("lo-mobile-command:old")).toBeNull();
+			clock += 25 * 60 * 60 * 1000;
+			expect(getPendingContinuation("old")).toBeNull();
+		});
+	});
 });
 
 describe("the input-mode annotation (input-mode-v1)", () => {
@@ -173,7 +275,7 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 			input_mode: "dictated",
 			input_path: "provider_stt_radient",
 		});
-		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", { ...receipt.envelope, accept_waking: true });
 	});
 
 	it("is replayed from the STORED envelope, never re-derived from a later draft", async () => {
@@ -204,17 +306,14 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		/* Exactly what the build before this change wrote: a v1 wrapper whose
 		   envelope has no annotation keys. It must stay valid (absent = legacy)
 		   and the retry must send those bytes. */
+		const stored = {
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "stored before annotations",
+		};
 		localStorage.setItem(
 			"lo-mobile-command:root",
-			JSON.stringify({
-				version: 1,
-				saved_at: Date.now(),
-				envelope: {
-					op: "prompt",
-					command_id: "12345678-1234-4678-9234-567812345678",
-					text: "stored before annotations",
-				},
-			}),
+			JSON.stringify({ version: 1, saved_at: Date.now(), envelope: stored }),
 		);
 		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
 
@@ -227,7 +326,13 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		expect(sent.text).toBe("stored before annotations");
 		expect(sent.input_mode).toBeUndefined();
 		expect(sent.input_path).toBeUndefined();
-		expect(retry.envelope).toEqual(sent);
+		/* The retained envelope is exactly the stored bytes (strict: no key
+		   invented, not even as `undefined`). The wire body adds only the
+		   transport-only `accept_waking` opt-in, which the relay pops before
+		   validating or forwarding, so what reaches the session is still the
+		   stored envelope byte for byte. */
+		expect(retry.envelope).toStrictEqual(stored);
+		expect(sent).toStrictEqual({ ...stored, accept_waking: true });
 	});
 
 	it("retires a stored envelope whose annotation is malformed", async () => {
@@ -275,7 +380,7 @@ describe("the skill-expansion request (`expand_skills`)", () => {
 			images: undefined,
 			expand_skills: true,
 		});
-		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", { ...receipt.envelope, accept_waking: true });
 	});
 
 	it("is absent when the caller does not ask, so an older relay sees the old body", async () => {
@@ -359,5 +464,59 @@ describe("the skill-expansion request (`expand_skills`)", () => {
 		const fresh = await submitContinuation("root", "prompt", "fresh", undefined, undefined, undefined, true);
 		expect(fresh.envelope.text).toBe("fresh");
 		expect(fresh.envelope.expand_skills).toBe(true);
+	});
+});
+
+describe("the prompt-wake opt-in (`accept_waking`, capability `prompt_wake`)", () => {
+	const ID = "12345678-1234-4678-9234-567812345678";
+
+	it("rides every prompt on the wire but never joins the retained envelope", async () => {
+		mockedSendCommand.mockRejectedValueOnce(Object.assign(new Error("lost"), { status: 504 }));
+		await expect(submitContinuation("root", "prompt", "wake up")).rejects.toThrow("lost");
+		expect(mockedSendCommand.mock.calls[0]?.[1]).toMatchObject({ op: "prompt", accept_waking: true });
+		/* Transport, not identity: the stored bytes a retry replays lack it. */
+		expect(getPendingContinuation("root")).not.toHaveProperty("accept_waking");
+	});
+
+	it("is never sent with a steer, which keeps the legacy frame byte-identical", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "steering queued" });
+		await submitContinuation("root", "steer", "nudge");
+		expect(mockedSendCommand.mock.calls[0]?.[1]).not.toHaveProperty("accept_waking");
+	});
+
+	it("keeps the envelope on a `waking` 2xx: the prompt is not admitted yet", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "session is waking", waking: true });
+		const receipt = await submitContinuation("root", "prompt", "wake up");
+		expect(receipt.waking).toBe(true);
+		/* The relay holds this prompt only in memory until the runtime admits it;
+		   dropping the copy here is what lost it on a failed boot (R1-1). */
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+
+		/* A same-id resend joins the relay's in-flight wake. */
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt admitted" });
+		const retry = await submitContinuation("root", "prompt", "a newer draft");
+		expect(retry.envelope.command_id).toBe(ID);
+		expect(retry.envelope.text).toBe("wake up");
+		expect(getPendingContinuation("root")).toBeNull();
+	});
+
+	it("is settled by the stream: the row clears it, `ended` without it fails it", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "session is waking", waking: true });
+		await submitContinuation("root", "prompt", "wake up");
+		const none = () => false;
+
+		expect(settleWakingContinuation("root", none, false, ID)).toBe("pending");
+		/* An envelope no `waking` answer left (an ambiguous 504, a reload) keeps
+		   its own retry affordance: neither the row nor `ended` settles it here. */
+		expect(settleWakingContinuation("root", none, true, null)).toBe("pending");
+		expect(settleWakingContinuation("root", () => true, false, null)).toBe("pending");
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+		expect(settleWakingContinuation("root", none, true, ID)).toBe("failed");
+		/* Failed keeps the envelope: it is the retry's body. */
+		expect(getPendingContinuation("root")?.command_id).toBe(ID);
+
+		expect(settleWakingContinuation("root", (id) => id === ID, true, ID)).toBe("delivered");
+		expect(getPendingContinuation("root")).toBeNull();
+		expect(settleWakingContinuation("root", none, true, ID)).toBeNull();
 	});
 });

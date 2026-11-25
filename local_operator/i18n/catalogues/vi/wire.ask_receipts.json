@@ -1,0 +1,9 @@
+{
+  "wire.ask_receipts.name.secret_question": "câu hỏi bí mật",
+  "wire.ask_receipts.response.answered": "Đã trả lời, đang gửi",
+  "wire.ask_receipts.response.declined": "Đã từ chối, tác nhân đã được báo",
+  "wire.ask_receipts.response.dismissed": "{surface, select, remote{Bạn đã bỏ qua (điện thoại)} tui{Bạn đã bỏ qua (terminal)} chat{Bạn đã bỏ qua (cuộc trò chuyện)} desktop{Bạn đã bỏ qua (ứng dụng desktop)} other{Bạn đã bỏ qua}}, {reason, select, answered_in_chat{đã trả lời trong cuộc trò chuyện} other{không còn cần nữa}}",
+  "wire.ask_receipts.response.late": "Đã trả lời muộn, tác nhân đã được báo",
+  "wire.ask_receipts.timeout.timed_out": "Hết thời gian sau {waited}, tác nhân tiếp tục mà không có câu trả lời của bạn",
+  "wire.ask_receipts.withdrawn.by_agent": "Tác nhân đã rút lại"
+}

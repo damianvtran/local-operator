@@ -1,0 +1,7 @@
+{
+  "tui.transcript_display.save_failed": "ٹرانسکرپٹ کی نمائش محفوظ نہیں ہو سکی: {reason}",
+  "tui.transcript_display.set": "ٹرانسکرپٹ: {mode}",
+  "tui.transcript_display.slash": "ٹرانسکرپٹ کو ٹرن کے مطابق یا جواب کے مطابق سمیٹیں",
+  "tui.transcript_display.unknown": "نامعلوم موڈ {echo} · by-turn یا by-response چنیں",
+  "tui.transcript_display.usage": "ٹرانسکرپٹ: {mode} · by-turn یا by-response چنیں"
+}

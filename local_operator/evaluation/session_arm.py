@@ -76,11 +76,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
@@ -137,7 +139,7 @@ from local_operator.evaluation.protocol import (
     FinishAction,
     Observation,
 )
-from local_operator.evaluation.receipts import BudgetAuthorization
+from local_operator.evaluation.receipts import BudgetAuthorization, CappedAllowance
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_NAME,
@@ -183,6 +185,7 @@ from local_operator.evaluation.runner.step_budget import (
     enforced_position,
     restate_step_budget,
 )
+from local_operator.harness.request_admission import RequestAdmissionRefused
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
@@ -2478,6 +2481,17 @@ class ActionBridge:
             f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"
             f"timed_out: {str(result.timed_out).lower()}\n"
         )
+        # A timeout names the limit that applied. "timed_out: true" alone does
+        # not say whether the 60 s default or the caller's own value cut the
+        # command, and a caller whose timeout never arrived (a misnamed
+        # argument, an omitted one) kept re-issuing the same command against
+        # the same default. Only on a timeout: every other result keeps the
+        # text it had.
+        if result.timed_out:
+            text += (
+                f"timeout_s: {timeout} (the limit that applied; the default is "
+                f"{COMMAND_DEFAULT_TIMEOUT_S}, the maximum {COMMAND_MAX_TIMEOUT_S})\n"
+            )
         # The target's own explanation of a command it could not run. Without
         # this line the result would read "exit_code: none / timed_out: false"
         # and say nothing about WHY -- the model would be told a command failed
@@ -3506,6 +3520,74 @@ def validate_episode_session_spec(
     return spec
 
 
+@dataclass(frozen=True)
+class _RecordedSpendStop:
+    reason: str
+    recorded_micros: int
+    in_flight: int
+
+
+class _RecordedSpendAdmission:
+    """Admission on recorded USD micros, not an invoice or an in-flight reservation.
+
+    A pending request does not count against the cap until a final arrives.
+    Requests already admitted (including their internal retries/fallbacks)
+    can take actual spend over the cap. Calls outside SessionStreamFn are not
+    covered. A settled request with no usable receipt or stamped estimate
+    is unknown, not free; later requests then fail closed.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self._recorded_micros = Fraction(0)
+        self._cost_known = True
+        self.pending: set[str] = set()
+        self.stop: _RecordedSpendStop | None = None
+
+    def admit(self, request_id: str) -> Callable[[], None]:
+        if self.stop is not None:
+            raise RequestAdmissionRefused(self.stop.reason)
+        reason = None
+        if not self._cost_known:
+            reason = "cost-unreported"
+        elif self._recorded_micros >= self.cap:
+            reason = "budget-cap"
+        if reason is not None:
+            self.stop = _RecordedSpendStop(
+                reason=reason,
+                recorded_micros=round(self._recorded_micros),
+                in_flight=len(self.pending),
+            )
+            raise RequestAdmissionRefused(reason)
+        self.pending.add(request_id)
+
+        def finish() -> None:
+            # The recorder normally settles first. Do not leave a preparation
+            # failure or a missing final pending (and therefore free) forever.
+            if request_id in self.pending:
+                self._cost_known = False
+                self.pending.discard(request_id)
+
+        return finish
+
+    def settle(self, observation: RequestFinalObservation) -> None:
+        from local_operator.model.costs import _recorded_cost
+
+        request_id = observation.request_id
+        if request_id not in self.pending:
+            # Duplicate or a request begun before this policy was installed.
+            return
+        cost = _recorded_cost(observation.usage)
+        if cost is None or not math.isfinite(cost):
+            self._cost_known = False
+        else:
+            # Compare the recorded total, not per-request rounded micros. Use
+            # the recorded USD value's decimal spelling so a sum at the cap
+            # cannot drift below it through binary floating-point addition.
+            self._recorded_micros += Fraction(str(cost)) * 1_000_000
+        self.pending.discard(request_id)
+
+
 @dataclass
 class EpisodeSession:
     """An open episode session: its live tool inventory and exit handle."""
@@ -3513,6 +3595,8 @@ class EpisodeSession:
     session: Any
     roots: SessionRoots
     _context: Any = field(repr=False)
+    _admission: _RecordedSpendAdmission | None = field(default=None, repr=False)
+    _admission_uninstall: Callable[[], None] | None = field(default=None, repr=False)
     _unsubscribe: Callable[[], None] | None = field(default=None, repr=False)
     #: The request observer's unsubscribe. Detached in ``aclose`` AFTER the
     #: SDK context exits -- deliberately NOT with the event sink above:
@@ -3575,8 +3659,13 @@ class EpisodeSession:
 
         return bool(getattr(self.session, "_confinement_root", None))
 
+    @property
+    def admission_refusal(self) -> str | None:
+        stop = self._admission.stop if self._admission is not None else None
+        return stop.reason if stop is not None else None
+
     async def aclose(self) -> None:
-        """Detach the sink, exit the SDK's open context, then the observer.
+        """Detach the sink, exit the SDK's open context, then the observer/policy.
 
         The ORDER is the point: the event sink detaches first (its delivery
         is the running turn's), the SDK context exit runs the canonical
@@ -3592,6 +3681,9 @@ class EpisodeSession:
         if self._request_unsubscribe is not None:
             self._request_unsubscribe()
             self._request_unsubscribe = None
+        if self._admission_uninstall is not None:
+            self._admission_uninstall()
+            self._admission_uninstall = None
 
 
 async def open_episode_session(
@@ -3601,6 +3693,7 @@ async def open_episode_session(
     on_event: Callable[[AgentEvent], Any] | None = None,
     session_opener: Callable[..., Any] | None = None,
     confinement_root: Path | None = None,
+    max_recorded_spend_micros: int | None = None,
 ) -> EpisodeSession:
     """Open the session an episode runs, subscribing the event sink first.
 
@@ -3617,8 +3710,16 @@ async def open_episode_session(
     first prompt, because the session rebuilds its tool context per turn: a
     tool call served in the first turn must already run against the confined
     context, and there is no later point that is as early.
+
+    ``max_recorded_spend_micros=None`` leaves admission unmodified. A cap is
+    installed only for this owning tree and stays active through SDK disposal.
     """
 
+    admission = (
+        None
+        if max_recorded_spend_micros is None
+        else _RecordedSpendAdmission(max_recorded_spend_micros)
+    )
     opener = session_opener or sdk.open_session
     context = opener(spec, roots=roots, mode="own")
     # ``Any`` on purpose, the same idiom ``sdk._build_session`` uses for its
@@ -3635,6 +3736,7 @@ async def open_episode_session(
         roots=roots,
         _context=context,
         _unsubscribe=unsubscribe,
+        _admission=admission,
     )
     # REQUEST OBSERVATION, attached immediately after open and BEFORE the
     # first prompt (records are not replayed): the episode's cost/actor
@@ -3645,7 +3747,13 @@ async def open_episode_session(
     # ``EpisodeSession.aclose``. The callback itself only deduplicates and
     # queues (contract: synchronous, no I/O, no pricing); serialization and
     # pricing happen once at close-out in ``_flush_request_observation``.
-    _subscribe_request_observation(handle)
+    try:
+        _subscribe_request_observation(handle)
+        if admission is not None:
+            handle._admission_uninstall = session.install_request_admission(admission.admit)
+    except BaseException:
+        await handle.aclose()
+        raise
     return handle
 
 
@@ -3666,6 +3774,8 @@ def _subscribe_request_observation(handle: EpisodeSession) -> None:
         if not request_id or request_id in seen:
             return
         seen.add(request_id)
+        if handle._admission is not None:
+            handle._admission.settle(observation)
         handle.request_rows.append(
             {
                 "request_id": request_id,
@@ -4097,8 +4207,13 @@ async def run_session_episode(
     session_opener: Any = None,
     owner_status: OwnerStatusChannel | None = None,
     progress_guards: tuple[EpisodeGuard, ...] | None = None,
+    enforce_recorded_spend: bool = False,
 ) -> SessionArmOutcome:
     """Run ONE episode as a session: launch, reset, prompt, score, clean up.
+
+    ``enforce_recorded_spend`` opts into logical-request admission against the
+    spec's ``provider_usd_micros`` cap. With no cap (or by default) no policy is
+    installed. This does not reserve in-flight cost or reconcile wire retries.
 
     ``progress_guards`` opts the episode into the runner's no-progress policy
     (pass ``runner.guards.progress_guards()``); see
@@ -4199,6 +4314,10 @@ async def run_session_episode(
         # command is refused while nothing is provisioned (QA round 1, Q2 --
         # the check had run after prepare + reset, i.e. after an AWS VM was up).
         assert_action_server_timeout_nests()
+        # The Session arm has no manifest carrying EpisodeSpec metadata. Keep
+        # the launcher's disclosure beside the observed accounting in the record.
+        if (session_budget := spec.metadata.get("session_budget")) is not None:
+            record.write("session_budget", session_budget)
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)
@@ -4544,12 +4663,25 @@ async def run_session_episode(
                 )
                 handle.session.request_graceful_cancel("episode step budget reached")
 
+        spend_cap = (
+            next(
+                (
+                    a.value
+                    for a in spec.budget.allowances
+                    if isinstance(a, CappedAllowance) and a.resource == "provider_usd_micros"
+                ),
+                None,
+            )
+            if enforce_recorded_spend
+            else None
+        )
         handle = await open_episode_session(
             spec=episode_session,
             roots=roots,
             on_event=_sink,
             session_opener=session_opener,
             confinement_root=confinement_root,
+            max_recorded_spend_micros=spend_cap,
         )
         if owner_status is not None:
             owner_status.phase("running", detail="episode session open; arm starting")
@@ -4636,12 +4768,16 @@ async def run_session_episode(
                 # nameless ``aborted`` (QA round 1, Q-1). The wall is read
                 # again AFTER the answer (``halted``), because obtaining it
                 # can outlast the wall (review round 1, R1-1).
-                while not wall_fired and (
-                    _turn_ended_cleanly(last_turn_end)
-                    or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                while (
+                    not wall_fired
+                    and handle.admission_refusal is None
+                    and (
+                        _turn_ended_cleanly(last_turn_end)
+                        or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                    )
                 ):
                     continuation = await bridge.text_only_continuation(
-                        halted=lambda: "wall-bound" if wall_fired else None
+                        halted=lambda: "wall-bound" if wall_fired else handle.admission_refusal
                     )
                     if continuation is None:
                         break
@@ -4651,10 +4787,18 @@ async def run_session_episode(
                         images=continuation_images or None,
                         harness_injected=True,
                     )
+            except RequestAdmissionRefused as refusal:
+                # Direct helper streams can surface the typed stop without a
+                # loop terminal frame. Only classify refusals owned by us.
+                if handle.admission_refusal != refusal.reason:
+                    raise
             finally:
                 if wall_timer is not None:
                     wall_timer.cancel()
         finally:
+            # An auxiliary refusal during teardown cannot rewrite the turn's
+            # ending. Keep the policy active until owned work actually joins.
+            spend_stop = handle._admission.stop if handle._admission is not None else None
             # EXPLICIT OWNED-WORK SHUTDOWN, bounded, BEFORE any score
             # (blueprint §3). The caller owns its tree, so it says so here:
             # delegation admission closes, the turn aborts, and the canonical
@@ -4734,6 +4878,12 @@ async def run_session_episode(
                 # so their transcripts are complete on disk.
                 _copy_verifier_transcripts(record_root, verifier_state, record)
 
+        if spend_stop is not None:
+            record.write(
+                "budget_stop",
+                {"cap_semantics": "admission_on_recorded_spend", **asdict(spend_stop)},
+            )
+
         steps = bridge.steps
         terminal_reason = bridge.end_requested
         stop_diagnostic: str | None = None
@@ -4750,7 +4900,38 @@ async def run_session_episode(
             # The runner's guard truncation: a scored partial whose reason is
             # the guard's stable code (``truncation_reason`` on the reply arm).
             status = "truncated"
-        elif terminal_reason == "max-steps" or steps >= bridge.max_steps:
+        elif (
+            spend_stop is not None
+            and not wall_fired
+            and not (
+                last_turn_end is not None and (last_turn_end.error or last_turn_end.cut_off_cause)
+            )
+        ):
+            status = "truncated"
+            terminal_reason = spend_stop.reason
+        elif (
+            terminal_reason == "max-steps"
+            or steps >= bridge.max_steps
+            or (
+                # The driver's OWN budget stop. ``steps`` counts admitted
+                # epochs only, so a run whose groups all called the command
+                # tool (never ``apply_actions``) exhausts the attempted-group
+                # budget with ``steps == 0`` and slipped past the check above.
+                # The cancel reason it sent ("episode step budget reached")
+                # cannot be read back: the Session drops graceful-cancel
+                # reasons by design (rewriting them as cut-off causes would
+                # file deliberate stops as errors on every surface), so the
+                # driver must classify from its own fact, ``budget_stop_sent``.
+                # Same precedence as the spend stop: the wall bound, a turn-end
+                # error or a named cut-off cause keeps its own label.
+                budget_stop_sent
+                and not wall_fired
+                and not (
+                    last_turn_end is not None
+                    and (last_turn_end.error or last_turn_end.cut_off_cause)
+                )
+            )
+        ):
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
         else:

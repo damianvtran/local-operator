@@ -1,0 +1,6 @@
+{
+  "network.skill_transfer.receipt.local_routing": "No skill snapshot was pinned. The destination will select skills locally.",
+  "network.skill_transfer.receipt.pinned": "The destination pinned the source's skill selection; only matching local skills will load.",
+  "network.skill_transfer.receipt.unconfirmed": "The destination did not confirm a skill snapshot. Do not assume it is using the source's selection.",
+  "network.skill_transfer.receipt.write_failed": "The destination could not save the skill snapshot. The staged copy was kept and was not published."
+}

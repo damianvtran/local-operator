@@ -40,6 +40,7 @@ from local_operator.model.registry import ModelInfo
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.failover import FallbackTarget, RetrySettings
 from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.session.inline_ui import INSTRUCTIONS
 
 
 @pytest.fixture
@@ -4977,9 +4978,30 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
         m == {"type": "ephemeral"} for m in _cache_markers(bodies[0])
     )
     # Turn 1 / call 2 (after the tool ran): call 1 reported 200k → 1h NOW.
-    assert bodies[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+    # Discovery is placed after cache placement; it must not take the tool
+    # result's breakpoint, which ends the reusable conversation prefix.
+    # WHERE it rides follows the builder's rule: this model sends thinking
+    # (default effort), so the hint is the latched HEAD row (signed thinking
+    # blocks bind everything before them); without thinking it is the tail.
+    messages = bodies[1]["messages"]
+    discovery_row = {"role": "user", "content": [{"type": "text", "text": INSTRUCTIONS}]}
+    from local_operator.providers.clients import inline_ui_hint_binds_head
+
+    head = inline_ui_hint_binds_head(session.model)
+    assert bodies[1].get("thinking") if head else not bodies[1].get("thinking")
+    # Exact equality also proves the hint row carries no cache_control.
+    assert messages[0 if head else -1] == discovery_row
+    assert messages.count(discovery_row) == 1
+    # The last message (head placement) or the one before the tail hint is
+    # the tool result, and it keeps the conversation's final breakpoint.
+    tool_result_row = messages[-1] if head else messages[-2]
+    assert tool_result_row["role"] == "user"
+    tool_result = tool_result_row["content"][0]
+    assert tool_result["type"] == "tool_result"
+    one_hour_marker = {"type": "ephemeral", "ttl": "1h"}
+    assert tool_result.get("cache_control") == one_hour_marker
     assert _cache_markers(bodies[1]) and all(
-        m == {"type": "ephemeral", "ttl": "1h"} for m in _cache_markers(bodies[1])
+        m == one_hour_marker for m in _cache_markers(bodies[1])
     )
     # Isolated errand: the session's hint says 200k, but its request carries
     # none and its small body stays 5m by the estimate.

@@ -39,8 +39,9 @@ from rich.text import Text
 from textual.app import NoScreen
 from textual.widgets import Static
 
+from local_operator.i18n.keys import tui_model_persistence as _model_persistence_keys
 from local_operator.i18n.keys import tui_small as copy
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import active_locale, tr
 from local_operator.model.ranking import (
     _MINOR_VERSION_PATTERN,
     _VERSION_PATTERN,
@@ -66,6 +67,7 @@ _t = tr("tui.small")
 #: measured regressions (kimi-k2, first-number-not-largest) reach for them.
 __all__ = [
     "MAX_VISIBLE_ROWS",
+    "PERSIST_CLAUSE_MARKER",
     "PERSIST_HINT_PREFIX",
     "ModelPicker",
     "ModelRow",
@@ -105,6 +107,75 @@ _COLUMN_GAP = 2
 #: here rather than imported from ``app`` because ``app`` imports this module.
 #: ``test_persist_hint_prefix_matches_app`` asserts the two never drift.
 PERSIST_HINT_PREFIX = "/model default"
+
+#: Stable, locale-independent MARKER the app writes into the picker's `` · ``-joined
+#: status where the persistence clause belongs.
+#:
+#: The clause is COPY — it has an audited key in every shipped locale
+#: (``tui.model_persistence.persist``) — and the app no longer puts the English
+#: sentence into the footer. It could not stay there: the status string is
+#: composed by the APP at populate time while the footer is painted by the
+#: WIDGET on repaints the app never sees (a resize, a scroll, a key, a locale
+#: move), so a status carrying English prose kept painting English after the
+#: user switched language — the one remaining authored-English surface.
+#:
+#: The marker DEFERS the resolution to `_footer_rows`, the single place that knows
+#: a footer row is being painted. What the app hands over is therefore the same
+#: token in every locale, and what the widget paints is whatever the active
+#: locale resolves the key to.
+#:
+#: THE NUL LEAD MAKES COLLISION IMPOSSIBLE: no catalogue string, translation,
+#: model id or status clause can equal it, and recognition below compares by
+#: EQUALITY. It must never be PREFIX-matched: ``PERSIST_HINT_PREFIX`` names the
+#: legacy ENGLISH clause that CLI/help/receipt consumers still print, and that
+#: parser is never handed this marker nor any translated bytes (the marker is
+#: matched first, before the prefix test, and the resolution happens after the
+#: split).
+PERSIST_CLAUSE_MARKER = "\x00tui.model_persistence.persist"
+
+
+def _persist_clause() -> str:
+    """The persistence clause in the ACTIVE locale, resolved once per paint.
+
+    Resolved here rather than in the app because the footer is painted text: a
+    repaint that the app did not initiate (resize, scroll, hover, locale move)
+    has to render the CURRENT locale, and the status string the clause arrived in
+    must stay locale-free so it can be re-resolved without re-composing it.
+
+    A read of the already-loaded in-memory catalogue and nothing else — no
+    credential read, no catalogue repopulation, no provider request — so a
+    repaint costs exactly what it did before this clause was localized.
+    """
+    return _model_persistence_keys.persist().envelope(locale=active_locale())["text"]
+
+
+def _split_persistence(status: str) -> tuple[list[str], str]:
+    """Split ``status`` into its ordinary clauses and the protected clause.
+
+    Returns ``(ordinary, persistent)``; ``persistent`` is ``""`` when the status
+    carries no persistence clause. Both footer surfaces (the painted rows and the
+    row budget) go through this one function so "the footer offers it" and "the
+    footer reserves a row for it" cannot disagree.
+
+    THE MARKER WINS AND IS MATCHED BY EQUALITY. It is the only spelling that asks
+    for a resolution, and it must never reach ``PERSIST_HINT_PREFIX``: that parser
+    recognises a legacy ENGLISH lead so the footer can protect a clause the app no
+    longer composes, and a translated clause must never be fed into it (a French
+    clause starting with the same command would otherwise be mistaken for the
+    legacy one and lose its own translation).
+
+    The legacy branch is unchanged behaviour for any caller that still composes
+    the English footer: the clause is returned BYTE-FOR-BYTE, exactly as before
+    this marker existed.
+    """
+    parts = [part for part in status.split(_SEAM) if part]
+    if PERSIST_CLAUSE_MARKER in parts:
+        return [part for part in parts if part != PERSIST_CLAUSE_MARKER], _persist_clause()
+    legacy = next((part for part in parts if part.startswith(PERSIST_HINT_PREFIX)), None)
+    if legacy is None:
+        return parts, ""
+    return [part for part in parts if part != legacy], legacy
+
 
 #: The argument words ``/model`` consumes as COMMANDS rather than as selectors
 #: to rank rows against. Typing one filters the catalogue to nothing by
@@ -930,15 +1001,16 @@ class ModelPicker(Static):
         approved default-model instruction is the only one that must survive
         verbatim at narrow widths, so it gets its own row rather than losing
         ``default`` behind a longer hidden/login clause.
+
+        The clause arrives as `PERSIST_CLAUSE_MARKER` (or, from a legacy caller,
+        as the English hint) and is resolved HERE — at paint time, in the active
+        locale — so a repaint after a locale move renders the new language
+        without the app re-composing the status. See `_split_persistence` for the
+        parser boundary this preserves.
         """
         total = len(self._matches)
         start, end, _ = self.visible_window()
-        status = [part for part in self._status.split(_SEAM) if part]
-        persistent = next(
-            (part for part in status if part.startswith(PERSIST_HINT_PREFIX)),
-            "",
-        )
-        status = [part for part in status if part != persistent]
+        status, persistent = _split_persistence(self._status)
 
         bits: list[str] = []
         if total == 0:
@@ -1033,8 +1105,10 @@ class ModelPicker(Static):
             return MAX_VISIBLE_ROWS
         # Catalogue status occupies footer chrome. The persistent-default
         # instruction gets a dedicated second row so wider catalogues cannot
-        # crowd it out non-monotonically.
-        persistent = any(part.startswith(PERSIST_HINT_PREFIX) for part in self._status.split(_SEAM))
+        # crowd it out non-monotonically. Recognised through the same split the
+        # painted rows use, so the reserved row and the painted row can never
+        # disagree about whether the clause is present.
+        _ordinary, persistent = _split_persistence(self._status)
         status_rows = 2 if persistent else (1 if self._status or self._status_row_held else 0)
         return max(
             1,
@@ -1078,6 +1152,23 @@ class ModelPicker(Static):
         self._window_start = 0
         self._hovered = None
         self._scroll_to_selection()
+        if self._open:
+            self._repaint()
+
+    def refresh_locale(self) -> None:
+        """Re-render the painted rows for a live locale move.
+
+        The footer's persistence clause is resolved at paint time (see
+        `PERSIST_CLAUSE_MARKER`), which makes this widget the owner of following
+        the locale — but a paint only happens on an event, so an open list would
+        otherwise keep the previous language until the user happened to scroll or
+        resize. The app's ``_apply_language`` calls this on that move.
+
+        Deliberately NOT ``set_rows``: re-handing rows would be a catalogue read
+        and the app's populate path also dispatches the live-refresh worker. A
+        locale move re-renders what is already held — same rows, same status,
+        same widget state — and nothing else.
+        """
         if self._open:
             self._repaint()
 

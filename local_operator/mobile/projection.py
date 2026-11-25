@@ -28,9 +28,13 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+from local_operator.compaction.cutpoint import is_preserved_replay
+from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
+    COMPACTION_REFUSED_TYPE,
+)
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
@@ -51,8 +55,12 @@ from local_operator.harness.message_types import (
     ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
 )
 from local_operator.harness.message_types import (
+    ASK_WITHDRAWN_MESSAGE_TYPE as ASK_WITHDRAWN_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
 )
 
@@ -64,6 +72,7 @@ from local_operator.harness.rows import (
     ask_gate_diverted_call_ids,
     ask_response_notice,
     ask_timeout_notice,
+    ask_withdrawn_notice,
     assistant_row_text,
     assistant_stop_notice,
     bridge_row,
@@ -143,7 +152,15 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
     ACTIVITY_PHASE_THINKING,
 )
+from local_operator.session.inline_ui_text import (
+    INLINE_UI_V1,
+    InlineUiEnvelope,
+    project_inline_ui,
+)
 from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+if TYPE_CHECKING:
+    from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 
 logger = logging.getLogger(__name__)
 
@@ -271,8 +288,34 @@ FRAME_CAP_ENTRY_TEXT_CHARS = 4_000
 
 #: Hard floor the text tier walks down to when even 4,000 chars/row does not
 #: fit (many rows, each individually modest). Below this a row is a stub and
-#: the frame is structurally as small as this function can make it.
+#: the frame is structurally as small as this function can make it. It does NOT
+#: apply to answer text: see ``FRAME_CAP_ANSWER_TEXT_KINDS``.
 FRAME_CAP_ENTRY_TEXT_FLOOR = 200
+
+#: Row kinds whose ``text`` is the READER'S ANSWER, and so the one field the
+#: text tier spends LAST: ``FRAME_CAP_ENTRY_TEXT_CHARS`` is where these rows stop
+#: while everything else walks down to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. Only a
+#: frame still over the cap after that walks the answers too (the old behaviour),
+#: because a frame over the cap is dropped whole by the daemon's reader.
+#:
+#: WHY THEY ARE SPARED FIRST. The tier is the last one, reached only when
+#: everything cheaper has been spent, and it used to apply the SAME falling
+#: bound to every field of every row. Two real messages of 3,012 and 1,842
+#: source characters therefore crossed to the phone as 200-character rows ending
+#: in "…" — the phone's rendering matched frame for frame — and nothing could
+#: get the text back: the flag is not a recovery path (its only reader, the
+#: peer-cycle restore predicate, uses it to refuse a drill-in) and the row is
+#: never re-fetched.
+#: The walk that did it usually cannot even buy the frame it is spent for: the
+#: tail is at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 ASCII chars/row
+#: is ~64 KB of a 700 KB budget, and a frame still over the cap at that point is
+#: over it for a reason row text cannot shrink (an unbounded sibling payload,
+#: say). Non-ASCII text escapes to 6-12 bytes a character on the wire, which is
+#: why the answers still walk as a last resort rather than never.
+#:
+#: Tool output, notices and every other kind keep the old behaviour: their text
+#: is the leading line of a result that expands, while the answer is the answer.
+FRAME_CAP_ANSWER_TEXT_KINDS = ("assistant", "user")
 
 #: Bound for one roster todo's text under the frame cap. Roster todos ride the
 #: wire by design and are agent-authored, so a deep roster can carry hundreds
@@ -381,6 +424,100 @@ def _live_call_map(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): item for key, item in value.items()}
+
+
+class LiveInlineUiEnvelope(InlineUiEnvelope):
+    # The runtime and phone repaint paths do not necessarily produce the same prose.
+    text: str
+
+
+def read_live_inline_ui(data: object) -> dict[str, LiveInlineUiEnvelope | None]:
+    """Read the shape of the authenticated runtime's already-validated sidecar."""
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        return {}
+    messages = data.get("messages")
+    if not isinstance(messages, dict):
+        return {}
+    decoded: dict[str, LiveInlineUiEnvelope | None] = {}
+    for message_id, envelope in messages.items():
+        if not isinstance(message_id, str) or not message_id:
+            continue
+        if envelope is None:
+            # A final event can supersede a streaming widget with plain prose.
+            # Tombstones are local runtime control frames, never HTTP overlays.
+            decoded[message_id] = None
+            continue
+        if (
+            not isinstance(envelope, dict)
+            or type(envelope.get("version")) is not int
+            or envelope["version"] != 1
+        ):
+            continue
+        text = envelope.get("text")
+        if not isinstance(text, str):
+            continue
+        # A valid UTF-16 position must also fall between Unicode code points.
+        # Build boundaries only for typed rows, never their unrelated prose.
+        boundaries = {0}
+        cursor = 0
+        for character in text:
+            cursor += 2 if ord(character) > 0xFFFF else 1
+            boundaries.add(cursor)
+        widgets = envelope.get("widgets")
+        if not isinstance(widgets, list) or not widgets:
+            continue
+        previous = 0
+        for widget in widgets:
+            if (
+                not isinstance(widget, dict)
+                or type(offset := widget.get("offset")) is not int
+                or offset < previous
+                or offset not in boundaries
+                or not isinstance(widget.get("payload"), dict)
+            ):
+                break
+            previous = offset
+        else:
+            decoded[message_id] = cast(LiveInlineUiEnvelope, envelope)
+    return decoded
+
+
+def project_live_inline_ui(
+    projection: SessionProjection, messages: Mapping[str, LiveInlineUiEnvelope | None]
+) -> dict[str, LiveInlineUiEnvelope]:
+    """Associate sidecars with visible assistant rows without mutating wire rows.
+
+    Offsets stay relative to the unchanged runtime basis. Legacy replay can
+    strip edge whitespace, but if the actual prose changed then the current
+    base row wins immediately, even before a queued retraction arrives.
+    """
+    if not messages:
+        return {}
+    return {
+        row.id: envelope
+        for row in projection.transcript
+        if row.kind == "assistant"
+        and (envelope := messages.get(row.id)) is not None
+        and row.text.strip() == envelope["text"].strip()
+    }
+
+
+def durable_inline_ui(rows: Iterable[TranscriptEntry]) -> dict[str, Any]:
+    """Build bounded overlays for visible durable rows, using their marked source."""
+    from local_operator.session.runtime.inline_ui_egress import _attach
+
+    frame: dict[str, Any] = {}
+    for row in rows:
+        if row.kind != "assistant" or row._inline_ui_source is None:
+            continue
+        projection = project_inline_ui(
+            row._inline_ui_source,
+            streaming=False,
+            source_version=1,
+            capabilities=frozenset({INLINE_UI_V1}),
+        )
+        _attach(frame, row.id, projection, include_text=True)
+    return frame
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -1244,6 +1381,47 @@ def steer_journal_order_frame(frame: dict[str, Any], *, declared: bool) -> dict[
     return out
 
 
+def _opening_user_row(
+    rows: Sequence[Any], kind: Callable[[Any], str], custom_type: Callable[[Any], str]
+) -> tuple[Any | None, bool]:
+    """The row the 80-row cap (and the frame cap's tail tier) may pin as the
+    conversation's OPENING message, or ``None`` when these rows do not hold it.
+
+    The pin claims "this is how the conversation began" — the client shows it
+    detached above the seam and pages from the row after it. That claim is only
+    true when the first user row in the fold precedes every compaction. A render
+    that STARTS at a compaction (the durable fold and the attach seed both open
+    at the newest marker, ``DurableFoldState.keep_start_id``) holds no opener at
+    all: its first user row is the first prompt of the KEPT window. Pinning that
+    showed a mid-conversation prompt as the opener (PR #4521 review R1-1 / QA
+    Q1: ``req-120`` pinned where the real opener was ``req-0``). Before #4521
+    the carried preserved copies at the render's head hid this, because the
+    oldest copy usually WAS the opener; with the copies shed the rule has to
+    say what it means.
+
+    So the first user-or-marker row decides: a user row first is the opener; a
+    compaction marker first means no pin. Returns ``(opener, opens_at_marker)``;
+    the second value is what the caller must REMEMBER
+    (``SessionProjection.transcript_opener_absent``), because the trim that
+    follows drops the marker and the next call could no longer see it.
+
+    The journal's real first user row is NOT fetched instead: the live fold
+    (``fold_history`` in the session process) has no journal handle, and an
+    unpinned seed is already correct —
+    the client's first cursor is then the tail's oldest row, and paging serves
+    the real opener exactly once, at its journal position. The live fold's own
+    ``cx-`` row (``kind="compaction"``) counts too, for the same reason, though
+    a live opener painted before it still precedes it and stays pinned.
+    """
+    for row in rows:
+        row_kind = kind(row)
+        if row_kind == "user":
+            return row, False
+        if row_kind == "compaction" or custom_type(row) == COMPACTION_MARKER_TYPE:
+            return None, True
+    return None, False
+
+
 def cap_projection_frame(
     projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
 ) -> tuple[dict[str, Any], bool]:
@@ -1296,7 +1474,11 @@ def cap_projection_frame(
        is last because the text is what the reader came for — but one pasted
        file can exceed the whole cap by itself, and tiers 1-5 cannot touch it,
        so without this the function returned a frame the socket then dropped
-       whole. The full text stays one /history fetch away.
+       whole. The full text stays one /history fetch away. ONE EXEMPTION: the
+       ``text`` of an ``assistant``/``user`` row is bounded at
+       ``FRAME_CAP_ENTRY_TEXT_CHARS`` and walked down only in a second pass,
+       when the frame is still over the cap after everything else reached the
+       floor (see ``FRAME_CAP_ANSWER_TEXT_KINDS``).
     7. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
        A viewer renders one row per child with its label, lifecycle state and
        parent; per-child detail is fetched on demand, the same trade the
@@ -1521,9 +1703,29 @@ def cap_projection_frame(
     # user message exactly like ``ProjectionFold._cap_tail`` does.
     entries = data.get("transcript") or []
     limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, PROJECTION_TRANSCRIPT_LIMIT // 2)
+    # Decided ONCE, before halving: the first halving can drop a compaction
+    # marker, and re-deciding on the shorter list would then pin a kept-window
+    # prompt as the opener (``_opening_user_row``). For an opener that exists
+    # this is the same row every iteration would have found.
+    first_user = (
+        None
+        if projection.transcript_opener_absent
+        else _opening_user_row(
+            entries,
+            lambda row: str(row.get("kind") or ""),
+            lambda row: str(row.get("custom_type") or ""),
+        )[0]
+    )
     while len(entries) > FRAME_CAP_TRANSCRIPT_FLOOR:
-        first_user = next((e for e in entries if e.get("kind") == "user"), None)
-        entries = entries[-limit:]
+        trimmed = entries[-limit:]
+        # A head this tier actually trims means older rows exist, even when the
+        # fold's own transcript was short enough to say nothing
+        # (``SessionProjection.transcript_has_older``).
+        head_cut = len(trimmed) < len(entries)
+        entries = trimmed
+        if head_cut and not data.get("transcript_has_older"):
+            data["transcript_has_older"] = True
+            dirty.add("transcript_has_older")
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
             # THE PINNED-HEAD FACT reaches the client here, because the client
@@ -1556,23 +1758,59 @@ def cap_projection_frame(
 
     # Tier 6: truncate row text. Tiers 1-5 cannot shrink a single oversized
     # row, so this is the only tier that bounds the pasted-file case.
-    text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
-    while True:
-        for entry in data.get("transcript") or []:
-            for field in ("text", "summary", "error"):
-                value = entry.get(field)
-                if isinstance(value, str) and len(value) > text_limit:
-                    entry[field] = _compact_multiline(value, text_limit)
+    #
+    # ANSWER TEXT IS SPENT LAST (``FRAME_CAP_ANSWER_TEXT_KINDS``).
+    # Pass 1 clips ``text`` on an ``assistant``/``user`` row to
+    # ``FRAME_CAP_ENTRY_TEXT_CHARS`` and never touches it again while everything
+    # else walks down to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. Tool output and notices
+    # are an expandable result's first line; the answer is the answer. The old
+    # behaviour spent both equally, and a 3,012-character reply reached the phone
+    # as 200 characters and an ellipsis with no way back (the flag is not a
+    # recovery path — its only reader refuses a drill-in — and nothing
+    # re-fetches the row) — usually in a frame that stayed over the cap anyway,
+    # because at the tail floor this tier's own budget is ~64 KB of 700 KB.
+    #
+    # "Usually" is not "always": that ~64 KB is ASCII. JSON-escaped, a CJK
+    # character costs 6 bytes and an emoji 12, so a frame carrying an unbounded
+    # sibling payload AND non-ASCII answers can fit only if the answers are walked
+    # too, and a frame still over the cap is dropped whole by the daemon's reader.
+    # So pass 2 runs ONLY when pass 1 left the frame over the cap: it is the old
+    # walk, answers included. Every limit pass 2 visits is one the old walk
+    # visited, with every other field already at or below the old walk's size, so
+    # a frame the old code kept is never dropped by this code.
+    #
+    # ``len(value) > limit`` is the ONLY edit condition, so a row already inside
+    # the bound is skipped rather than re-normalised: an answer row bounded on
+    # the first pass is byte-identical on every later pass and every repaint.
+    # The completeness flag is written only where a clip actually happened — a
+    # row still clipped reports ``false``, a full row keeps its ``true``.
+    for spare_answers in (True, False):
+        text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
+        while True:
+            for entry in data.get("transcript") or []:
+                answer_text = spare_answers and (entry.get("kind") in FRAME_CAP_ANSWER_TEXT_KINDS)
+                for field in ("text", "summary", "error"):
+                    value = entry.get(field)
+                    if not isinstance(value, str):
+                        continue
+                    limit = (
+                        FRAME_CAP_ENTRY_TEXT_CHARS
+                        if answer_text and field == "text"
+                        else text_limit
+                    )
+                    if len(value) <= limit:
+                        continue
+                    entry[field] = _compact_multiline(value, limit)
                     if field == "text":
                         # Keep this fact across runtime -> relay serialization.
                         # The retained ID names a prefix, not the final result end.
                         entry["text_complete"] = False
-        dirty.add("transcript")
-        if fits():
-            return data, True
-        if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
-            break
-        text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
+            dirty.add("transcript")
+            if fits():
+                return data, True
+            if text_limit <= FRAME_CAP_ENTRY_TEXT_FLOOR:
+                break
+            text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
 
     # Tier 7: identity rows. What stays is what a reader can neither derive nor
     # fetch per child: the job id, the label, the parent edge and the lifecycle
@@ -1700,11 +1938,42 @@ def fold_messages_to_entries(
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
     for message in history:
+        if is_preserved_replay(message):
+            # A COMPACTION'S CARRIED COPY, not a transcript row (operator report
+            # 2026-11-23). The newest marker's ``preserved_user_turns`` — and the
+            # elision notice standing in for the ones its cap dropped — are
+            # re-injected after the marker so the MODEL keeps the operator's
+            # words; they reuse the ORIGINAL row ids, and the original rows sit
+            # in the journal below the cut, between the work that answered them.
+            # Painting the copies did two things on the phone: a wall of
+            # consecutive user bubbles with no agent rows or final answers (the
+            # reported session carried 126), and — because the seed's oldest row
+            # was then a copy — a ``?before=`` cursor at THAT prompt's journal
+            # position, so every row between it and the compaction was newer
+            # than the cursor and never served. The desktop pages the journal and
+            # never paints them, so neither does the phone: each prompt is served
+            # once, at its journal position, by the cursor pages
+            # (``durable.journal_rows_older_than``). Shed by PROVENANCE (the
+            # ``provider_payload`` stamp / elision id ``cutpoint`` mints), never
+            # by wording, so a genuine user row cannot match.
+            continue
         if isinstance(message, CustomMessage):
             # Session-state snapshots are agent context, not conversation. Drop
             # the typed metadata before row budgets/grouping; never match text,
             # since users and peers can legitimately quote its marker.
             if message.custom_type == "session_state":
+                continue
+            if message.custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                # The account-change notice ("[session credential] This session
+                # is now using …") is NOT a phone row — operator ruling
+                # 2026-11-23: irrelevant on the device the tunnel reaches, and
+                # hidden on a remote session too. Dropped by its typed
+                # ``custom_type`` here, in the ONE phone fold, so the attach
+                # seed (``ProjectionFold.fold_history``, the live arm — the
+                # notice arrives as a context message, never as an event) and
+                # every history page agree. TUI and desktop are unchanged; the
+                # surface list on the type in ``harness/message_types.py``
+                # records the exclusion.
                 continue
             if message.custom_type == HUB_MESSAGE_TYPE:
                 # The parent's own words (``body``), never the model-facing
@@ -1836,6 +2105,33 @@ def fold_messages_to_entries(
                                 str(key): [str(item) for item in (value or [])]
                                 for key, value in (details.get("answers") or {}).items()
                             },
+                            "at": int(details.get("at") or 0),
+                            "text": str(details.get("text") or ""),
+                            "severity": severity,
+                        },
+                    )
+                )
+                continue
+            if message.custom_type == ASK_WITHDRAWN_CUSTOM_TYPE:
+                # An ask the AGENT took back (display-only on this side too: the
+                # row never reaches the model). It is a ``notice`` rather than a
+                # new ``kind`` on purpose — a kind the client does not know yet
+                # is a row it cannot paint, and the typed facts a client would
+                # need to key it later ride ``details`` anyway. The text is the
+                # shared receipt, so the phone and the terminal state the same
+                # fact in the same words.
+                details = message.details or {}
+                text, severity = ask_withdrawn_notice(details)
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, _NOTICE_CHARS),
+                        details={
+                            "ask_id": str(details.get("ask_id") or ""),
+                            "status": "withdrawn",
+                            "by": "agent",
+                            "questions": [dict(q) for q in (details.get("questions") or [])],
                             "at": int(details.get("at") or 0),
                             "text": str(details.get("text") or ""),
                             "severity": severity,
@@ -2040,13 +2336,22 @@ def fold_messages_to_entries(
             # extra EMPTY row here that the TUI (which tests its stripped
             # text) never emits. Same rows plus one blank one is not the
             # same rows.
-            assistant_text = assistant_row_text(message.text)
-            if assistant_text:
+            source = message.text if message._inline_ui_source_version == 1 else None
+            text = (
+                message.text
+                if source is None
+                else project_inline_ui(
+                    source, streaming=False, source_version=1, capabilities=frozenset()
+                )["text"]
+            )
+            assistant_text = assistant_row_text(text)
+            if assistant_text or (source is not None and source.strip()):
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
                         kind="assistant",
                         text=assistant_text,
+                        _inline_ui_source=source,
                         # The condensation facts (types.TranscriptEntry): the
                         # provider's phase declaration and whether this row
                         # carried calls of its own. Both arms set them, and
@@ -2283,6 +2588,9 @@ class ProjectionFold:
 
     def __init__(self, projection: SessionProjection, *, queued_engine: bool = False) -> None:
         self.projection = projection
+        # Created only when a marked response actually streams. Normal turns
+        # continue to append provider deltas without parsing Markdown.
+        self._inline_ui_events: InlineUiEvents | None = None
         # Only an explicit owner-side source binding can negotiate this field;
         # reconstructing a projection with raw details is not authentication.
         projection.peer_cycles = None
@@ -2458,6 +2766,10 @@ class ProjectionFold:
         # The rebuilt transcript IS journal order; a delivery slot recorded
         # against the replaced rows has nothing left to describe.
         self.projection.steer_journal_order = {}
+        # A wholesale rebuild re-decides the opener — and whether older rows
+        # exist (the only reset of that sticky fact) — from the whole render.
+        self.projection.transcript_opener_absent = False
+        self.projection.transcript_has_older = False
         self.projection.transcript = self._cap_tail(entries)
         from local_operator.mobile.peer_cycles import retained_peer_graphs
 
@@ -2743,7 +3055,17 @@ class ProjectionFold:
                 if row is not None:
                     # Append the delta; never re-read the whole message — the
                     # delta contract is what makes 30 Hz streaming cheap.
-                    row.text += event.delta
+                    if (
+                        isinstance(event.message, Message)
+                        and event.message._inline_ui_source_version == 1
+                    ):
+                        if self._inline_ui_events is None:
+                            from local_operator.session.runtime import inline_ui_egress
+
+                            self._inline_ui_events = inline_ui_egress.InlineUiEvents()
+                        row.text += self._inline_ui_events.dump(event)["delta"]
+                    else:
+                        row.text += event.delta
         elif isinstance(event, ReasoningDeltaEvent):
             # The model's reasoning, streamed onto its own row. Display-only in
             # the same sense the event is: the row is not the assistant message,
@@ -2756,7 +3078,16 @@ class ProjectionFold:
         elif isinstance(event, MessageEndEvent):
             row = self._find(event.message.id)
             if row is not None:
-                row.text = _message_text(event.message)
+                text = _message_text(event.message)
+                if (
+                    isinstance(event.message, Message)
+                    and event.message.role == "assistant"
+                    and event.message._inline_ui_source_version == 1
+                ):
+                    text = project_inline_ui(
+                        text, streaming=False, source_version=1, capabilities=frozenset()
+                    )["text"]
+                row.text = text
                 row.final = True
                 # The provider's phase declaration arrives WITH the end frame,
                 # so it is stamped here rather than at start: a lead-in frame
@@ -2765,6 +3096,7 @@ class ProjectionFold:
                 # row.
                 row.stop_reason = _stop_reason_of(event.message)
                 row.calls_tools = _calls_tools_of(event.message)
+            self._inline_ui_events = None
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
@@ -3279,6 +3611,12 @@ class ProjectionFold:
         # Match the history fold: context snapshots must not become optimistic
         # delivery rows, consume the tail budget, or emit a changed frame.
         if custom_type == "session_state" or cross_session_hidden():
+            return
+        # The account-change notice is never a phone row (operator ruling
+        # 2026-11-23; see the history fold's arm). No producer delivers it as an
+        # event today, but this is the live fold's one custom-delivery entry, so
+        # it refuses the type here too rather than trusting that stays true.
+        if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return
@@ -4596,9 +4934,28 @@ class ProjectionFold:
         """
         if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
             self.projection.transcript_head_pinned = False
+            # A SHORT render can still have a past: one that opens at a
+            # compaction marker is the kept window, and every turn the
+            # compaction summarised sits older in the journal (PR #4521 QA Q3:
+            # a 3-turn kept window seeded 14 rows, and the relay SPA offered no
+            # way to reach the 120 turns behind it). Sticky: once true it stays
+            # true until ``fold_history`` re-seeds.
+            if not self.projection.transcript_has_older:
+                self.projection.transcript_has_older = _opening_user_row(
+                    entries, lambda row: row.kind, lambda row: row.custom_type or ""
+                )[1]
             return entries
+        # Past the cap rows are trimmed off the head, so older rows exist
+        # whether or not an opener gets pinned above them.
+        self.projection.transcript_has_older = True
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
-        first_user = next((e for e in entries if e.kind == "user"), None)
+        first_user: TranscriptEntry | None = None
+        if not self.projection.transcript_opener_absent:
+            first_user, opens_at_marker = _opening_user_row(
+                entries, lambda row: row.kind, lambda row: row.custom_type or ""
+            )
+            # Remembered past this trim, which drops the marker that told us.
+            self.projection.transcript_opener_absent = opens_at_marker
         if first_user is not None and first_user not in tail:
             # Pin the opener and make room by dropping the OLDEST tail row
             # (``tail[1:]``), never the newest (``tail[:-1]``). ``_cap_tail``

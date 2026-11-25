@@ -86,7 +86,7 @@ describe("dismissedReasonKey", () => {
 describe("askStateLine", () => {
 	it("states the open ask as queued, with a locally rendered countdown", () => {
 		const line = askStateLine(ask({ expires_at: 1000 + 42 * 60 * 1000 }), 1000, t);
-		expect(line.text).toBe("Queued — the agent is continuing; expires in 42 m");
+		expect(line.text).toBe("Queued — the agent is continuing; expires in 42\u00a0m");
 		expect(line.tone).toBe("waiting");
 	});
 
@@ -138,17 +138,18 @@ describe("askStateLine", () => {
 });
 
 describe("durationLabel", () => {
+	// NO-BREAK SPACE: "42" and "m" must never wrap onto two lines (design D4).
 	it("spaces its units, and never reads as more precise than it is", () => {
-		expect(durationLabel(42 * 60 * 1000, t)).toBe("42 m");
-		expect(durationLabel(3 * 3600 * 1000, t)).toBe("3 h");
-		expect(durationLabel(50 * 3600 * 1000, t)).toBe("2 d");
+		expect(durationLabel(42 * 60 * 1000, t)).toBe("42\u00a0m");
+		expect(durationLabel(3 * 3600 * 1000, t)).toBe("3\u00a0h");
+		expect(durationLabel(50 * 3600 * 1000, t)).toBe("2\u00a0d");
 		expect(durationLabel(0, t)).toBe("");
 		/* SUB-SECOND IS A BOUND, NOT A BLANK (agent review round 1, N1): the open
 		   line used to read "expires in" with no value at all for a deadline
 		   inside the next second. */
-		expect(durationLabel(400, t)).toBe("<1 m");
-		expect(durationLabel(30_000, t)).toBe("<1 m");
-		expect(durationLabel(60_000, t)).toBe("1 m");
+		expect(durationLabel(400, t)).toBe("<1\u00a0m");
+		expect(durationLabel(30_000, t)).toBe("<1\u00a0m");
+		expect(durationLabel(60_000, t)).toBe("1\u00a0m");
 	});
 });
 

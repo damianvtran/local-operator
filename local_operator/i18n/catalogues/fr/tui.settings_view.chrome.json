@@ -1,7 +1,9 @@
 {
+  "tui.settings_view.chrome.capture.chord_grammar": "alt+<letter> partout, ctrl+enter exige des touches étendues",
   "tui.settings_view.chrome.capture.contract_cancel": "{cancel_key} annuler",
   "tui.settings_view.chrome.capture.contract_confirm": "{save_key} confirmer · {cancel_key} annuler",
   "tui.settings_view.chrome.capture.listening": "en attente d’une touche",
+  "tui.settings_view.chrome.capture.needs_enhanced_keys": "touches étendues requises",
   "tui.settings_view.chrome.capture.press_another": "essayez une autre touche",
   "tui.settings_view.chrome.capture.saved": "{shortcut} enregistré",
   "tui.settings_view.chrome.capture.takes_from": "retire {shortcut} à « {victim} »",

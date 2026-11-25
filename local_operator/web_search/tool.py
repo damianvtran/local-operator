@@ -24,6 +24,10 @@ from local_operator.harness.types import (
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import validation_error_result
 from local_operator.tools.confinement import confinement_of
+
+# Shared with the MCP search-hit clip (``mcp.search_snippet_chars``) so a
+# snippet is cut the same way whichever search path returned it.
+from local_operator.tools.result_normalize import clip_snippet as _clip
 from local_operator.web_search.models import (
     SearchProviderId,
     SearchResponse,
@@ -63,10 +67,13 @@ class WebSearchParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(description="Search query.", min_length=1)
-    max_results: int = Field(default=5, ge=1, le=20, description="Maximum results to return.")
+    # Field descriptions are billed on every turn (scripts/bench_context_budget.py):
+    # the schema already carries default/min/max and optionality, so the text
+    # says only what the schema cannot.
+    max_results: int = Field(default=5, ge=1, le=20, description="Results to return.")
     provider: SearchProviderId | None = Field(
         default=None,
-        description="Optional enabled provider to use instead of load balancing.",
+        description="Use one enabled provider instead of load balancing.",
     )
 
 
@@ -84,13 +91,6 @@ def _result(
         details=details,
         is_error=error,
     )
-
-
-def _clip(text: str, limit: int) -> str:
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
 
 
 def _hard_clip(text: str, limit: int) -> str:
@@ -318,7 +318,14 @@ def _tavily_oauth_delegate(
             {"query": query, "max_results": limit, "search_depth": "basic"},
             signal,
             on_update,
-            context,
+            # ``_tavily_mcp_payload`` parses this result's text (JSON first,
+            # then the official server's prose), so the MCP manager must hand
+            # it back exactly as the server wrote it: were a strict server
+            # schema ever to stop declaring one of the three keys above, the
+            # manager's dropped-argument note would trail the body, defeat the
+            # JSON parse and end up inside the last result's snippet. A
+            # per-call copy, so the caller's own context is left as it was.
+            context.model_copy(update={"result_parsed_by_harness": True}),
         )
         if result.is_error:
             raise RuntimeError(result.text or "Tavily OAuth MCP search failed")
@@ -528,11 +535,20 @@ async def execute_web_search(
     # sums it for a total any more, so a search cannot be counted twice.
     from local_operator.session.channel_spend import emit_web_spend
 
+    # A Radient search's ``cost`` came from the server that charged it
+    # (``priced_from_usage``), so it is recorded as that bill, with Radient's
+    # usage record id (carried as ``request_id``, ``radient.search_radient``) as
+    # the reconciliation handle. Every other search keeps the client estimate.
+    server_billed = bool(
+        response.provider == "radient" and response.cost and response.cost.priced_from_usage
+    )
     emit_web_spend(
         getattr(context, "record_channel_spend", None),
         channel="search",
         provider=response.provider,
         usd=response.cost.usd if response.cost else None,
+        server_billed=server_billed,
+        usage_record_id=(response.request_id or "") if server_billed else "",
     )
 
     # Hand the captured page context to THIS session, so `web_read` can answer
@@ -553,14 +569,22 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
         name="web_search",
         label="Web Search",
         description=(
-            "Search the public web with load balancing and automatic fallback. "
+            # "load balancing" lives only in the ``provider`` parameter's
+            # description, which names it as the default that parameter
+            # overrides; repeating it here cost ~10 billed tokens per turn.
+            "Search the public web with automatic provider fallback. "
             # "with `query`" carries the web_fetch passage steer to the moment
             # a search result is about to be opened; kept to three words
             # because this string is billed on every turn.
             "Results include bounded snippets and source URLs; use `web_fetch` with "
-            "`query` (or `read <url>`) to read a result's full page. Use provider only for a "
-            "specific enabled source. Running several independent searches? Issue "
-            "the calls in one turn — they run in parallel."
+            "`query` (or `read <url>`) for a result's full page. Run independent "
+            "searches in one turn, in parallel."
+            # No provider sentence here: the ``provider`` parameter's own
+            # description already says it forces one enabled source instead of
+            # load balancing. Dropping the duplicate (-77 chars) pays for the
+            # nine native vendor ids PR #4569 adds to that enum, so the start
+            # context stays under scripts/bench_context_budget.py's ceiling;
+            # the second trim (-41 chars) restores headroom after main grew.
         ),
         parameters=WebSearchParams.model_json_schema(),
         approval_tier="read",

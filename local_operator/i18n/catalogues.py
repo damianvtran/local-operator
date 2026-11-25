@@ -138,6 +138,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
+    "wire.runtime_memory": (
+        "per-runtime memory guard settings rows rendered by settings_io._t, and the "
+        "sessions tool's force-stop hint and approval prompt rendered in-process as "
+        "plain strings"
+    ),
     "wire.guardrails": (
         "guardrails section title/description and row label/help rendered by settings_io._t"
     ),
@@ -167,6 +172,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     ),
     "wire.settings.keymap": (
         "hotkey row labels/help rendered by settings_io._t as plain label/help strings"
+    ),
+    "wire.settings.transcript_display": (
+        "transcript layout row label/help and its two choice labels/descriptions "
+        "rendered by settings_io._t as plain strings; the slash command reuses the "
+        "rendered label as a receipt, never a code"
     ),
     "wire.language_receipts": (
         "the /language receipts printed by tui/app.py and returned as finished "

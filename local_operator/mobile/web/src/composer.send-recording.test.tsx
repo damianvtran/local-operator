@@ -264,7 +264,7 @@ describe("Send recording: stop, transcribe and submit in one press", () => {
 		fireEvent.click(disc);
 		fireEvent.click(disc);
 		expect(mockedTranscribe).toHaveBeenCalledOnce();
-		expect((mockedTranscribe.mock.calls[0]![1] as AbortSignal).aborted).toBe(false);
+		expect((mockedTranscribe.mock.calls[0]![1] as { signal: AbortSignal }).signal.aborted).toBe(false);
 		expect(roles()).toEqual(["send-recording-busy"]);
 		expect(mockedSendCommand).not.toHaveBeenCalled();
 		/* The mic is the one spinner and cannot start a second take. */
@@ -301,7 +301,7 @@ describe("Send recording: stop, transcribe and submit in one press", () => {
 		await new Promise((r) => setTimeout(r, 0));
 		expect(mockedSendCommand).not.toHaveBeenCalled();
 		expect(mockedTranscribe).toHaveBeenCalledOnce();
-		expect((mockedTranscribe.mock.calls[0]![1] as AbortSignal).aborted).toBe(false);
+		expect((mockedTranscribe.mock.calls[0]![1] as { signal: AbortSignal }).signal.aborted).toBe(false);
 
 		/* The take still goes out once, as the Send recording press asked. */
 		await act(async () => held.resolve(transcript("go")));
@@ -334,15 +334,34 @@ describe("Send recording: when nothing is sent, the words stay in the box", () =
 		expect(field().value).toBe("");
 	});
 
-	it("a failed transcription sends nothing, says why, and frees the slot", async () => {
+	it("a failed transcription sends nothing, keeps the take for a Retry, and frees the slot", async () => {
 		renderComposer();
 		mockedTranscribe.mockRejectedValueOnce(new api.HttpError(502, "Transcription failed upstream."));
 		await startRecording();
 		fireEvent.click(sendRecordingDisc());
-		await waitFor(() => expect(screen.getByText("Couldn't transcribe that. Try again.")).toBeTruthy());
+		await waitFor(() => expect(screen.getByText("Transcription failed")).toBeTruthy());
 		expect(mockedSendCommand).not.toHaveBeenCalled();
 		expect(roles()).toEqual(["send"]);
 		expect(screen.getByRole("button", { name: "start voice input" })).toBeTruthy();
+		expect(screen.getByRole("button", { name: "retry transcription" })).toBeTruthy();
+	});
+
+	it("a Retry after a failed SEND inserts the words and never sends, even unfailed", async () => {
+		/* The press asked to send. The send did not happen, the take failed, and the
+		   retry must not turn into the message the user believed had failed: it runs
+		   the insert path (append + review), so what goes out is a separate Send. */
+		renderComposer();
+		mockedTranscribe.mockRejectedValueOnce(new api.HttpError(502, "Transcription failed upstream."));
+		await startRecording();
+		fireEvent.click(sendRecordingDisc());
+		await screen.findByRole("alert");
+
+		mockedTranscribe.mockResolvedValueOnce(transcript("fix the build"));
+		fireEvent.click(screen.getByRole("button", { name: "retry transcription" }));
+
+		await waitFor(() => expect(field().value).toBe("fix the build"));
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+		expect(screen.getByText("Transcript added")).toBeTruthy();
 	});
 
 	it("typing during the wait sends nothing; the transcript joins what is in the box for review", async () => {
@@ -377,7 +396,7 @@ describe("Send recording: when nothing is sent, the words stay in the box", () =
 		await startRecording();
 		fireEvent.click(sendRecordingDisc());
 		const cancel = await screen.findByRole("button", { name: "cancel transcription" });
-		const signal = mockedTranscribe.mock.calls[0]![1] as AbortSignal;
+		const signal = (mockedTranscribe.mock.calls[0]![1] as { signal: AbortSignal }).signal;
 
 		fireEvent.click(cancel);
 

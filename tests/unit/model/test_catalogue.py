@@ -33,6 +33,34 @@ from local_operator.model.catalogue import cached_listing
 from local_operator.providers.clients import OpenAICompatClient
 
 
+@pytest.fixture(autouse=True)
+def _cold_model_info_memo():
+    """Start and end every test with the in-process metadata memo empty.
+
+    WHY: ``resolve_model_info`` memoises per ``(provider, model_id, day bucket,
+    scope, base)`` for the life of the PROCESS, and many tests here resolve
+    through it (``build_model_spec`` / ``configure_model``). A test that resolves
+    a model leaves that answer warm for every later test in the same worker.
+    Measured: with the file shuffled by ``random.Random(11).shuffle(items)``,
+    ``test_an_explicit_override_still_wins_on_every_family`` resolved
+    ``google/gemini-2.5-pro`` keylessly (a clean, non-degraded entry), and
+    ``test_the_gemini_wire_reaches_the_spec_through_a_real_transport[gemini-2.5-pro]``
+    then hit that memo and never reached its canned transport ("the transport was
+    never exercised"). It passed in file order only because the polluter is
+    defined later.
+
+    This gap is in the tests, not the product: a real process changes credentials
+    through the login/key paths, and those call ``invalidate_model_info_cache``
+    (``providers/controller.py``, ``providers/auth_cli.py``). A test that
+    ``setenv``s a key skips that path, so the reset belongs here. Memo behaviour
+    INSIDE one test (hits, TTL buckets, degraded expiry) is untouched, because
+    this only runs at test boundaries.
+    """
+    configure_mod.invalidate_model_info_cache()
+    yield
+    configure_mod.invalidate_model_info_cache()
+
+
 def _payload(model_id: str = "vendor/model", window: int = 1_000_000) -> dict[str, Any]:
     return {
         "data": [

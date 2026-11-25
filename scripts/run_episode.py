@@ -32,18 +32,22 @@ Inputs, all explicit:
 * ``--infra [purpose:]NAME=VALUE`` (repeatable) -- non-secret infra values
   (``AWS_REGION``, ``AWS_SUBNET_ID``, ...) default to ``--infra-purpose``;
   a per-value purpose permits compute and simulator inputs in one episode.
-* Budget and step caps (``--max-steps``, ``--max-usd``, ``--max-wall-s``,
-  ``--max-cycle-usd``), all explicit; the defaults are conservative because
-  a paid episode with no cap is the one thing this script must not run.
-  ``--max-usd-at`` states the USD figure against another route's prices and
-  scales the enforced cap to this run's route (never downward), so a budget
-  sized on a cheap route does not truncate an expensive one.
+* Reply-arm budget and step caps (``--max-steps``, ``--max-usd``,
+  ``--max-wall-s``, ``--max-cycle-usd``). ``--max-usd-at`` scales the
+  USD figure from another route's prices, never downward.
+* Session-arm limits: ``--max-steps`` bounds decision groups and optional
+  ``--session-wall-s`` bounds the turn. Provider and per-cycle spend figures
+  are accepted for reference, not enforced; observed usage is still reported.
+  ``--max-wall-s`` supplies the lease and frontend wait basis, not the turn timer.
 
 Output: the ``EpisodeOutcome`` as a JSON object on stdout, plus
-``bundle_root``. Exit status is 0 only for ``completed``; ``failed``,
-``cancelled``, ``abandoned``, ``abandonment_failed`` and ``failed_pre_bundle``
-exit 1, and a missing secret (which fails BEFORE any allocation) exits 2 with
-the secret's NAME -- never a value -- on stderr.
+``bundle_root``. Exit status is 0 whenever the outcome carries a score whose
+status is ``scored``, whatever the episode status (a scored ``truncated`` or
+``agent_stop`` run is a result, not a failure); an unscored or failed outcome
+(``failed``, ``cancelled``, ``abandoned``, ``abandonment_failed``,
+``failed_pre_bundle``, an owner lost unverified) exits 1, and a missing
+secret (which fails BEFORE any allocation) exits 2 with the secret's NAME --
+never a value -- on stderr.
 
 The exact command the paid proof runs is in the adapter README under
 "Running one episode".
@@ -56,6 +60,7 @@ import asyncio
 import functools
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -110,10 +115,43 @@ from local_operator.update import BuildStamp
 
 if TYPE_CHECKING:
     from local_operator.owned_process import OwnershipGuarantee
+    from local_operator.session.spec import SessionRoots
 
 EXIT_OK = 0
 EXIT_EPISODE = 1
 EXIT_PREFLIGHT = 2
+
+
+# The outcome statuses whose scored episode is a valid benchmark datum.
+# ``truncated`` / ``agent_stop`` are session-arm endings (the step cap or the
+# agent ending its turn without finishing); ``completed`` is both arms' clean
+# close-out. ``failed`` and ``cancelled`` are deliberately absent: the reply arm
+# marks a scored run ``failed`` when its cleanup leaked a resource
+# (``rescue_required``) and the session arm marks a bridge-wedged run ``failed``
+# even when its scorer succeeded -- both still carry a ``scored`` score, and
+# both must stay a process failure.
+_EXIT_OK_STATUSES = frozenset({"completed", "truncated", "agent_stop"})
+
+
+def _episode_exit_code(status: Any, score: Any) -> int:
+    """``EXIT_OK`` only for a scored episode that ENDED cleanly.
+
+    A scored ``truncated`` or ``agent_stop`` episode is a valid benchmark
+    datum, not a process failure: exiting 1 for it put every capped run
+    under launchd's "last exit code 1" beside genuine infrastructure deaths,
+    so the exit code could not tell them apart. But a score alone is not
+    enough: a ``failed`` (leaked cleanup, wedged bridge) or ``cancelled``
+    outcome can still carry one, and exiting 0 for it would hide exactly the
+    deaths the exit code exists to surface. So both must hold: the outcome
+    ``status`` is in ``_EXIT_OK_STATUSES`` AND the score's status is
+    ``scored``. ``score`` is the typed ``ScoreArtifact`` or its JSON dump (the
+    owner frontend reads the sealed ``outcome.json``); ``status`` is the
+    outcome's own status string from either source.
+    """
+
+    scored = score.get("status") if isinstance(score, dict) else getattr(score, "status", None)
+    return EXIT_OK if scored == "scored" and status in _EXIT_OK_STATUSES else EXIT_EPISODE
+
 
 # The harness identity this script seals into a manifest is read from the
 # INSTALL that is executing, never from a file beside the script: see
@@ -313,22 +351,25 @@ def _budget(
     max_usd_micros: int,
     max_wall_ms: int,
     max_steps: int,
+    session_arm: bool = False,
 ) -> BudgetAuthorization:
-    """Cap what the operator asked to cap; leave the rest uncapped but reported.
-
-    Every resource must appear exactly once. Token counts and cloud cost are
-    reported rather than capped (there is no honest number to put on them up
-    front), but the USD, wall and action caps are hard because they are the
-    three things that bound a paid episode's damage.
-    """
+    """Authorize only limits that the chosen arm actually enforces."""
 
     now_ms = int(time.time() * 1000)
-    capped: dict[str, int] = {
-        "provider_usd_micros": max_usd_micros,
-        "wall_milliseconds": max_wall_ms,
-        "guest_actions": max_steps * 8,
-        "model_cycles": max_steps * 2,
-    }
+    # Session does not use the reply runner's dispatch account. Its timer
+    # bounds the turn, not episode wall time, and decision groups are not
+    # guest actions or provider model cycles. Keep reporting and reservations
+    # for every resource without minting a false cap for any of them.
+    capped: dict[str, int] = (
+        {}
+        if session_arm
+        else {
+            "provider_usd_micros": max_usd_micros,
+            "wall_milliseconds": max_wall_ms,
+            "guest_actions": max_steps * 8,
+            "model_cycles": max_steps * 2,
+        }
+    )
     allowances: list[Any] = []
     for resource in BUDGET_RESOURCES:
         if resource in capped:
@@ -537,6 +578,7 @@ def build_spec(
     max_wall_ms: int,
     max_steps: int,
     metadata: dict[str, Any],
+    session_budget: dict[str, int | float | None] | None = None,
 ) -> EpisodeSpec:
     """Pin everything the manifest identifies the run by.
 
@@ -564,8 +606,13 @@ def build_spec(
     receipts = (record_preflight(plan, "compute", status="pass", duration_ms=0),)
     preflight = seal_preflight(plan, receipts, RedactionSet.from_resolved_values(()))
     budget = _budget(
-        episode_id, max_usd_micros=max_usd_micros, max_wall_ms=max_wall_ms, max_steps=max_steps
+        episode_id,
+        max_usd_micros=max_usd_micros,
+        max_wall_ms=max_wall_ms,
+        max_steps=max_steps,
+        session_arm=session_budget is not None,
     )
+    budget_stamp = {"session_budget": session_budget} if session_budget is not None else {}
     reservation = reserve_budget(
         budget,
         "episode",
@@ -576,6 +623,7 @@ def build_spec(
             "max_steps": max_steps,
             "max_usd_micros": max_usd_micros,
             "max_wall_ms": max_wall_ms,
+            **budget_stamp,
             "route": route.model_dump(mode="json"),
             "selector": selector.model_dump(mode="json"),
         },
@@ -601,7 +649,7 @@ def build_spec(
         fallback_policy="forbid",
         secret_refs=tuple(SecretRef(name=name) for name in secret_refs),
         infra_values=tuple(infra_values),
-        metadata=metadata,
+        metadata={**metadata, **budget_stamp},
     )
 
 
@@ -681,6 +729,21 @@ def _open_store(config_dir: Path | None) -> tuple[Any, Path]:
     return AuthStore(config_dir=root), root
 
 
+def _validate_reasoning_effort(
+    provider: str, model: str, effort: str, ladder: Sequence[str], *, session: bool = False
+) -> None:
+    # The ordinary runtime can clamp or drop unsupported levels. An explicit
+    # run override must instead be refused before allocating a benchmark guest.
+    if effort not in ladder:
+        route = f"{provider}/{model}"
+        if session:
+            route = f"session route {route}"
+        raise ValueError(  # i18n: ignore checkout-only evaluation diagnostic
+            f"{route} does not accept reasoning effort {effort!r}; its ladder is "
+            f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
+        )
+
+
 def _model_client(
     *,
     auth_store: Any,
@@ -702,21 +765,7 @@ def _model_client(
 
     model_spec = build_model_spec(provider, model)
     if reasoning_effort is not None:
-        # Validated against the model's OWN ladder rather than a fixed list of
-        # level names: the ladder differs per model, and the client silently
-        # DROPS an effort the spec does not list (providers/clients.py
-        # ``_reasoning_effort``). Dropping it is right mid-episode, where the
-        # alternative is losing the turn — but here it would mean a paid run
-        # quietly executing at the default effort while the operator believed
-        # otherwise, and comparing that against published maximum-effort
-        # numbers. Fail before anything is allocated instead.
-        ladder = model_spec.reasoning_efforts
-        if reasoning_effort not in ladder:
-            raise ValueError(
-                f"{provider}/{model} does not accept reasoning effort "
-                f"{reasoning_effort!r}; its ladder is "
-                f"{', '.join(ladder) if ladder else '(none: this model has no effort ladder)'}"
-            )
+        _validate_reasoning_effort(provider, model, reasoning_effort, model_spec.reasoning_efforts)
         # ModelSpec is mutable at runtime by design — this is the same field
         # ``/effort`` writes — so setting it here is the supported path.
         model_spec.reasoning_effort = reasoning_effort
@@ -915,7 +964,8 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         "--max-usd",
         type=float,
         default=0.50,
-        help="provider spend cap (a safety net; see --max-usd-at for how the figure is scaled)",
+        help="provider spend cap for Reply; spend reference only for Session "
+        "(see --max-usd-at for scaling)",
     )
     parser.add_argument(
         "--max-usd-at",
@@ -923,9 +973,9 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         default=None,
         metavar="PROVIDER/MODEL",
         help=(
-            "the route whose prices the --max-usd figure is stated at; the enforced cap "
-            "is scaled to the run route's prices, never down. Default: use the figure "
-            "as stated"
+            "the route whose prices the --max-usd figure is stated at; scales the Reply cap "
+            "or Session reference to the run route's prices, never down. "
+            "Default: use the figure as stated"
         ),
     )
     # OSWorld 2.0 bounds an episode by MODEL STEPS (500), not by time: the
@@ -936,7 +986,12 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
     # observed pace and truncated 9 of 30 episodes mid-work; see
     # docs/benchmarks/osworld_2/BUDGETS_AND_LATENCY.md.
     parser.add_argument("--max-wall-s", type=int, default=18000)
-    parser.add_argument("--max-cycle-usd", type=float, default=None, help="per-cycle cap")
+    parser.add_argument(
+        "--max-cycle-usd",
+        type=float,
+        default=None,
+        help="per-cycle spend cap for Reply; spend reference only for Session",
+    )
     parser.add_argument("--keep-recent-frames", type=int, default=3)
     parser.add_argument(
         "--action-binding",
@@ -1197,6 +1252,46 @@ def _ensure_lease_outlasts_wall(
     )
 
 
+def _session_roots() -> tuple[Path, SessionRoots]:
+    """Require the launcher's scratch environment; never default to ambient roots."""
+    from local_operator import paths
+    from local_operator.session.spec import SessionIsolationError, SessionRoots
+
+    missing = [
+        name
+        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise SessionIsolationError(
+            "--engagement session requires " + ", ".join(missing) + " (the episode "
+            "scratch the launcher sets); refusing to run the session against an "
+            "ambient home"
+        )
+    scratch_root = Path(os.environ["LOP_RUN_SCRATCH_ROOT"]).resolve()
+    # The world is a sibling of the launcher-seeded HOME, not a parent of it:
+    # the model may read its world, but not the controller's credential store.
+    roots = SessionRoots(
+        config_dir=paths.config_dir(), agent_home=paths.agent_home_dir(), cwd=scratch_root / "world"
+    )
+    roots.assert_durable()
+    return scratch_root, roots
+
+
+def _validate_session_effort(args: argparse.Namespace, roots: SessionRoots, effort: str) -> None:
+    from local_operator.model.configure import build_model_spec, resolve_model_info
+    from local_operator.sdk import _check_resolved_roots
+
+    # This can discover models absent from the built-in registry. Apply the
+    # same ambient-root guard and explicit config base as the owning Session
+    # before any such lookup, without constructing a client or a guest.
+    _check_resolved_roots(roots)
+    provider, model = args.session_route or args.route
+    info = resolve_model_info(provider, model, base=roots.config_path)
+    ladder = build_model_spec(provider, model, info).reasoning_efforts
+    _validate_reasoning_effort(provider, model, effort, ladder, session=True)
+
+
 async def _run_session_arm(
     *,
     args: argparse.Namespace,
@@ -1239,7 +1334,6 @@ async def _run_session_arm(
     from local_operator.session.spec import (
         ApprovalPolicy,
         SessionIsolationError,
-        SessionRoots,
         SessionSpec,
         VolatileRootError,
     )
@@ -1260,48 +1354,19 @@ async def _run_session_arm(
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
 
-    missing = [
-        name
-        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
-        if not os.environ.get(name)
-    ]
-    if missing:
-        print(
-            "--engagement session requires " + ", ".join(missing) + " (the episode "
-            "scratch the launcher sets); refusing to run the session against an "
-            "ambient home",
-            file=sys.stderr,
-        )
-        return EXIT_PREFLIGHT
-    home = Path(os.environ["HOME"]).resolve()
-    scratch_root = Path(os.environ["LOP_RUN_SCRATCH_ROOT"]).resolve()
-    config_dir = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]).resolve()
-    agent_home = Path(
-        os.environ.get("LOCAL_OPERATOR_HOME") or (home / "local-operator-home")
-    ).resolve()
-    # THE WORLD SPLIT (world-boundary slice). The launcher seeds controller
-    # state (the secret store, auth.db, config) under ``$SCRATCH/home``; the
-    # model's world must NOT contain it, or the seatbelt jail would hand the
-    # model's own shell read access to a decryptable store. So the episode's
-    # world is its own sibling directory: ``scratch/world`` is the
-    # confinement root, the cwd, and the discovery boundary, while
-    # HOME/config/agent-home, records and the bridge stay outside it.
-    world = scratch_root / "world"
-    world.mkdir(mode=0o700, parents=True, exist_ok=True)
-    cwd = world
     try:
-        roots = SessionRoots(
-            config_dir=config_dir, agent_home=agent_home, cwd=cwd, allow_volatile=False
-        )
-        roots.assert_durable()
+        scratch_root, roots = _session_roots()
     except (VolatileRootError, SessionIsolationError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
+    world = scratch_root / "world"
+    world.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     session_provider, session_model = args.session_route or route
     session_spec = SessionSpec(
         hosting=session_provider,
         model=session_model,
+        birth_effort=getattr(args, "reasoning_effort", None),
         # The world boundary + the pinned surface: validate_episode_session_spec
         # refuses anything else, and the declaration is the approval for
         # exactly the tools it names (see session_arm.EPISODE_TOOL_SURFACE for
@@ -1360,7 +1425,7 @@ async def _run_session_arm(
         # Same contract as the reply arm: name the ref, keep the value out.
         print(diagnostic, file=sys.stderr)
         return EXIT_PREFLIGHT
-    return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
+    return _episode_exit_code(outcome.status, outcome.score)
 
 
 #: How much wall time the frontend waits past the episode's own wall budget
@@ -1701,6 +1766,11 @@ async def _run_managed_frontend(
         # something proves otherwise.
         observed = _owner_observation(lease)
         lost = observed.state is JobState.ABSENT
+        if lost:
+            # The owner may have admitted and sealed while liveness was being read.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
         detail = (
             "the owner exited without admitting: no terminal status and no live holder "
             "were observable. Its retained state is UNVERIFIED (it may have admitted "
@@ -1743,6 +1813,10 @@ async def _run_managed_frontend(
             return _report_owner_outcome(lease, status)
         observed = _owner_observation(lease)
         if observed.state is JobState.ABSENT:
+            # A terminal receipt can land between the status read and owner exit.
+            terminal = owner_status()
+            if terminal is not None and terminal.phase in owned_process.TERMINAL_PHASES:
+                return _report_owner_outcome(lease, terminal)
             print(
                 json.dumps(
                     {
@@ -1867,9 +1941,16 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
 
     Terminal status is written AFTER the seal on a completed close-out, so
     the outcome file is the answer; when it cannot be read the status itself
-    is printed so the caller still gets a truthful shape. The failed/complete
-    exit contract stays the same as the foreground used to provide.
+    is printed so the caller still gets a truthful shape. The exit contract is
+    the foreground's (``_episode_exit_code``: 0 only for a scored
+    ``completed``/``truncated``/``agent_stop`` outcome), read from the sealed
+    outcome's own ``status`` and ``score``.
     """
+    if status.phase == "ended" and status.receipt.get("session_effort_preflight_refused") is True:
+        # An invalid effort has no outcome bundle to read. Keep the foreground
+        # refusal contract instead of reporting an unreadable terminal outcome.
+        print(status.detail, file=sys.stderr)
+        return EXIT_PREFLIGHT
     if status.outcome_path:
         try:
             body = Path(status.outcome_path).read_text()
@@ -1881,7 +1962,7 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
                 final = json.loads(body)
             except ValueError:
                 final = {}
-            return EXIT_OK if final.get("status") == "completed" else EXIT_EPISODE
+            return _episode_exit_code(final.get("status"), final.get("score"))
     print(
         json.dumps(
             {
@@ -1896,6 +1977,31 @@ def _report_owner_outcome(lease: Any, status: Any) -> int:
         )
     )
     return EXIT_EPISODE
+
+
+def _usd_micros(value: float, *, flag: str) -> int:
+    # A finite USD input can still overflow when converted to micros.
+    micros = value * 1_000_000
+    if not math.isfinite(micros):
+        raise ValueError(f"{flag} must be finite when expressed in USD micros")
+    return round(micros)
+
+
+def _session_budget_disclosure(
+    args: argparse.Namespace, *, configured_usd_micros: int, max_cycle_usd_micros: int | None
+) -> dict[str, int | float | None]:
+    """Preflight record shared by the frontend and the Session episode spec."""
+    return {
+        "provider_usd_cap_micros": None,
+        "per_cycle_usd_cap_micros": None,
+        "guest_actions_limit": None,
+        "model_cycles_limit": None,
+        "session_turn_wall_s": args.session_wall_s,
+        "decision_groups_limit": args.max_steps,
+        "requested_provider_usd_micros": configured_usd_micros,
+        "requested_per_cycle_usd_micros": max_cycle_usd_micros,
+        "lease_and_frontend_wall_basis_s": args.max_wall_s,
+    }
 
 
 async def run(
@@ -1921,6 +2027,22 @@ async def run(
         if refusal is not None:
             print(refusal, file=sys.stderr)
             return EXIT_PREFLIGHT
+    try:
+        configured_usd_micros = _usd_micros(args.max_usd, flag="--max-usd")
+        max_cycle_usd_micros = (
+            _usd_micros(args.max_cycle_usd, flag="--max-cycle-usd")
+            if args.max_cycle_usd is not None
+            else None
+        )
+        # The old one-micro reservation rejected zero after rounding.
+        # Price-basis scaling cannot rescue a nonpositive request.
+        if args.engagement == "session" and configured_usd_micros <= 0:
+            raise ValueError("--max-usd must authorize at least one USD micro after rounding")
+        if args.session_wall_s is not None and not math.isfinite(args.session_wall_s):
+            raise ValueError("--session-wall-s must be finite")
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
     if args.engagement == "session":
         from local_operator.evaluation.source_pin import (
             SourcePinError,
@@ -1935,6 +2057,21 @@ async def run(
         except (OSError, ValueError, SourcePinError) as error:
             print(str(error), file=sys.stderr)
             return EXIT_PREFLIGHT
+    session_budget = None
+    if args.engagement == "session":
+        session_budget = _session_budget_disclosure(
+            args,
+            configured_usd_micros=configured_usd_micros,
+            max_cycle_usd_micros=max_cycle_usd_micros,
+        )
+        # The frontend does not relay the owner's stderr, so disclose before
+        # launching it as well as in the owner log. Stdout remains the outcome.
+        print(  # i18n: ignore structured benchmark preflight diagnostic
+            "session budget preflight (null limits are not enforced): "
+            f"session_budget={json.dumps(session_budget, sort_keys=True, allow_nan=False)}",
+            file=sys.stderr,
+            flush=True,
+        )
     if args.engagement == "session" and not args.owned_host and not args.in_process_host:
         # The session arm's ONLY standalone path is the managed frontend: the
         # bare foreground loop is the lifetime defect (R2), and the rig's
@@ -1950,6 +2087,18 @@ async def run(
     owner_status = _owned_host_status_channel(args)
     if owner_status is not None:
         owner_status.phase("admitted", detail="managed owner verified before prepare")
+    effort = getattr(args, "reasoning_effort", None)
+    if args.engagement == "session" and effort is not None:
+        try:
+            _, roots = _session_roots()
+            _validate_session_effort(args, roots, effort)
+        except ValueError as error:
+            if owner_status is not None:
+                owner_status.phase(
+                    "ended", detail=str(error), receipt={"session_effort_preflight_refused": True}
+                )
+            print(str(error), file=sys.stderr)
+            return EXIT_PREFLIGHT
     try:
         infra_refs = _parse_infra_refs(args.infra_ref, args.infra_purpose)
         if infra_refs:
@@ -1993,7 +2142,6 @@ async def run(
     episode_id = args.episode_id or f"ep-{uuid.uuid4().hex[:12]}"
     ref_names = tuple(args.secret) if args.secret is not None else _DEFAULT_SECRET_REFS
     secret_refs = tuple(dict.fromkeys((*ref_names, *(ref.value for ref in infra_refs))))
-    configured_usd_micros = int(round(args.max_usd * 1_000_000))
     try:
         usd_cap = _scale_usd_cap(
             configured_usd_micros, route=(provider, model), basis=args.max_usd_at
@@ -2001,14 +2149,18 @@ async def run(
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
-    max_cycle = int(round(args.max_cycle_usd * 1_000_000)) if args.max_cycle_usd else None
+    usd_metadata = _usd_cap_metadata(usd_cap)
+    if session_budget is not None:
+        # Preserve the requested value and price-basis arithmetic, but do not
+        # call the resulting reference figure an enforced limit on this arm.
+        usd_metadata["usd_cap_reference_micros"] = usd_metadata.pop("usd_cap_effective_micros")
 
     try:
         config = build_config(
             args.run_root,
             episode_id=episode_id,
             max_steps=args.max_steps,
-            max_cycle_usd_micros=max_cycle,
+            max_cycle_usd_micros=max_cycle_usd_micros if args.max_cycle_usd else None,
             execution_overhead_seconds_per_action=(
                 _ACTION_SETTLE_SECONDS if settle_policy == "paper" else 0.0
             ),
@@ -2041,12 +2193,11 @@ async def run(
         benchmark_release=args.benchmark_release,
         secret_refs=secret_refs,
         infra_values=infra_values,
-        # The ENFORCED figure: ``run()`` has already scaled the operator's
-        # ``--max-usd`` from its stated price basis; the derivation is stamped
-        # into the metadata below so the bundle explains the number.
+        # Price-basis-scaled cap for Reply; a reporting reference for Session.
         max_usd_micros=usd_cap.effective_micros,
         max_wall_ms=args.max_wall_s * 1000,
         max_steps=args.max_steps,
+        session_budget=session_budget,
         metadata={
             "harness_version": _harness_version(),
             # The unfolded route, verbatim, beside the folded identity the
@@ -2087,24 +2238,18 @@ async def run(
             # unconditionally for the same lost-stamp reason.
             "progress_guards": bool(getattr(args, "progress_guards", False))
             or args.engagement != "session",
-            # The effort the decisions were made at, beside the route they were
-            # made on. A score is not comparable across effort levels, and the
-            # published numbers this run is read against are at maximum effort,
-            # so the bundle has to carry the level rather than leave it to the
-            # operator's memory of which flags were passed. Absent when not
-            # overridden: the effective value is then the model table's
-            # documented default for the route already stamped above.
+            # The requested effort override, not an observation of any wire
+            # request. A score is not comparable across effort levels, so the
+            # bundle carries the flag when supplied without guessing defaults.
             **(
                 {"reasoning_effort": args.reasoning_effort}
                 if args.reasoning_effort is not None
                 else {}
             ),
             "script": "scripts/run_episode.py",
-            # The USD cap's arithmetic: what the operator set, what the budget
-            # enforced, and the price factor between them. Stamped for every
-            # run, scaled or not, because a bundle must be able to say which
-            # bound applied without guessing the defaults of the day.
-            **_usd_cap_metadata(usd_cap),
+            # Price arithmetic is useful even when it describes a reference
+            # rather than a cap. The Session stamp names the actual limits.
+            **usd_metadata,
             # Apparatus disclosure: the infra overrides REQUESTED for this run
             # (instance type, root volume size, system proxy policy). A score on
             # non-default apparatus is not comparable to one produced on the
@@ -2224,7 +2369,7 @@ async def run(
         # anything can run, hence the preflight exit code.
         print(diagnostic, file=sys.stderr)
         return EXIT_PREFLIGHT
-    return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
+    return _episode_exit_code(outcome.status, outcome.score)
 
 
 def main(

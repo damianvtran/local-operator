@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "audit_id": "tr1-binding",
+  "audit_kind": "evidence binding of the PR #4508 independent audit(s); no new verdict",
+  "locale": "vi",
+  "namespace": "tui.projects",
+  "status": "passed",
+  "verdict": "passed",
+  "pr": "damianvtran/local-operator#4508",
+  "why": "The tr rows cite their record as 'Record <path>.' rather than the 'Evidence: <path>' pointer tests/unit/i18n/test_audit_input_manifests.py::_superseded parses, and the auditor records keep source_sha256 as a {path: sha} map. Without a parsable pointer to a record binding string hashes, the historical cg1 byte pin kept governing this namespace and failed on the PR's added keys. This record moves the pin; it is not a new audit.",
+  "binds": [
+    {
+      "round": "tr1",
+      "evidence": "i18n/audits/evidence/vi/tui.projects/tr1/record.json",
+      "record_sha256": "d44b1fe83c63765587f8693fe669e246bb13a2160a55bd8b5dbd117ea949afb7",
+      "auditor_session": "512639ecdf78"
+    }
+  ],
+  "verification": "Recomputed at fc8bbf20939f from the shipped files. Every key this PR changed in vi/tui.projects versus merge-base c7bcb65640f7 equals, byte for byte, the value in the translator file the cited auditor record names (file sha256 matched the record); every other key is byte-identical to the merge-base, whose last ledger row was passed and fresh.",
+  "source_sha256": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2",
+  "target_sha256": "1aa3be635c2c564489db00dba4bb51df96e5ace79794b201285e24299864bf04",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/tui.projects.json",
+    "target": "local_operator/i18n/catalogues/vi/tui.projects.json"
+  }
+}

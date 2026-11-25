@@ -1,0 +1,96 @@
+{
+  "_note": "LIVE capture 2026-11-24, openrouter.ai/api/v1/responses, openai/gpt-4.1-nano + openrouter:web_search (engine exa). Trimmed: ids redacted, encrypted reasoning items dropped, citation content cut to 160 chars.",
+  "object": "response",
+  "model": "openai/gpt-4.1-nano",
+  "status": "completed",
+  "output": [
+    {
+      "type": "openrouter:web_search",
+      "id": "REDACTED",
+      "status": "completed",
+      "action": {
+        "type": "search",
+        "query": "latest stable Python release",
+        "sources": [
+          {
+            "type": "url",
+            "url": "https://www.python.org/downloads/release/python-3152/"
+          },
+          {
+            "type": "url",
+            "url": "https://blog.python.org/2026/10/python-3152-31410-31318-31216-31118/"
+          },
+          {
+            "type": "url",
+            "url": "https://www.python.org/downloads/"
+          }
+        ]
+      }
+    },
+    {
+      "id": "REDACTED",
+      "type": "message",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The latest stable release of Python is Python 3.15.2, which was released on October 25, 2026. This release is an expedited security update that includes around 130 bug fixes, build improvements, and documentation changes. It also addresses security concerns related to compromised eMudhra intermediate CA keys.",
+          "annotations": [
+            {
+              "type": "url_citation",
+              "url": "https://www.python.org/downloads/release/python-3152/",
+              "title": "Python Release Python 3.15.2 | Python.org",
+              "start_index": 0,
+              "end_index": 0,
+              "content": "Python Release Python 3.15.2 | Python.org\n\n# Python 3.15.2\n\nRelease date: Oct. 25, 2026\n\n## This is the second maintenance release of Python 3.15\n\nPython 3.15.2",
+              "uncited": true
+            },
+            {
+              "type": "url_citation",
+              "url": "https://blog.python.org/2026/10/python-3152-31410-31318-31216-31118/",
+              "title": "Python 3.15.2, 3.14.10, 3.13.18, 3.12.16 and 3.11.18 are out | Python Insider",
+              "start_index": 0,
+              "end_index": 0,
+              "content": "# Python 3.15.2, 3.14.10, 3.13.18, 3.12.16 and 3.11.18 are out\n\nHugo van Kemenade/ October 26, 2026\n\nHere are expedited security releases of Python 3.15, 3.14, ",
+              "uncited": true
+            },
+            {
+              "type": "url_citation",
+              "url": "https://www.python.org/downloads/",
+              "title": "Download Python | Python.org",
+              "start_index": 0,
+              "end_index": 0,
+              "content": "# Download the latest version of Python\n\n Want to help test development versions of Python 3.16? Pre-releases, Docker images \n\n## Active Python releases\n\nFor mo",
+              "uncited": true
+            }
+          ],
+          "logprobs": []
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 2032,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens": 86,
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "total_tokens": 2118,
+    "cost": 0.0072376,
+    "cost_details": {
+      "upstream_inference_cost": 0.00023759999999999997,
+      "upstream_inference_input_cost": 0.0002032,
+      "upstream_inference_output_cost": 3.44e-05
+    },
+    "server_tool_use_details": {
+      "web_search_requests": 1,
+      "tool_calls_requested": 1,
+      "tool_calls_executed": 1
+    }
+  },
+  "id": "gen-REDACTED"
+}
