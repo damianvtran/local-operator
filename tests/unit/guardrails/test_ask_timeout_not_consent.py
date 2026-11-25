@@ -1751,17 +1751,27 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
 
 
 def _answered_at(
-    home: Path, ask_id: str, question: str, labels: list[str], *, answer: str, ago_ms: int
+    home: Path,
+    ask_id: str,
+    question: str,
+    labels: list[str],
+    *,
+    answer: str,
+    ago_ms: int,
+    queued_ago_ms: int | None = None,
+    session: str = S,
 ) -> None:
-    """One desktop-answered ask whose answer landed ``ago_ms`` ago."""
-    now = int(time.time() * 1000) - ago_ms
+    """One synthetic desktop answer; creation order need not match answer order."""
+    wall = int(time.time() * 1000)
+    now = wall - ago_ms
+    created = wall - queued_ago_ms if queued_ago_ms is not None else now - 60_000
     rows = [
         {
             "v": 1,
             "kind": "queued",
             "ask_id": ask_id,
-            "at": now - 60_000,
-            "created_at": now - 60_000,
+            "at": created,
+            "created_at": created,
             "expires_at": now + 3_600_000,
             "timeout_s": 3600,
             "questions": [
@@ -1783,7 +1793,7 @@ def _answered_at(
             "answers": {"q": [answer]},
         },
     ]
-    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    path = home / ".local-operator" / "sessions" / session / "asks.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as fh:
         for row in rows:
@@ -1856,6 +1866,70 @@ async def test_decline_answered_after_the_approval_still_holds(deep: Path) -> No
     assert hit is not None and hit[0].ask_id == "a-e630"
     result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", _Judge("ALLOW ask=a-ba0f"))
     assert result is not None and result.blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct_turn", [False, True])
+async def test_latest_decline_wins_across_lineage_and_rejects_stale_citation(
+    deep: Path, direct_turn: bool
+) -> None:
+    state = deep / ".local-operator"
+    prov.record_lineage(CHILD, origin="subagent", parent=S, state_root=state)
+    prov.record_lineage(S, origin="subagent", parent=PARENT, state_root=state)
+    _answered_at(
+        deep, "a-c1", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=500_000, session=CHILD
+    )
+    _answered_at(
+        deep, "a-a1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000, session=PARENT
+    )
+    _answered_at(
+        deep,
+        "a-d1",
+        BUILD_Q,
+        ["Approve", "Keep"],
+        answer="Keep",
+        ago_ms=10_000,
+        queued_ago_ms=900_000,
+        session=PARENT,
+    )
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = _ctx(deep, command)
+    if direct_turn:
+        # A direct turn can keep the judge eligible; it does not make a
+        # losing ask citation a valid basis for the judge's ALLOW.
+        assert ctx.operator is not None
+        ctx.operator.words.append(
+            prov.OperatorWords("operator, direct", "Review cleanup of ~/hyperplane-cpp/build")
+        )
+    else:
+        preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+        assert preview.builtin_effect == "refuse-lapsed-ask" and "a-d1" in preview.render()
+    judge = _Judge("ALLOW ask=a-a1")
+    result = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
+    )
+    assert result is not None and result.blocked
+    assert len(judge.prompts) == int(direct_turn)
+    assert "a-d1" in (judge.prompts[0] if direct_turn else result.text)
+
+
+def test_citation_rechecks_for_a_decline_recorded_after_judge_dispatch(deep: Path) -> None:
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    _answered_at(deep, "a-a1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000)
+    command = "rm -rf ~/hyperplane-cpp/build"
+    verdict = _rank(deep, command)
+    # Test the citation boundary directly, independent of why the classifier
+    # would need a judge on this target. No shell command is dispatched.
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, _ctx(deep, command))
+    basis, missing = case.verify("ALLOW ask=a-a1", forked=True)
+    assert "a-a1" in basis and not missing
+    _answered_at(deep, "a-d1", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=10_000)
+    basis, missing = case.verify("ALLOW ask=a-a1", forked=True)
+    assert not basis and missing
 
 
 def test_expired_late_decline_newer_than_approval_still_holds(deep: Path) -> None:

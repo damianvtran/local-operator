@@ -1495,14 +1495,13 @@ def _removed_worktree_remnant(path: str) -> bool:
     repo = _former_worktree_repo(real)
     if repo is None:
         return False
-    # A live owner holds (2026-11-25, probe on the orphan-ask-cascade shape):
-    # a process whose cwd or open files sit in the tree may still be writing
-    # into it, so "every byte is in Git" is only true for this instant. The
-    # content rule never asked, and a ``sleep`` running inside an empty
-    # remnant ranked LOW. Unknown (``None``) fails closed like ``True``.
+    # A process can enter after a cached idle scan. This judge-free exception
+    # requires a fresh cwd inventory with no unknown entries. macOS scans cwd
+    # only, not open files; Linux also checks readable fd/maps evidence for
+    # processes with hidden cwd. This is a snapshot, not a lock on the tree.
     from local_operator.guardrails import provenance as _prov
 
-    if _prov._live_cwd_inside(real) is not False:
+    if _prov._live_cwd_inside(real, fresh=True, hidden_blocks=True) is not False:
         return False
     files: list[str] = []
 
@@ -1521,8 +1520,15 @@ def _removed_worktree_remnant(path: str) -> bool:
             # directory (or a pointer file) contributes no file to hash, so
             # the content check alone passed it as lossless. Only the root's
             # own dangling pointer is the remnant's ``.git``.
-            if root != real and ".git" in (*dirs, *names):
-                return False
+            if root != real:
+                # Let the filesystem resolve the spelling Git would look up;
+                # lstat also sees broken symlinks and propagates access errors.
+                try:
+                    os.lstat(os.path.join(root, ".git"))
+                except FileNotFoundError:
+                    pass
+                else:
+                    return False
             if root == real and ".git" in dirs:
                 return False
             for name in dirs:

@@ -415,17 +415,65 @@ def test_orphan_holding_a_nested_repository_keeps_the_rank(repo: Path, nested: s
     assert not _removed_worktree_remnant(str(wt))
 
 
-def test_orphan_with_a_live_owner_keeps_the_rank(repo: Path) -> None:
+@pytest.mark.parametrize("spelling", [".git", ".GiT"])
+def test_nested_gitfile_holds_when_native_lookup_finds_it(repo: Path, spelling: str) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
+    wt = _orphan(repo, "nested-native")
+    nested = wt / "sub"
+    nested.mkdir()
+    marker = nested / spelling
+    marker.write_text(f"gitdir: {repo}/.git\n")
+    # The outer repo already holds these bytes, so a content-only check passes.
+    _git("hash-object", "-w", str(marker), cwd=repo)
+    risk = _rank(repo, wt)
+    if (nested / ".git").exists():
+        probe = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=nested,
+            env=ENV,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert Path(probe.stdout.strip()).resolve() == nested.resolve()
+        assert risk.risk is Risk.HIGH
+    else:
+        assert risk.risk is Risk.LOW and risk.reason == REMNANT_REASON
+
+
+def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(repo: Path) -> None:
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
     wt = _orphan(repo, "owned")
+    idle = _rank(repo, wt)
+    assert idle.risk is Risk.LOW and idle.reason == REMNANT_REASON
+    cached = prov._cwd_inventory_cache
+    assert cached is not None
+    # Popen returns after exec, so its cwd is in place before the next check.
     proc = subprocess.Popen(["sleep", "30"], cwd=wt, start_new_session=True)
     try:
-        from local_operator.guardrails import provenance as prov
-
-        prov._cwd_entries(fresh=True)  # a cached miss from an earlier test is reused
-        assert not _removed_worktree_remnant(str(wt))
+        assert prov._cwd_inventory_cache is cached
+        assert _rank(repo, wt).risk is Risk.HIGH
+        entries = prov._cwd_entries()
+        assert entries is not None and (proc.pid, str(wt.resolve())) in entries
     finally:
         os.killpg(proc.pid, 9)
         proc.wait()
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)
+
+
+@pytest.mark.parametrize("inventory", [None, ((42, None),)], ids=["unavailable", "hidden-cwd"])
+def test_orphan_with_unknown_cwd_inventory_keeps_the_rank(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: tuple | None
+) -> None:
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import Risk
+
+    monkeypatch.setattr(prov, "_cwd_entries", lambda **_: inventory)
+    assert _rank(repo, _orphan(repo, "unknown")).risk is Risk.HIGH
 
 
 @pytest.mark.parametrize("extra", ["untracked", "node-modules-link"])
