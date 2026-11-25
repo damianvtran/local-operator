@@ -6191,6 +6191,7 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        offload_static_key: bool = False,
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade.
 
@@ -6209,6 +6210,7 @@ class AuthStore:
             model_id=model_id,
             exclude_keys=exclude_keys,
             exclude_credential_ids=exclude_credential_ids,
+            offload_static_key=offload_static_key,
         )
         return key
 
@@ -6223,6 +6225,7 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -6242,11 +6245,18 @@ class AuthStore:
         broker hiding owner rows must reach an eligible stored API key rather
         than stop at an ambient winner that its safety backstop must discard.
         None preserves the ordinary cascade, including override short-circuiting.
+        ``local_oauth_only`` is for automatic advisory work: use an already
+        fresh local bearer, never refresh it, borrow, or move session routing.
         """
         if persisted_kinds is None and (
             self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
         ):
             return None
+        if local_oauth_only:
+            if self.override_keys(provider):
+                return None  # An explicit gateway is not consent for a public OAuth route.
+            persisted_kinds = frozenset({"oauth"})
+            read_only = True
         # An inherited ContextVar value is a shared object, not a deep copy.
         # Give EACH getter a collector so nested provider lookups or parallel
         # getters under one opt-in cannot overwrite the returning row's rank.
@@ -6261,6 +6271,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                local_oauth_only=local_oauth_only,
             )
             # Refresh may skip a candidate and re-read the successful row. Bind
             # its creation stamp, not a mutable pointer or a fresh ranking read.
@@ -6610,6 +6621,54 @@ class AuthStore:
             )
         return identities
 
+    def _fresh_local_oauth(
+        self,
+        provider: str,
+        session_id: str | None,
+        *,
+        model_id: str,
+        force_refresh: bool,
+        exclude_keys: Collection[str] | None,
+        exclude_credential_ids: Collection[int] | None,
+    ) -> tuple[str | None, StoredCredential | None]:
+        rows = self._usable_key_rows(
+            provider,
+            "oauth",
+            source=None,
+            model_id=model_id,
+            session_id=session_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
+        )
+        local = [
+            row
+            for row in rows
+            if "mesh_origin" not in row.data and REFRESH_DELEGATE_KEY not in row.data
+        ]
+        for row in self._selection_order(
+            local, provider, session_id, read_only=True, model_id=model_id
+        ):
+            # Ranking can race a writeback. Read the current row without ever
+            # taking the refresh lock, invoking refresh, or changing affinity.
+            current = self.get_credential(row.id)
+            if current is None or current.disabled_cause is not None:
+                continue
+            data = current.data
+            if (
+                "mesh_origin" in data
+                or REFRESH_DELEGATE_KEY in data
+                or data.get(AWAITING_WRITEBACK_KEY)
+                or self._grant_dead_at(data) is not None
+                or self._family_moved_at(data) is not None
+                or self._needs_refresh(data, force=force_refresh)
+            ):
+                continue
+            key_fn = self._oauth_key_fn(provider)
+            key = key_fn(data) if key_fn else data.get("access")
+            if key:
+                return key, current
+        return None, None
+
     async def _resolve(
         self,
         provider: str,
@@ -6622,6 +6681,8 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
+        offload_static_key: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -6681,6 +6742,19 @@ class AuthStore:
         if config and persisted_kinds is None:
             return config, None
 
+        if local_oauth_only:
+            # This path performs no refresh or routing writes. SQLite and secret
+            # resolution can block, so run the entire local selection off-loop.
+            return await asyncio.to_thread(
+                self._fresh_local_oauth,
+                provider,
+                session_id,
+                model_id=model_id,
+                force_refresh=force_refresh,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+            )
+
         # 3. OAuth credential (skipped when the caller wants API-key rows only)
         oauth_rows = (
             []
@@ -6713,8 +6787,7 @@ class AuthStore:
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
                 pin(row.id)
-                refreshed = self.get_credential(row.id)
-                return key, refreshed or row
+                return key, self.get_credential(row.id) or row
         if oauth_rows and force_refresh:
             # Every sibling failed its refresh — surface the failure so the
             # failover layer can block/back off instead of silently looping.
@@ -6752,7 +6825,13 @@ class AuthStore:
 
         # 5. Env var tier (the process environment; the plaintext credentials.env
         # file is no longer read here, PR2a).
-        env_key = self._env_api_key(provider) if persisted_kinds is None else None
+        env_key = None
+        if persisted_kinds is None:
+            env_key = (
+                await asyncio.to_thread(self._env_api_key, provider)
+                if offload_static_key
+                else self._env_api_key(provider)
+            )
         if env_key:
             return env_key, None
 
@@ -6816,6 +6895,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                offload_static_key=offload_static_key,
             )
 
         return None, None

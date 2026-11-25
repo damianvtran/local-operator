@@ -3298,7 +3298,8 @@ async def _classification_recommendation(
 
     THE TURN'S PATIENCE IS NOT THE CALL'S DEADLINE. The turn waits
     ``values.classification.waitMs`` (50 ms by default); the call is bounded by
-    ``values.classification.timeoutMs``, which the service enforces itself. When
+    ``values.classification.timeoutMs``. For the shipped classifier the native probe
+    and either recommendation route share the deadline set at admission. When
     the answer misses the wait, the turn does NOT pay the difference: the call is
     left running (``shield``, so the wait's own cancellation cannot reach it),
     kept in ``classification_outstanding``, and delivered if this task renders its
@@ -3334,24 +3335,64 @@ async def _classification_recommendation(
     # requirement on the seam.
     probe = getattr(service, "provider_available", None)
 
-    async def _probe_then_call() -> Any:
-        if probe is not None:
-            try:
-                available = bool(await probe())
-            except Exception:  # noqa: BLE001 — a probe fault must not change the prompt
-                logger.debug("classification: provider probe failed", exc_info=True)
-                available = True
-            if not available:
-                logger.debug(
-                    "classification: no recommender provider has a credential; nothing to ask"
-                )
-                return _NO_PROVIDER
+    vertex_enabled = getattr(service, "vertex_hint_enabled", None)
+    loop = asyncio.get_running_loop()
+    # False still identifies the shipped routing seam: a tripped Vertex
+    # breaker must not disable the foreground's Radient takeover fence.
+    deadline = (
+        loop.time() + _classification_deadline_s(service)
+        if isinstance(vertex_enabled, bool)
+        else None
+    )
+
+    async def _recommend(*, vertex: bool = False) -> Any:
+        if deadline is not None and loop.time() >= deadline:
+            return None
         try:
             request = _classification_request(hooks, query)
         except Exception:  # noqa: BLE001 — a roster fault must not fail a turn
             logger.warning("classification: could not build the request", exc_info=True)
             return None
-        return await _classification_call(service, request)
+        if deadline is None:
+            return await _classification_call(service, request)
+        recommendation = await service.recommend_resources(
+            request, automatic=vertex, deadline=deadline
+        )
+        _log_classification_cost(recommendation)
+        return recommendation
+
+    async def _probe_then_call() -> Any:
+        if probe is not None:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    try:
+                        available = bool(await probe())
+                    except Exception:  # noqa: BLE001 — a probe fault must not change the prompt
+                        logger.debug("classification: provider probe failed", exc_info=True)
+                        available = True
+            except TimeoutError:
+                # No vendor attempt started; do not count discovery against its breaker.
+                return None
+            if deadline is not None and loop.time() >= deadline:
+                # A worker can finish as the timeout callback becomes runnable.
+                # Neither a native hit nor a miss can start a new clock then.
+                return None
+            if not available:
+                if vertex_enabled is True:
+                    # The foreground waited ONLY for the original native path.
+                    # Vertex resolution and inference are never awaited by a
+                    # model step; use the existing same-task late-answer slot.
+                    detached = asyncio.create_task(_recommend(vertex=True))
+                    hooks.classification_outstanding.append(
+                        _OutstandingClassification(detached, task_id)
+                    )
+                    _prune_outstanding(hooks)
+                else:
+                    logger.debug(
+                        "classification: no recommender provider has a credential; nothing to ask"
+                    )
+                return _NO_PROVIDER
+        return await _recommend()
 
     wait_s = _classification_wait_s(hooks, service)
     task = asyncio.create_task(_probe_then_call())
@@ -7165,6 +7206,12 @@ async def create_session(
     # dispose (one leaked pool per turn on the server facade otherwise).
     # The classification seam's client and memos are per SESSION, so the
     # keep-alive client has to be released with everything else the root owns.
+    # Bind after Session restores its model. Read it at resolution time so a
+    # model switch changes advisory preference without pinning a chat account.
+    if plan.knowledge_hooks is not None:
+        bind_route = getattr(plan.knowledge_hooks.classifier, "bind_advisory_route", None)
+        if callable(bind_route):
+            bind_route(plan.auth_store, session.session_id)
     attach_classification_spend(session, plan.knowledge_hooks)
     attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])
