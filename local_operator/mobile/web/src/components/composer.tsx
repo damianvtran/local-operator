@@ -50,6 +50,7 @@ import {
 import {
 	markPendingEchoAccepted,
 	markPendingEchoWaking,
+	pendingEchoFor,
 	projectionCarriesCommand,
 	registerPendingEcho,
 	withdrawPendingEcho,
@@ -521,6 +522,16 @@ function DeliverySheet({
 }
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
+/* How long after a `waking` receipt the relay's wake has certainly settled
+   (review round 5, M1 on PR #4522). Invariant: the relay boots under
+   `PROMPT_WAKE_DEADLINE_S = 180` (`mobile/daemon.py`, set above the measured
+   engage max of 169.6 s, n=2845) and that task starts before the receipt, so
+   by 180 s after the receipt it has delivered or failed. +30 s covers the
+   failure frame's own publish and a skewed `Date.now()`. Only gates a
+   failure the relay's one-shot `wake_failed` frame should already have
+   reported — a composer that missed it (unmounted, stream down). Exported
+   for the regression cells. */
+export const WAKE_SETTLED_BOUND_MS = 210_000;
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
@@ -1012,7 +1023,14 @@ export function Composer({
 		   (another surface woke the session, or the retry joined), and that row
 		   must take the failure copy down with it. */
 		failed: boolean;
+		/* `Date.now()` when this wake was first answered `waking` (a joining
+		   retry keeps it). What `WAKE_SETTLED_BOUND_MS` is measured from. */
+		startedAt: number;
 	} | null>(null);
+	/* Bumped by the settle effect's own deadline timer, so the effect re-runs
+	   when the wake's settled bound passes even if no frame arrives (a cold
+	   session whose wake failed while nobody watched publishes nothing more). */
+	const [wakeDeadlineTick, setWakeDeadlineTick] = useState(0);
 	const retryPending = retryEnvelope !== null;
 	/* Presentation is deliberately separate from the immutable retry envelope.
 	   Each occurrence is an object, even for identical copy: a queued close from
@@ -1443,13 +1461,62 @@ export function Composer({
 	   terminal frame it publishes for a failed wake, or — from a relay without
 	   the marker — `projection.ended` after a frame from a running owner. */
 	useEffect(() => {
+		/* RE-ATTACH A WAKE THIS COMPOSER DID NOT SEE START (review round 5, M1 on
+		   PR #4522). `SessionScreen` is keyed per route, so a session switch
+		   unmounts this composer and its tracker ref with it, while the pending
+		   row — module-level in `pending-echo.ts` — survives with `waking` set.
+		   Without a tracker this effect could never fail the send, and the row
+		   read "waking session…" until a land, a retry or a reload.
+
+		   Rebuilt from the two durable facts, both required: the retained
+		   envelope (the retry's body, same id) and a held row for THAT id still
+		   flagged waking. An envelope alone is not enough — an ambiguous 504 or a
+		   reload retains one too, and those keep their own retained-retry
+		   affordance rather than becoming a failed wake. `sawLive` restarts false
+		   (the frames since are unknown), which only ever delays the `ended`
+		   fallback; the marker and the bound below do not depend on it.
+
+		   Re-attaching rather than merely clearing the flag on unmount (the
+		   review's cheaper option): clearing would turn the caption back into
+		   `sending…` — the pre-#4522 stuck row — while a re-attached tracker
+		   lets the failure land as the ordinary failed send. */
+		if (wakingCommand.current === null || wakingCommand.current.pid !== pid) {
+			const envelope = getPendingContinuation(pid);
+			const held = envelope ? pendingEchoFor(pid, envelope.command_id) : undefined;
+			if (envelope && held?.waking) {
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: false,
+					startedAt: held.wakingAt ?? Date.now(),
+				};
+			}
+		}
 		const waking = wakingCommand.current?.pid === pid ? wakingCommand.current : null;
 		if (waking && projection.pid > 0 && projection.ended !== true) waking.sawLive = true;
+		/* THE WAKE HAS SETTLED BY NOW, WHETHER OR NOT ANYONE SAW IT. The relay's
+		   `wake_failed` marker rides ONE frame and is never stored, so a composer
+		   that was unmounted (or whose stream was down) when it was published
+		   never sees it, and a re-subscribed cold session serves only its pid-0
+		   disk rebuild — the same frame a running wake shows. What bounds the
+		   wait is the relay itself: the boot runs under `deadline_s =
+		   PROMPT_WAKE_DEADLINE_S` and the task started before this receipt. Past
+		   the bound, a frame with NO running owner and no row under the id means
+		   the wake ended without delivering, i.e. it failed. A frame from a
+		   running owner never trips this: the runtime is up (this wake or another
+		   surface's) and its `command_id` dedupe owns the message from there. */
+		const pastBound =
+			waking !== null &&
+			Date.now() - waking.startedAt >= WAKE_SETTLED_BOUND_MS &&
+			(projection.pid === 0 || projection.ended === true);
 		const wakeFailed =
 			waking !== null &&
 			!waking.failed &&
 			(projection.wake_failed === waking.commandId ||
-				(waking.sawLive && projection.ended === true));
+				(waking.sawLive && projection.ended === true) ||
+				pastBound);
 		const outcome = settleWakingContinuation(
 			pid,
 			(commandId) => projectionCarriesCommand(projection.transcript, commandId),
@@ -1494,7 +1561,16 @@ export function Composer({
 			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			wakingCommand.current = null;
 		}
-	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed]);
+		/* Re-run once the bound passes: a cold session publishes nothing after a
+		   failed wake, so without this timer a quiet stream would never re-enter
+		   the check above. Cleared on every re-run; at most one is pending. */
+		const tracked = wakingCommand.current;
+		if (tracked === null || tracked.failed || tracked.pid !== pid) return;
+		const remaining = tracked.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
+		if (remaining <= 0) return;
+		const timer = setTimeout(() => setWakeDeadlineTick((n) => n + 1), remaining);
+		return () => clearTimeout(timer);
+	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -2039,6 +2115,9 @@ export function Composer({
 						text: receipt.envelope.text,
 						sawLive: joined?.sawLive ?? false,
 						failed: false,
+						/* A joining retry rides the SAME relay task, so it keeps the
+						   clock that task's deadline is measured from. */
+						startedAt: joined?.startedAt ?? Date.now(),
 					};
 					/* The row says the session is booting, not just "sending…" (D2). */
 					markPendingEchoWaking(pid, receipt.envelope.command_id, true);

@@ -119,6 +119,15 @@ export interface PendingEcho {
 	    `markPendingEchoWaking`. The row itself leaves on land (the projection
 	    answers it) or on a failed wake (the composer withdraws it). */
 	waking?: boolean;
+	/** `Date.now()` when `waking` was last turned ON (`markPendingEchoWaking`).
+	    WHY IT LIVES ON THE ROW (review round 5, M1 on PR #4522): the composer's
+	    wake tracker is a ref, and `SessionScreen` is keyed per route, so a
+	    session switch unmounts it while this module-level row survives. The
+	    remounted composer re-attaches its tracker from the row, and this stamp
+	    is the one fact it cannot rebuild from the stream: how long the wake has
+	    been running, which bounds when it MUST have settled (see
+	    `WAKE_SETTLED_BOUND_MS` in the composer). Cleared with the flag. */
+	wakingAt?: number;
 }
 
 /** The kinds a row the USER authored can be written under, carrying the command
@@ -252,9 +261,24 @@ export function markPendingEchoWaking(sessionId: string, commandId: string, waki
 	const index = held.findIndex((item) => item.commandId === commandId);
 	if (index === -1 || (held[index].waking ?? false) === waking) return;
 	const next = [...held];
-	next[index] = { ...next[index], waking };
+	/* The stamp is taken only on the OFF→ON edge (the guard above returns on a
+	   repeat): a retry that joins the same in-flight wake must not restart the
+	   clock the deadline bound is measured from. */
+	next[index] = { ...next[index], waking, wakingAt: waking ? Date.now() : undefined };
 	echoes.set(sessionId, next);
 	emit();
+}
+
+/** The held echo for one command on one route, answered or not — `undefined`
+ *  once it has been withdrawn or retired.
+ *
+ * For the composer's mount-time reconciliation (review round 5, M1 on PR
+ * #4522): a remounted composer has lost its wake tracker, and the row's
+ * `waking`/`wakingAt` are what it rebuilds that tracker from. A read, not a
+ * hook: the composer asks once per settle pass and the store's own emit
+ * already re-renders the screen that owns the row. */
+export function pendingEchoFor(sessionId: string, commandId: string): PendingEcho | undefined {
+	return echoes.get(sessionId)?.find((item) => item.commandId === commandId);
 }
 
 /** Drop every echo this device holds, whatever the route.
