@@ -478,8 +478,40 @@ SHRUNK_KEY = "context_shrunk_here"
 #: ``tests/unit/session/test_credential_binding.py`` pins two providers' rows
 #: across a real compaction, so this member cannot be added back without
 #: addressing the granularity above first.
+#:
+#: ``todo_snapshot`` and ``wake_schedules`` are the same failure mode at a larger
+#: scale (incident 2026-11-24, session ``1375449bf925``: an 820 MB journal held
+#: 4,425 ``todo_snapshot`` rows / 403 MB and 3,028 ``wake_schedules`` rows /
+#: 27 MB, every one but the newest superseded, and the runtime sat at ~1.19 GB
+#: RSS a minute after boot). Each row is a FULL snapshot, not a delta:
+#: ``Session._persist_todo_snapshot`` writes the whole list whenever its
+#: fingerprint changes, and ``Session._persist_wake_schedules`` writes the whole
+#: schedule set on every arm/cancel/fire. Every reader was audited as
+#: newest-wins: ``latest_custom`` / ``latest_custom_entry`` in ``Session``
+#: (todo restore, wake restore, the aida/librarian cadence ``previous`` row),
+#: ``read_latest_custom`` / ``read_latest_custom_entry`` in ``wakes.arm``,
+#: ``projects``, ``todo_panel``, ``serving``, ``harness.subagent``,
+#: ``mobile.tui_handle`` and the aida/librarian proactive passes,
+#: ``network.carry``'s ``latest_custom_details``, ``mobile.durable``'s tracked
+#: set (it iterates, but overwrites one dict slot per type), and
+#: ``workspace_rest._no_wake_schedule``, which walks the journal BACKWARD and
+#: returns at the first match. Nothing renders or diffs older snapshots
+#: (``open_frame`` and the desktop reducer drop both types unpainted). The fork
+#: guard in the wake restore compares only the NEWEST row's ``ts`` with the
+#: fork instant, which the fold never changes.
+#:
+#: Literals are inline for the leaf-module reason above; the owners are
+#: ``session.session.TODO_SNAPSHOT_CUSTOM_TYPE`` and
+#: ``harness.wake.WAKE_SCHEDULES_CUSTOM_TYPE``, and
+#: ``tests/unit/session/test_transcript_footprint.py`` pins both.
 _COLLAPSIBLE_CUSTOM_TYPES = frozenset(
-    {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
+    {
+        "subagent_roster",
+        SESSION_SPEND_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
+        "todo_snapshot",
+        "wake_schedules",
+    }
 )
 
 #: The prefix every :meth:`TranscriptEntry.to_json` CUSTOM row opens with, up to
