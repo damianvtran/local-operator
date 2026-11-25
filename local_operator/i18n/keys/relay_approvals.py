@@ -9,6 +9,14 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def card_always_ask() -> Msg:
+    return Msg("relay.approvals.card.always_ask", {})
+
+
+def card_guardrails_still_apply() -> Msg:
+    return Msg("relay.approvals.card.guardrails_still_apply", {})
+
+
 def card_notice_session_auto() -> Msg:
     return Msg("relay.approvals.card.notice_session_auto", {})
 

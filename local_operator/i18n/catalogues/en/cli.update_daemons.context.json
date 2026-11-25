@@ -1,0 +1,14 @@
+{
+  "cli.update_daemons.incomplete_heading": {
+    "role": "lop update closing warning (stderr): the install succeeded but one or more background services still run the previous build",
+    "note": "Lowercase start like the command's other warnings; ends with a colon because one indented row per service follows. Must not read as a failure of the install itself, only of the services moving."
+  },
+  "cli.update_daemons.incomplete_row": {
+    "role": "lop update: one row under the heading, naming a service and what to run",
+    "note": "{name} is a service's display name (e.g. 'network relay'), {remedy} is an already-localized-or-technical sentence ending in a literal command in backticks; keep both placeholders and the two leading spaces verbatim."
+  },
+  "cli.update_daemons.remedy_fallback": {
+    "role": "lop update: remedy shown when no specific command is known for that service",
+    "note": "`lop services status` is a literal CLI command; keep it and its backticks verbatim."
+  }
+}

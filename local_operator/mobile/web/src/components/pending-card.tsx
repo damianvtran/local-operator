@@ -188,7 +188,7 @@ export function PendingCard({
 	   answerable, and a policy write in flight must not grey out approve/deny for
 	   a request that is still perfectly answerable on another surface. Sharing
 	   the state would silently give one the other's lifetime. */
-	const [policyBusy, setPolicyBusy] = useState<"auto" | "default auto" | null>(null);
+	const [policyBusy, setPolicyBusy] = useState<"ask" | "auto" | "default auto" | null>(null);
 	const [policyNotice, setPolicyNotice] = useState("");
 	const [policyError, setPolicyError] = useState("");
 
@@ -329,6 +329,41 @@ export function PendingCard({
 				question_index: pending.question_index,
 			}),
 		);
+
+	/* Back to asking for THIS session (operator request, 2026-11-24). The same
+	   `/approvals ask` the gate sheet sends: tightening needs no proof and works
+	   unpaired. The receipt is read exactly as `setPolicy` reads one (R1-M1): a
+	   routed refusal changed nothing and must not be confirmed, and the
+	   runtime's own sentence is the notice when it gives one. */
+	const setAsk = async () => {
+		if (policyBusy) return;
+		setPolicyBusy("ask");
+		setPolicyError("");
+		setPolicyNotice("");
+		try {
+			const receipt = await sendCommand(pid, {
+				op: "slash_result",
+				command: "approvals",
+				args: "ask",
+				images: [],
+			});
+			if (receipt.refused) {
+				setPolicyError(
+					receipt.detail.trim() ||
+						messageRuntime.t("relay.approvals.gate.refused_nothing_changed"),
+				);
+				return;
+			}
+			const said = asSentence(
+				receipt.detail.trim() || messageRuntime.t("relay.asks.gate.notice_ask"),
+			);
+			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
+		} catch (failure) {
+			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
+		} finally {
+			setPolicyBusy(null);
+		}
+	};
 
 	/* A MODE CHANGE, NEVER AN ANSWER — and that distinction is the whole reason
 	   these two links exist here instead of sending the reader to the gate sheet.
@@ -652,14 +687,32 @@ export function PendingCard({
 					    too, in the runtime's words, with approve/deny still live. */}
 					<div className="flex flex-col gap-1">
 						<div className="flex flex-wrap items-center gap-x-4">
-							<button
-								type="button"
-								disabled={policyBusy !== null}
-								onClick={() => void setPolicy("auto")}
-								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
-							>
-								{messageRuntime.t("relay.approvals.card.set_auto_session")}
-							</button>
+							{/* "Always ask" REPLACES "Auto-approve this session" while the
+							    session is already auto (operator request, 2026-11-24): the
+							    card is where the mode is decided, so it must also be where it
+							    is reversed in one tap. Tightening needs no proof and is never
+							    refused, so it uses the plain slash route the gate sheet's
+							    "keep asking" uses — and, like every control here, it never
+							    answers `request_id`. */}
+							{pending.approval_mode === "auto" ? (
+								<button
+									type="button"
+									disabled={policyBusy !== null}
+									onClick={() => void setAsk()}
+									className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+								>
+									{messageRuntime.t("relay.approvals.card.always_ask")}
+								</button>
+							) : (
+								<button
+									type="button"
+									disabled={policyBusy !== null}
+									onClick={() => void setPolicy("auto")}
+									className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+								>
+									{messageRuntime.t("relay.approvals.card.set_auto_session")}
+								</button>
+							)}
 							<button
 								type="button"
 								disabled={policyBusy !== null}
@@ -669,6 +722,12 @@ export function PendingCard({
 								{messageRuntime.t("relay.approvals.card.set_auto_all")}
 							</button>
 						</div>
+						{/* The limit of auto, said where auto is offered: it skips this
+						    prompt only. Guardrail refusals and the dangerous-delete review
+						    are enforced below the gate and still run. */}
+						<p className="text-meta text-ink-dim">
+							{messageRuntime.t("relay.approvals.card.guardrails_still_apply")}
+						</p>
 						{policyNotice ? (
 							<p role="status" className="text-meta text-ink-dim">
 								{policyNotice}

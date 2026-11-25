@@ -1,8 +1,10 @@
 {
+  "relay.approvals.card.always_ask": "हमेशा पूछें",
+  "relay.approvals.card.guardrails_still_apply": "सुरक्षा नियमों के इनकार और ख़तरनाक हटाने की समीक्षा फिर भी लागू रहते हैं।",
   "relay.approvals.card.notice_session_auto": "यह सत्र अब auto है",
   "relay.approvals.card.request_needs_answer": "इस अनुरोध का उत्तर अभी बाकी है।",
-  "relay.approvals.card.set_auto_all": "सभी सत्रों के लिए auto सेट करें",
-  "relay.approvals.card.set_auto_session": "इस सत्र के लिए auto सेट करें",
+  "relay.approvals.card.set_auto_all": "सभी सत्रों में अपने-आप स्वीकृत करें",
+  "relay.approvals.card.set_auto_session": "इस सत्र में अपने-आप स्वीकृत करें",
   "relay.approvals.card.still_needs_answer": "इस कॉल का उत्तर अभी बाकी है।",
   "relay.approvals.gate.body_scope.after": "बदलता है।",
   "relay.approvals.gate.body_scope.before": "पहले दो विकल्प केवल",

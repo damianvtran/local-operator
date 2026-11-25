@@ -2247,6 +2247,25 @@ _DAEMON_MODULES: dict[str, tuple[str, str]] = {
 }
 
 
+def daemon_remedy(name: str) -> str:
+    """The census's own remedy sentence for a daemon's DISPLAY name, or ``""``.
+
+    ``lop update``'s incompleteness disclosure (``update._incomplete_daemons``)
+    names a remedy for a ``failed`` daemon row that carries no reason of its
+    own — never an ``unsupervised`` one, whose refresher already printed the
+    right command (``lop mobile restart`` is launchd-only). It reads it HERE, from
+    :data:`_DAEMON_MODULES`, rather than from a second command table, so the
+    update's closing lines cannot name a different command than ``lop services
+    status`` does for the same daemon. ``""`` for a name the census does not
+    own (``service daemons``, a serve row): the caller falls back to pointing
+    at ``lop services status``, never at an invented command.
+    """
+    for display, remedy in _DAEMON_MODULES.values():
+        if display == name:
+            return remedy
+    return ""
+
+
 @dataclass(frozen=True)
 class StaleDaemon:
     """One background daemon process provably on a superseded generation."""

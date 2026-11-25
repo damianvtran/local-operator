@@ -1,8 +1,10 @@
 {
+  "relay.approvals.card.always_ask": "Preguntar siempre",
+  "relay.approvals.card.guardrails_still_apply": "Los rechazos de las reglas de protección y la revisión de borrados peligrosos siguen activos.",
   "relay.approvals.card.notice_session_auto": "esta sesión ahora es auto",
   "relay.approvals.card.request_needs_answer": "Esta solicitud aún necesita tu respuesta.",
-  "relay.approvals.card.set_auto_all": "Activar auto para todas las sesiones",
-  "relay.approvals.card.set_auto_session": "Activar auto para esta sesión",
+  "relay.approvals.card.set_auto_all": "Aprobar automáticamente todas las sesiones",
+  "relay.approvals.card.set_auto_session": "Aprobar automáticamente esta sesión",
   "relay.approvals.card.still_needs_answer": "Esta llamada aún necesita tu respuesta.",
   "relay.approvals.gate.body_scope.after": "siguientes.",
   "relay.approvals.gate.body_scope.before": "Las dos primeras opciones cambian",

@@ -4194,6 +4194,18 @@ class SessionStreamFn:
         # the constant). Instance state, so a fork starts clean: a child's
         # workload says nothing about its parent's.
         self._had_long_call = False
+        # Automation TTL state (``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S``).
+        # ``_automation`` is set by the entry point that KNOWS the run is
+        # non-interactive (``mark_automation``: ``lop exec`` and the SDK), never
+        # inferred here, because this stream cannot tell an exec run from a
+        # viewer-less interactive runtime. ``_last_turn_started`` is the
+        # monotonic start of the previous turn request, and ``_had_long_gap``
+        # latches once two of them were far enough apart for a 5m prefix to
+        # have expired in between. Instance state like ``_had_long_call``: a
+        # fork starts clean, and the policy ignores it for subagents anyway.
+        self._automation = False
+        self._last_turn_started: float | None = None
+        self._had_long_gap = False
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -5562,6 +5574,38 @@ class SessionStreamFn:
             or request.model.provider in {"radient", "radient-key"}
             or not request.messages
         )
+
+    def mark_automation(self) -> None:
+        """Mark this conversation as a non-interactive run for the cache-TTL policy.
+
+        Called by ``exec_session.run_session`` and the SDK's session builder,
+        the two entry points that know nobody idles between this run's calls.
+        One-way: an automation run never becomes interactive in-process.
+        """
+        self._automation = True
+
+    def _observe_turn_gap(self, request: ChatRequest) -> bool:
+        """Record a turn request's start; whether a long start-to-start gap was ever seen.
+
+        START to START because the 5m entry is refreshed when a request starts:
+        a gap past five minutes is an expiry whether it went into a long
+        stream or a long tool. Measured here, before dispatch, so the request
+        that ends a long gap is already sent at the main-thread TTL; it pays
+        the one rewrite either way, and its fresh write then survives the next
+        gap. Turn requests only: isolated errands and auxiliary purposes do not
+        refresh this conversation's prefix.
+        """
+        if request.purpose != "turn" or request.isolated:
+            return self._had_long_gap
+        from local_operator.providers.anthropic_cache_ttl import (
+            AUTOMATION_LONG_GAP_1H_THRESHOLD_S,
+        )
+
+        now = time.monotonic()
+        previous, self._last_turn_started = self._last_turn_started, now
+        if previous is not None and now - previous >= AUTOMATION_LONG_GAP_1H_THRESHOLD_S:
+            self._had_long_gap = True
+        return self._had_long_gap
 
     def bind_saver_session(self, session: Any) -> None:
         """Read the owning session's live choice without sharing stream state.
@@ -7585,6 +7629,8 @@ class SessionStreamFn:
                     delegated=bool(getattr(self, "_parent_session_id", None)),
                 ),
                 "cache_after_long_call": self._had_long_call,
+                "cache_automation": self._automation,
+                "cache_after_long_gap": self._observe_turn_gap(request),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }

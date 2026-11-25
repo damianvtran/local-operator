@@ -4735,7 +4735,11 @@ async def _construct_child_session(
     from local_operator.config import ConfigManager
     from local_operator.harness.types import ToolContext
     from local_operator.i18n.resolve import preferred_language_line
-    from local_operator.prompts_api import CHANNEL_HUB, build_system_blocks
+    from local_operator.prompts_api import (
+        CHANNEL_HUB,
+        STABLE_HEAD_BLOCK_COUNT,
+        build_system_blocks,
+    )
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.session_factory import _env_details, load_user_instructions
@@ -5192,6 +5196,10 @@ async def _construct_child_session(
         )
 
     setattr(system_blocks_provider, "append_only_state", True)
+    # Same ``build_system_blocks`` composition as a main session, so a child
+    # shares the parent's cached tools+persona head across cwds and days
+    # (see ``prompts_api.STABLE_HEAD_BLOCK_COUNT``).
+    setattr(system_blocks_provider, "stable_head_blocks", STABLE_HEAD_BLOCK_COUNT)
     # Asks the child Session to install ``live_tools`` (read in the provider).
     setattr(system_blocks_provider, "session_tool_membership", True)
     setattr(system_blocks_provider, "repo_guidance", repo_guidance)

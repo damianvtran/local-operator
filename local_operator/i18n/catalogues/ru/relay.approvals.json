@@ -1,8 +1,10 @@
 {
+  "relay.approvals.card.always_ask": "Всегда спрашивать",
+  "relay.approvals.card.guardrails_still_apply": "Отказы защитных правил и проверка опасных удалений продолжают действовать.",
   "relay.approvals.card.notice_session_auto": "эта сессия теперь в режиме auto",
   "relay.approvals.card.request_needs_answer": "Этот запрос всё ещё ждёт вашего ответа.",
-  "relay.approvals.card.set_auto_all": "Включить auto для всех сессий",
-  "relay.approvals.card.set_auto_session": "Включить auto для этой сессии",
+  "relay.approvals.card.set_auto_all": "Автоодобрение для всех сессий",
+  "relay.approvals.card.set_auto_session": "Автоодобрение для этой сессии",
   "relay.approvals.card.still_needs_answer": "Этот вызов всё ещё ждёт вашего ответа.",
   "relay.approvals.gate.body_scope.after": "меняет последний.",
   "relay.approvals.gate.body_scope.before": "Первые два варианта меняют",

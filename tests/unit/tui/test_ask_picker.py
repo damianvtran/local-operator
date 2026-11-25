@@ -1244,7 +1244,7 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
     """The blast radius. `ApprovalPrompt` subclasses this card, and there the
     description is not a nicety — it is the CONSEQUENCE of authorising a
     possibly destructive tool call, and the difference between "ask again next
-    time" and "stop asking for this session".
+    time" and "this session; guardrails still apply".
 
     Measured on the pre-fix tree: the three consequence strings are 37, 36 and
     28 cells and wrap to one line each at every width down to 44 columns, so the
@@ -1288,10 +1288,10 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Allow all",
-        "     stop asking for this session",
-        "Approvals: Ask — global default.",
-        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
+        "  A. Allow + auto-approve",
+        "     this session; guardrails still apply",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
+        "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -5372,7 +5372,7 @@ async def test_the_approval_gate_reveal_never_strips_a_consequence() -> None:
 
     `ApprovalPrompt` reuses this widget, and there each option's description IS
     the consequence of allowing the call: "run this call and ask again next
-    time" against "stop asking for this session". A reveal that leaves only the
+    time" against "this session; guardrails still apply". A reveal that leaves only the
     selected row's consequence turns *Deny* and *Allow all* into bare labels —
     an authorisation surface losing two of three consequences behind a key the
     card itself advertised.
@@ -6176,10 +6176,10 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Allow all",
-        "     stop asking for this session",
-        "Approvals: Ask — global default.",
-        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
+        "  A. Allow + auto-approve",
+        "     this session; guardrails still apply",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
+        "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -7125,10 +7125,10 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
         "     run this call and ask again next time",
         "  n. Deny",
         "     refuse this call; the turn continues",
-        "  A. Allow all",
-        "     stop asking for this session",
-        "Approvals: Ask — global default.",
-        "Set auto for this session [S]  ·  Set auto for all sessions [G]",
+        "  A. Allow + auto-approve",
+        "     this session; guardrails still apply",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
+        "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
 
@@ -8010,7 +8010,7 @@ async def test_the_boot_approval_gate_never_scrolls_a_label_off() -> None:
                 rendered = card.render_lines_for_test()
                 frame = "\n".join(rendered)
                 # Every authorisation label is on screen.
-                for label in ("y. Allow", "n. Deny", "A. Allow all"):
+                for label in ("y. Allow", "n. Deny", "A. Allow + auto-approve"):
                     assert label in frame, (
                         size,
                         f"the boot approval gate hid {label!r} — a label scrolled off an"
@@ -8077,7 +8077,9 @@ async def test_a_gate_without_the_labels_fit_hook_scrolls_a_label_off(
                 "without the hook the tall gate should window",
                 rendered,
             )
-            hidden = [label for label in ("n. Deny", "A. Allow all") if label not in frame]
+            hidden = [
+                label for label in ("n. Deny", "A. Allow + auto-approve") if label not in frame
+            ]
             assert hidden, (
                 "no label scrolled off even with the hook disabled; the boot-gate"
                 " guard would not have caught the C3/D1 regression",

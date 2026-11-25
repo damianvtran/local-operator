@@ -2250,6 +2250,10 @@ async def test_a_still_starting_resume_reports_starting_not_reopened(
     assert result.text.startswith("reopen requested")
     assert "still starting" in result.text
     assert "`lop exec --status feedface0001`" in result.text
+    # The owner's acceptance: a resume that did not start says NOT STARTED,
+    # and names no model, because no run exists yet to have used one.
+    assert "NOT STARTED" in result.text
+    assert " model" not in result.text
     assert (result.details or {}).get("readiness") == "starting"
 
 
