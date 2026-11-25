@@ -9880,6 +9880,9 @@ class RelayServer:
                     "archived": None,
                     "binding": self._row_binding(entry.name),
                     **self._row_avatar(entry.name),
+                    # A mesh-created session is the commonest cold boot (the
+                    # first ``--send`` engages it), so this half asks too.
+                    **self._boot_row_state(entry.name),
                 }
             )
         return rows
@@ -9990,9 +9993,75 @@ class RelayServer:
                     "archived": None,
                     "binding": self._row_binding(session_id),
                     **self._row_avatar(session_id),
+                    # Additive, and only while a runtime is being built.
+                    **self._boot_row_state(session_id),
                 }
             )
         return rows
+
+    def _boot_row_state(self, session_id: str) -> dict[str, Any]:
+        """``boot_state``/``boot_age_s`` for a cold row whose runtime is being built, else ``{}``.
+
+        WHY (PR #4572 QA Q6). After ``lop network sessions --send`` reported
+        "<session> is still starting on <peer>; message NOT queued", the sender's
+        listing showed that session ``stored``, pid 0, "not running" — identical
+        to one stopped on purpose — so the sender could not tell "an engage was
+        accepted and a runtime is booting" from "stopped" or "wedged".
+
+        THE SIGNAL ALREADY EXISTS, so no heartbeat is added: a process holding
+        the session's transcript lease (``.execution-lease``), alive AND
+        identity-verified by its birth token, with no run record published yet.
+        That is exactly what ``launch.engage_runtime``'s loop reads as "someone is
+        constructing a runtime but has not published yet", through the same probe
+        (``launch._lease_holder``), so the listing and the engage cannot disagree
+        about whether a boot is under way. A recycled pid fails the identity test
+        and the row carries no boot claim.
+
+        THE AGE IS THE CLAIM FILE'S MTIME. ``acquire_session_lease`` writes the
+        claim once, at ``O_EXCL`` creation, and nothing rewrites or touches it
+        afterwards (release unlinks it; stale recovery replaces it with a NEW
+        file, i.e. a new acquisition), so its mtime is the acquisition time.
+
+        THE BUDGET IS THE SENDER'S (``types.REMOTE_COLD_BOOT_BUDGET_S``, read at
+        call time so a test can move it): past it the claim is ``not_responding``,
+        the same moment the sender stopped waiting for it.
+
+        ADDITIVE KEYS, ``state`` STAYS ``stored`` — and that is the mixed-version
+        contract, not timidity. A viewer on an older build that met an unknown
+        ``state`` would send it to ``live_state_from_flags`` (``peer_rows.
+        _live_state``), which reads this row's ``busy=False, detached=True`` as
+        ``idle`` — a resident runtime — in every older sidebar and sessions tool.
+        Keeping the token means every existing branch on it (``published``,
+        ``types.row_needs_claim``, the sidebar's Running filing, the stored-last
+        dedupe sort) keeps treating a booting session as COLD by construction:
+        there is still nothing to dial and no gate to answer. Only readers that
+        know ``boot_state`` say more (``resume.session_row_state_words``).
+        ``boot_age_s`` is its own key rather than the row's ``age_s``, which
+        readers treat as peer staleness and read 0 as unknown.
+
+        Only called for rows the LIVE half did not list, i.e. no live/wedged
+        record: a published runtime holds its lease for its whole life and keeps
+        its registry state. Best effort: any probe failure is no claim (``{}``).
+        A lease held briefly by a non-runtime writer (the browser-resource
+        cleanup) can read ``starting`` for that instant.
+        """
+        from local_operator.network import types as net_types
+        from local_operator.session.runtime.launch import _lease_holder
+        from local_operator.session_lease import LEASE_NAME
+
+        try:
+            if _lease_holder(self.root, session_id) is None:
+                return {}
+            claimed = (self.root / "sessions" / session_id / LEASE_NAME).stat().st_mtime
+        except Exception:  # noqa: BLE001 — a listing is not an error path
+            return {}
+        age = max(0.0, time.time() - claimed)
+        state = (
+            net_types.ROW_STATE_STARTING
+            if age < net_types.REMOTE_COLD_BOOT_BUDGET_S
+            else net_types.ROW_STATE_NOT_RESPONDING
+        )
+        return {"boot_state": state, "boot_age_s": round(age, 3)}
 
     def _op_member_list(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
         record = self.store_view.network(link.network_id)

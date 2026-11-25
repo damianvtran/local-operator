@@ -325,6 +325,48 @@ def row_needs_claim(*, state: object, pending: object) -> str | None:
     return normalise_pending(pending)
 
 
+# ---------------------------------------------------------------------------
+# A cold row whose runtime is being constructed
+# ---------------------------------------------------------------------------
+
+#: How long a session may sit between "an engage started constructing its runtime"
+#: and "that runtime published its record" before the wait stops being a boot.
+#:
+#: ONE NUMBER FOR BOTH ENDS OF ONE WAIT (PR #4572 QA Q6). The sender's
+#: ``lop network sessions --send`` waits this long for a cold-booted runtime to
+#: publish (``network.cli.PILOT_COLD_BOOT_BUDGET_S`` re-exports it, #4470/#4572),
+#: and the OWNER classifies its own constructing rows with it
+#: (``relay.RelayServer._boot_row_state``): a row the owner still calls
+#: ``starting`` is one the sender is still prepared to wait for, and the moment
+#: the sender gives up ("still starting … message NOT queued") is the moment the
+#: owner starts calling it ``not_responding``. It mirrors the local engage's own
+#: cold-start allowance (``session.runtime.launch.DEFAULT_DEADLINE_S``), which is
+#: not imported here because this module is stdlib-only by contract (see the
+#: module docstring) and ``launch`` is not.
+REMOTE_COLD_BOOT_BUDGET_S = 30.0
+
+#: A cold row's ``boot_state`` while a process HOLDS its transcript lease but has
+#: not published a run record yet — an engage was accepted and a runtime is
+#: booting. Before this, the owner listed it ``stored`` (pid 0, "not running"),
+#: byte-identical to a session stopped on purpose, so a sender told "still
+#: starting" could not tell a boot from a stop or a wedge. The row's ``state``
+#: stays ``stored`` (see ``relay.RelayServer._boot_row_state`` for the
+#: mixed-version reason); this is an additive claim beside it.
+ROW_STATE_STARTING = "starting"
+
+#: The same constructing row once it has been constructing for longer than
+#: :data:`REMOTE_COLD_BOOT_BUDGET_S`: the process holding the lease is alive, but
+#: no runtime has come up in the time a boot takes, so it is reported as not
+#: answering rather than as a boot that will finish.
+ROW_STATE_NOT_RESPONDING = "not_responding"
+
+#: Both ``boot_state`` values. The row they ride is still ``stored`` for every
+#: reader that branches on liveness: no record, no pid a viewer can dial, no
+#: answerable gate, never filed under Running and never ``published``. Only the
+#: words a person reads differ (``resume.session_row_state_words``).
+BOOT_ROW_STATES = frozenset({ROW_STATE_STARTING, ROW_STATE_NOT_RESPONDING})
+
+
 def row_without_stored_claims(row: dict[str, Any]) -> dict[str, Any]:
     """The row a MACHINE payload may carry: ``row_needs_claim`` applied to a dict.
 

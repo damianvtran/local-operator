@@ -59,6 +59,9 @@ from local_operator.i18n.keys import cli_network_send as _network_send
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
 
+# Stdlib-only by contract (its docstring), so the CLI's import cost is unchanged.
+from local_operator.network.types import REMOTE_COLD_BOOT_BUDGET_S
+
 if TYPE_CHECKING:
     from local_operator.mobile.types import SessionRecord
     from local_operator.session.attached import _RuntimeLocator
@@ -7840,8 +7843,10 @@ PILOT_BIND_TIMEOUT_S = 120.0
 #: Publication grace for a stored send after the peer ACKs engage. Use the
 #: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
 #: inside, never on top of, the CLI's bind deadline. A warm or refused engage
-#: never gets this grace.
-PILOT_COLD_BOOT_BUDGET_S = 30.0
+#: never gets this grace. The number lives in ``network.types`` because the OWNER
+#: classifies its constructing rows (``starting`` → ``not_responding``) with the
+#: same budget, and a second literal is how the two ends would drift apart.
+PILOT_COLD_BOOT_BUDGET_S = REMOTE_COLD_BOOT_BUDGET_S
 
 #: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
 #: outer bound fires. The viewer is given the bind budget as an absolute deadline
@@ -10205,7 +10210,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     remote = [row_without_stored_claims(row) for row in remote]
     lines: list[str] = []
     cells: list[tuple[str, str, str, str]] = []
-    from local_operator.resume import session_state_words
+    from local_operator.resume import session_row_state_words
 
     for row in remote:
         block = row.get("peer") or {}
@@ -10228,7 +10233,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             (
                 str(row.get("session_id") or ""),
                 holder,
-                session_state_words(str(row.get("state") or "")) or "?",
+                # The ROW, not the token: a booting session is ``stored`` plus a
+                # ``boot_state`` claim (PR #4572 QA Q6), and only the row says so.
+                session_row_state_words(row) or "?",
                 str(row.get("conversation_name") or ""),
             )
         )

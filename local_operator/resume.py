@@ -3743,6 +3743,73 @@ def session_state_words(state: str) -> str:
     return SESSION_STATE_WORDS.get(token, token)
 
 
+def session_row_state_words(
+    row: Mapping[str, Any], *, render: Callable[[Any], str] | None = None
+) -> str:
+    """One federated ROW's state in words: :func:`session_state_words`, plus a boot.
+
+    WHY A ROW AND NOT A TOKEN (PR #4572 QA Q6). A session whose owner accepted an
+    engage and is constructing its runtime is still ``state: "stored"`` on the
+    wire — deliberately, so an older reader keeps treating it as cold (see
+    ``network.relay.RelayServer._boot_row_state``) — and carries the additive
+    ``boot_state``/``boot_age_s`` claim beside it. Read from the token alone, that
+    row said "not running", the same as a session stopped on purpose, so a sender
+    told "still starting … message NOT queued" could not tell a boot from a stop.
+
+    ``starting`` reads "starting · 12s"; past the shared cold-boot budget the
+    owner says ``not_responding``, read "not answering · starting for 45s" — the
+    wedged state's own "not answering" word (``wire.session_status.wedged``),
+    because the lease holder is alive and that is all that was observed.
+
+    The boot claim is honoured ONLY on a ``stored`` row: a live row's registry
+    state is the better fact, and a stale claim beside it must not override it.
+    An unreadable age (absent, a bool, non-finite, negative) is no claim and the
+    row reads as it always did. ``render`` defaults to the process's active
+    locale (the CLI); a model-facing caller passes an English renderer.
+    """
+    import math
+
+    from local_operator.network.types import (
+        ROW_STATE_NOT_RESPONDING,
+        ROW_STATE_STARTING,
+    )
+
+    state = str(row.get("state") or "").strip()
+    boot = str(row.get("boot_state") or "").strip()
+    age = row.get("boot_age_s")
+    if (
+        state != "stored"
+        or boot not in (ROW_STATE_STARTING, ROW_STATE_NOT_RESPONDING)
+        or isinstance(age, bool)
+        or not isinstance(age, (int, float))
+        or not math.isfinite(age)
+        or age < 0
+    ):
+        return session_state_words(state)
+    from local_operator.i18n.duration_message import format_duration
+    from local_operator.i18n.keys import wire_session_status as status_keys
+
+    if render is None:
+        from local_operator.i18n.text import tr
+
+        render = tr("wire.session_status")
+    duration = format_duration(float(age), render)
+    if boot == ROW_STATE_STARTING:
+        return render(status_keys.booting(duration=duration))
+    return render(status_keys.booting_not_answering(duration=duration))
+
+
+def english_status_render(message: Any) -> str:
+    """``message`` rendered in English, for MODEL-FACING session state words.
+
+    Tool results are model-facing and pinned to ``en`` (docs/I18N.md, step 1);
+    the CLI renders in the user's locale instead.
+    """
+    from local_operator.i18n.messages import render
+
+    return render(message.code, dict(message.params), locale="en")
+
+
 #: What a SESSION with no stored name is called, on every surface that has to
 #: name one — the same export and for the same measured reason as
 #: :data:`UNNAMED_DEVICE` one paragraph up.
