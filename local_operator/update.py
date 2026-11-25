@@ -11019,7 +11019,8 @@ def _incomplete_daemons(report: StageReport) -> list[dict[str, str]]:
     when it has one (the reconciliation folds ``services._DAEMON_MODULES``'s
     sentence in there, a deferral keeps its own); else, for a ``failed`` row
     ONLY, the census sentence for that display name (``services.daemon_remedy``);
-    else ``""`` — which the human half renders as "see ``lop services status``".
+    else ``""`` — which the human half renders as "see ``lop services status``"
+    (or, for ``unsupervised``, omits: its warning already named the fix).
     Adding a command list here would let this output disagree with ``lop
     services status``.
 
@@ -11063,9 +11064,22 @@ def _print_incomplete_daemons(rows: Sequence[dict[str, str]]) -> None:
     from local_operator.i18n.keys import cli_update_daemons as _k
     from local_operator.i18n.text import tr
 
+    # MACHINE TRUTH KEPT, HUMAN REPEAT DROPPED (owner, PR #4562): a reasonless
+    # ``unsupervised`` row stays in ``daemons_incomplete`` with ``remedy: ""`` so
+    # ``daemons_complete`` never claims completeness over it — but its refresher
+    # already printed a warning naming the fix (``lop mobile serve``). A per-daemon
+    # line here would be a THIRD instruction (the generic ``lop services status``
+    # pointer), and the census's ``lop mobile restart`` is launchd-only and wrong.
+    # So the human channel prints no row for it. Other empty-remedy rows (a
+    # reasonless ``failed``/``pending``) had no earlier warning, so they keep the
+    # generic pointer. The heading prints only above a row, so an unsupervised-
+    # only stage shows the warning and nothing extra.
+    printed = [row for row in rows if row["remedy"] or row.get("status") != "unsupervised"]
+    if not printed:
+        return
     _t = tr("cli.update_daemons")
     print(_t(_k.incomplete_heading()), file=sys.stderr)
-    for row in rows:
+    for row in printed:
         remedy = row["remedy"] or _t(_k.remedy_fallback())
         print(_t(_k.incomplete_row(name=row["name"], remedy=remedy)), file=sys.stderr)
 

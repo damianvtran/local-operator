@@ -861,8 +861,12 @@ def test_freshness_a_reasonless_unsupervised_row_gets_no_per_daemon_command(
     Regression (merge gate run 45523620065): the census remedy for ``mobile``
     is ``lop mobile restart``, which is launchd-only and wrong for a daemon
     running outside its supervisor — ``test_update_command_unsupervised_warns``
-    pins that it never appears. Such a row, and a reasonless ``pending`` one,
-    takes the generic pointer at ``lop services status`` instead.
+    pins that it never appears. A reasonless ``pending`` row, which had no
+    earlier warning, still takes the generic pointer at ``lop services status``.
+
+    Owner constraint (PR #4562): the summary must not add a THIRD instruction
+    beside the warning's ``lop mobile serve`` — so the unsupervised row prints
+    no per-daemon line at all, while ``daemons_incomplete`` keeps it truthfully.
     """
     stage = update.StageReport(
         daemons=(
@@ -871,12 +875,34 @@ def test_freshness_a_reasonless_unsupervised_row_gets_no_per_daemon_command(
         )
     )
     captured, report = _emit(stage, monkeypatch, capsys)
-    remedies = {row["name"]: row["remedy"] for row in report["daemons_incomplete"]}
-    assert remedies == {"mobile": "", "network relay": ""}
+    rows = {row["name"]: row for row in report["daemons_incomplete"]}
+    assert rows["mobile"] == {"name": "mobile", "status": "unsupervised", "remedy": ""}
+    assert rows["network relay"]["remedy"] == ""
+    assert report["daemons_complete"] is False
     assert "lop mobile restart" not in captured.err
     assert "lop network restart" not in captured.err
-    assert "mobile: run `lop services status`" in captured.err
+    assert "mobile:" not in captured.err
     assert "network relay: run `lop services status`" in captured.err
+
+
+def test_freshness_an_unsupervised_mobile_summary_repeats_only_the_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End to end through the refresher's warning AND the summary (owner, PR #4562).
+
+    The warning names ``lop mobile serve``; the summary must neither contradict
+    it (``lop mobile restart``) nor add a per-daemon ``mobile:`` instruction.
+    """
+    refresh = update._mobile_daemon_refresh(update.MobileRefresh(kind="unsupervised"))
+    for line in refresh.warnings:
+        print(line, file=sys.stderr)
+    stage = update.StageReport(daemons=refresh.statuses)
+    update._print_incomplete_daemons(update._incomplete_daemons(stage))
+    err = capsys.readouterr().err
+    assert "lop mobile serve" in err
+    assert "lop mobile restart" not in err
+    assert "mobile:" not in err
+    assert "lop services status" not in err
 
 
 def test_freshness_a_fully_refreshed_report_still_reads_clean(
