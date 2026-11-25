@@ -438,8 +438,18 @@ def test_system_md_stops_research_at_sufficiency_and_fans_out_only_needed_calls(
       return — the criterion that excludes speculative fan-out while keeping
       independent file reads concurrent on long coding tasks;
     - one read source settles a claim, with exactly three reopeners (conflict,
-      staleness, an explicit ask for corroboration) so dates and status are not
-      taken from one stale page;
+      staleness, a task that requires more) so dates and status are not taken
+      from one stale page. The third used to read "corroboration is
+      requested", and a paired long-task research run showed the economy rule
+      outranking the task's own per-item citation requirement: asked to cite,
+      for each of 28 PEPs, a fetched page showing that PEP's header, the agent
+      cited one aggregate index for all 28 (1/28 cites, both reps). A paired
+      probe showed that "the task requires more, e.g. per-item sources" alone
+      did not move it (the index "lists each PEP's header fields", so it
+      counted as a per-item source: 0/28), while also saying what per item
+      means — the item's own page, not an index — did (15 per-PEP pages
+      fetched before the probe's spend cap). A task's stated sources are part
+      of the claim;
     - "cross-check other sources" is gone from the truncation rule, which keeps
       its paging instruction (PR #4375 B1).
     The savings are unproven until a live paired run; this pins the wording.
@@ -449,8 +459,10 @@ def test_system_md_stops_research_at_sufficiency_and_fans_out_only_needed_calls(
     assert "batch calls" not in text
     assert (
         "Start shallow, deepen on signals; stop at one read source per claim unless "
-        "sources conflict, look stale or corroboration is requested."
+        "sources conflict, look stale or the task requires more; per item means its own "
+        "page, not an index."
     ) in text
+    assert "corroboration is requested" not in text
     assert (
         "Page through a capped or truncated result before calling a list or count complete."
     ) in text
@@ -931,7 +943,7 @@ def test_system_md_scopes_the_peer_gate_to_spawning_and_names_restart_cutoffs() 
     does not end a turn."""
     flat = " ".join(render_template("system.md", {}).split())
     assert "list or inspect sessions any time, and to spawn one only when the user asked" in flat
-    assert "cause (limits/auth/provider/network/context/restart/update) and recovery" in flat
+    assert "cause (limits/auth/provider/network/context/restart/update) and the recovery" in flat
     # The tool-first steer: `sessions` owns list/inspect/resume/stop/peek and
     # is the default route; the messaging negative stays, and `lop exec` is the
     # CLI fallback for a human's terminal — NOT a blanket ban, which would
