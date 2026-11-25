@@ -6223,6 +6223,7 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -6242,11 +6243,17 @@ class AuthStore:
         broker hiding owner rows must reach an eligible stored API key rather
         than stop at an ambient winner that its safety backstop must discard.
         None preserves the ordinary cascade, including override short-circuiting.
+        ``local_oauth_only`` is for automatic advisory work: neither a key nor
+        an OAuth row imported from another device may authorize that work.
         """
         if persisted_kinds is None and (
             self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
         ):
             return None
+        if local_oauth_only:
+            if self.override_keys(provider):
+                return None  # An explicit gateway is not consent for a public OAuth route.
+            persisted_kinds = frozenset({"oauth"})
         # An inherited ContextVar value is a shared object, not a deep copy.
         # Give EACH getter a collector so nested provider lookups or parallel
         # getters under one opt-in cannot overwrite the returning row's rank.
@@ -6261,6 +6268,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                local_oauth_only=local_oauth_only,
             )
             # Refresh may skip a candidate and re-read the successful row. Bind
             # its creation stamp, not a mutable pointer or a fresh ranking read.
@@ -6622,6 +6630,7 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -6696,6 +6705,10 @@ class AuthStore:
                 exclude_credential_ids=exclude_credential_ids,
             )
         )
+        if local_oauth_only:
+            # Synced copies and refresh delegations are normal-looking local
+            # rows. Exclude both BEFORE resolving or refreshing a bearer.
+            oauth_rows = [row for row in oauth_rows if "mesh_origin" not in row.data]
         for row in self._selection_order(
             oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
         ):
@@ -6714,6 +6727,12 @@ class AuthStore:
             if key:
                 pin(row.id)
                 refreshed = self.get_credential(row.id)
+                if local_oauth_only and (
+                    refreshed is None
+                    or refreshed.disabled_cause is not None
+                    or "mesh_origin" in refreshed.data
+                ):
+                    continue  # Provenance or eligibility changed while the refresh suspended.
                 return key, refreshed or row
         if oauth_rows and force_refresh:
             # Every sibling failed its refresh — surface the failure so the
@@ -6816,6 +6835,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                local_oauth_only=local_oauth_only,
             )
 
         return None, None

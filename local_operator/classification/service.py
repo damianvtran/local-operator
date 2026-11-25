@@ -115,7 +115,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from local_operator.classification import accounting
-from local_operator.classification.advisory import ADVISORY_VENDORS, GOOGLE_VERTEX
+from local_operator.classification.advisory import (
+    ADVISORY_VENDORS,
+    GOOGLE_VERTEX,
+    AdvisoryVendor,
+    RadientCredentialsChanged,
+    RadientStamp,
+    radient_stamp,
+)
 from local_operator.classification.cascade import (
     DEFAULT_VENDOR,
     VendorResolution,
@@ -329,6 +336,9 @@ class ClassificationService:
         self._decide_cache: OrderedDict[str, Answer] = OrderedDict()
         self._consecutive_failures = 0
         self._circuit_open = False
+        self._structured_failures = 0
+        self._structured_circuit_open = False
+        self._radient_stamp: RadientStamp | None = None
         #: Question ids the vendor rejected on this session, disabled until the
         #: session ends (a 422/field-level 400 is our bug, and re-asking it every
         #: message would spend a request per message to re-learn one fact).
@@ -619,12 +629,36 @@ class ClassificationService:
         )
         decision_request = build_decision_request(plan, state)
         timeout_s = self.timeout_s
+        structured = False
+
+        def mark_leg(name: str) -> None:
+            nonlocal structured
+            structured = name in ADVISORY_VENDORS
+
         try:
-            async with asyncio.timeout(timeout_s):
-                response = await self._call_cascade(decision_request, timeout_s, advisory=True)
+            async with asyncio.timeout(timeout_s) as budget:
+                deadline = budget.when()
+                assert deadline is not None
+                loop = asyncio.get_running_loop()
+                remaining = timeout_s
+                while True:
+                    try:
+                        response = await self._call_cascade(
+                            decision_request,
+                            remaining,
+                            advisory=True,
+                            on_leg=mark_leg,
+                        )
+                        break
+                    except RadientCredentialsChanged:
+                        # A late login won the race. Re-run selection without
+                        # extending the original deadline or recording a failure.
+                        self._legs = None
+                        await asyncio.sleep(0)
+                        remaining = max(0.0, deadline - loop.time())
         except TimeoutError:
             logger.warning("classification: timed out after %.0f ms", timeout_s * 1000)
-            self._record_failure("timeout")
+            self._record_failure("timeout", structured=structured)
             return Recommendation(skipped="timeout", latency_s=time.monotonic() - started)
         except DecisionSchemaError as exc:
             self._disable_shape(exc.shape)
@@ -650,13 +684,13 @@ class ClassificationService:
                 exc.kind,
                 exc,
             )
-            self._record_failure(exc.kind)
+            self._record_failure(exc.kind, structured=structured)
             return Recommendation(skipped="error", latency_s=time.monotonic() - started)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — see the module docstring
             logger.warning("classification: vendor call failed", exc_info=True)
-            self._record_failure("error")
+            self._record_failure("error", structured=structured)
             return Recommendation(skipped="error", latency_s=time.monotonic() - started)
 
         resources = collect_resources(
@@ -685,7 +719,11 @@ class ClassificationService:
             output_tokens=response.output_tokens,
             latency_s=time.monotonic() - started,
         )
-        self._consecutive_failures = 0
+        # A generated answer is not evidence that the native route recovered.
+        if response.vendor in ADVISORY_VENDORS:
+            self._structured_failures = 0
+        else:
+            self._consecutive_failures = 0
         self._remember(key, recommendation)
         return recommendation
 
@@ -755,7 +793,12 @@ class ClassificationService:
         )
 
     async def _call_cascade(
-        self, request: DecisionRequest, timeout_s: float, *, advisory: bool = False
+        self,
+        request: DecisionRequest,
+        timeout_s: float,
+        *,
+        advisory: bool = False,
+        on_leg: Callable[[str], None] | None = None,
     ) -> DecisionResponse:
         """Walk the legs in order; the first that answers wins.
 
@@ -770,28 +813,46 @@ class ClassificationService:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
-        legs = await self._available_legs(advisory=advisory)
+        # Keep this snapshot with THIS walk. A parallel turn may publish a
+        # newer memo while this one is suspended in OAuth resolution.
+        authorized_stamp = self._advisory_radient_stamp() if advisory else None
+        legs = await self._available_legs(
+            advisory=advisory, on_probe=on_leg, radient_snapshot=authorized_stamp
+        )
+
+        def check_radient() -> None:
+            if authorized_stamp != radient_stamp(self._config_dir):
+                raise RadientCredentialsChanged
+
         if not legs:
             raise _NoUsableLeg("no leg has a usable credential")
         # Leave time for a native fallback only when it can actually send.
-        # Reserving half unconditionally cuts the normal 1.5 s deadline to
-        # 750 ms for the very OAuth-only installs this path is meant to help.
+        # A missing key is not a native failure and must not move its breaker
+        # when an OAuth-only walk fails. Preserve the legacy native-only walk.
         reserve_for_native = False
         if any(vendor.name in ADVISORY_VENDORS for vendor in legs):
-            for vendor in legs:
+            eligible = []
+            for index, vendor in enumerate(legs):
                 if vendor.name in ADVISORY_VENDORS:
+                    eligible.append(vendor)
                     continue
                 try:
-                    reserve_for_native = bool(await vendor.credential(self._config_dir))
+                    if await vendor.credential(self._config_dir):
+                        # From the first usable native leg onward, preserve its
+                        # full legacy tail (including credential/refusal handling).
+                        eligible.extend(legs[index:])
+                        reserve_for_native = True
+                        break
                 except Exception:  # A credential probe is not a decision attempt.
                     continue
-                if reserve_for_native:
-                    break
+            legs = tuple(eligible)
         attempts: list[str] = []
         last: DecisionVendorError | None = None
         for walk in range(DEFAULT_CASCADE_ATTEMPTS):
             attempts_walk: list[str] = []
             for vendor in legs:
+                if on_leg is not None:
+                    on_leg(vendor.name)
                 try:
                     note = self._fallback_note(advisory=advisory)
                     if reserve_for_native and vendor.name in ADVISORY_VENDORS:
@@ -802,14 +863,26 @@ class ClassificationService:
                         try:
                             async with asyncio.timeout(leg_budget):
                                 response = await self._metered_decide(
-                                    vendor, request, leg_budget, note=note
+                                    vendor,
+                                    request,
+                                    leg_budget,
+                                    note=note,
+                                    check_radient=check_radient,
                                 )
                         except TimeoutError:
                             raise DecisionVendorError(
                                 "structured hint timed out", kind="transport"
                             ) from None
                     else:
-                        response = await self._metered_decide(vendor, request, timeout_s, note=note)
+                        response = await self._metered_decide(
+                            vendor,
+                            request,
+                            timeout_s,
+                            note=note,
+                            check_radient=(
+                                check_radient if vendor.name in ADVISORY_VENDORS else None
+                            ),
+                        )
                 except DecisionSchemaError:
                     raise
                 except DecisionVendorError as exc:
@@ -856,7 +929,13 @@ class ClassificationService:
         )
 
     async def _metered_decide(
-        self, vendor: DecisionVendor, request: DecisionRequest, timeout_s: float, *, note: str = ""
+        self,
+        vendor: DecisionVendor,
+        request: DecisionRequest,
+        timeout_s: float,
+        *,
+        note: str = "",
+        check_radient: Callable[[], None] | None = None,
     ) -> DecisionResponse:
         """One leg attempt, with exactly one channel-ledger row for the request(s) it placed.
 
@@ -884,14 +963,22 @@ class ClassificationService:
         cancellation from dropping its row: ``CancelledError`` is not an ``Exception``
         and would skip a plain ``except Exception``.
         """
+
+        async def send() -> DecisionResponse:
+            if isinstance(vendor, AdvisoryVendor):
+                return await vendor.decide(
+                    request, timeout_s=timeout_s, check_radient=check_radient
+                )
+            return await vendor.decide(request, timeout_s=timeout_s)
+
         # A bare service has no session ledger; do not even construct rows. Apart
         # from avoiding work, this prevents bookkeeping faults from changing a
         # standalone caller's result when there is nowhere to send the record.
         if self._spend_sink is None:
-            return await vendor.decide(request, timeout_s=timeout_s)
+            return await send()
         meter, token = accounting.begin_attempt()
         try:
-            response = await vendor.decide(request, timeout_s=timeout_s)
+            response = await send()
         except asyncio.CancelledError:
             if meter.posts:
                 self._emit(
@@ -986,16 +1073,30 @@ class ClassificationService:
             return True
         return bool(legs)
 
-    async def _available_legs(self, *, advisory: bool) -> tuple[DecisionVendor, ...]:
+    def _advisory_radient_stamp(self) -> RadientStamp | None:
+        # The original native-only and already-Radient routes need no new I/O.
+        if (self._legs and self._legs[0].name == "radient") or not any(
+            name in ADVISORY_VENDORS for name in leg_order(self._settings, advisory=True)
+        ):
+            return None
+        return radient_stamp(self._config_dir)
+
+    async def _available_legs(
+        self,
+        *,
+        advisory: bool,
+        on_probe: Callable[[str], None] | None = None,
+        radient_snapshot: RadientStamp | None = None,
+    ) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
 
         Uses :func:`~local_operator.classification.cascade.resolve_vendor_with_trace`
         — the one definition of "first usable leg" plus the skipped rows — and then
         builds the legs AFTER the resolved one, because a leg ahead of it has just
         been proven unusable. Instances are cached, so a leg's credential is
-        resolved once no matter how many messages the session classifies. The
-        trace is kept on the service (:attr:`routing_note`) and cleared whenever
-        ``_legs`` is.
+        not needlessly re-probed for the whole route on every message. The
+        no-Radient answer is memoized only while its local inputs are unchanged.
+        The trace is kept on the service (:attr:`routing_note`).
         """
         preferred = self._active_provider() if advisory and self._active_provider else ""
         prefer_vertex = preferred == GOOGLE_VERTEX
@@ -1003,9 +1104,17 @@ class ClassificationService:
             self._legs = None
             self._prefer_vertex = prefer_vertex
         cached = self._legs if advisory else self._typed_legs
+        order = leg_order(self._settings, advisory=advisory, preferred_provider=preferred)
+        if advisory and any(name in ADVISORY_VENDORS for name in order):
+            if not cached or cached[0].name != "radient":
+                if radient_snapshot is None:
+                    radient_snapshot = radient_stamp(self._config_dir)
+                if radient_snapshot != self._radient_stamp:
+                    cached = None
         if cached is not None:
             return cached
-        order = leg_order(self._settings, advisory=advisory, preferred_provider=preferred)
+        if self._structured_circuit_open:
+            order = tuple(name for name in order if name not in ADVISORY_VENDORS)
         resolution = await resolve_vendor_with_trace(
             self._config_dir,
             self._settings,
@@ -1013,6 +1122,7 @@ class ClassificationService:
             order=order,
             auth_store=self._auth_store,
             session_id=self._advisory_session_id,
+            on_probe=on_probe,
         )
         # Record the trace even when nothing resolved: the next re-resolution starts
         # from ``_legs is None`` anyway, and keeping the skipped rows here lets the
@@ -1041,6 +1151,7 @@ class ClassificationService:
             legs = tuple(self._vendor_for(name) for name in order[start:])
         if advisory:
             self._legs = legs
+            self._radient_stamp = radient_snapshot
         else:
             self._typed_legs = legs
         return legs
@@ -1149,13 +1260,21 @@ class ClassificationService:
             self._vendors[name] = vendor
         return vendor
 
-    def _record_failure(self, kind: str) -> None:
+    def _record_failure(self, kind: str, *, structured: bool = False) -> None:
         """Count a consecutive failure and open the breaker at the threshold.
 
         Only transport-class failures ever reach here (the schema path is
         handled separately), which is what keeps a malformed question from
         tripping a breaker that is meant to stop network calls.
         """
+        if structured:
+            # Structured-provider trouble must not suppress a typed decision,
+            # nor a later Radient/native recommendation on a different account.
+            self._structured_failures += 1
+            if self._structured_failures >= CIRCUIT_FAILURE_THRESHOLD:
+                self._structured_circuit_open = True
+                self._legs = None
+            return
         self._consecutive_failures += 1
         if self._consecutive_failures >= CIRCUIT_FAILURE_THRESHOLD and not self._circuit_open:
             self._circuit_open = True

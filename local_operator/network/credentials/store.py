@@ -558,6 +558,7 @@ class MeshAwareAuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        local_oauth_only: bool = False,
     ) -> Any:
         """Local access, the session's binding, else a borrowed ``OAuthAccess``.
 
@@ -566,6 +567,14 @@ class MeshAwareAuthStore:
         owner of record — because a provider reaches this entry point for its
         OAuth flows and the two must not disagree about which account serves.
         """
+        if local_oauth_only:
+            # A read-only normal resolve can still borrow and change which
+            # account pays. Automatic hints must never enter that branch.
+            if self._owner_policy_skips_local(self._binding_for(provider)):
+                return None
+            return await self._local.get_oauth_access(
+                provider, session_id, read_only=True, model_id=model_id, local_oauth_only=True
+            )
         access = await self._local.get_oauth_access(
             provider,
             session_id,

@@ -8,8 +8,9 @@ parser, so an incompatible response cannot silently become a typed decision.
 from __future__ import annotations
 
 import json
+import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -33,9 +34,50 @@ GOOGLE_VERTEX = "google-vertex"
 ADVISORY_VENDORS = (OPENAI_SUBSCRIPTION, GOOGLE_VERTEX)
 
 
+class RadientCredentialsChanged(Exception):
+    """The no-Radient check no longer authorizes this POST; resolve again."""
+
+
+RadientStamp = tuple[bool, tuple[tuple[int, int, int, int, int] | None, ...]]
+
+
+def radient_stamp(config_dir: Path | None) -> RadientStamp:
+    """Cheap invalidation of a negative Radient probe, not a credential lookup.
+
+    Login, provider-key writes and rotations can happen in another process.
+    Watch the main files AND their WALs: SQLite can commit without touching
+    the main file (including an in-place update inside an existing WAL).
+    The only ambient key tier is RADIENT_API_KEY; changes between nonempty
+    values do not change its availability. Keep no key material in the memo.
+    """
+    from local_operator.providers.auth_store import default_db_path
+    from local_operator.secrets.keys import store_path
+
+    def stamp(path: Path) -> tuple[int, int, int, int, int] | None:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return None
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    auth = config_dir / "auth.db" if config_dir is not None else default_db_path()
+    secrets = store_path(config_dir)
+    return bool(os.environ.get("RADIENT_API_KEY")), tuple(
+        stamp(candidate)
+        for db in (auth, secrets)
+        for candidate in (db, db.with_name(db.name + "-wal"))
+    )
+
+
 class AdvisoryAuthSource(Protocol):
     async def get_oauth_access(
-        self, provider: str, session_id: str | None, *, read_only: bool, model_id: str
+        self,
+        provider: str,
+        session_id: str | None,
+        *,
+        read_only: bool,
+        model_id: str,
+        local_oauth_only: bool,
     ) -> OAuthAccess | None: ...
 
 
@@ -48,16 +90,18 @@ async def resolve_advisory_access(
     session_id: str | None,
 ) -> OAuthAccess | None:
     if auth_store is None:
-        from local_operator.providers.auth_store import default_db_path, shared_auth_store
+        from local_operator.providers.auth_store import (
+            default_db_path,
+            shared_auth_store,
+        )
 
         db = config_dir / "auth.db" if config_dir is not None else default_db_path()
         if not db.is_file():
             return None
         auth_store = shared_auth_store(db, config_dir=config_dir)
-    # Same account selector as chat, without repointing session affinity.
-    # A key chosen by that selector is never sent: the caller checks kind
-    # before building either provider request.
-    return await auth_store.get_oauth_access(provider, session_id, read_only=True, model_id=model)
+    return await auth_store.get_oauth_access(
+        provider, session_id, read_only=True, model_id=model, local_oauth_only=True
+    )
 
 
 class AdvisoryVendor:
@@ -97,18 +141,34 @@ class AdvisoryVendor:
             return None
         if self.name == OPENAI_SUBSCRIPTION and not access.org_id:
             return None  # Without account identity the chat client would use the paid API path.
+        if self.name == GOOGLE_VERTEX:
+            # The chat client can use an ambient billing project. An automatic
+            # hint can only bill the project the operator selected at login.
+            project = (access.raw or {}).get("project_id")
+            if not isinstance(project, str) or not project.strip():
+                return None
         return access
 
     async def credential(self, config_dir: Path | None) -> SecretStr | None:
         access = await self._access(config_dir)
         return SecretStr(access.access_token) if access is not None else None
 
-    async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
+    async def decide(
+        self,
+        request: DecisionRequest,
+        *,
+        timeout_s: float,
+        check_radient: Callable[[], None] | None = None,
+    ) -> DecisionResponse:
         if not request.questions or any(q.kind != "choice" for q in request.questions):
             raise VendorError("structured hints require choice questions", kind="response")
         access = await self._access(self._config_dir)
         if access is None:
             raise VendorError("no eligible OAuth sign-in", kind="auth")
+        # OAuth resolution can suspend (even after the cascade was memoized).
+        # Check again after it, before handing any turn text to the HTTP client.
+        if check_radient is not None:
+            check_radient()
         started = time.monotonic()
         if self._client is None:
             async with httpx.AsyncClient() as client:

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -212,6 +212,7 @@ async def resolve_vendor_with_trace(
     order: tuple[str, ...] | None = None,
     auth_store: AdvisoryAuthSource | None = None,
     session_id: str | None = None,
+    on_probe: Callable[[str], None] | None = None,
 ) -> VendorResolution:
     """Resolve the first usable leg AND record every preferred leg skipped before it.
 
@@ -232,6 +233,8 @@ async def resolve_vendor_with_trace(
     model = model_override(settings)
     skipped: list[dict[str, str]] = []
     for name in order if order is not None else leg_order(settings):
+        if on_probe is not None:
+            on_probe(name)
         vendor = build_vendor(
             name,
             config_dir,

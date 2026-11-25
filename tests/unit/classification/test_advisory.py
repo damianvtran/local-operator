@@ -1,7 +1,9 @@
 """The real recommendation cascade and adapters, with synthetic auth and HTTP."""
 
 import asyncio
+import dataclasses
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,7 +13,8 @@ from local_operator.classification.recommend import RecommendationRequest
 from local_operator.classification.service import ClassificationService
 from local_operator.classification.types import Answer, Question
 from local_operator.classification.vendors import build_vendor
-from local_operator.providers.auth_store import OAuthAccess
+from local_operator.network.credentials.store import MeshAwareAuthStore
+from local_operator.providers.auth_store import AuthStore, OAuthAccess
 from tests.unit.classification.support import candidate, store_row
 
 pytestmark = pytest.mark.asyncio
@@ -32,7 +35,10 @@ class Auth:
         self.access = access
         self.calls = []
 
-    async def get_oauth_access(self, provider, session_id, *, read_only, model_id):
+    async def get_oauth_access(
+        self, provider, session_id, *, read_only, model_id, local_oauth_only
+    ):
+        assert local_oauth_only
         self.calls.append((provider, session_id, read_only, model_id))
         return self.access.get(provider)
 
@@ -288,5 +294,218 @@ async def test_generated_route_is_never_reused_by_shared_typed_decide(bare_manag
             assert await subject.decide(state="synthetic apple", question=question) is None
         assert not auth.calls
         assert posts == ["chatgpt.com"]
+    finally:
+        await subject.aclose()
+
+
+def next_request(index):
+    return dataclasses.replace(REQUEST, user_message=f"identify apple number {index}")
+
+
+@pytest.mark.parametrize("source", ["env", "provider-key", "auth-key", "auth-oauth"])
+async def test_local_radient_login_reclaims_a_warm_advisory_memo(bare_manager, monkeypatch, source):
+    posts = []
+
+    def transport(http):
+        posts.append(http.url.host)
+        if http.url.host == "chatgpt.com":
+            return codex()
+        assert http.headers["authorization"] == "Bearer new-local-credential"
+        return native()
+
+    auth = Auth(openai=OPENAI)
+    subject = service(bare_manager, auth, transport)
+    writer = AuthStore(bare_manager / "auth.db", config_dir=bare_manager)
+    try:
+        assert (await subject.recommend_resources(REQUEST)).vendor == OPENAI_SUBSCRIPTION
+        if source == "env":
+            monkeypatch.setenv("RADIENT_API_KEY", "new-local-credential")
+        elif source == "provider-key":
+            # SQLite/WAL-backed provider-class secret, not an auth.db row.
+            store_row(bare_manager, "RADIENT_API_KEY", "new-local-credential")
+        elif source == "auth-key":
+            writer.upsert_credential(
+                "radient", {"type": "api_key", "key": "new-local-credential", "source": "login"}
+            )
+        else:
+            writer.upsert_credential("radient", {"type": "oauth", "access": "new-local-credential"})
+        auth.calls.clear()
+        assert (await subject.recommend_resources(next_request(1))).vendor == "radient"
+        assert posts == ["chatgpt.com", "api.radienthq.com"]
+        assert not auth.calls
+    finally:
+        await subject.aclose()
+        writer.close()
+
+
+async def test_login_during_awaited_oauth_lookup_prevents_stale_post(bare_manager, monkeypatch):
+    resolving = asyncio.Event()
+    resume = asyncio.Event()
+    posts = []
+
+    class PausedAuth(Auth):
+        pause = False
+
+        async def get_oauth_access(self, *args, **kwargs):
+            if self.pause:
+                # A distinct request with a warm no-Radient memo.
+                resolving.set()
+                await resume.wait()
+            return await super().get_oauth_access(*args, **kwargs)
+
+    def transport(http):
+        posts.append(http.url.host)
+        return codex() if http.url.host == "chatgpt.com" else native()
+
+    auth = PausedAuth(openai=OPENAI)
+    subject = service(bare_manager, auth, transport)
+    try:
+        assert (await subject.recommend_resources(REQUEST)).vendor == OPENAI_SUBSCRIPTION
+        auth.pause = True
+        async with asyncio.timeout(1):
+            pending = asyncio.create_task(subject.recommend_resources(next_request(1)))
+            await resolving.wait()
+            monkeypatch.setenv("RADIENT_API_KEY", "new-during-resolve")
+            resume.set()
+            assert (await pending).vendor == "radient"
+        assert posts == ["chatgpt.com", "api.radienthq.com"]
+    finally:
+        resume.set()
+        await subject.aclose()
+
+
+@pytest.mark.parametrize("failure", ["401", "refusal", "timeout"])
+async def test_advisory_breaker_does_not_open_native_typed_breaker(bare_manager, failure):
+    posts = []
+    blocked = asyncio.Event()
+
+    async def transport(http):
+        posts.append(http.url.host)
+        if http.url.host == "api.typesafe.ai":
+            return httpx.Response(
+                200, json={"answers": {"check": {"choice": "yes", "confidence": 0.94}}}
+            )
+        assert http.url.host == "chatgpt.com"
+        if failure == "timeout":
+            await blocked.wait()
+        if failure == "401":
+            return httpx.Response(401)
+        return codex(part_type="refusal")
+
+    subject = service(bare_manager, Auth(openai=OPENAI), transport, timeoutMs=100)
+    try:
+        for index in range(3):
+            rec = await subject.recommend_resources(next_request(index))
+            assert rec.skipped == ("timeout" if failure == "timeout" else "error")
+        assert posts.count("chatgpt.com") >= 3
+        attempted = list(posts)
+        assert (await subject.recommend_resources(next_request(3))).skipped == "no-vendor"
+        assert posts == attempted  # Structured circuit actually stopped new HTTP.
+        store_row(bare_manager, "TYPESAFE_API_KEY", "local-typesafe")
+        question = Question("check", "choice", "", {"yes": "yes", "no": "no"})
+        answer = await subject.decide(state="a fresh typed question", question=question)
+        assert answer is not None and answer.value == "yes"
+        assert posts == [*attempted, "api.typesafe.ai"]
+    finally:
+        await subject.aclose()
+
+
+@pytest.mark.parametrize("source", ["borrow-only", "synced", "delegated", "owner-routing"])
+async def test_advisory_never_borrows_or_spends_another_devices_grant(
+    bare_manager, monkeypatch, source
+):
+    local = AuthStore(bare_manager / "auth.db", config_dir=bare_manager)
+    if source == "owner-routing":
+        local.upsert_credential(
+            "openai", {"type": "oauth", "access": "local-but-not-selected", "org_id": "local"}
+        )
+    if source in {"synced", "delegated"}:
+        origin = {"owner": "another-device", "key": "openai"}
+        if source == "delegated":
+            origin["grant_id"] = "delegation-id"
+        local.upsert_credential(
+            "openai",
+            {"type": "oauth", "access": "remote", "org_id": "remote", "mesh_origin": origin},
+        )
+    auth = MeshAwareAuthStore(local, mesh=None, config_dir=bare_manager)
+
+    if source == "owner-routing":
+        auth.set_binding_reader(
+            lambda _: SimpleNamespace(policy="owner", owner_device="another-device")
+        )
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("automatic hints must not borrow or refresh another device's OAuth")
+
+    monkeypatch.setattr(auth, "_borrow", forbidden)
+    monkeypatch.setattr(local, "_ensure_oauth_fresh", forbidden)
+    subject = service(bare_manager, auth, forbidden)
+    try:
+        assert (await subject.recommend_resources(REQUEST)).skipped == "no-vendor"
+    finally:
+        await subject.aclose()
+        auth.close()
+
+
+@pytest.mark.parametrize("project", [None, "persisted-vertex-project"])
+async def test_vertex_only_bills_its_persisted_login_project(bare_manager, monkeypatch, project):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "ambient-wrong-project")
+    monkeypatch.setenv("VERTEX_PROJECT", "another-wrong-project")
+    local = AuthStore(bare_manager / "auth.db", config_dir=bare_manager)
+    local.upsert_credential(
+        "google-vertex",
+        {
+            "type": "oauth",
+            "access": "local-vertex",
+            "project_id": project,
+            "auth_mode": "oauth",
+            "location": "us-central1",
+        },
+    )
+    # Test the same adapter passed by a mesh-aware session, even for a local login.
+    auth = MeshAwareAuthStore(local, mesh=None, config_dir=bare_manager)
+    posts = []
+
+    def transport(http):
+        posts.append(http.url.host)
+        assert f"/projects/{project}/" in http.url.path
+        assert http.headers["x-goog-user-project"] == project
+        assert http.headers["authorization"] == "Bearer local-vertex"
+        return vertex()
+
+    subject = service(bare_manager, auth, transport, preferred=GOOGLE_VERTEX)
+    try:
+        rec = await subject.recommend_resources(REQUEST)
+        if project is None:
+            assert rec.skipped == "no-vendor" and posts == []
+        else:
+            assert rec.vendor == GOOGLE_VERTEX and rec.resources == tuple(ROSTER)
+            assert posts == ["us-central1-aiplatform.googleapis.com"]
+    finally:
+        await subject.aclose()
+        auth.close()
+
+
+async def test_advisory_success_does_not_reset_native_typed_failures(bare_manager):
+    store_row(bare_manager, "TYPESAFE_API_KEY", "local-typesafe")
+    posts = []
+
+    def transport(http):
+        posts.append(http.url.host)
+        return codex() if http.url.host == "chatgpt.com" else httpx.Response(403)
+
+    subject = service(bare_manager, Auth(openai=OPENAI), transport)
+    question = Question("check", "choice", "", {"yes": "yes", "no": "no"})
+    try:
+        for index in range(3):
+            if index:
+                assert (await subject.recommend_resources(next_request(index))).vendor == (
+                    OPENAI_SUBSCRIPTION
+                )
+            assert await subject.decide(state=f"typed {index}", question=question) is None
+        assert posts.count("api.typesafe.ai") >= 3 and posts.count("chatgpt.com") == 2
+        attempted = list(posts)
+        assert await subject.decide(state="typed blocked", question=question) is None
+        assert posts == attempted
     finally:
         await subject.aclose()
