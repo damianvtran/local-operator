@@ -50,6 +50,9 @@ const STORAGE_KEY = ["lo-mobile-command", "s1"].join(":");
 const FAILED_COPY =
 	"This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume.";
 const WAKING = { ok: true, detail: "session is waking", waking: true };
+/* English `RETAINED_RETRY_ERROR`: the alert a retained envelope raises. */
+const RETAINED_RETRY_COPY =
+	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
 
 let slot: { projection: SessionProjection | null; connected: boolean } = {
 	projection: null,
@@ -620,5 +623,81 @@ describe("a waking row that outlived its composer (M1)", () => {
 
 		expect(await screen.findByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
 		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+	});
+});
+
+/* A RETAINED INSTRUCTION THE STREAM ALREADY CARRIES. Only
+   `settleWakingContinuation` retired an envelope, and this composer rebuilds a
+   tracker for one only while a held row still says `waking` — which a reload
+   wipes. So a message the session had already written kept its "may have been
+   delivered" card, its Retry and a blocked send until a retry or a second
+   reload. The row under the envelope's id is that message's acknowledgement,
+   so the composer now settles the envelope against every frame. Cells C and D
+   and the last guard hold the retained path (`no row in the tail`): the card,
+   its retry and the blocked send are the only copy of a message whose fate is
+   still open, and must survive there on both heads. */
+function seedEnvelope() {
+	localStorage.setItem(
+		STORAGE_KEY,
+		JSON.stringify({
+			version: 1,
+			saved_at: Date.now(),
+			envelope: { op: "prompt", command_id: COMMAND_ID, text: SENT },
+		}),
+	);
+}
+
+describe("a retained instruction the transcript already carries", () => {
+	it("retires a reload's envelope once the stream shows its row", async () => {
+		seedEnvelope();
+		const view = mount(frame({ pid: 4242, kind: "daemon", transcript: [userRow(COMMAND_ID, SENT)] }));
+		await composer();
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(screen.queryByText(RETAINED_RETRY_COPY)).toBeNull();
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+	});
+
+	it("retires a same-mount ambiguous 504 whose row lands afterwards", async () => {
+		const view = mount(frame({ pid: 4242, kind: "daemon" }));
+		vi.mocked(api.sendCommand).mockRejectedValueOnce(Object.assign(new Error("gateway timeout"), { status: 504 }));
+		fireEvent.change(await composer(), { target: { value: SENT } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Couldn"));
+		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+	});
+
+	it("the x only hides the sentence; retry and send stay blocked", async () => {
+		seedEnvelope();
+		mount(frame({ pid: 4242, kind: "daemon" }));
+		await composer();
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("may have been delivered"));
+		fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+		expect(screen.getByText("Resolve the earlier instruction first.")).toBeTruthy();
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+	});
+
+	it("retry against a warm session that dedupes (plain 200) clears the card", async () => {
+		seedEnvelope();
+		mount(frame({ pid: 4242, kind: "daemon" }));
+		await composer();
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({ ok: true, detail: "dup" });
+		fireEvent.click(await screen.findByRole("button", { name: "Retry earlier instruction" }));
+		await waitFor(() => expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull());
+		expect(vi.mocked(api.sendCommand).mock.calls[0][1]).toMatchObject({ command_id: COMMAND_ID });
+	});
+
+	it("keeps the card while the transcript lacks the id", async () => {
+		seedEnvelope();
+		const view = mount(frame({ pid: 4242, kind: "daemon" }));
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow("other", "something else")] }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("may have been delivered"));
+		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
 	});
 });

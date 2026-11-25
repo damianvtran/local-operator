@@ -31,6 +31,7 @@ import {
 	useSessionSettings,
 } from "../lib/settings-defer";
 import {
+	clearPendingContinuation,
 	getPendingContinuation,
 	settleWakingContinuation,
 	submitContinuation,
@@ -1809,6 +1810,42 @@ export function Composer({
 		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
 		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick, armWakeDeadline, clearWakeDeadline,
 	]);
+
+	/* AN ENVELOPE THE TRANSCRIPT ALREADY CARRIES IS SETTLED, WHOEVER RETAINED IT.
+	   `settleWakingContinuation` retires one only for the id the composer holds a
+	   waking tracker for, and this composer rebuilds that tracker only while a
+	   held row still says `waking` — which a reload wipes, and which an ambiguous
+	   504 (the send may have landed) never had. So a message the session had
+	   already written kept its "may have been delivered" card, its Retry and a
+	   blocked send until a retry or a second reload. The row under the envelope's
+	   id IS that message (same UUID), so the envelope, its echo and the failure
+	   copy that offered the retry come down here. The draft is untouched: a
+	   retained body lives in the envelope, never in what the user typed since. */
+	useEffect(() => {
+		if (retryEnvelope === null) return;
+		if (!projectionCarriesCommand(projection.transcript, retryEnvelope.command_id)) return;
+		clearPendingContinuation(pid);
+		setRetryEnvelope(null);
+		/* The same copies the settle effect clears on a delivery: a landing must
+		   not leave the sentence that offered to retry it. */
+		const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
+		setErrorOccurrence((current) =>
+			current.message === RETAINED_RETRY_ERROR ||
+			current.message === UNCONFIRMED_WAKE_ERROR ||
+			current.message === failedCopy
+				? { message: "" }
+				: current,
+		);
+		withdrawPendingEcho(pid, retryEnvelope.command_id);
+		/* A tracker on this id has nothing left to settle: mirror the settle
+		   effect's delivered branch so no deadline re-runs it. */
+		const tracker = wakingCommand.current;
+		if (tracker !== null && tracker.pid === pid && tracker.commandId === retryEnvelope.command_id) {
+			wakingCommand.current = null;
+			forgetFailedWake(pid);
+			markPendingEchoWaking(pid, retryEnvelope.command_id, false);
+		}
+	}, [pid, projection.transcript, retryEnvelope]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
