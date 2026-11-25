@@ -490,6 +490,12 @@ def test_the_atomic_drop_never_deletes_a_release_and_still_drops_undecided(
 ) -> None:
     config_dir, store, owner = rig
     _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    # Positive (code review m1): an UNDECIDED matching row IS dropped.
+    kept = store.work_scope_decision(owner, MESSAGE_ID)
+    assert store.drop_undecided_review_decision(owner, MESSAGE_ID, hold_code=CONFLICT)
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    assert store.work_scope_decision(owner, MESSAGE_ID) is not None, kept
     # Wrong verdict / code: the statement re-checks, nothing is dropped.
     assert not store.drop_undecided_review_decision(
         owner, MESSAGE_ID, hold_code=CONFLICT, require_verdict="allow"
@@ -499,3 +505,142 @@ def test_the_atomic_drop_never_deletes_a_release_and_still_drops_undecided(
     assert not store.drop_undecided_review_decision(owner, MESSAGE_ID, hold_code=CONFLICT)
     assert store.work_scope_decision(owner, MESSAGE_ID) is not None
     assert store.owner_release(owner, MESSAGE_ID)["word"] == "discard"
+
+
+_REDRIVES = [
+    # The narrowing re-drive: the Deliver-able allow row becomes a Discard-only bounce.
+    ("allow_conflict", PRYING),
+    # M1: the conflict row is replaced by the newer ``model_hold`` row.
+    ("reject_conflict", DOUBT),
+]
+
+
+def _setup_conflict(config_dir, store, owner, setup: str):
+    if setup == "allow_conflict":
+        return _allow_conflict(config_dir, store, owner)
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    return _live(store, owner)
+
+
+@pytest.mark.parametrize(("setup", "redrive"), _REDRIVES)
+def test_a_redrive_inside_the_release_write_makes_the_discard_stale_and_never_delivers(
+    rig, monkeypatch, setup, redrive  # noqa: F811 — imported fixture
+) -> None:
+    """#4570 security S-1 (the reverse race, the reviewer's probe): the route
+    read and signed decision D1, then a re-drive replaced it with D2 before the
+    release write. The write used to commit, the owner was told "Discarded",
+    the next pass refused the mismatched release and screened on, and a
+    current allow delivered. Now the write re-checks the CURRENT row inside its
+    own transaction and the route answers ``snapshot_stale``."""
+
+    from local_operator.team_bridge.store import Store
+
+    config_dir, store, owner = rig
+    _setup_conflict(config_dir, store, owner, setup)
+    before = store.work_scope_decision(owner, MESSAGE_ID)
+    fired: list[str] = []
+
+    def _hooked(name: str):
+        real = getattr(Store, name)
+
+        def run(self, *args, **kwargs):
+            if not fired:
+                fired.append(name)
+                _screen(config_dir, owner, Runner(redrive), policy=_live(store, owner))
+            return real(self, *args, **kwargs)
+
+        return run
+
+    for name in ("record_owner_release", "record_owner_release_local_terminal"):
+        monkeypatch.setattr(Store, name, _hooked(name))
+    with pytest.raises(holds.HoldRefused) as refused:
+        _decide(config_dir, owner, "discard")
+    assert fired, "the Discard never reached its release write"
+    assert refused.value.code == "snapshot_stale"
+    after = store.work_scope_decision(owner, MESSAGE_ID)
+    assert after is not None and not hr.release_matches_decision(before, after)
+    # Nothing false was recorded: no word exists, so the owner (told the
+    # message changed) re-reads D2 and decides it; what the screener does
+    # next is ordinary screening, not a delivery after a "Discarded".
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    assert store.screening_hold(owner, MESSAGE_ID) is not None
+
+
+@pytest.mark.parametrize(
+    ("setup", "change"),
+    [
+        # The narrowing re-drive's D2: the same conflict, now a bounce.
+        ("allow_conflict", "UPDATE work_scope_decisions SET screener_verdict = 'bounce'"),
+        # M1's D2: the conflict row replaced by a ``model_hold`` row.
+        ("reject_conflict", "UPDATE work_scope_decisions SET hold_code = 'model_hold'"),
+    ],
+)
+def test_a_committed_discard_over_a_changed_decision_keeps_the_message_held(
+    rig, setup, change  # noqa: F811 — imported fixture
+) -> None:
+    """#4570 security S-1, the connector half (defence in depth): a verified
+    Discard committed for D1 whose decision row is now D2 (the state the race
+    left before the store re-check existed) must keep the message held, never
+    fall through to screening and deliver. The row is changed directly: a real
+    re-drive cannot, because it consumes the Discard first."""
+
+    config_dir, store, owner = rig
+    _setup_conflict(config_dir, store, owner, setup)
+    _decide(config_dir, owner, "discard")
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(change)
+    release = store.owner_release(owner, MESSAGE_ID)
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert release is not None and release["word"] == "discard"
+    assert decision is None or not hr.release_matches_decision(release, decision)
+    receipts = _count_rows(config_dir, "screening_receipts")
+    out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
+    assert out.disposition == "hold"
+    assert _count_rows(config_dir, "screening_receipts") == receipts
+    assert store.screening_hold(owner, MESSAGE_ID) is not None
+
+
+def test_a_busy_undecided_drop_retries_then_warns(
+    rig, monkeypatch, caplog  # noqa: F811 — imported fixture
+) -> None:
+    """#4570 security S-2: a ``busy`` refusal used to skip the narrowing
+    silently, leaving a Deliver-able row over a current bounce for a day. The
+    drop retries a bounded number of times, then logs a content-free warning."""
+
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    config_dir, store, owner = rig
+    _allow_conflict(config_dir, store, owner)
+    real = Store._begin_write
+    calls: list[int] = []
+
+    def flaky(self, conn):
+        calls.append(1)
+        if len(calls) < Store._UNDECIDED_DROP_ATTEMPTS:
+            raise StoreRefused("busy", "database is locked")
+        return real(self, conn)
+
+    monkeypatch.setattr(Store, "_begin_write", flaky)
+    assert store.drop_undecided_review_decision(
+        owner, MESSAGE_ID, hold_code=CONFLICT, require_verdict="allow"
+    )
+    assert len(calls) == Store._UNDECIDED_DROP_ATTEMPTS
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+    calls.clear()
+    monkeypatch.setattr(
+        Store, "_begin_write", lambda self, conn: (_ for _ in ()).throw(StoreRefused("busy", "x"))
+    )
+    with caplog.at_level("WARNING"):
+        assert not store.drop_undecided_review_decision(owner, MESSAGE_ID, hold_code=CONFLICT)
+    (line,) = [r.getMessage() for r in caplog.records if "undecided review drop" in r.getMessage()]
+    assert line == "bridge: undecided review drop refused code=busy attempts=3"
+    assert MESSAGE_ID not in line
+
+
+def _count_rows(config_dir, table: str) -> int:
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        try:
+            return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        except sqlite3.OperationalError:
+            return 0

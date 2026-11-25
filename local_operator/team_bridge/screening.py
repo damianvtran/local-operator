@@ -4228,6 +4228,17 @@ def _consume_owner_release(
     ):
         hr.log_release("decision_changed")
         outcome(owner, envelope.message_id, "refused:decision_changed", now=now)
+        if not deliver:
+            # #4570 security S-1, defence in depth behind the store's
+            # check-and-write: a VERIFIED owner Discard whose decision row has
+            # since changed is still the owner's word on this message. Falling
+            # through to screening let a current allow deliver a message the
+            # owner was told was discarded, so it stays held. A Deliver keeps
+            # "refuse and re-screen" (a stale Deliver must never admit).
+            code = str((decision or {}).get("hold_code") or release.get("hold_code") or "")
+            code = code or "hold"
+            _persist_hold(store, owner, envelope.message_id, code)
+            return ScreenResult("hold", hold_code=code)
         return None
     if (
         release["body_sha256"] != envelope.body_sha256
