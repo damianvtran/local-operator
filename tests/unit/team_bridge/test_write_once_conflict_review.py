@@ -427,3 +427,75 @@ def test_a_conflict_discard_survives_review_turned_off(
     out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
     assert out.disposition == "hold" and out.hold_code == CONFLICT
     assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "discarded_local_unconfirmed"
+
+
+@pytest.mark.parametrize(
+    ("setup", "redrive"),
+    [
+        # The narrowing drop in ``_record_conflict_review`` (allow row → PRYING).
+        ("allow_conflict", PRYING),
+        # M1's drop in ``_record_review_decision`` (conflict row → model_hold).
+        ("reject_conflict", DOUBT),
+    ],
+)
+def test_a_discard_landing_mid_drop_survives_and_never_delivers(
+    rig, monkeypatch, setup, redrive  # noqa: F811 — imported fixture
+) -> None:
+    """#4546 security review S-4 (the reviewer's interleaving): the owner's
+    Discard commits after the pass decided the row was undecided but before
+    its drop. It used to be check-then-delete across two transactions, and
+    the delete took the release row with it, so the owner was told
+    "Discarded" and the next current preferred allow delivered. The hook runs
+    the Discard immediately before whichever drop the build performs."""
+
+    from local_operator.team_bridge.store import Store
+
+    config_dir, store, owner = rig
+    if setup == "allow_conflict":
+        _allow_conflict(config_dir, store, owner)
+    else:
+        _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    fired: list[str] = []
+
+    def _hooked(name: str):
+        real = getattr(Store, name)
+
+        def run(self, *args, **kwargs):
+            if not fired:
+                fired.append(name)
+                receipt = _decide(config_dir, owner, "discard")
+                assert receipt["outcome"] == "discarded_local_unconfirmed"
+            return real(self, *args, **kwargs)
+
+        return run
+
+    for name in ("drop_review_decision", "drop_undecided_review_decision"):
+        if hasattr(Store, name):
+            monkeypatch.setattr(Store, name, _hooked(name))
+    _screen(config_dir, owner, Runner(redrive), policy=_live(store, owner))
+    assert fired, "the re-drive never reached a drop: the interleaving was not exercised"
+    # No ``monkeypatch.undo()``: ``rig`` patches the signing anchor through the
+    # same fixture, and the hook is already one-shot (``fired``).
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release is not None and release["word"] == "discard"
+    # A fully current preferred allow must not deliver a discarded message.
+    out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
+    assert out.disposition == "hold"
+    assert store.owner_release(owner, MESSAGE_ID)["word"] == "discard"
+
+
+def test_the_atomic_drop_never_deletes_a_release_and_still_drops_undecided(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    # Wrong verdict / code: the statement re-checks, nothing is dropped.
+    assert not store.drop_undecided_review_decision(
+        owner, MESSAGE_ID, hold_code=CONFLICT, require_verdict="allow"
+    )
+    assert not store.drop_undecided_review_decision(owner, MESSAGE_ID, hold_code="model_hold")
+    _decide(config_dir, owner, "discard")
+    assert not store.drop_undecided_review_decision(owner, MESSAGE_ID, hold_code=CONFLICT)
+    assert store.work_scope_decision(owner, MESSAGE_ID) is not None
+    assert store.owner_release(owner, MESSAGE_ID)["word"] == "discard"

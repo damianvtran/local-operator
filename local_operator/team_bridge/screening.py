@@ -4707,14 +4707,13 @@ def _record_review_decision(
         # would mask it: decision and hold codes differ, nothing is listed
         # actionable, and the message has no exit at all. While no word has
         # been given on it, the newer hold's own row replaces it; a decided
-        # row (a signed release exists) is never dropped.
-        existing = store.work_scope_decision(owner, envelope.message_id)
-        if (
-            existing is not None
-            and str(existing.get("hold_code") or "") == WRITE_ONCE_CONFLICT_HOLD
-            and store.owner_release(owner, envelope.message_id) is None
-        ):
-            store.drop_review_decision(owner, envelope.message_id)
+        # row (a signed release exists) is never dropped. #4546 security S-4:
+        # the "undecided" test and the delete are ONE write transaction, and
+        # the release row is never deleted here, so an owner Discard landing
+        # mid-pass is kept instead of erased.
+        store.drop_undecided_review_decision(
+            owner, envelope.message_id, hold_code=WRITE_ONCE_CONFLICT_HOLD
+        )
     try:
         store.record_work_scope_decision(
             owner,
@@ -4809,15 +4808,16 @@ def _record_conflict_review(
     if committed is None:
         return
     agrees = current_verdict == "allow"
-    existing = store.work_scope_decision(owner, envelope.message_id)
-    if (
-        not agrees
-        and existing is not None
-        and str(existing.get("hold_code") or "") == WRITE_ONCE_CONFLICT_HOLD
-        and existing.get("screener_verdict") == "allow"
-        and store.owner_release(owner, envelope.message_id) is None
-    ):
-        store.drop_review_decision(owner, envelope.message_id)
+    if not agrees:
+        # Narrow an UNDECIDED Deliver-able row. #4546 security S-4: checked and
+        # dropped atomically, never touching the release row, so a Discard
+        # committed during this pass survives (and keeps the message held).
+        store.drop_undecided_review_decision(
+            owner,
+            envelope.message_id,
+            hold_code=WRITE_ONCE_CONFLICT_HOLD,
+            require_verdict="allow",
+        )
     if agrees:
         _record_review_decision(
             store,

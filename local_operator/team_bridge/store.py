@@ -10136,6 +10136,58 @@ class Store:
         except (sqlite3.Error, StoreRefused):
             return
 
+    def drop_undecided_review_decision(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        hold_code: str,
+        require_verdict: str | None = None,
+    ) -> bool:
+        """Drop ONE message's review decision row only while the owner has given
+        no word on it; return whether a row was dropped. Never raises.
+
+        WHY (#4546 security review S-4). The conflict paths used to read
+        ``owner_release(...) is None`` on one connection and then call
+        ``drop_review_decision`` in a second transaction, which deletes the
+        release row too. An owner Discard committed between the two was erased:
+        the owner was told "Discarded", and the next current preferred allow
+        delivered the message. Here the "undecided" test and the delete are ONE
+        ``BEGIN IMMEDIATE`` statement (``NOT EXISTS`` over ``owner_releases``),
+        so a concurrent Discard either commits first (nothing is dropped) or
+        waits for this write (and then decides the row that replaces it).
+
+        CONSTRAINTS: it never touches ``owner_releases`` — a signed word is
+        never deleted on this path. Any release row for the message counts as
+        decided, whatever its generation, because erring towards "decided" only
+        leaves a stale row in place, while erring the other way loses a word.
+        ``hold_code`` (and ``require_verdict`` when given) must still match
+        inside the same statement, so a row another pass already replaced is
+        left alone. The unscreened-rescreen drop (round 3, Q3) deliberately
+        removes a refused release and keeps using ``drop_review_decision``.
+        """
+
+        key = _owner_key(owner)
+        sql = (
+            "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND hold_code = ? "
+            "AND NOT EXISTS (SELECT 1 FROM owner_releases r "
+            "WHERE r.owner_key = ? AND r.message_id = ?)"
+        )
+        params: list[Any] = [key, message_id, hold_code, key, message_id]
+        if require_verdict is not None:
+            sql += " AND screener_verdict = ?"
+            params.append(require_verdict)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_work_scope_tables(conn)
+                return conn.execute(sql, params).rowcount > 0
+        except (sqlite3.Error, StoreRefused):
+            return False
+
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
 
