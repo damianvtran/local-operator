@@ -27,9 +27,13 @@ from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — ``rig``
     DELIVER,
     DOUBT,
     MESSAGE_ID,
+    OPUS,
     PRYING,
+    SONNET,
     Policy,
     Runner,
+    _chain,
+    _ChainPolicy,
     _decide,
     _item,
     _screen,
@@ -71,6 +75,26 @@ def _conflict(config_dir, store, owner, *, first: str, second: str) -> None:
     screening._persist_hold(store, owner, _composite(), CONFLICT)
 
 
+def _allow_conflict(config_dir, store, owner) -> _ChainPolicy:
+    """The measured live shape (seq 3318/3319): BOTH passes ALLOWED.
+
+    The preferred screener commits an allow; the admission revision moves; the
+    preferred hop then fails pre-wire and the approved fallback allows too.
+    A fallback allow is not preferred, so it cannot supersede (#4533) and
+    write-once refuses it. Returns the live policy for later re-drives.
+    """
+
+    _screen(config_dir, owner, Runner(DELIVER), policy=_ChainPolicy(SONNET, OPUS))
+    _republish(store, owner, revision="rev-2")
+    policy = _ChainPolicy(SONNET, OPUS)
+    policy.admission_revision = "rev-2"
+    runner = _chain(SONNET, OPUS, DELIVER, fail_primary=True)
+    out = _screen(config_dir, owner, runner, policy=policy)
+    assert out.disposition == "hold" and out.hold_code == CONFLICT
+    screening._persist_hold(store, owner, _composite(), CONFLICT)
+    return policy
+
+
 def _hold_rows(config_dir) -> list[tuple[str, str, float]]:
     with sqlite3.connect(state_db_path(config_dir)) as conn:
         return [
@@ -95,13 +119,18 @@ def test_a_stale_allow_conflict_is_one_review_item_with_both_words(
     rig,  # noqa: F811 — imported fixture
 ) -> None:
     config_dir, store, owner = rig
-    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    _allow_conflict(config_dir, store, owner)
     # Two hold rows, one message: the list, the badge and the rollup count it once.
     assert sorted(code for _m, code, _r in _hold_rows(config_dir)) == [CONFLICT, CONFLICT]
     decision = store.work_scope_decision(owner, MESSAGE_ID)
     assert decision is not None and decision["hold_code"] == CONFLICT and decision["eligible"] == 1
-    # The row names the COMMITTED screener allow the person is agreeing with.
+    # The row names the COMMITTED screener allow the person is agreeing with:
+    # its verdict, model, template and prompt version (#4546 m1).
+    committed = store.receipt_for_message(owner, MESSAGE_ID)
     assert decision["screener_verdict"] == "allow" and decision["screener_provider"] == ""
+    assert decision["screener_model"] == committed["model"]
+    assert decision["template_sha256"] == committed["template_sha256"]
+    assert decision["prompt_version"] == committed["prompt_version"]
     (item,) = _review_items(config_dir, owner)
     assert item["hold_code"] == CONFLICT and item["kind"] == "owner_decision"
     assert item["releasable"] and item["can_deliver"] and not item["unscreened"]
@@ -124,13 +153,13 @@ def test_the_owner_deliver_rearms_the_hold_and_the_next_pass_delivers(
     rig,  # noqa: F811 — imported fixture
 ) -> None:
     config_dir, store, owner = rig
-    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    policy = _allow_conflict(config_dir, store, owner)
     assert all(retry > time.time() + 3600 for _m, _c, retry in _hold_rows(config_dir))
     receipt = _decide(config_dir, owner, "deliver")
     assert receipt["state"] == "released" and receipt["outcome"] == "pending"
     # #4533: both spellings are due now, not a day out.
     assert all(retry <= time.time() for _m, _c, retry in _hold_rows(config_dir))
-    out = _screen(config_dir, owner, Runner(PRYING), policy=_live(store, owner))
+    out = _screen(config_dir, owner, Runner(PRYING), policy=policy)
     assert out.disposition == "deliver" and out.receipt is not None
     assert out.receipt.template_sha256 == hr.OWNER_RELEASE_SHA256
     # The commit clears the screener's bare row; the composite one is the
@@ -150,6 +179,85 @@ def test_a_discard_on_a_conflict_settles_locally_and_never_delivers(
     # its reject, so even a fully-current allow cannot deliver it now.
     out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
     assert out.disposition == "hold" and out.hold_code == CONFLICT
+
+
+def test_a_conflict_over_a_live_reject_is_discard_only(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """#4546 security round 1, S-2: the CURRENT preferred pass bounced it as
+    personal info, so Deliver is never offered, signed or admitted; the row
+    carries that real verdict and category, and Discard still works."""
+
+    config_dir, store, owner = rig
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == CONFLICT
+    assert decision["screener_verdict"] == "bounce"
+    assert "personal_info_request" in hr.decoded_categories(decision)
+    assert hr.deliver_refused(decision)
+    (item,) = _review_items(config_dir, owner)
+    assert item["can_deliver"] is False
+    assert item["can_discard"] is True and item["discard_receipt"]
+    with pytest.raises(holds.HoldRefused) as refused:
+        _decide(config_dir, owner, "deliver")
+    assert (refused.value.status, refused.value.code) == (409, "hold_not_releasable")
+    assert store.owner_release(owner, MESSAGE_ID) is None
+    assert _decide(config_dir, owner, "discard")["outcome"] == "discarded_local_unconfirmed"
+
+
+def test_a_later_reject_narrows_an_undecided_allow_row(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """The row is written once, so a re-drive whose current pass rejects must
+    narrow a Deliver-able row (never widen one), or the first pass's answer
+    would decide the class for good."""
+
+    config_dir, store, owner = rig
+    policy = _allow_conflict(config_dir, store, owner)
+    assert _review_items(config_dir, owner)[0]["can_deliver"] is True
+    out = _screen(config_dir, owner, Runner(PRYING), policy=policy)
+    assert out.disposition == "hold" and out.hold_code == CONFLICT
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision["screener_verdict"] == "bounce" and hr.deliver_refused(decision)
+    (item,) = _review_items(config_dir, owner)
+    assert item["can_deliver"] is False and item["can_discard"] is True
+    # And a later allow does not widen it back.
+    runner = _chain(SONNET, OPUS, DELIVER, fail_primary=True)
+    assert _screen(config_dir, owner, runner, policy=policy).hold_code == CONFLICT
+    assert store.work_scope_decision(owner, MESSAGE_ID)["screener_verdict"] == "bounce"
+
+
+def test_a_conflict_row_never_masks_a_later_review_hold(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """#4546 code review round 1, M1 (the reviewer's probe): the conflict row
+    is re-screened, the re-screen draws ``model_hold``, and that hold must get
+    its own row; on the PR's first head the write-once conflict row stayed and
+    nothing was actionable."""
+
+    config_dir, store, owner = rig
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    assert store.work_scope_decision(owner, MESSAGE_ID)["hold_code"] == CONFLICT
+    out = _screen(config_dir, owner, Runner(DOUBT), policy=_live(store, owner))
+    assert out.disposition == "hold" and out.hold_code == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID)["hold_code"] == "model_hold"
+    model_items = [i for i in _items(config_dir, owner) if i["hold_code"] == "model_hold"]
+    assert model_items and all(
+        i["releasable"] and i["can_discard"] and i["actionable"] for i in model_items
+    )
+
+
+def test_a_decided_conflict_row_is_never_replaced(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    """M1's replacement is for UNDECIDED rows only: a signed word stays bound."""
+
+    config_dir, store, owner = rig
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    _decide(config_dir, owner, "discard")
+    out = _screen(config_dir, owner, Runner(DOUBT), policy=_live(store, owner))
+    assert out.disposition == "hold" and out.hold_code == CONFLICT
+    assert store.work_scope_decision(owner, MESSAGE_ID)["hold_code"] == CONFLICT
 
 
 def test_a_reject_backed_conflict_is_not_listed_and_deliver_is_refused(
@@ -184,7 +292,7 @@ def test_a_corrupt_committed_receipt_is_not_listed_or_signed(
     store.drop_review_decision(owner, MESSAGE_ID)
     epoch = int(store.current_screening_policy(owner)["epoch"])
     target = screening._review_target(_envelope(owner, _item()), Policy(), epoch, _item())
-    screening._record_conflict_review(store, owner, target)
+    screening._record_conflict_review(store, owner, target, current_verdict="allow")
     assert store.work_scope_decision(owner, MESSAGE_ID) is None
 
 
@@ -229,21 +337,34 @@ def test_an_owner_deliver_on_the_real_spine_wakes_once_with_the_late_line(
     rig, monkeypatch  # noqa: F811 — imported fixture
 ) -> None:
     """End to end through ``handle_conversation_available``: a stale screener
-    allow, a live reject → listed conflict; the owner's Deliver; ONE wake that
+    allow, a live (fallback) allow → listed conflict; the owner's Deliver; ONE wake that
     carries the delivered-late line."""
 
+    from local_operator.team_bridge.connector import conversation as conv
     from tests.unit.team_bridge import test_hold_release as thr
     from tests.unit.team_bridge.test_holds_triage_release_path import _screener_receipt
 
     config_dir, store, owner = rig
-    runner = thr.Runner(DOUBT)
-    _server, wakes, run = thr._spine(monkeypatch, config_dir, owner, runner)
+    reply = {"text": DOUBT}
+    _server, wakes, run = thr._spine(monkeypatch, config_dir, owner, thr.Runner(DOUBT))
+
+    async def screen_item(o, item, *, config_dir, **_kw):
+        # The allow-vs-allow shape (S-2): the preferred hop fails pre-wire and
+        # the approved fallback answers, so a live allow cannot supersede.
+        item = dict(item)
+        item["allocation"] = {"tier": 3, "sender_account_id": "acc_sender"}
+        runner = _chain(SONNET, OPUS, reply["text"], fail_primary=True)
+        return await screening.screen_message_async(
+            o, item, config_dir=config_dir, policy=_ChainPolicy(SONNET, OPUS), runner=runner
+        )
+
+    monkeypatch.setattr(conv, "screen_item", screen_item)
     assert run()["action"] == "hold"  # publishes the live policy; nothing committed
     store.drop_review_decision(owner, MESSAGE_ID)
     with sqlite3.connect(state_db_path(config_dir)) as conn:
         conn.execute("DELETE FROM screening_answer_holds")
     _screener_receipt(config_dir, store, owner)  # stale model + revision
-    runner.reply = PRYING
+    reply["text"] = DELIVER
     assert run()["action"] == "hold"
     assert {code for _m, code, _r in _hold_rows(config_dir)} == {CONFLICT}
     (item,) = _review_items(config_dir, owner)
@@ -255,3 +376,54 @@ def test_an_owner_deliver_on_the_real_spine_wakes_once_with_the_late_line(
     assert len(wakes) == 1 and wakes[0].count("delivered late") == 1
     assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "admitted"
     assert _hold_rows(config_dir) == []
+
+
+def test_a_conflict_discard_survives_review_turned_off_on_the_real_spine(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    """#4546 security round 1, S-1, on the connector spine: after a Discard
+    with ``review_held`` off, a re-serve sends no ACK and no wake.
+
+    The spine's screener runs the rig's rev-1 policy, so this re-drive is not
+    fully current and could not supersede even before the fix. It pins the
+    hub-facing surface (no admit, no wake); the discriminating reproduction is
+    ``test_a_conflict_discard_survives_review_turned_off`` below, which fails
+    on the pre-fix source with ``deliver``."""
+
+    from tests.unit.team_bridge import test_hold_release as thr
+    from tests.unit.team_bridge.test_holds_triage_release_path import _screener_receipt
+
+    config_dir, store, owner = rig
+    runner = thr.Runner(DOUBT)
+    server, wakes, run = thr._spine(monkeypatch, config_dir, owner, runner)
+    assert run()["action"] == "hold"  # publishes the live policy; nothing committed
+    store.drop_review_decision(owner, MESSAGE_ID)
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("DELETE FROM screening_answer_holds")
+    _screener_receipt(config_dir, store, owner)  # stale model + revision
+    runner.reply = PRYING
+    assert run()["action"] == "hold"
+    assert thr._decide(config_dir, owner, "discard")["outcome"] == "discarded_local_unconfirmed"
+    monkeypatch.setattr(hr, "review_enabled", lambda _config_dir: False)
+    runner.reply = DELIVER
+    admits_before = len(server.admits)
+    assert run()["action"] == "hold"
+    assert wakes == [] and len(server.admits) == admits_before
+    assert {code for _m, code, _r in _hold_rows(config_dir)} == {CONFLICT}
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "discarded_local_unconfirmed"
+
+
+def test_a_conflict_discard_survives_review_turned_off(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    """#4546 security round 1, S-1, the reviewer's reproduction: with the
+    setting off, a fully-current preferred allow re-drive returned ``deliver``
+    over a signed Discard (``_consume_owner_release`` is inert then)."""
+
+    config_dir, store, owner = rig
+    _conflict(config_dir, store, owner, first=DELIVER, second=PRYING)
+    assert _decide(config_dir, owner, "discard")["outcome"] == "discarded_local_unconfirmed"
+    monkeypatch.setattr(hr, "review_enabled", lambda _config_dir: False)
+    out = _screen(config_dir, owner, Runner(DELIVER), policy=_live(store, owner))
+    assert out.disposition == "hold" and out.hold_code == CONFLICT
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "discarded_local_unconfirmed"

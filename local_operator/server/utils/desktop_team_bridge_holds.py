@@ -231,7 +231,10 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             eligible
             and deliver_until is not None
             and now <= deliver_until
-            and code not in hr.DISCARD_ONLY_HOLD_CODES
+            # Discard-only rows: S-13's code, and a conflict whose current
+            # pass rejected (#4546 S-2; ``hold_release.deliver_refused``).
+            and decision is not None
+            and not hr.deliver_refused(decision)
         )
         # PR #4358 R1-M1: ``decide`` refuses unless the DECISION's own
         # conversation equals the posted one, so a row whose decision names
@@ -394,9 +397,10 @@ def decide(
         raise HoldRefused(409, "snapshot_stale")
     if word == "deliver" and now > float(decision["created_at"]) + hr.DELIVER_WINDOW_S:
         raise HoldRefused(409, "deliver_expired")
-    if word == "deliver" and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
+    if word == "deliver" and hr.deliver_refused(decision):
         # PR #4212 round 3 (S-13): every screener failed on THIS message while
-        # others screened; nothing read it, so only Discard is offered.
+        # others screened; nothing read it, so only Discard is offered. #4546
+        # S-2: a conflict whose current pass rejected is Discard-only too.
         raise HoldRefused(409, "hold_not_releasable")
     if not hr.owner_reviewable(
         store,

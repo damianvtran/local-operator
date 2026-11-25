@@ -131,7 +131,10 @@ def test_every_listable_class_offers_a_receipt_discard(api, code) -> None:  # no
     assert item["hold_code"] == code and item["releasable"] is True
     assert item["can_discard"] is True and item["actionable"] is True
     assert isinstance(item["discard_receipt"], str) and len(item["discard_receipt"]) == 64
-    assert item["can_deliver"] is (code not in hr.DISCARD_ONLY_HOLD_CODES)
+    # The fixture conflict's current pass bounced it (personal info), so it is
+    # Discard-only like S-13's code (#4546 S-2).
+    discard_only = code in hr.DISCARD_ONLY_HOLD_CODES or code == hr.WRITE_ONCE_CONFLICT_HOLD
+    assert item["can_deliver"] is (not discard_only)
     assert "thread_root_id" in item and item["thread_root_id"] is None
 
 
@@ -206,10 +209,13 @@ def test_a_thread_reply_hold_lists_its_root_and_discards_by_receipt(api) -> None
     assert out.status_code == 200 and out.json()["result"]["state"] == "discarded"
 
 
-def test_a_damaged_thread_root_is_never_listed(api) -> None:  # noqa: F811
+def test_a_thread_root_that_is_not_a_bcmsg_id_reads_null(api) -> None:  # noqa: F811
+    """The ``bcmsg_`` validation itself (#4546 n1): no slashes, so the tag is
+    not refused as a positional segment before the id check could run."""
+
     config_dir, store, owner, call = api
     _hold(config_dir, store, owner, hr.WORK_SCOPE_HOLD)
-    damaged = _reply_ref().replace(f"thread_root={ROOT}", "thread_root=../../etc")
+    damaged = _reply_ref().replace(f"thread_root={ROOT}", "thread_root=not_a_bcmsg")
     assert damaged != _reply_ref()
     screening._persist_hold(store, owner, damaged, hr.WORK_SCOPE_HOLD)
     item = _only(call)

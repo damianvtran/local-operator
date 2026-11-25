@@ -3932,9 +3932,9 @@ items: [...]}`, oldest hold first. Each item:
 | `kind` | `owner_decision` \| `screening` \| `waiting` | Coarse class. |
 | `hold_code` | closed code \| `unknown_hold` | The hold code. |
 | `releasable` | bool | An eligible owner decision exists. |
-| `can_deliver` / `can_discard` | bool | Which words the route accepts now. Every releasable hold has `can_discard`; `can_deliver` is false past `deliver_until` and for `screening_failed`. |
-| `actionable` | bool | THE count predicate: undecided and a word is open. The badge, nav count and "Dismiss all" count exactly these. |
-| `discard_receipt` | string (64 hex) \| null | Present exactly when a Discard is open and undecided. POST it as `hold_receipt` (instead of `body_sha256`) to discard with no body on screen. Never accepted for Deliver. |
+| `can_deliver` / `can_discard` | bool | Which words the route accepts now. Every releasable hold has `can_discard`; `can_deliver` is false past `deliver_until`, for `screening_failed`, and for a `write_once_conflict` whose current screener pass rejected (Discard-only). |
+| `actionable` | bool | THE count predicate: undecided, a word is open, and the decision is bound to this row (its `conversation_id` equals the row's; `decide` refuses otherwise). The badge, nav count and "Dismiss all" count exactly these. |
+| `discard_receipt` | string (64 hex) \| null | Present exactly when a Discard is open, undecided and the decision is bound to this row (same `conversation_id`), so a `can_discard: true` row can still carry `null` here. POST it as `hold_receipt` (instead of `body_sha256`) to discard with no body on screen. Never accepted for Deliver. |
 | `unscreened` | bool | A review hold no model read. |
 | `deliver_until` | ISO-8601 UTC \| null | End of the Deliver window. |
 | `decision` | `{word, decided_at, outcome, key_id}` \| null | The recorded answer; `outcome` is `pending`, `admitted`, `rejected`, `discarded_local_unconfirmed` or `refused`. |

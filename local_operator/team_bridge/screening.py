@@ -2376,7 +2376,12 @@ def _screen_prepare_steps(
                 _persist_hold(store, owner, message_id, code)
                 if code == WRITE_ONCE_CONFLICT_HOLD:
                     _record_conflict_review(
-                        store, owner, _review_target(envelope, snapshot, epoch, item)
+                        store,
+                        owner,
+                        _review_target(envelope, snapshot, epoch, item),
+                        current_verdict=str(cached["verdict"]),
+                        current_categories=tuple(cached["categories"]),
+                        current_model=str(cached.get("model") or ""),
                     )
                 return ScreenResult("hold", hold_code=code)
             receipt = ScreeningReceipt(
@@ -4144,7 +4149,14 @@ def _conclude_parsed(
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
         if code == WRITE_ONCE_CONFLICT_HOLD:
-            _record_conflict_review(store, owner, prepared)
+            _record_conflict_review(
+                store,
+                owner,
+                prepared,
+                current_verdict=receipt.verdict,
+                current_categories=tuple(receipt.categories),
+                current_model=str(receipt.model or ""),
+            )
         return ScreenResult("hold", hold_code=code)
     return ScreenResult(
         disposition,
@@ -4225,9 +4237,10 @@ def _consume_owner_release(
         outcome(owner, envelope.message_id, "refused:body_hash_mismatch", now=now)
         _persist_hold(store, owner, envelope.message_id, "body_hash_mismatch")
         return ScreenResult("hold", hold_code="body_hash_mismatch")
-    if deliver and str(decision.get("hold_code") or "") in hr.DISCARD_ONLY_HOLD_CODES:
-        # Round 3 (S-13): a Discard-only decision. A Deliver row, however it was
-        # written, is refused here — never admitted.
+    if deliver and hr.deliver_refused(decision):
+        # Round 3 (S-13): a Discard-only decision (and #4546 S-2's conflict
+        # over a current reject). A Deliver row, however it was written, is
+        # refused here — never admitted.
         hr.log_release("decision_changed")
         outcome(owner, envelope.message_id, "refused:discard_only", now=now)
         return None
@@ -4454,9 +4467,23 @@ def _replay_work_scope_decision(
         return None
     review_code = str(decision.get("hold_code") or "")
     if review_code == WRITE_ONCE_CONFLICT_HOLD:
-        # NOT replayed: a conflict's decision row is not a cached answer, and
-        # its daily re-drive must still reach the commit, where a fully
-        # current preferred allow supersedes the stale one (#4533) or
+        # A verified Discard the person signed is honoured FIRST, whatever
+        # ``review_held`` says (#4546 security round 1, S-1). With the setting
+        # off ``_consume_owner_release`` is inert, so without this the re-drive
+        # below reached the commit and #4533's current preferred allow
+        # delivered a message the owner's record calls Discarded. The same
+        # holds if that consumer returned ``None`` for any other reason.
+        release = store.owner_release(owner, envelope.message_id)
+        if release is not None and release.get("word") == "discard":
+            spki, _key_id = hold_release.anchor_spki(store.config_dir)
+            if hold_release.verify_row(release, spki) and hold_release.release_matches_decision(
+                release, decision
+            ):
+                _persist_hold(store, owner, envelope.message_id, WRITE_ONCE_CONFLICT_HOLD)
+                return ScreenResult("hold", hold_code=WRITE_ONCE_CONFLICT_HOLD)
+        # Otherwise NOT replayed: a conflict's decision row is not a cached
+        # answer, and its daily re-drive must still reach the commit, where a
+        # fully current preferred allow supersedes the stale one (#4533) or
         # ``_resolve_write_once_conflict`` answers it. Replaying the hold here
         # would make the person's Deliver the ONLY exit. The re-drive re-holds
         # it under the same code, and the row (written once) stays put.
@@ -4626,8 +4653,14 @@ def _record_review_decision(
     categories: Sequence[str] = (),
     screener_reason: str | None = None,
     unscreened: bool = False,
+    template_sha256: str | None = None,
+    prompt_version: str | None = None,
 ) -> None:
     """Give a fresh cached-answer hold its EXIT: a per-message review decision row.
+
+    ``template_sha256``/``prompt_version`` default to the live snapshot (the
+    pass that just answered); ``_record_conflict_review`` overrides them with
+    the COMMITTED receipt's when the row names that receipt (#4546 m1).
 
     Operator report 2026-11-09 (R1): a ``model_hold`` (and its answered siblings,
     ``hold_release.REVIEW_HOLD_CODES``) was cached as final and replayed forever
@@ -4666,6 +4699,22 @@ def _record_review_decision(
         existing = store.work_scope_decision(owner, envelope.message_id)
         if existing is not None and _decision_unscreened(existing):
             store.drop_review_decision(owner, envelope.message_id)
+    if code != WRITE_ONCE_CONFLICT_HOLD:
+        # #4546 code review round 1, M1: a conflict's row deliberately does NOT
+        # replay (its re-drive re-screens), so that re-screen can draw a
+        # DIFFERENT review hold (S-4: the same body does not always draw the
+        # same verdict). The row is written once, so the stale conflict row
+        # would mask it: decision and hold codes differ, nothing is listed
+        # actionable, and the message has no exit at all. While no word has
+        # been given on it, the newer hold's own row replaces it; a decided
+        # row (a signed release exists) is never dropped.
+        existing = store.work_scope_decision(owner, envelope.message_id)
+        if (
+            existing is not None
+            and str(existing.get("hold_code") or "") == WRITE_ONCE_CONFLICT_HOLD
+            and store.owner_release(owner, envelope.message_id) is None
+        ):
+            store.drop_review_decision(owner, envelope.message_id)
     try:
         store.record_work_scope_decision(
             owner,
@@ -4680,8 +4729,12 @@ def _record_review_decision(
             screener_model=(
                 "" if unscreened else str(actual_model or snapshot.default_model or "")
             ),
-            template_sha256=snapshot.template_sha256,
-            prompt_version=snapshot.screening_version,
+            template_sha256=(
+                snapshot.template_sha256 if template_sha256 is None else template_sha256
+            ),
+            prompt_version=(
+                snapshot.screening_version if prompt_version is None else prompt_version
+            ),
             categories=tuple(c for c in categories if c in SCREENING_CATEGORIES),
             policy_epoch=prepared.epoch,
             sender_digest=hr.sender_digest(prepared.sender_account_id),
@@ -4698,7 +4751,13 @@ def _record_review_decision(
 
 
 def _record_conflict_review(
-    store: Store, owner: OwnerSnapshot, target: "_Prepared | _ReviewTarget"
+    store: Store,
+    owner: OwnerSnapshot,
+    target: "_Prepared | _ReviewTarget",
+    *,
+    current_verdict: str,
+    current_categories: Sequence[str] = (),
+    current_model: str = "",
 ) -> None:
     """Give a ``write_once_conflict`` hold over a SCREENER ALLOW its owner exit.
 
@@ -4711,12 +4770,28 @@ def _record_conflict_review(
     ONLY when ``hold_release.owner_reviewable`` says the committed receipt is
     a readable screener allow for these exact body bytes: a reject-backed or
     damaged conflict gets no row, so it is never listed (no Deliver could
-    commit there). The row names the COMMITTED receipt's screener and verdict,
-    which is what the person is agreeing with; the provider is not stored on a
-    receipt, so it is empty (the hub block then carries no provider and an
-    ``unknown`` stage rather than a guessed one). Best effort and written
-    once, like every review row; the daily re-drive calls this again, which is
-    how a conflict held before this build gets its row.
+    commit there).
+
+    WHICH WORDS depends on the CONFLICTING pass (``current_verdict``, the
+    receipt verdict that write-once just refused; #4546 security round 1, S-2):
+
+    * ``allow`` too (an allow-vs-allow mismatch, the measured live case): the
+      row names the COMMITTED receipt — its model, template and prompt
+      version, verdict ``allow`` — which is what a Deliver agrees with. Both
+      words are offered.
+    * anything else (a bounce): the row is DISCARD-ONLY
+      (``hold_release.deliver_refused``) and carries the CURRENT pass's real
+      verdict (``bounce``), categories and model under the live template, so
+      the owner sees what the screener objected to and a personal-info or
+      out-of-scope reject is never one click from delivery.
+
+    The provider is not stored on a receipt, so it is empty (the hub block
+    then carries no provider and an ``unknown`` stage rather than a guessed
+    one). Best effort and written once, like every review row; the daily
+    re-drive calls this again, which is how a conflict held before this build
+    gets its row. A re-drive may only NARROW an undecided row (Deliver-able to
+    Discard-only), never widen it: otherwise the first pass's answer would
+    decide the class for good.
     """
 
     from local_operator.team_bridge import hold_release as hr
@@ -4733,16 +4808,45 @@ def _record_conflict_review(
     committed = store.receipt_for_message(owner, envelope.message_id)
     if committed is None:
         return
+    agrees = current_verdict == "allow"
+    existing = store.work_scope_decision(owner, envelope.message_id)
+    if (
+        not agrees
+        and existing is not None
+        and str(existing.get("hold_code") or "") == WRITE_ONCE_CONFLICT_HOLD
+        and existing.get("screener_verdict") == "allow"
+        and store.owner_release(owner, envelope.message_id) is None
+    ):
+        store.drop_review_decision(owner, envelope.message_id)
+    if agrees:
+        _record_review_decision(
+            store,
+            owner,
+            target,
+            WRITE_ONCE_CONFLICT_HOLD,
+            actual_model=str(committed.get("model") or "") or None,
+            served_provider="",
+            served_hop=None,
+            screener_preferred=bool(committed.get("screener_preferred")),
+            screener_verdict="allow",
+            template_sha256=str(committed.get("template_sha256") or ""),
+            prompt_version=str(committed.get("prompt_version") or ""),
+        )
+        return
     _record_review_decision(
         store,
         owner,
         target,
         WRITE_ONCE_CONFLICT_HOLD,
-        actual_model=str(committed.get("model") or "") or None,
+        # The row must name SOME screener to exist at all (``actual_model``
+        # None means "nothing answered"); the committed one stands in only if
+        # the current pass named none.
+        actual_model=current_model or str(committed.get("model") or "") or None,
         served_provider="",
         served_hop=None,
-        screener_preferred=bool(committed.get("screener_preferred")),
-        screener_verdict="allow",
+        screener_preferred=False,
+        screener_verdict="bounce",
+        categories=tuple(current_categories),
     )
 
 

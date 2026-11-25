@@ -149,9 +149,11 @@ DISCARD_ONLY_HOLD_CODES = frozenset({SCREENING_FAILED_HOLD})
 #: Discard first and its reject commit is refused by write-once, so the
 #: message stays HELD — the signed Discard keeps a later re-screen's allow
 #: from delivering it (``_consume_owner_release`` runs before the re-drive
-#: that #4546 keeps for undecided conflicts). Like every release row, this
-#: holds while the review setting is on: with it off a release row is inert
-#: by design (``enabled_for``).
+#: that #4546 keeps for undecided conflicts). It also holds with the review
+#: setting OFF (#4546 security round 1, S-1): ``_consume_owner_release`` is
+#: inert then, so ``screening._replay_work_scope_decision`` re-holds a
+#: conflict whose verified Discard exists before any re-screen could deliver
+#: it — an already-signed narrowing outlives the setting, as for every class.
 LOCAL_DISCARD_HOLD_CODES = frozenset({WRITE_ONCE_CONFLICT_HOLD})
 RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
@@ -452,6 +454,30 @@ def owner_reviewable(
     if hold_code != WRITE_ONCE_CONFLICT_HOLD:
         return True
     return bool(store.write_once_conflict_deliverable(owner, message_id, body_sha256=body_sha256))
+
+
+def deliver_refused(decision: Mapping[str, Any]) -> bool:
+    """Is this decision row Discard-only (no Deliver may be offered, signed or admitted)?
+
+    Read at all three ends — the list's ``can_deliver``, the decide route and
+    the connector's ``_consume_owner_release`` — so a hand-written release row
+    cannot deliver what the list never offered.
+
+    * :data:`DISCARD_ONLY_HOLD_CODES` (PR #4212 round 3, S-13).
+    * A :data:`WRITE_ONCE_CONFLICT_HOLD` row whose CONFLICTING (current) pass
+      did not also allow (#4546 security round 1, S-2). The committed receipt
+      is a stale allow either way, but when the current screener bounced the
+      message (``personal_info_request``, ``out_of_scope_work``…) a Deliver
+      would release, one click away and unexplained, exactly the categories
+      this module declares never releasable. Only an allow-vs-allow mismatch
+      (the measured live case: a served-model/revision mismatch) keeps both
+      words; every other conflict still has its Discard.
+    """
+
+    code = str(decision.get("hold_code") or "")
+    if code in DISCARD_ONLY_HOLD_CODES:
+        return True
+    return code == WRITE_ONCE_CONFLICT_HOLD and decision.get("screener_verdict") != "allow"
 
 
 def any_enabled(config_dir: Path | str) -> bool:
