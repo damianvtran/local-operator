@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
+from uvicorn.protocols.http.flow_control import FlowControl
 
 from local_operator.server import desktop_idle_update as idle_update
 from local_operator.server import reload
@@ -254,7 +255,13 @@ async def test_accepted_stop_exits_with_nonreading_tcp_feed(daemon, monkeypatch)
                     b"GET /v1/desktop/sessions/abc/events?blocked HTTP/1.1\r\n"
                     b"Host: localhost\r\n\r\n",
                 )
-                while not any(conn.flow.write_paused for conn in server.server_state.connections):
+                # Uvicorn's shared connection set also permits non-HTTP protocols.
+                # Only real HTTP transport backpressure satisfies this prerequisite.
+                while not any(
+                    isinstance(flow := getattr(conn, "flow", None), FlowControl)
+                    and flow.write_paused
+                    for conn in server.server_state.connections
+                ):
                     await asyncio.sleep(0)
                 assert len(getattr(app.state, reload.UPDATE_STREAMS_ATTR)) == 2
 
