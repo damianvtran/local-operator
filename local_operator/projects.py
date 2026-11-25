@@ -44,13 +44,14 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -3400,6 +3401,221 @@ def _pick_record(records: list[Any]) -> Any | None:
     return best
 
 
+#: The runtime vocabulary this view already speaks (``live``/``wedged``/
+#: ``stopped``), from a peer listing row's ``live_state`` token
+#: (``peer_rows._live_state``'s four words, or ``""`` for a cold/stored row).
+#: ``busy`` is True ONLY where the peer claimed a running turn; a live but idle
+#: or watched session is ``False``, and every other state is ``None`` — no
+#: claim either way, exactly like a local row with no runtime record.
+_PEER_STATES: dict[str, tuple[str, bool | None]] = {
+    "busy": ("live", True),
+    "idle": ("live", False),
+    "attached": ("live", False),
+    "wedged": ("wedged", None),
+    "": ("stopped", None),
+}
+
+
+def _holder(
+    kind: str,
+    *,
+    device_id: str | None = None,
+    device_name: str | None = None,
+    source: str | None = None,
+    title: str | None = None,
+    state: str | None = None,
+    busy: bool | None = None,
+    listing_age_s: float | None = None,
+) -> dict[str, Any]:
+    """ONE shape for every holder answer, so a renderer never branches on keys."""
+    return {
+        "kind": kind,
+        "device_id": device_id,
+        "device_name": device_name,
+        "source": source,
+        "title": title,
+        "state": state,
+        "busy": busy,
+        "listing_age_s": listing_age_s,
+    }
+
+
+def _holder_resolver(root: Path) -> Callable[[str], dict[str, Any] | None]:
+    """Who holds a linked session that has NO directory here — CACHE-ONLY.
+
+    WHY (remote-parity lane, 2026-11-25). A session minted on a peer (placement
+    ``peer``, pinned to that device) never gets a directory on this one, so the
+    view used to report it ``exists: False`` and the ``project`` tool printed
+    ``[missing] — no session directory`` — the sentence the projects guide tells
+    agents to unlink. The holder answer below lets every reader say "node2 holds
+    it" instead, from metadata this device ALREADY has and is authorized to show:
+
+    1. **Tombstones + membership** (``network.projection.read_tombstones``): a
+       session this device handed away names its new device. Honoured only when
+       that device is a CURRENT active member of one of this device's networks —
+       the same rule ``projection.locate_owner`` applies — and a tombstone naming
+       anyone else is ignored WITHOUT surfacing its device id or name.
+    2. **The peer-listing cache** (``session.peer_rows``' module cache, the one the
+       sidebar poll and ``seed_peer_row`` fill). Peeked through
+       :func:`peer_rows.cached_listing` — never ``read_listing`` /
+       ``peer_session_rows``, which DIAL the relay on a cold or expired cache. The
+       cache is keyed by root, ``""`` for a root-less caller; the ``""`` entry is
+       consulted only when ``root`` IS the default config dir, so an isolated
+       root (every test, every capture) never reads a real install's answer.
+       A row from a device outside the membership is ignored too.
+
+    Answers ``None`` (no holder block; the row stays byte-identical to the
+    pre-mesh view) on a device in no network at all. Otherwise every miss is
+    ``unresolved`` — "not here, and no peer listing names it", which is NOT proof
+    of deletion: the listing is a TTL'd cache that a process without a sidebar
+    may never have filled. A peer that did not answer the last listing (an
+    ``UnansweredPeer``, or a cached row stamped ``reachable=False``) is
+    ``unreachable``: its device is named, but no title or other row metadata
+    rides along, because the listing could not vouch for any of it.
+
+    COST INVARIANT: this is called once per :func:`build_project_view` and only
+    when some row lacks a directory; the membership, tombstone and cache reads
+    happen at most ONCE per call, lazily on the first lookup, and the whole thing
+    short-circuits on a missing ``network/networks`` directory. No relay call, no
+    runtime wake, no per-row read — the TUI composes many projects per refresh
+    (``tui/app.py``), and a dial here would put a peer's latency on that path.
+    """
+    from local_operator import paths
+
+    networks = root / "network" / "networks"
+    if not networks.is_dir():
+        return lambda _session_id: None
+
+    state: dict[str, Any] = {}
+
+    def _load() -> dict[str, Any]:
+        if state:
+            return state
+        from local_operator.network import store
+        from local_operator.network.projection import read_tombstones
+        from local_operator.session import peer_rows
+
+        try:
+            records = store.list_networks(root)
+        except Exception:  # noqa: BLE001 — an unreadable store is "no network known"
+            logger.debug("could not read network records", exc_info=True)
+            records = []
+        selves: set[str] = set()
+        members: dict[str, str] = {}
+        for record in records:
+            if record.self_device_id:
+                selves.add(record.self_device_id)
+                own = record.member(record.self_device_id)
+                if own is not None:
+                    selves.update(str(item) for item in (own.previous_ids or ()))
+            for member in record.active_members():
+                members.setdefault(member.device_id, member.name or "")
+        for device_id in selves:
+            members.pop(device_id, None)
+        if not records:
+            # An empty (or wholly unreadable) store is "in no network": the
+            # zero-peer answer, with no tombstone or cache read behind it.
+            state.update(records=False)
+            return state
+
+        rows: list[Any] = []
+        unanswered: dict[str, str] = {}
+        ages: list[float] = []
+        keys: list[Path | None] = [root]
+        try:
+            if root.resolve() == paths.config_dir().resolve():
+                keys.append(None)
+        except OSError:
+            pass
+        for key in keys:
+            cached = peer_rows.cached_listing(key)
+            if cached is None:
+                continue
+            rows.extend(cached[0])
+            for peer in cached[1]:
+                unanswered.setdefault(str(peer.device_id), str(peer.name or ""))
+            age = peer_rows.listing_age_s(key)
+            # ``inf`` is an entry only ``seed_peer_row`` wrote: never a listing,
+            # so it has no age to claim (and JSON cannot carry it).
+            if age is not None and math.isfinite(age):
+                ages.append(max(0.0, age))
+        state.update(
+            records=bool(records),
+            members=members,
+            tombstones=read_tombstones(root),
+            rows=rows,
+            unanswered=unanswered,
+            age=min(ages) if ages else None,
+        )
+        return state
+
+    def resolve(session_id: str) -> dict[str, Any] | None:
+        facts = _load()
+        if not facts["records"]:
+            return None
+        members: dict[str, str] = facts["members"]
+        unanswered: dict[str, str] = facts["unanswered"]
+
+        tombstone = facts["tombstones"].get(session_id) or {}
+        tomb_device = str(tombstone.get("device_id") or "")
+        if tomb_device not in members:
+            tomb_device = ""  # a non-member's id and name are never surfaced
+
+        listed = [
+            row
+            for row in facts["rows"]
+            if row.id == session_id
+            and row.is_remote
+            and str(row.owner_device or "") in members
+            and (not tomb_device or row.owner_device == tomb_device)
+        ]
+        if listed:
+            row = listed[0]
+            device_id = str(row.owner_device)
+            device_name = str(row.owner_device_name or "") or members.get(device_id) or None
+            if not row.reachable or device_id in unanswered:
+                return _holder(
+                    "unreachable", device_id=device_id, device_name=device_name, source="listing"
+                )
+            from local_operator.resume import UNTITLED_CONVERSATION
+
+            mapped, busy = _PEER_STATES.get(str(row.live_state or ""), ("stopped", None))
+            title = str(row.name or "")
+            return _holder(
+                "remote",
+                device_id=device_id,
+                device_name=device_name,
+                source="listing",
+                title=None if not title or title == UNTITLED_CONVERSATION else title,
+                state=mapped,
+                busy=busy,
+                listing_age_s=facts["age"],
+            )
+        if tomb_device:
+            device_name = (
+                str(tombstone.get("device_name") or "") or members.get(tomb_device) or None
+            )
+            if tomb_device in unanswered:
+                return _holder(
+                    "unreachable",
+                    device_id=tomb_device,
+                    device_name=unanswered[tomb_device] or device_name,
+                    source="tombstone",
+                )
+            # The tombstone proves WHERE, not whether it is running: "unknown",
+            # never "stopped", which would be a claim about the peer's runtime.
+            return _holder(
+                "remote",
+                device_id=tomb_device,
+                device_name=device_name,
+                source="tombstone",
+                state="unknown",
+            )
+        return _holder("unresolved")
+
+    return resolve
+
+
 def build_project_view(
     project: Project,
     *,
@@ -3432,6 +3648,13 @@ def build_project_view(
 
     ``records`` is :func:`scan_runtime_states`'s answer for a caller composing
     several projects from ONE scan (the desktop listing); ``None`` scans here.
+
+    ``exists`` keeps meaning "a session directory exists HERE". A row WITHOUT one
+    on a device in a network gains an additive ``holder`` block
+    (:func:`_holder_resolver`: which peer holds it, from cache-only metadata);
+    the top-level ``title``/``runtime`` stay as before, so every surface that
+    reads ``exists`` (TUI, desktop, mobile, ``/project``) renders unchanged until
+    it opts into ``holder``. A device in no network gets no ``holder`` key at all.
     """
     from local_operator.resume import read_title_state
     from local_operator.session.archived import archived_ids
@@ -3446,6 +3669,16 @@ def build_project_view(
         archived = archived_ids(root)
     except Exception:  # noqa: BLE001
         archived = frozenset()
+
+    resolver: Callable[[str], dict[str, Any] | None] | None = None
+
+    def holder_for(session_id: str) -> dict[str, Any] | None:
+        # Built on the first directory-less row only: an all-local project pays
+        # nothing beyond the ``is_dir`` probes it always paid.
+        nonlocal resolver
+        if resolver is None:
+            resolver = _holder_resolver(root)
+        return resolver(session_id)
 
     rows: list[dict[str, Any]] = []
     for session_id in project.sessions:
@@ -3476,6 +3709,10 @@ def build_project_view(
             "subagents": _load_subagent_summary(session_dir) if exists else None,
             "todos": _load_todo_summary(session_dir) if exists else None,
         }
+        if not exists:
+            holder = holder_for(session_id)
+            if holder is not None:
+                row["holder"] = holder
         if live and session_id in live:
             # The overlay is shallow and per field: the caller owns fresher
             # values for the fields it passes and nothing else.
@@ -3495,16 +3732,22 @@ def build_project_view(
             state = read_title_state(session_dir)
             title = state.text if state is not None else None
             created_at = session_created_at(session_dir) or None
-        rows.append(
-            {
-                "session_id": session_id,
-                "role": "coordination",
-                "exists": exists,
-                "title": title,
-                "created_at": created_at,
-                "archived": session_id in archived,
-            }
-        )
+        filed_row: dict[str, Any] = {
+            "session_id": session_id,
+            "role": "coordination",
+            "exists": exists,
+            "title": title,
+            "created_at": created_at,
+            "archived": session_id in archived,
+        }
+        if not exists:
+            holder = holder_for(session_id)
+            if holder is not None:
+                # Provenance only: WHERE the filing session lives, never its
+                # liveness — the holder's state/busy are dropped so no
+                # renderer can misread a filing as a working session.
+                filed_row["holder"] = {**holder, "state": None, "busy": None}
+        rows.append(filed_row)
 
     return {
         "project": project.model_dump(mode="json", by_alias=True),

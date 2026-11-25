@@ -170,7 +170,12 @@ def test_a_listed_peer_row_names_its_holder_and_state(root: Path) -> None:
 
 @pytest.mark.parametrize(
     ("live_state", "state", "busy"),
-    [("idle", "live", False), ("attached", "live", False), ("wedged", "wedged", None), ("", "stopped", None)],
+    [
+        ("idle", "live", False),
+        ("attached", "live", False),
+        ("wedged", "wedged", None),
+        ("", "stopped", None),
+    ],
 )
 def test_the_peer_state_maps_to_this_views_vocabulary(
     root: Path, live_state: str, state: str, busy: bool | None
@@ -308,7 +313,13 @@ def test_the_view_never_reads_a_listing_or_dials(
     def refuse(*_args, **_kwargs):
         raise AssertionError("build_project_view must stay cache-only")
 
-    for name in ("read_listing", "peer_session_rows", "unanswered_peers", "_read_all", "_open_catalog"):
+    for name in (
+        "read_listing",
+        "peer_session_rows",
+        "unanswered_peers",
+        "_read_all",
+        "_open_catalog",
+    ):
         monkeypatch.setattr(peer_rows, name, refuse)
     from local_operator.network import projection
 
