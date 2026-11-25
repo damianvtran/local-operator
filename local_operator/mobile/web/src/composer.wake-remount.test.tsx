@@ -207,6 +207,61 @@ describe("a waking row that outlived its composer (M1)", () => {
 		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
 	});
 
+	/* REVIEW ROUND 1, M1 (PR #4584): the projection is the 80-row tail, so a
+	   wake that delivered and then ran a long turn has pushed the user row out
+	   of it. Past the bound that looked like "no row, no owner" and the
+	   delivered message was reported failed. Measured RED on b4adabdd: the
+	   failure copy shows, the draft returns and the envelope is kept. */
+	it("treats a moved tail past the bound as delivered, not failed", async () => {
+		const start = Date.now();
+		const view = mount();
+		await sendWaking(view);
+		const clock = vi.spyOn(Date, "now").mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 1_000);
+		/* The wake delivered, the turn wrote 80+ rows, the runtime parked: the
+		   remount's seed is a pid-0 rebuild whose tail no longer holds the row. */
+		const tail = Array.from({ length: 80 }, (_, i) => userRow(`later-${i}`, `row ${i}`));
+		const back = switchAway(view, frame({ version: 2, transcript: tail }));
+		back.publish(frame({ version: 3, transcript: tail }));
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe("");
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		clock.mockRestore();
+	});
+
+	/* REVIEW ROUND 1, m1 (PR #4584): a Retry inside the bound, after a failure
+	   nobody saw, starts a NEW relay task with a fresh deadline. Measuring from
+	   the FIRST receipt failed a boot that was still running. Measured RED on
+	   b4adabdd: the failure copy shows at first-receipt + bound. */
+	it("measures the bound from the latest waking answer, a retry's too", async () => {
+		const start = Date.now();
+		const view = mount();
+		await sendWaking(view);
+		/* Away while the first wake failed; back 150 s later, the remount shows
+		   the retained-retry affordance and the user taps it. */
+		const clock = vi.spyOn(Date, "now").mockReturnValue(start + 150_000);
+		const back = switchAway(view);
+		vi.mocked(api.sendCommand).mockResolvedValueOnce(WAKING);
+		fireEvent.click(await screen.findByRole("button", { name: "Retry earlier instruction" }));
+		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(pendingRows(back)[0]?.textContent).toContain("waking session…"));
+
+		/* Past the FIRST receipt's bound, inside the retry's: still booting. */
+		clock.mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 1_000);
+		back.publish(frame({ version: 2 }));
+		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(1);
+
+		/* Past the retry's own bound: now it has settled, and failed. */
+		clock.mockReturnValue(start + 150_000 + WAKE_SETTLED_BOUND_MS + 1_000);
+		back.publish(frame({ version: 3 }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+		expect(pendingRows(back)).toHaveLength(0);
+		clock.mockRestore();
+	});
+
 	it("leaves a retained envelope with no waking row on its retained-retry path", async () => {
 		/* A reload (or an ambiguous 504) retains an envelope too; with no waking
 		   row there is no wake to settle, so the old affordance stands. */

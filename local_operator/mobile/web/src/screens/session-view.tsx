@@ -1039,7 +1039,14 @@ export function SessionScreen({
 						projectionPid={projection.pid}
 						/* A frame with no rows yet but a turn running (the first frame of a
 						   switch, or a decode that dropped every row) used to paint only the
-						   top hairline — a blank column that reads as broken. */
+						   top hairline — a blank column that reads as broken.
+
+						   BOTTOM-ANCHORED WITH THE ROWS (review round 1, m4 on PR #4584).
+						   The transcript's D1 spacer puts this skeleton on the bottom edge
+						   too, and that is kept on purpose: the pre-projection skeleton
+						   above (`justify-end`) already hangs from the bottom, and the first
+						   row lands on the bottom edge, so a top-stacked skeleton here would
+						   swap top → bottom at the first row, the same jump D1 removed. */
 						emptyContent={projection.streaming ? <TranscriptSkeleton /> : undefined}
 					/>
 				</AskChipHostProvider>

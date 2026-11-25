@@ -13,10 +13,10 @@
 // component's own, and only the box arithmetic is modelled — a rendered
 // browser frame is the real-path check this cell cannot replace.
 //
-// Measured RED on a9ecde89 (origin/main), all four cells: no spacer, so the
+// Measured RED on a9ecde89 (origin/main), all three cells: no spacer, so the
 // newest row sits 324 px above the bottom and moves to 36 px after the
-// prepend (the D1 jump, in this model's units); the structural and overflow
-// cells find no spacer; the stylesheet has no `scrollbar-gutter`.
+// prepend (the D1 jump, in this model's units); the structural cell finds no
+// spacer; the scroller reserves no `scrollbar-gutter`.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
@@ -125,20 +125,24 @@ describe("short transcripts anchor to the bottom (D1)", () => {
 	});
 
 	/* Design round 1, D2 (PR #4521): a classic scrollbar appearing took ~11 px
-	   from the content width and shifted the bubbles sideways. vitest loads no
-	   stylesheet, so the rule is pinned at its source. */
-	it("reserves the scrollbar gutter on .lo-scroll", () => {
-		const css = readFileSync(join(__dirname, "styles", "index.css"), "utf8");
-		const block = /\n\.lo-scroll \{([^}]*)\}/.exec(css)?.[1] ?? "";
-		expect(block).toMatch(/scrollbar-gutter:\s*stable;/);
-	});
-
-	it("contributes no height once the content overflows", () => {
-		const long = Array.from({ length: 40 }, (_, i) => row(`r-${i}`, "assistant", `answer ${i}`));
-		const { container } = render(<Transcript pid="s" entries={long} />);
+	   from the content width and shifted the bubbles sideways. Scoped to the
+	   TRANSCRIPT scroller (review round 1, m3 on PR #4584): the shared
+	   `.lo-scroll` rule must not carry it, or every tray, card and the
+	   composer textarea gives up gutter width too (`pending-card.tsx` decided
+	   against that). Measured RED on b4adabdd: no inline gutter, and the
+	   stylesheet's `.lo-scroll` block carries it. */
+	it("reserves the scrollbar gutter on the transcript scroller only", () => {
+		const { container } = render(<Transcript pid="s" entries={seed()} />);
 		const scroller = container.querySelector<HTMLElement>(".lo-scroll")!;
-		const spacer = scroller.querySelector(":scope > [data-bottom-anchor]")!;
-		const box = layout(scroller).get(spacer)!;
-		expect(box.bottom - box.top).toBe(0);
+		expect(scroller.style.scrollbarGutter).toBe("stable");
+		const css = readFileSync(join(__dirname, "styles", "index.css"), "utf8");
+		const block = /\n\.lo-scroll \{([^}]*)\}/.exec(css)?.[1];
+		expect(block).toBeDefined();
+		expect(block).not.toMatch(/scrollbar-gutter/);
 	});
+	/* No "contributes no height once the content overflows" cell (review round
+	   1, n1 on PR #4584): this file's `layout()` clamps free space at 0, so
+	   such a cell could only pass. The overflow geometry's evidence is the
+	   rendered-browser frame in the PR body; the structural cell above pins
+	   what the component owns (grow-only `flex`, the gap-cancelling margin). */
 });

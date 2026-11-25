@@ -1428,8 +1428,18 @@ export function Transcript({
 
 				   Inline rather than a class for the reason `lib/column.ts` spells
 				   out: the vitest layer has no stylesheet, so only an inline style
-				   RESOLVES and a test can fail when the property is dropped. */
-				style={{ overscrollBehaviorY: "contain" }}
+				   RESOLVES and a test can fail when the property is dropped.
+
+				   `scrollbarGutter: stable` (design round 1, D2 on PR #4521): a
+				   classic (non-overlay) scrollbar appearing as the conversation
+				   outgrew the box took ~11 px from the content width, so the
+				   right-aligned user bubbles jumped sideways. Reserved HERE and not
+				   on every `.lo-scroll` (review round 1, m3 on PR #4584): the other
+				   scrollers (composer textarea, pending card, trays) never had the
+				   jump, and `pending-card.tsx` records a decision not to give up a
+				   gutter's line length at 360 px. A no-op where the bar is an
+				   overlay (phones). */
+				style={{ overscrollBehaviorY: "contain", scrollbarGutter: "stable" }}
 				className={cn(
 					/* overflow-x-hidden as the backstop: break-words on the rows should
 					   wrap everything, but a table or pre that still overflows scrolls

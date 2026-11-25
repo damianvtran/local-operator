@@ -53,6 +53,7 @@ import {
 	pendingEchoFor,
 	projectionCarriesCommand,
 	registerPendingEcho,
+	transcriptTailId,
 	withdrawPendingEcho,
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
@@ -527,7 +528,11 @@ const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
    `PROMPT_WAKE_DEADLINE_S = 180` (`mobile/daemon.py`, set above the measured
    engage max of 169.6 s, n=2845) and that task starts before the receipt, so
    by 180 s after the receipt it has delivered or failed. +30 s covers the
-   failure frame's own publish and a skewed `Date.now()`. Only gates a
+   relay's work outside that deadline: `engage_runtime` takes it only after
+   `_engage_and_publish`'s pre-engage durable fold, and the failure frame is
+   published after it expires. (Not clock skew: both stamps are this device's
+   `Date.now()`.) `composer.wake-bound.test.ts` reads the daemon constant and
+   fails if the two drift apart. Only gates a
    failure the relay's one-shot `wake_failed` frame should already have
    reported — a composer that missed it (unmounted, stream down). Exported
    for the regression cells. */
@@ -1023,9 +1028,15 @@ export function Composer({
 		   (another surface woke the session, or the retry joined), and that row
 		   must take the failure copy down with it. */
 		failed: boolean;
-		/* `Date.now()` when this wake was first answered `waking` (a joining
-		   retry keeps it). What `WAKE_SETTLED_BOUND_MS` is measured from. */
+		/* `Date.now()` of the LATEST `waking` answer for this id (review round 1,
+		   m1 on PR #4584: a retry re-stamps it, see `PendingEcho.wakingAt`). What
+		   `WAKE_SETTLED_BOUND_MS` is measured from. */
 		startedAt: number;
+		/* The projection's newest row id at the first `waking` answer, taken only
+		   from a pid-0 durable rebuild (see `PendingEcho.wakingTailId` and the
+		   settle effect). Undefined = no baseline: the bound then fails the send
+		   as before. */
+		tailId?: string;
 	} | null>(null);
 	/* Bumped by the settle effect's own deadline timer, so the effect re-runs
 	   when the wake's settled bound passes even if no frame arrives (a cold
@@ -1491,6 +1502,7 @@ export function Composer({
 					sawLive: false,
 					failed: false,
 					startedAt: held.wakingAt ?? Date.now(),
+					tailId: held.wakingTailId,
 				};
 			}
 		}
@@ -1511,21 +1523,43 @@ export function Composer({
 			waking !== null &&
 			Date.now() - waking.startedAt >= WAKE_SETTLED_BOUND_MS &&
 			(projection.pid === 0 || projection.ended === true);
+		/* PAST THE BOUND, A MOVED TAIL IS A DELIVERY (review round 1, M1 on PR
+		   #4584). The projection is the 80-row tail, so a wake that delivered and
+		   then ran a long turn has pushed the user row out of it, and "no row
+		   under the id" stopped meaning "not delivered". A failed wake writes
+		   nothing to the journal, so a durable rebuild whose newest row is not
+		   the one it showed when the wake was answered means the session wrote
+		   after the wake started. Only consulted past the bound with no running
+		   owner, i.e. once the wake has certainly settled: a live frame's
+		   transient notice rows could move the tail mid-boot, and before the
+		   bound the row's own arrival is the signal. Not the session list's
+		   activity time or a turn counter: neither rides the pid-0 rebuild this
+		   composer is served while the session is cold. */
+		const movedPastBaseline =
+			pastBound &&
+			waking.tailId !== undefined &&
+			(projection.transcript?.length ?? 0) > 0 &&
+			transcriptTailId(projection.transcript) !== waking.tailId;
 		const wakeFailed =
 			waking !== null &&
 			!waking.failed &&
+			!movedPastBaseline &&
 			(projection.wake_failed === waking.commandId ||
 				(waking.sawLive && projection.ended === true) ||
 				pastBound);
 		const outcome = settleWakingContinuation(
 			pid,
-			(commandId) => projectionCarriesCommand(projection.transcript, commandId),
+			(commandId) => movedPastBaseline || projectionCarriesCommand(projection.transcript, commandId),
 			wakeFailed,
 			waking?.commandId ?? null,
 		);
 		if (outcome === "delivered") {
 			wakingCommand.current = null;
-			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
+			/* A row the tail no longer carries is never retired by the projection
+			   (`usePendingEchoes` filters on the tail), so a delivery read off the
+			   moved tail takes it down here, or it would sit at the bottom. */
+			if (waking && movedPastBaseline) withdrawPendingEcho(pid, waking.commandId);
+			else if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
 			   the user to wait for exactly this; leaving it up after the landing
 			   kept them waiting on nothing. Same success line as a plain retry. */
@@ -1533,9 +1567,17 @@ export function Composer({
 				setNoticeTone("success");
 				setNotice(RETRY_ACK_NOTICE);
 			}
+			/* The envelope is cleared, so the retained-retry affordance a remount
+			   restored for it is stale (M1 on PR #4584): a delivered message must
+			   not keep offering "Retry earlier instruction". */
+			setRetryEnvelope(null);
+			if (!waking?.failed) {
+				setErrorOccurrence((current) =>
+					current.message === RETAINED_RETRY_ERROR ? { message: "" } : current,
+				);
+			}
 			if (waking?.failed) {
 				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
-				setRetryEnvelope(null);
 				setErrorOccurrence((current) =>
 					current.message === failedCopy || current.message === RETAINED_RETRY_ERROR
 						? { message: "" }
@@ -2102,6 +2144,9 @@ export function Composer({
 					   makes a later `ended` this boot's end (the settle effect). A retry
 					   that joins the same wake keeps what the stream already showed. */
 					const prior = wakingCommand.current;
+					/* M1's baseline, only from a durable rebuild: a live frame can end in
+					   a transient notice row whose id no rebuild reproduces. */
+					const coldTail = projection.pid === 0 ? transcriptTailId(projection.transcript) : undefined;
 					const joined =
 						prior !== null &&
 						prior.pid === pid &&
@@ -2115,12 +2160,17 @@ export function Composer({
 						text: receipt.envelope.text,
 						sawLive: joined?.sawLive ?? false,
 						failed: false,
-						/* A joining retry rides the SAME relay task, so it keeps the
-						   clock that task's deadline is measured from. */
-						startedAt: joined?.startedAt ?? Date.now(),
+						/* EVERY `waking` answer restarts the clock (m1 on PR #4584), a
+						   joining one too: "joined" means same id and not failed, not
+						   same relay task. A retry after a failure nobody saw starts a
+						   new task with a fresh deadline, and the latest receipt is the
+						   conservative bound for either. */
+						startedAt: Date.now(),
+						/* The baseline stays the FIRST answer's (see `tailId`). */
+						tailId: joined ? joined.tailId : coldTail,
 					};
 					/* The row says the session is booting, not just "sending…" (D2). */
-					markPendingEchoWaking(pid, receipt.envelope.command_id, true);
+					markPendingEchoWaking(pid, receipt.envelope.command_id, true, wakingCommand.current.tailId);
 					/* A NEW draft that rode along (R2-2): the send replayed the retained
 					   earlier instruction, which is still waking, and the composer kept
 					   what the user just typed. Say so — the tap otherwise looked dead. */
