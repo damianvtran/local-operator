@@ -1569,6 +1569,11 @@ _REGENERABLE = frozenset(
         # same standing as ``build``/``dist`` (only ever matched when Git
         # itself reports the entry IGNORED).
         "out",
+        # Added 2026-11-24 (guard 0.113.0 field case, session 045831e8588c,
+        # minerva-nexus QA worktree): Next.js rewrites ``next-env.d.ts`` on
+        # every ``next build``/``next dev``. Exact basename only; see
+        # :func:`_next_env_types_file` for the any-tree witness.
+        "next-env.d.ts",
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -2487,7 +2492,20 @@ def worktree_state(
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if not own and not _regenerable(name) and not _only_regenerable(os.path.join(real, entry)):
+        # 2026-11-24 field case (no ledger row, so ``own`` is False here): an
+        # ignored symlink is unlinked, never followed, so it loses no bytes.
+        # Same path rules as ``_cleanup_status_path``; anything else fails closed.
+        linked = (
+            not os.path.isabs(entry)
+            and ".." not in entry.split("/")
+            and _ignored_symlink(real, entry)
+        )
+        if (
+            not own
+            and not linked
+            and not _regenerable(name)
+            and not _only_regenerable(os.path.join(real, entry))
+        ):
             return "dirty"
         # Kept for OWN trees too (security review M2, PR #3800): a nested
         # repository's commits may exist nowhere else. ``owned_record``'s
@@ -2641,6 +2659,59 @@ def _finder_metadata_file(real: str, entry: str) -> bool:
         if not stat.S_ISREG(os.lstat(physical).st_mode):
             return False
         # A symlinked parent would put the file outside the tree being removed.
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
+def _ignored_symlink(real: str, entry: str) -> bool:
+    """An ignored entry that is itself a symbolic link (by ``lstat``).
+
+    Why (operator directive 2026-11-24, guard 0.113.0 field case, session
+    045831e8588c): the session's own finished Next.js QA worktree was held for
+    "2 ignored entries the guard cannot prove regenerable"; one was an ignored
+    ``.env.local`` SYMLINK into the primary checkout. The tree had no ledger
+    row, so the own-tree rule never applied. Removing a worktree unlinks a
+    link entry; it never follows it or deletes the target's bytes, so no data
+    can be lost. That is a property of the payload, not of ownership, so this
+    applies to any tree, like the shared ``node_modules`` link.
+
+    Constraints: ``lstat`` only (never follow; a dangling link is still just a
+    link); ``entry`` comes from :func:`_cleanup_status_path` (relative, no
+    ``..``). A symlinked PARENT would put the entry outside the tree, so the
+    parent's realpath must stay inside it. Any OSError holds (fail closed).
+    This changes only which ignored payload plain cleanup may take; it does
+    not touch the critical class, consent, or ``rm -rf`` handling.
+    """
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISLNK(os.lstat(physical).st_mode):
+            return False
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
+def _next_env_types_file(real: str, entry: str) -> bool:
+    """An ignored ``next-env.d.ts`` that is a plain regular file inside the tree.
+
+    Why (same field case as :func:`_ignored_symlink`): the other held entry
+    was ``next-env.d.ts``, the type-reference stub Next.js regenerates on
+    every ``next build``/``next dev``; losing it costs one rebuild, never user
+    data. Exact basename only (no broad Next.js pattern), and only a regular
+    file by ``lstat``: a directory, symlink-to-elsewhere or special file under
+    that name is not Next's and is judged by the other witnesses or held.
+    Like ``.DS_Store``, it widens neither the critical class nor consent.
+    Fails closed.
+    """
+    if os.path.basename(entry) != "next-env.d.ts":
+        return False
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
         parent = os.path.realpath(os.path.dirname(physical))
     except OSError:
         return False
@@ -2812,10 +2883,14 @@ def plain_cleanup_ignored_inventory(
         # Any tree (#4503): the shared ``node_modules`` link and a regular-file
         # Finder ``.DS_Store`` are verified witnesses for plain removal, and so
         # is a content-verified cache directory (``_verified_cache_dir``).
+        # Also any tree (2026-11-24 field case): an ignored symlink (unlinking
+        # removes no bytes) and a regular-file ``next-env.d.ts``.
         if (
             _shared_dependencies_link(real, entry)
             or _finder_metadata_file(real, entry)
             or _verified_cache_dir(real, entry)
+            or _ignored_symlink(real, entry)
+            or _next_env_types_file(real, entry)
         ):
             continue
         if own_regenerable and _own_tree_sheds(os.path.join(real, entry)):
@@ -2890,6 +2965,12 @@ def _interrupted_cleanup_state(
         # regenerable names and links as plain removal (#4493 QA Q-R4-1).
         if _shared_dependencies_link(real, entry):
             continue
+        # 2026-11-24 field case: the ignored-symlink and ``next-env.d.ts``
+        # witnesses are deliberately NOT added here for foreign trees, as with
+        # ``.DS_Store`` (#4503 R1/Q1): ``--force`` stays as on base. An own tree
+        # already sheds both through ``_own_tree_sheds`` (a link, or a file
+        # holding no repository), so the two routes agree where ``--force`` is
+        # the owner's supported spelling.
         if own_regenerable and _own_tree_sheds(physical):
             continue
         return "dirty"
