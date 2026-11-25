@@ -2207,7 +2207,9 @@ _DUAL_MODE_WIRE = {
 }
 
 
-async def _wire_request(provider_id: str, credentials, mode: str) -> httpx.Request:
+async def _wire_request(
+    provider_id: SearchProviderId, credentials, mode: str
+) -> httpx.Request:
     """The one request a transport sends while serving ``mode``'s leg.
 
     The handler answers 503 so the test reads only what was SENT; the
