@@ -5019,7 +5019,11 @@ class _Walker:
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
-        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned)
+        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned) or (
+            # Needs the EXPANDED words (glob/opaque facts) and the cwd, which
+            # ``read_only_argv``'s string argv cannot carry (field case 0.113.2).
+            name == "sqlite3" and not raw_assigns and _sqlite_read_only(args, st.cwd)
+        )
         # A move, link, arbitrary interpreter, or unmodelled writer can replace
         # the fresh directory or its parent. Never carry containment past it.
         # mkdir only creates directories; mktemp's substitution is walked in a
@@ -5194,8 +5198,14 @@ class _Walker:
             # ``sqlite3 FILE [SQL]`` writes FILE whatever the SQL says; the
             # guard's ledger is a sqlite file (R1-MAJOR-1).
             operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
-            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive).
-            if operands and not any(w.text == "-readonly" for w in args):
+            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive);
+            # so does a proven read (``_sqlite_read_only``): an existing file
+            # opened only to SELECT from is not written.
+            if (
+                operands
+                and not any(w.text == "-readonly" for w in args)
+                and not _sqlite_read_only(args, self.state.cwd)
+            ):
                 self._add(operands[0], "append", name)
             return
         if name in ("sed", "gsed") and _in_place_edit(name, args):
@@ -7574,6 +7584,274 @@ def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
         elif w.text.startswith("-F") and len(w.text) > 2 and not w.text.startswith("--"):
             out.add(id(w))
     return out
+
+
+#: ``sqlite3`` switches that change only how results are PRINTED (or make the
+#: shell stricter: ``-safe``, ``-bail``, ``-nofollow``). Anything else —
+#: ``-init FILE`` (runs a script file), ``-vfs`` (an arbitrary VFS),
+#: ``-A``/``-append``/``-zip``/``-deserialize`` (archive and storage modes) or
+#: a switch this table has never heard of — keeps the call off the read-only
+#: route. Both spellings (``-x``/``--x``) are accepted by the shell.
+_SQLITE_PRINT_FLAGS = frozenset(
+    {
+        "-readonly",
+        "-safe",
+        "-batch",
+        "-bail",
+        "-echo",
+        "-nofollow",
+        "-header",
+        "-noheader",
+        "-column",
+        "-csv",
+        "-json",
+        "-line",
+        "-list",
+        "-box",
+        "-markdown",
+        "-table",
+        "-tabs",
+        "-html",
+        "-quote",
+        "-ascii",
+    }
+)
+#: Value-taking switches whose value is printed text (``-cmd`` is handled on
+#: its own: its value is a command and gets the statement check).
+_SQLITE_PRINT_VALUE_FLAGS = frozenset({"-separator", "-newline", "-nullvalue"})
+#: Dot-commands that only print or set display state. Deliberately absent:
+#: ``.output``/``.once``/``.excel``/``.log``/``.trace`` (write a file),
+#: ``.shell``/``.system`` (run a program), ``.save``/``.backup``/``.clone``/
+#: ``.archive``/``.ar``/``.import``/``.recover`` (write a database or files),
+#: ``.open`` (reopens read-write), ``.read``/``.load``/``.cd`` (unknowable).
+_SQLITE_READ_DOT_COMMANDS = frozenset(
+    {
+        ".tables",
+        ".schema",
+        ".fullschema",
+        ".indexes",
+        ".indices",
+        ".databases",
+        ".dbinfo",
+        ".headers",
+        ".header",
+        ".mode",
+        ".show",
+        ".width",
+        ".nullvalue",
+        ".separator",
+        ".timer",
+        ".changes",
+        ".print",
+        ".help",
+    }
+)
+#: Words that write OUTSIDE the opened database even when it is read-only
+#: (measured on sqlite 3.54: ``sqlite3 -readonly db "select writefile('f','x')"``
+#: and ``"vacuum into 'f'"`` both create ``f``), or attach/extend the
+#: connection. Matched as whole words anywhere in the text — inside a string
+#: literal too, which costs a judge call, never a missed write.
+_SQLITE_ESCAPE_WORDS = frozenset(
+    {"attach", "vacuum", "writefile", "edit", "load_extension", "fts3_tokenizer"}
+)
+#: Words that write the database itself. Only consulted when the database is
+#: opened read-write; ``replace`` is also a scalar function, so ``replace()``
+#: in a SELECT leaves the read-only route (conservative on purpose).
+_SQLITE_WRITE_WORDS = frozenset(
+    {
+        "insert",
+        "update",
+        "delete",
+        "create",
+        "drop",
+        "alter",
+        "replace",
+        "reindex",
+        "analyze",
+        "detach",
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        "release",
+    }
+)
+_SQLITE_READ_LEADS = ("select", "with", "explain", "values", "pragma")
+#: PRAGMAs that only report. ``_ARG`` ones take a table/index name in
+#: parentheses; the bare ones would SET a value given ``=x`` or ``(x)``
+#: (``journal_mode(wal)``), so for them any argument leaves the route.
+_SQLITE_PRAGMA_ARG = frozenset(
+    {
+        "table_info",
+        "table_xinfo",
+        "index_list",
+        "index_info",
+        "index_xinfo",
+        "foreign_key_list",
+        "foreign_key_check",
+        "integrity_check",
+        "quick_check",
+    }
+)
+_SQLITE_PRAGMA_BARE = _SQLITE_PRAGMA_ARG | frozenset(
+    {
+        "user_version",
+        "schema_version",
+        "application_id",
+        "page_count",
+        "page_size",
+        "freelist_count",
+        "encoding",
+        "journal_mode",
+        "database_list",
+        "table_list",
+        "compile_options",
+        "function_list",
+        "pragma_list",
+        "collation_list",
+        "module_list",
+    }
+)
+_SQLITE_PRAGMA_RE = re.compile(
+    r"^pragma\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)\s*(\(\s*[\w\"'.]+\s*\))?\s*$"
+)
+_SQL_WORD_RE = re.compile(r"[a-z_][a-z0-9_]*")
+
+
+def _sqlite_text_read_only(text: str, *, db_read_only: bool) -> bool:
+    """Can this one ``sqlite3`` command argument (SQL or a dot-command) write?
+
+    A dot-command must be one line from :data:`_SQLITE_READ_DOT_COMMANDS`.
+    SQL never carries an escape word; on a read-write open every
+    ``;``-separated statement must also LEAD with a read keyword and hold no
+    write word, and a PRAGMA must be a reporting one. Splitting on ``;``
+    ignores quoting, and a leading comment fails the lead check: both only
+    ever push a call off the read-only route.
+    """
+    if text.startswith("."):
+        if "\n" in text or "\r" in text or ";" in text:
+            return False
+        return text.split(None, 1)[0].casefold() in _SQLITE_READ_DOT_COMMANDS
+    words = set(_SQL_WORD_RE.findall(text.casefold()))
+    if words & _SQLITE_ESCAPE_WORDS:
+        return False
+    if db_read_only:
+        return True
+    if words & _SQLITE_WRITE_WORDS:
+        return False
+    statements = [s.strip().casefold() for s in text.split(";") if s.strip()]
+    if not statements:
+        return False
+    for stmt in statements:
+        lead = _SQL_WORD_RE.match(stmt)
+        if lead is None or lead.group(0) not in _SQLITE_READ_LEADS:
+            return False
+        if lead.group(0) == "pragma":
+            m = _SQLITE_PRAGMA_RE.match(stmt)
+            if m is None:
+                return False
+            allowed = _SQLITE_PRAGMA_ARG if m.group(2) else _SQLITE_PRAGMA_BARE
+            if m.group(1) not in allowed:
+                return False
+    return True
+
+
+def _sqlite_read_only(args: list[Expanded], cwd: str | None) -> bool:
+    """Is this ``sqlite3`` call provably unable to write anything?
+
+    WHY (field case, 0.113.2 Team Bridge lane): a read-only query on
+    ``~/.local-operator/team_bridge/state.sqlite3`` was refused CRITICAL as a
+    delete — via the backstop's cwd/``?``-glob mention of the responder
+    policy's directory — and ``sqlite3 <ledger> "select …"`` was refused as a
+    planted write. A read cannot delete. Passing this proof makes the call
+    read-only exactly like ``cat`` (no write targets, no backstop); its
+    redirections are still ranked separately, as for every program.
+
+    The parse is deliberately conservative — unknown means "not read-only",
+    which keeps today's ranking, never a LOW:
+
+    * every switch is a print-only one (``-cmd`` values get the statement
+      check); ``--`` and every word after the database must be literal;
+    * exactly one literal database operand (no glob, no opaque or empty
+      expansion) and at least one command argument — with none, sqlite3
+      reads commands from stdin, which this cannot see;
+    * the database is opened read-only (``-readonly`` or a ``file:`` URI with
+      ``mode=ro``) — then only escapes that write ELSEWHERE are refused —
+      or every command is a read statement (``SELECT``/``WITH``/``EXPLAIN``/
+      reporting ``PRAGMA``) or print-only dot-command;
+    * a read-write (or ``immutable=1``) open must name an EXISTING regular
+      file: sqlite3 creates a missing one (measured: ``sqlite3 new.db
+      "select 1"`` and ``file:new.db?immutable=1`` leave an empty file),
+      which could plant an empty evidence mark.
+
+    Not covered, by design: ``~/.sqliterc``, which the shell runs at start
+    (the same trust ``git status`` places in repo config).
+    """
+    db: Expanded | None = None
+    commands: list[str] = []
+    read_only_flag = False
+    k = 0
+    ended = False
+    while k < len(args):
+        w = args[k]
+        if w.opaque or w.empty or w.pattern is not None or w.vanished:
+            return False
+        t = w.text
+        if not ended and t == "--":
+            ended = True
+        elif not ended and t.startswith("-"):
+            flag = t[1:] if t.startswith("--") else t
+            if flag in ("-cmd", *_SQLITE_PRINT_VALUE_FLAGS):
+                if k + 1 >= len(args):
+                    return False
+                value = args[k + 1]
+                if value.opaque or value.empty or value.vanished:
+                    return False
+                if flag == "-cmd":
+                    commands.append(value.text)
+                k += 1
+            elif flag in _SQLITE_PRINT_FLAGS:
+                read_only_flag = read_only_flag or flag == "-readonly"
+            else:
+                return False
+        elif db is None:
+            db = w
+        else:
+            commands.append(t)
+        k += 1
+    if db is None or not commands:
+        return False
+    uri_read_only = False
+    must_exist = not read_only_flag
+    path = db.text
+    if path.startswith("file:"):
+        from urllib.parse import parse_qs, unquote
+
+        body, _, query = path[5:].partition("?")
+        params = parse_qs(query.split("#", 1)[0], keep_blank_values=True)
+        if "vfs" in params or any(len(v) > 1 for v in params.values()):
+            return False
+        mode = params.get("mode", [""])[0]
+        uri_read_only = mode == "ro"
+        if mode not in ("", "ro"):
+            # ``rw``/``rwc``/``memory``: never the read-only route, whatever
+            # ``-readonly`` says (sqlite errors on the mix; unknown -> no).
+            return False
+        must_exist = not (read_only_flag or uri_read_only)
+        if body.startswith("//"):
+            authority, slash, rest = body[2:].partition("/")
+            if authority not in ("", "localhost") or not slash:
+                return False
+            body = "/" + rest
+        path = unquote(body)
+    if must_exist:
+        if not path or (not path.startswith("/") and cwd is None):
+            return False
+        full = path if path.startswith("/") else os.path.join(cwd or "", path)
+        if not os.path.isfile(full):
+            return False
+    db_read_only = read_only_flag or uri_read_only
+    return all(_sqlite_text_read_only(c, db_read_only=db_read_only) for c in commands)
 
 
 def _sed_read_only(argv: list[str]) -> bool:

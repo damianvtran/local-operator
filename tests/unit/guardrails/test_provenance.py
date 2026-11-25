@@ -1119,7 +1119,9 @@ _READS = [
     ),
     (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.HIGH),
     (f"git -C ~/.local-operator/sessions/{CHILD} status", Risk.LOW),
-    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.HIGH),
+    # Field case 0.113.2: a -readonly open with only read statements is a
+    # proven read (``resolve._sqlite_read_only``), LOW like ``cat``.
+    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.LOW),
     ("cat ~/.local-operator/guardrails/lineage.jsonl", Risk.LOW),
     ("python3 rig.py --out=~/.local-operator/sessions/newid", Risk.HIGH),
 ]

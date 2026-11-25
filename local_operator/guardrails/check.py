@@ -426,13 +426,35 @@ SUPPORTED_DELETE_PATHS = (
 )
 
 
+#: Appended when a flagged target was handed to ``sqlite3`` (field case
+#: 0.113.2): the agent usually meant a read, and the guard DOES pass a provable
+#: one (``resolve._sqlite_read_only``), so the refusal names the form it
+#: accepts instead of leaving the agent to guess or reroute. Model-facing
+#: English like ``BLOCK_MARKER``; every other refusal stays byte-identical.
+SQLITE_READ_HINT = (
+    "If this was meant as a read, open the database read-only: "
+    '`sqlite3 -readonly <db> "SELECT …"` or `sqlite3 "file:<db>?mode=ro" "SELECT …"` '
+    "with only SELECT/WITH/EXPLAIN/reporting PRAGMA statements or print-only dot-commands "
+    "(no `.output`/`.once`/`.dump`, `-cmd` writes, ATTACH, VACUUM or writefile)."
+)
+
+
+def _sqlite_hint(verdict: Verdict) -> str:
+    flagged = verdict.flagged_targets or verdict.targets
+    return (
+        f" {SQLITE_READ_HINT}"
+        if any(t.target.program == "sqlite3" for t in flagged)
+        else ""
+    )
+
+
 def _critical_text(verdict: Verdict) -> str:
     return (
         f"{BLOCK_MARKER} {DANGEROUS_DELETE_RULE} (critical): this command would delete, move "
         f"or overwrite {_targets_text(verdict)}. Nothing was run. This is not retryable by "
         "rewording, and no approval lifts it from inside the session. If a narrower path was "
         "intended, target it directly (for example a path inside your own scratchpad); "
-        f"otherwise ask the operator. {REFUSAL_SCOPE}"
+        f"otherwise ask the operator.{_sqlite_hint(verdict)} {REFUSAL_SCOPE}"
     )
 
 
