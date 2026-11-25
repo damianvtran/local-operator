@@ -632,7 +632,16 @@ describe("a waking row that outlived its composer (M1)", () => {
    wipes. So a message the session had already written kept its "may have been
    delivered" card, its Retry and a blocked send until a retry or a second
    reload. The row under the envelope's id is that message's acknowledgement,
-   so the composer now settles the envelope against every frame. Cells C and D
+   so the composer now settles the envelope against every frame.
+   REVIEW ROUND 2, M1 (PR #4606): settling the envelope was not enough. The
+   same-mount failure path had handed the body back into the composer and
+   raised a sentence offering to retry it, so `Send` opened on a message the
+   session already wrote — one tap from a duplicate under a fresh id. P1/P2/P3
+   below are the three shapes of that (row after the 504, row before it, row
+   during a retry), and the guard beside them holds a draft typed since and an
+   unrelated alert on both heads.
+   Measured RED on 32c0389bf (27 passed / 3 failed): P1, P2 and P3 — the alert
+   and the restored draft stay after the row lands. Cells C and D
    and the last guard hold the retained path (`no row in the tail`): the card,
    its retry and the blocked send are the only copy of a message whose fate is
    still open, and must survive there on both heads. */
@@ -668,6 +677,86 @@ describe("a retained instruction the transcript already carries", () => {
 		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
 		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
 		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		/* The failure handed the body back into the composer AND raised the
+		   sentence that offered to retry it. The landed row is the delivery, so
+		   both are leftovers: a send from here would duplicate the message the
+		   session already wrote, under a fresh id. */
+		await waitFor(() => expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe(""));
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	/** A send whose reply the test controls: the row can land while it is out. */
+	function heldSend() {
+		let fail: (error: unknown) => void = () => {};
+		vi.mocked(api.sendCommand).mockImplementationOnce(
+			() => new Promise<never>((_resolve, reject) => { fail = reject; }),
+		);
+		return async (error: unknown) => {
+			await act(async () => { fail(error); });
+		};
+	}
+
+	it("retires a fresh send whose row lands before its 504 reply (P2)", async () => {
+		/* The relay wrote the message and its ack timed out: the stream's row
+		   arrives while the request is still out, so no envelope was on screen
+		   when it landed — only the catch, after it, raises the failure. */
+		const view = mount(frame({ pid: 4242, kind: "daemon" }));
+		const failHeld = heldSend();
+		fireEvent.change(await composer(), { target: { value: SENT } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledOnce());
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
+		await failHeld(Object.assign(new Error("gateway timeout"), { status: 504 }));
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		await waitFor(() => expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe(""));
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+	});
+
+	it("retires a retry whose row lands mid-flight, then 504s (P3)", async () => {
+		/* The retry's own echo is what paints the row, so it is on screen when the
+		   504 arrives; the envelope is already retired by then, and the catch has
+		   no card to hang the failure on. */
+		seedEnvelope();
+		const view = mount(frame({ pid: 4242, kind: "daemon" }));
+		await screen.findByRole("button", { name: "Retry earlier instruction" });
+		const failHeld = heldSend();
+		fireEvent.click(screen.getByRole("button", { name: "Retry earlier instruction" }));
+		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledOnce());
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		await failHeld(Object.assign(new Error("gateway timeout"), { status: 504 }));
+
+		await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+		expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("");
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+	});
+
+	it("keeps a draft typed since the failure, and an unrelated alert, on a landing", async () => {
+		/* The clearing is keyed to the failure's OWN occurrence and to the body it
+		   handed back. A draft the user typed over it is theirs, and a different
+		   alert (here a refused attachment) is not this failure's to retire. */
+		const view = mount(frame({ pid: 4242, kind: "daemon" }));
+		vi.mocked(api.sendCommand).mockRejectedValueOnce(Object.assign(new Error("gateway timeout"), { status: 504 }));
+		fireEvent.change(await composer(), { target: { value: SENT } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Couldn"));
+
+		fireEvent.change(await composer(), { target: { value: "my own next message" } });
+		const input = view.container.querySelector('input[type="file"]') as HTMLInputElement;
+		Object.defineProperty(input, "files", {
+			configurable: true,
+			value: [new File(["notes"], "notes.txt", { type: "text/plain" })],
+		});
+		await act(async () => { fireEvent.change(input); });
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Couldn't attach notes.txt"));
+
+		view.publish(frame({ pid: 4242, kind: "daemon", version: 2, transcript: [userRow(COMMAND_ID, SENT)] }));
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		await waitFor(() => expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull());
+		expect(screen.getByRole("alert").textContent).toContain("Couldn't attach notes.txt");
+		expect((await composer()).value).toBe("my own next message");
 	});
 
 	it("the x only hides the sentence; retry and send stay blocked", async () => {
