@@ -6199,12 +6199,35 @@ class AnthropicClient:
                 ephemeral_indices=ephemeral_indices,
                 system_head_marker=head_marker,
             )
-        # An ephemeral frame belongs beyond all original cache points. Keep a
-        # preceding user/tool-result row byte-identical, including block order.
+        # The discovery hint is request-only: it is never stored, so the next
+        # request's history cannot contain it where this one put it. WHERE it
+        # rides therefore decides whether earlier turns stay byte-stable.
         if request.inline_ui_hint is not None:
-            messages.append(
-                {"role": "user", "content": [{"type": "text", "text": request.inline_ui_hint}]}
-            )
+            hint_row = {
+                "role": "user",
+                "content": [{"type": "text", "text": request.inline_ui_hint}],
+            }
+            if _reasoning_effort(request) is not None:
+                # Thinking is on (same gate that writes ``body["thinking"]``
+                # below), so signed thinking blocks get replayed. Sonnet/Opus/
+                # Haiku 5.5 bind each block to ALL content before it: a tail
+                # hint sits right before the block the model produces next, then
+                # vanishes from the following request ("Content that preceded
+                # this block when it was created is missing", HTTP 400, every
+                # 2nd tool call since v0.113.0). Pin it at the HEAD instead,
+                # byte-identical on every request of the run, so every replayed
+                # block sees the same prefix it was created with. Consecutive
+                # user rows are accepted (the API joins them into one turn);
+                # cache markers were placed on block dicts above, so prepending
+                # moves none. Trade-off: if the hint appears, disappears or
+                # changes mid-session (an input-surface switch), the prefix
+                # changes once, the same as any edit to the system prompt.
+                messages.insert(0, hint_row)
+            else:
+                # No thinking, so there is no signature to break. Keep the
+                # suffix past every cache point, so the cached prefix and the
+                # user/tool-result row before it stay byte-identical.
+                messages.append(hint_row)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
