@@ -706,7 +706,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``model_choice=model`` a tier needs (+), net of trimming the ``model``
     # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
     # budget (-). Re-measured.
-    "hub": 875,
+    # 875 -> 876 (PR #4566): the ``peek`` range blurb now spells the bare
+    # ``'start[-]'`` form the parser accepts. Re-measured via this test's print.
+    "hub": 876,
     "integrations": 501,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
@@ -770,7 +772,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
     # "ask with a short summary plus the proposal id" sentence.
     "profile_proposal": 131,
-    "read": 345,
+    # 345 -> 344 (PR #4566): the ``range`` blurb names the bare ``'start[-]'``
+    # form and drops "read". Re-measured via this test's print.
+    "read": 344,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
