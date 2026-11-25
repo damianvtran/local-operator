@@ -443,9 +443,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         from local_operator.network import pairing_attest
 
         if hasattr(app.state, "desktop_idle_update_control"):
+            from local_operator.server.desktop_idle_update import stopping
+
+            # Ordinary rolling reload can hold its HTTP fence across awaits and
+            # then roll back. Only a committed private stop closes pairing.
             app.state.mesh_pairing_attest = await pairing_attest.start_service(
-                config_dir,
-                admitting=lambda: not getattr(app.state, serve_reload.ADMISSION_ATTR, False),
+                config_dir, admitting=lambda: not stopping(app)
             )
         else:
             app.state.mesh_pairing_attest = await pairing_attest.start_service(config_dir)
@@ -702,6 +705,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
         logger.debug("org hub gate refresh could not start", exc_info=True)
+    app.state.org_hub_boot_thread = org_hub_thread
 
     # The record was created before the autonomous hub producer. Publish safety
     # only AFTER every real hook exists; absent/failed hub startup stays unknown.

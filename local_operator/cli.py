@@ -13266,6 +13266,11 @@ def _serve_command(
         from local_operator.server import peer_check
 
         peer_check.ensure_resolving()
+        http_protocol = peer_check.gated_protocol_class()
+        if idle_update_control is not None and listener_fd is None:
+            from local_operator.server import desktop_idle_update
+
+            http_protocol = desktop_idle_update.stream_protocol(http_protocol, asgi_app)
         # dictConfig otherwise closes ALL existing handlers (including ours)
         # and reinstalls synchronous stderr handlers before startup can run.
         config = uvicorn.Config(
@@ -13273,7 +13278,7 @@ def _serve_command(
             host=host,
             port=resolved_port,
             log_config=None,
-            http=peer_check.gated_protocol_class(),
+            http=http_protocol,
         )
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame

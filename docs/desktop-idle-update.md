@@ -32,10 +32,12 @@ obtain it by adopting a daemon, knowing its PID, or getting the desktop bearer.
 On that same channel, send `stop <instance_id>\n`; keep at most one outstanding
 request. The daemon briefly parks HTTP, scheduler, and hub admissions, validates
 its owned work on the same event-loop turn, and either rolls back or commits
-ordinary uvicorn shutdown. It gracefully ends only its two replayable desktop
-feeds. Detached session runtimes, passive attachments, and the separate network
-relay are not stopped by this operation; it does not authorize updating or
-restarting any of them.
+ordinary uvicorn shutdown. An unfinished daemon-owned bootstrap defers the stop.
+Only the two replayable desktop feeds are ended: a draining connection gets a
+normal HTTP end, and a backpressured connection is closed without waiting for the
+client to read. Detached session runtimes, passive attachments, and the separate
+network relay are not stopped by this operation; it does not authorize updating
+or restarting any of them.
 
 - `accepted <instance_id>\n`: committed, not yet exited. Only continue the
   update after the same `ChildProcess` exits normally with code 0. Do not wait

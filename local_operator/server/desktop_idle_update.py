@@ -21,9 +21,14 @@ import struct
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from anyio import CancelScope
 
 from local_operator.server import reload
+
+if TYPE_CHECKING:
+    from starlette.types import Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 ATTACHED = "desktop_idle_update_control"
@@ -83,6 +88,71 @@ def adopt(fd: int) -> Channel | None:
             channel.detach()
 
 
+async def _end_feed(transport: asyncio.Transport, send: Send, finished: bool) -> None:
+    try:
+        if not finished and not transport.get_write_buffer_size():
+            # This is Uvicorn's send, not a middleware queue. A cancelled scope
+            # allows the terminal chunk to go out inline but cannot wait on drain.
+            with CancelScope() as no_drain:
+                no_drain.cancel()
+                await send({"type": "http.response.body", "body": b""})
+                finished = True
+    finally:
+        if finished and not transport.get_write_buffer_size():
+            transport.close()
+        else:
+            # close() would wait for even a partial write to flush. Discard only
+            # this feed's queued bytes, never stop the runtime that produced them.
+            transport.abort()
+
+
+def stream_protocol(base: type[asyncio.Protocol], app: Any) -> type[asyncio.Protocol]:
+    """Bind the opted-in daemon's replayable feeds to their actual connections."""
+
+    class UpdateStreamProtocol(base):  # type: ignore[misc,valid-type]
+        # Both Uvicorn HTTP protocols set this in connection_made, before ASGI.
+        transport: asyncio.Transport
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            asgi = self.app
+
+            async def attach(scope: Scope, receive: Receive, send: Send) -> None:
+                streams = getattr(app.state, reload.UPDATE_STREAMS_ATTR, None)
+                if streams is None or not reload.replayable_feed(scope):
+                    await asgi(scope, receive, send)
+                    return
+                admission = reload.UpdateFeedAdmission()
+                scope[reload.UPDATE_FEED_KEY] = admission  # type: ignore[typeddict-unknown-key]
+                stop = CancelScope()
+                finished = False
+
+                async def wire(message: Message) -> None:
+                    nonlocal finished
+                    await send(message)
+                    if message["type"] == "http.response.start" and message["status"] == 200:
+                        if admission.on_headers is not None:
+                            streams.add(stop)
+                            admission.on_headers()
+                    if message["type"] == "http.response.body" and not message.get("more_body"):
+                        finished = True
+
+                try:
+                    with stop:
+                        await asgi(scope, receive, wire)
+                finally:
+                    streams.discard(stop)
+                    if stop.cancel_called:
+                        # Outer HTTP middleware can suspend on an internal
+                        # queue even when TCP is draining. Finish at Uvicorn's
+                        # request cycle, after cancelling all those layers.
+                        await _end_feed(self.transport, send, finished)
+
+            self.app = attach
+
+    return UpdateStreamProtocol
+
+
 def bind(app: Any, channel: Channel, server: Any) -> None:
     """Only the fresh, owned uvicorn Server may install the control lifecycle."""
     setattr(app.state, ATTACHED, (channel, server))
@@ -108,6 +178,20 @@ def _extra_blocker(state: Any, settings_resume: asyncio.Task[int] | None) -> str
     mcp = getattr(state, "desktop_mcp_host", None)
     if mcp is not None and mcp.ops.running:
         return "desktop-mcp"
+    # These startup tasks are not joined by lifespan teardown. A Librarian
+    # birth spans multiple durable writes; connector catch-up may still be
+    # applying a service unit. Ordinary rolling reload keeps its own inventory.
+    for attr, reason in (
+        ("librarian_boot_task", "librarian-bootstrap"),
+        ("bridge_connector_boot_task", "connector-bootstrap"),
+    ):
+        task = getattr(state, attr, None)
+        if task is not None and not task.done():
+            return reason
+    # The lifespan's bounded join is best-effort; it may return mid-enrolment.
+    org_hub = getattr(state, "org_hub_boot_thread", None)
+    if org_hub is not None and org_hub.is_alive():
+        return "org-hub-bootstrap"
     if settings_resume is not None and not settings_resume.done():
         return "settings-intent-resume"
     applier = getattr(state, "settings_applier", None)
@@ -132,8 +216,10 @@ def _try_stop(
     consumed commit keeps the gates through ordinary uvicorn shutdown.
     """
     state = app.state
-    if not server.started or server.should_exit or any(
-        getattr(state, name, False) for name in (reload.ADMISSION_ATTR, reload.PENDING_ATTR)
+    if (
+        not server.started
+        or server.should_exit
+        or any(getattr(state, name, False) for name in (reload.ADMISSION_ATTR, reload.PENDING_ATTR))
     ):
         return "transition"
     if reload.rolling_contract(app) != reload.ROLLING_CONTRACT:
@@ -186,9 +272,7 @@ async def run(app: Any, settings_resume: asyncio.Task[int] | None) -> None:
         stop = b"stop " + identity
         if len(stop) + 1 != MAX_LINE:
             return
-        await loop.sock_sendall(
-            sock, b"desktop-idle-update-v1 %d %s\n" % (os.getpid(), identity)
-        )
+        await loop.sock_sendall(sock, b"desktop-idle-update-v1 %d %s\n" % (os.getpid(), identity))
         buffer = b""
         while channel.still_owned():
             chunk = await loop.sock_recv(sock, MAX_LINE - len(buffer))
@@ -205,7 +289,9 @@ async def run(app: Any, settings_resume: asyncio.Task[int] | None) -> None:
                 continue
             receipt = b"accepted " + identity + b"\n"
             reason = _try_stop(
-                app, server, settings_resume,
+                app,
+                server,
+                settings_resume,
                 lambda: channel.still_owned() and sock.send(receipt) == len(receipt),
             )
             if reason is None or reason == "not-consumed":

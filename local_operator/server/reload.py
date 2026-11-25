@@ -79,9 +79,10 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from local_operator.interpreter import SAFE_PATH_FLAG
 
@@ -114,10 +115,27 @@ PENDING_ATTR = "serve_reload_pending"
 ADMISSION_ATTR = "serve_reload_admission_closed"
 REQUESTS_ATTR = "serve_reload_owned_requests"
 FENCE_ATTR = "serve_reload_request_fence"
-# Present only with a private desktop update channel. Made here because the
-# request middleware, not a sampled list of sockets, knows which feeds replay.
+# Present only with a private desktop update channel.
 UPDATE_STREAMS_ATTR = "serve_idle_update_streams"
+UPDATE_FEED_KEY = "lop.idle_update.feed"
 ROLLING_CONTRACT = "local-work-v1"
+
+
+@dataclass
+class UpdateFeedAdmission:
+    # The middleware owns the request count; the HTTP protocol owns the moment
+    # that a successfully opened feed actually reaches the wire.
+    on_headers: Callable[[], None] | None = None
+
+
+def replayable_feed(scope: Scope) -> bool:
+    if scope["type"] != "http" or scope.get("method") != "GET":
+        return False
+    path = str(scope.get("path", ""))
+    parts = path.strip("/").split("/")
+    return path == "/v1/desktop/events" or (
+        len(parts) == 5 and parts[:3] == ["v1", "desktop", "sessions"] and parts[4] == "events"
+    )
 
 
 class ReloadAdmissionMiddleware:
@@ -185,16 +203,7 @@ class ReloadAdmissionMiddleware:
                 headers={"Retry-After": "1"},
             )(scope, receive, send)
             return
-        path = str(scope.get("path", ""))
-        parts = path.strip("/").split("/")
-        replayable = scope.get("method") == "GET" and (
-            path == "/v1/desktop/events"
-            or (
-                len(parts) == 5
-                and parts[:3] == ["v1", "desktop", "sessions"]
-                and parts[4] == "events"
-            )
-        )
+        replayable = replayable_feed(scope)
         setattr(state, REQUESTS_ATTR, int(getattr(state, REQUESTS_ATTR, 0)) + 1)
         counted = True
 
@@ -211,45 +220,22 @@ class ReloadAdmissionMiddleware:
                 remaining = int(getattr(state, REQUESTS_ATTR, 0)) - 1
                 setattr(state, REQUESTS_ATTR, remaining if remaining > 0 else 0)
 
-        streams = getattr(state, UPDATE_STREAMS_ATTR, None) if replayable else None
-        stream_scope = None
-        if streams is not None:
-            from anyio import CancelScope
-
-            stream_scope = CancelScope()
-        finished = False
+        private_feed = replayable and getattr(state, UPDATE_STREAMS_ATTR, None) is not None
+        if private_feed:
+            # Without a wire-level binding, keep this response counted: there is
+            # no proof the private stop can close its transport without waiting.
+            feed = cast(UpdateFeedAdmission | None, scope.get(UPDATE_FEED_KEY))
+            if feed is not None:
+                feed.on_headers = release
 
         async def relay(message: Message) -> None:
-            nonlocal finished
-            if stream_scope is None and replayable and message["type"] == "http.response.start":
+            if replayable and not private_feed and message["type"] == "http.response.start":
                 release()
             await send(message)
-            if (
-                stream_scope is not None
-                and message["type"] == "http.response.start"
-                and message["status"] == 200
-            ):
-                # Do not treat errors or headers still in flight as a standing
-                # feed: only successful, established streams can be ended.
-                streams.add(stream_scope)
-                release()
-            if message["type"] == "http.response.body" and not message.get("more_body"):
-                finished = True
 
         try:
-            if stream_scope is None:
-                await self.app(scope, receive, relay)
-            else:
-                # Uvicorn otherwise waits forever for a live SSE body on clean
-                # shutdown. Stop only these two replayable feeds, not the server's
-                # other streams; finish HTTP framing after cooperative teardown.
-                with stream_scope:
-                    await self.app(scope, receive, relay)
-                if stream_scope.cancel_called and not finished:
-                    await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await self.app(scope, receive, relay)
         finally:
-            if stream_scope is not None:
-                streams.discard(stream_scope)
             release()
 
 
