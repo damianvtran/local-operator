@@ -571,9 +571,13 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
             # a search result is about to be opened; kept to three words
             # because this string is billed on every turn.
             "Results include bounded snippets and source URLs; use `web_fetch` with "
-            "`query` (or `read <url>`) to read a result's full page. Use provider only for a "
-            "specific enabled source. Running several independent searches? Issue "
-            "the calls in one turn — they run in parallel."
+            "`query` (or `read <url>`) to read a result's full page. Batch independent "
+            "searches in one turn; they run in parallel."
+            # No provider sentence here: the ``provider`` parameter's own
+            # description already says it forces one enabled source instead of
+            # load balancing. Dropping the duplicate (-77 chars) pays for the
+            # nine native vendor ids PR #4569 adds to that enum, so the start
+            # context stays under scripts/bench_context_budget.py's ceiling.
         ),
         parameters=WebSearchParams.model_json_schema(),
         approval_tier="read",

@@ -928,7 +928,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # native vendor the model cannot force is not selectable at all.
     # RE-MEASURED (native-search family, PR2 part B): 208 -> 222 (+14) — the
     # enum gains google/kimi/zai/mistral/openrouter, for the same reason.
-    "web_search": 222,
+    # RE-MEASURED (PR #4569 context-budget offset): 222 -> 208 (-14) — the
+    # description drops its "Use provider only for a specific enabled source"
+    # sentence, which repeated the ``provider`` parameter's own description,
+    # and tightens the parallel-batching line; pays for the enum growth above.
+    "web_search": 208,
     "write": 137,
 }
 
