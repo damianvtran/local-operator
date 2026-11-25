@@ -1859,7 +1859,9 @@ def test_content_verified_caches_shed_from_a_foreign_merged_tree(
     # sheds the regenerable NAMES too; only an unreadable walk still holds.
     # Held: an unreadable walk or a nested repository (fail closed), and a
     # source file inside ``__pycache__`` (``worktree_state`` reads it dirty).
-    if payload in {"tagged-unreadable", "tagged-repo", "pycache-with-source"}:
+    # Since 2026-11-24 a source file in ``__pycache__`` of a merged tree is
+    # ignored payload like any other and goes too.
+    if payload in {"tagged-unreadable", "tagged-repo"}:
         assert plain.risk is not Risk.LOW, plain.reasons
     else:
         assert plain.risk is Risk.LOW, plain.reasons
@@ -1904,10 +1906,12 @@ def _build_output(wt: Path, payload: str) -> None:
         ("node-modules", True),
         ("cache-typecheck", True),
         ("egg-info-venv", True),
-        ("node-modules-with-env", False),
+        # 2026-11-24 (guard 0.113.0): a merged, finished tree sheds ALL
+        # ignored payload but nested repositories (``_merged_tree_sheds``).
+        ("node-modules-with-env", True),
         ("node-modules-repo", False),
         ("node-modules-unreadable", False),
-        ("test-output", False),
+        ("test-output", True),
     ],
 )
 def test_finished_foreign_tree_sheds_regenerable_build_output(

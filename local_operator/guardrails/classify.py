@@ -1935,14 +1935,21 @@ def _rank(
                     from local_operator.guardrails import provenance as prov
 
                     merged = plain_cleanup_ignored_inventory(path, merged_regenerable=True)
-                    if (
-                        merged is not None
-                        and merged.unverified_ignored == 0
-                        and prov.finished_foreign_worktree(
+                    if merged is not None and merged.unverified_ignored == 0:
+                        finished = prov.finished_foreign_worktree(
                             path, session_id, activity=activity, ignored_verified=True
-                        ).safe
-                    ):
-                        inventory = merged
+                        )
+                        if finished.safe:
+                            inventory = merged
+                            # The legacy state above reads an off-list ignored
+                            # name (``out/``, ``_shared-*.mjs``) as ``dirty``;
+                            # the proof re-read it with the verified payload
+                            # allowance and found it clean (no change, lock,
+                            # live cwd or nested repo), so its state stands.
+                            state = finished.state
+                            state_text = state_phrase(
+                                path, state, session_id, hidden_blocks=target.forced
+                            )
                 if inventory is None:
                     return RankedTarget(
                         target,
