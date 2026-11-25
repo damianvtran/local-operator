@@ -1,0 +1,17 @@
+{
+  "cli.network_sessions.next_page": {
+    "role": "Footer line of `lop network sessions` when a peer holds more rows than the page shown",
+    "tone": "factual and terse; a pointer to the next command, not a warning",
+    "note": "{kind} is `search` when the listing was a --query search (then {total} counts the MATCHING rows, hence 'matching'), else `other`. {peer} is a device name or ID, {shown} and {total} are row counts (ICU number arguments). {command} is the complete, shell-quoted next-page command line (e.g. `lop network sessions --peer node2 --cursor TOKEN --limit 20 --query 'x'`): never translate, reorder or split it; the reader copies it verbatim. Keep both select arms; no final period."
+  },
+  "cli.network_sessions.paging_unsupported": {
+    "role": "Footer line of `lop network sessions` when a peer runs an older build that cannot page or search its listing",
+    "tone": "factual; say plainly what is missing, without blaming the user",
+    "note": "{kind} is `search` when the reader asked --query (the search never ran on that peer and it contributed no rows), else `other` (a paged ask: the rows shown are that device's capped default listing, not all of it). {peer} is a device name or ID; preserve it verbatim. No final period."
+  },
+  "cli.network_sessions.relay_unpaged": {
+    "role": "Footer line of `lop network sessions --limit/--cursor/--query` when this device's own background relay is an older build that ignored the paging request",
+    "tone": "factual; state that the answer is not a page or a search and give the remedy, without blaming the user",
+    "note": "'Relay' is the background mesh service on this device (glossary term). The remedy is restarting that relay so the newer build serves. No final period."
+  }
+}

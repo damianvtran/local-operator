@@ -489,6 +489,10 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # (``RelayServer._op_catalog``), so advertising it promises an owner whose
         # ``net_catalog`` handler answers only that session's row.
         wire.REMOTE_CATALOG_SESSION_ID_V1: "net_catalog",
+        # Paging/search adds no op: it gates optional ``limit``/``cursor``/``query``
+        # fields on the same catalogue frame (``RelayServer._catalog_page``), so
+        # advertising it promises an owner whose ``net_catalog`` handler pages.
+        wire.REMOTE_CATALOG_PAGE_V1: "net_catalog",
         # Advertising the binding promises verification/storage of the signed
         # onboarding proof through this dedicated peer op, not just a wire feature.
         wire.OPERATOR_BINDING_V1: "net_operator_binding",

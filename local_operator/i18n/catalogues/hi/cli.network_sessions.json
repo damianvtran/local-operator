@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}: {shown, number} दिखाए गए, कुल {total, number} मेल खाते परिणाम — अगला पेज: {command}} other {{peer}: {shown, number} दिखाए गए, कुल {total, number} — अगला पेज: {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}: उसका बिल्ड रिमोट खोज से पुराना है, इसलिए वहाँ खोज नहीं चली — उससे कोई पंक्ति नहीं मिली} other {{peer}: उसका बिल्ड रिमोट पेजिंग से पुराना है, इसलिए यह उसकी पूरी सूची नहीं है}}",
+  "cli.network_sessions.relay_unpaged": "इस डिवाइस पर चल रहा रिले रिमोट पेजिंग और खोज से पुराना है, इसलिए किसी भी डिवाइस पर न पेजिंग हुई, न खोज — पेजिंग या खोज के लिए रिले को रीस्टार्ट करें"
+}
