@@ -7305,7 +7305,20 @@ async def events(
     # because the reduction some callers build is a request whose state carries
     # only the pool (`SimpleNamespace`), and the app-state attribute is not part
     # of what this route needs.
-    release_paint = transcript_index.hold_paint(pool.root, session_id)
+    release_index_hold = transcript_index.hold_paint(pool.root, session_id)
+    # INTERACTIVE-FIRST ADMISSION (``DesktopSessions.hold_interactive_open``):
+    # the same span, the same exits, a different resource. The paint hold makes
+    # index SCANS give way; this makes another session's background read that
+    # would COLD-BUILD a bridge wait (bounded) until this snapshot is written,
+    # because that build holds the GIL for 1-1.5 s on a large roster. Folded
+    # into ``release_paint`` so every exit that releases one releases both --
+    # the snapshot frame, a refusal, a disconnect, a never-iterated body.
+    release_admission = pool.hold_interactive_open()
+
+    def release_paint() -> None:
+        release_index_hold()
+        release_admission()
+
     # R1 HANDOFF: a first-paint open was already holding since before the
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
@@ -7317,7 +7330,9 @@ async def events(
     session_options: _EventsSessionOptions = (
         {} if ingress_trace is None else {"ingress_trace": ingress_trace}
     )
-    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
+    context = pool.session(
+        session_id, read=True, allow_draft=True, interactive_open=True, **session_options
+    )
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()

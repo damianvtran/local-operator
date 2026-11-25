@@ -1135,6 +1135,11 @@ async def test_the_events_route_forwards_entry_ts_into_the_open_frame(remote_api
         # this config dir.
         root = client._transport.app.state.config_manager.config_dir
 
+        # ...and the interactive-first admission hold the /events route takes
+        # (``DesktopSessions.hold_interactive_open``); nothing here is held.
+        def hold_interactive_open(self):
+            return lambda: None
+
         @contextlib.asynccontextmanager
         async def session(self, session_id: str, **kwargs: Any):
             yield bridge

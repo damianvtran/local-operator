@@ -269,6 +269,14 @@ RESYNC_MARKER = "resync"
 MERGE_CAP_BYTES = 1 << 20
 SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
+#: How long a BACKGROUND read that would cold-build a bridge yields to an
+#: interactive ``/events`` open still building its first frame, before it runs
+#: anyway. See :meth:`DesktopSessions.hold_interactive_open` for the measurement.
+#: The bound exists so a nonstop run of clicks (or a leaked hold) can only
+#: DELAY a background reader, never starve it: the 12 traced opens on v0.113.1
+#: took 7-2889 ms entry->snapshot (median 643), so 2 s covers all but the one
+#: open that was itself stretched by the contention this removes.
+INTERACTIVE_ADMISSION_WAIT_S = 2.0
 
 #: How long a READ waits for its attach when the conversation is ANOTHER DEVICE'S.
 #:
@@ -8893,6 +8901,14 @@ class DesktopSessions:
         #: makes a cancelled LEADER harmless — the task itself is never cancelled
         #: by a waiter (``asyncio.shield``), so it still settles and still
         #: publishes.
+        #: INTERACTIVE-FIRST ADMISSION: how many ``/events`` opens are between
+        #: their route entry and their snapshot frame (see
+        #: :meth:`hold_interactive_open`), plus the event set whenever that count
+        #: is zero. The event is keyed with its loop, as ``_locate_flights`` is,
+        #: so a torn-down test loop's event reads as absent rather than as a
+        #: future bound to a dead loop. Loop-only mutation, never across an await.
+        self._interactive_opens = 0
+        self._interactive_idle: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self._locate_flights: dict[
             str, tuple[asyncio.AbstractEventLoop, asyncio.Task[_LocatedSession]]
         ] = {}
@@ -11440,6 +11456,90 @@ class DesktopSessions:
             dedupe_key=f"failed:{request_id}",
         )
 
+    def _idle_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        held = self._interactive_idle
+        if held is None or held[0] is not loop:
+            event = asyncio.Event()
+            if self._interactive_opens == 0:
+                event.set()
+            held = self._interactive_idle = (loop, event)
+        return held[1]
+
+    def hold_interactive_open(self) -> Callable[[], None]:
+        """Mark one interactive ``/events`` open in flight; returns its idempotent release.
+
+        WHY (interactive-first admission, 2026-11-25). A sidebar click waited on
+        a DIFFERENT session's cold build. Trace on v0.113.1 (12 real opens,
+        median 643 ms, 6/12 under 500, max 2889): the worst opens overlapped a
+        background ``GET .../history?limit=100`` of a non-resident 218 MB / 11 MB
+        roster session -- the renderer's held-send sweep at app mount, most
+        likely -- whose cold build (roster ``json.load`` on the loop, then
+        ``install_prepare``'s GIL-holding copy in a thread) took 1.2-1.5 s. A
+        thread does not help: the build holds the GIL, so the click's loop work
+        stretches by the build's share. The paint hold
+        (``transcript_index.hold_paint``) only makes index SCANS give way; a
+        whole cold build started by another route did not.
+
+        THE RULE. While any hold taken here is live, a ``read=True`` acquire that
+        is not itself an ``/events`` open and whose bridge has no facade yet --
+        i.e. one that would cold-build -- waits (at most
+        :data:`INTERACTIVE_ADMISSION_WAIT_S`) before it builds. A resident read
+        is a dict lookup plus a page and is never delayed, an ``/events`` open
+        never waits on another, and writes are never delayed (a user action must
+        not queue behind a paint).
+
+        The caller (the ``/events`` route) takes this at entry and releases it
+        once the snapshot frame is written, and on every other exit (refusal,
+        error, disconnect, a body never iterated); the release is idempotent so
+        each exit may call it, and the bounded wait caps the cost of a leak.
+        """
+        self._interactive_opens += 1
+        self._idle_event().clear()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._interactive_opens = max(0, self._interactive_opens - 1)
+            held = self._interactive_idle
+            if self._interactive_opens == 0 and held is not None:
+                held[1].set()
+
+        return release
+
+    async def _yield_to_interactive_opens(self, session_id: str) -> None:
+        """Wait (bounded) for in-flight ``/events`` opens before a cold background build.
+
+        See :meth:`hold_interactive_open`. Asked before the pool lock, so a held
+        reader holds nothing anyone else needs. "Resident" means a bridge whose
+        facade is built (``remote``): a pooled bridge that detached at
+        ``users == 0`` rebuilds its facade on the next acquire, which is exactly
+        the cold cost this rule defers.
+        """
+        if self._interactive_opens <= 0:
+            return
+        bridge = self.bridges.get(session_id)
+        if bridge is not None and bridge.remote is not None:
+            return
+        started = time.monotonic()
+        opens = self._interactive_opens
+        timed_out = False
+        try:
+            await asyncio.wait_for(self._idle_event().wait(), INTERACTIVE_ADMISSION_WAIT_S)
+        except TimeoutError:
+            timed_out = True  # proceed regardless: delay, never starve
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.admission.held",
+                (time.monotonic() - started) * 1000,
+                session=session_id,
+                opens=opens,
+                timed_out=timed_out,
+            )
+
     async def _resident_bridge(self, session_id: str) -> DesktopSessionBridge | None:
         """The bridge this session ALREADY has, or ``None`` — never a new one.
 
@@ -11463,6 +11563,7 @@ class DesktopSessions:
         allow_draft: bool = False,
         control_only: bool = False,
         ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
+        interactive_open: bool = False,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
 
@@ -11560,6 +11661,12 @@ class DesktopSessions:
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         await self._refuse_deleted_temporary(session_id)
+        # INTERACTIVE-FIRST ADMISSION (``hold_interactive_open``): a background
+        # read that would cold-build yields to an /events open's first frame.
+        # Keyed on ``interactive_open`` -- the flag the /events route passes --
+        # never on ``ingress_trace``, which exists only when tracing is on.
+        if read and not interactive_open:
+            await self._yield_to_interactive_opens(session_id)
         bridge: DesktopSessionBridge | None = None
         flight: asyncio.Task[_LocatedSession] | None = None
         # ``taken`` rather than an unconditional release in the ``finally``: a
