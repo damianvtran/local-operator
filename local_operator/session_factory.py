@@ -7165,6 +7165,12 @@ async def create_session(
     # dispose (one leaked pool per turn on the server facade otherwise).
     # The classification seam's client and memos are per SESSION, so the
     # keep-alive client has to be released with everything else the root owns.
+    # Bind after Session restores its model. Read it at resolution time so a
+    # model switch changes advisory preference without pinning a chat account.
+    if plan.knowledge_hooks is not None:
+        bind_route = getattr(plan.knowledge_hooks.classifier, "bind_advisory_route", None)
+        if callable(bind_route):
+            bind_route(plan.auth_store, session.session_id, lambda: session.model.provider)
     attach_classification_spend(session, plan.knowledge_hooks)
     attach_classification_dispose(session, plan.knowledge_hooks)
     attach_stream_dispose(session, plan.session_kwargs["stream_fn"])

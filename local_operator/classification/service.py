@@ -115,6 +115,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from local_operator.classification import accounting
+from local_operator.classification.advisory import ADVISORY_VENDORS, GOOGLE_VERTEX
 from local_operator.classification.cascade import (
     DEFAULT_VENDOR,
     VendorResolution,
@@ -158,6 +159,8 @@ from local_operator.settings_io import strict_bool
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from local_operator.classification.advisory import AdvisoryAuthSource
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +335,14 @@ class ClassificationService:
         self._disabled_shapes: set[str] = set()
         self._vendor_name: str | None = None
         self._legs: tuple[DecisionVendor, ...] | None = None
+        # Typed calls must not resolve or reuse a generated-hint route, even
+        # when they ask a choice question. Hold separate memos for the two lanes.
+        self._typed_legs: tuple[DecisionVendor, ...] | None = None
+        self._typed_trace: VendorResolution | None = None
+        self._prefer_vertex = False
+        self._auth_store: AdvisoryAuthSource | None = None
+        self._advisory_session_id: str | None = None
+        self._active_provider: Callable[[], str] | None = None
         #: Why the first leg was skipped, when it was. Set by :meth:`_available_legs`
         #: from the resolution trace and cleared with ``_legs`` so a stale reason can
         #: never describe a newly resolved cascade. ``None`` means "not resolved yet";
@@ -353,6 +364,14 @@ class ClassificationService:
         self._spend_sink: accounting.SpendSink | None = None
 
     # -- configuration -----------------------------------------------------
+
+    def bind_advisory_route(
+        self, auth_store: AdvisoryAuthSource, session_id: str, active_provider: Callable[[], str]
+    ) -> None:
+        """Use the session's own account selector without modifying its affinity."""
+        self._auth_store = auth_store
+        self._advisory_session_id = session_id
+        self._active_provider = active_provider
 
     def bind_spend_sink(self, sink: "accounting.SpendSink | None") -> None:
         """Bind (or, with ``None``, unbind) the channel-ledger sink for this session.
@@ -602,7 +621,7 @@ class ClassificationService:
         timeout_s = self.timeout_s
         try:
             async with asyncio.timeout(timeout_s):
-                response = await self._call_cascade(decision_request, timeout_s)
+                response = await self._call_cascade(decision_request, timeout_s, advisory=True)
         except TimeoutError:
             logger.warning("classification: timed out after %.0f ms", timeout_s * 1000)
             self._record_failure("timeout")
@@ -735,7 +754,9 @@ class ClassificationService:
             skip_question_ids=frozenset(self._disabled_shapes),
         )
 
-    async def _call_cascade(self, request: DecisionRequest, timeout_s: float) -> DecisionResponse:
+    async def _call_cascade(
+        self, request: DecisionRequest, timeout_s: float, *, advisory: bool = False
+    ) -> DecisionResponse:
         """Walk the legs in order; the first that answers wins.
 
         A ``DecisionSchemaError`` is re-raised rather than caught: it is our bug
@@ -747,16 +768,48 @@ class ClassificationService:
         re-resolves credentials: a key revoked or topped up mid-session is
         picked up without restarting the session.
         """
-        legs = await self._available_legs()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        legs = await self._available_legs(advisory=advisory)
         if not legs:
             raise _NoUsableLeg("no leg has a usable credential")
+        # Leave time for a native fallback only when it can actually send.
+        # Reserving half unconditionally cuts the normal 1.5 s deadline to
+        # 750 ms for the very OAuth-only installs this path is meant to help.
+        reserve_for_native = False
+        if any(vendor.name in ADVISORY_VENDORS for vendor in legs):
+            for vendor in legs:
+                if vendor.name in ADVISORY_VENDORS:
+                    continue
+                try:
+                    reserve_for_native = bool(await vendor.credential(self._config_dir))
+                except Exception:  # A credential probe is not a decision attempt.
+                    continue
+                if reserve_for_native:
+                    break
         attempts: list[str] = []
         last: DecisionVendorError | None = None
         for walk in range(DEFAULT_CASCADE_ATTEMPTS):
             attempts_walk: list[str] = []
             for vendor in legs:
                 try:
-                    response = await self._metered_decide(vendor, request, timeout_s)
+                    note = self._fallback_note(advisory=advisory)
+                    if reserve_for_native and vendor.name in ADVISORY_VENDORS:
+                        # Split the remaining call budget with the rest of the
+                        # cascade. A stuck hint must leave time for a native
+                        # leg; the outer turn wait and call deadline don't move.
+                        leg_budget = max(0.0, (deadline - loop.time()) / 2)
+                        try:
+                            async with asyncio.timeout(leg_budget):
+                                response = await self._metered_decide(
+                                    vendor, request, leg_budget, note=note
+                                )
+                        except TimeoutError:
+                            raise DecisionVendorError(
+                                "structured hint timed out", kind="transport"
+                            ) from None
+                    else:
+                        response = await self._metered_decide(vendor, request, timeout_s, note=note)
                 except DecisionSchemaError:
                     raise
                 except DecisionVendorError as exc:
@@ -766,8 +819,12 @@ class ClassificationService:
                     last = exc
                     attempts.append(f"{vendor.name}:{exc.kind}")
                     attempts_walk.append(f"{vendor.name}:{exc.kind}")
-                    self._legs = None
-                    self._routing_trace = None
+                    if advisory:
+                        self._legs = None
+                        self._routing_trace = None
+                    else:
+                        self._typed_legs = None
+                        self._typed_trace = None
                     self._vendor_name = None
                     logger.debug(
                         "classification: leg %s failed (%s), trying next", vendor.name, exc.kind
@@ -799,7 +856,7 @@ class ClassificationService:
         )
 
     async def _metered_decide(
-        self, vendor: DecisionVendor, request: DecisionRequest, timeout_s: float
+        self, vendor: DecisionVendor, request: DecisionRequest, timeout_s: float, *, note: str = ""
     ) -> DecisionResponse:
         """One leg attempt, with exactly one channel-ledger row for the request(s) it placed.
 
@@ -832,7 +889,6 @@ class ClassificationService:
         # standalone caller's result when there is nowhere to send the record.
         if self._spend_sink is None:
             return await vendor.decide(request, timeout_s=timeout_s)
-        note = self._fallback_note()
         meter, token = accounting.begin_attempt()
         try:
             response = await vendor.decide(request, timeout_s=timeout_s)
@@ -876,7 +932,7 @@ class ClassificationService:
         finally:
             accounting.end_attempt(token)
 
-    def _fallback_note(self) -> str:
+    def _fallback_note(self, *, advisory: bool) -> str:
         """The spend row's routing note, or "" for the ordinary first-leg path.
 
         Names the FIRST preferred leg the resolution skipped. That is the leg the
@@ -885,7 +941,7 @@ class ClassificationService:
         present the fallback as the choice (the defect this slice closes). Empty
         when nothing was skipped, which keeps every pre-slice row identical.
         """
-        trace = self._routing_trace
+        trace = self._routing_trace if advisory else self._typed_trace
         if trace is None or not trace.skipped:
             return ""
         first = trace.skipped[0]
@@ -924,13 +980,13 @@ class ClassificationService:
             # configuration, and the caller's warning is about the latter.
             return True
         try:
-            legs = await self._available_legs()
+            legs = await self._available_legs(advisory=True)
         except Exception:  # noqa: BLE001 — a probe must never fail a turn
             logger.debug("classification: provider probe failed", exc_info=True)
             return True
         return bool(legs)
 
-    async def _available_legs(self) -> tuple[DecisionVendor, ...]:
+    async def _available_legs(self, *, advisory: bool) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
 
         Uses :func:`~local_operator.classification.cascade.resolve_vendor_with_trace`
@@ -941,16 +997,31 @@ class ClassificationService:
         trace is kept on the service (:attr:`routing_note`) and cleared whenever
         ``_legs`` is.
         """
-        if self._legs is not None:
-            return self._legs
+        preferred = self._active_provider() if advisory and self._active_provider else ""
+        prefer_vertex = preferred == GOOGLE_VERTEX
+        if advisory and prefer_vertex != self._prefer_vertex:
+            self._legs = None
+            self._prefer_vertex = prefer_vertex
+        cached = self._legs if advisory else self._typed_legs
+        if cached is not None:
+            return cached
+        order = leg_order(self._settings, advisory=advisory, preferred_provider=preferred)
         resolution = await resolve_vendor_with_trace(
-            self._config_dir, self._settings, client=self._client()
+            self._config_dir,
+            self._settings,
+            client=self._client(),
+            order=order,
+            auth_store=self._auth_store,
+            session_id=self._advisory_session_id,
         )
         # Record the trace even when nothing resolved: the next re-resolution starts
         # from ``_legs is None`` anyway, and keeping the skipped rows here lets the
         # caller's diagnostics explain WHY no leg was available.
-        self._routing_trace = resolution
-        note = self.routing_note
+        if advisory:
+            self._routing_trace = resolution
+        else:
+            self._typed_trace = resolution
+        note = self.routing_note if advisory else self._fallback_note(advisory=False)
         if note:
             # ONE LINE PER RESOLUTION, and that is the point: the recommendation and
             # the spend row carry the downgrade, but this is the surface an operator
@@ -958,15 +1029,21 @@ class ClassificationService:
             # exists to remove must be visible here too.
             logger.info("classification: %s", note)
         first = resolution.vendor
-        if first is None:
-            self._legs = ()
-            return self._legs
-        order = leg_order(self._settings)
-        start = order.index(first.name) if first.name in order else 0
-        self._vendors[first.name] = first
-        self._vendor_name = self._vendor_name or first.name
-        self._legs = tuple(self._vendor_for(name) for name in order[start:])
-        return self._legs
+        legs: tuple[DecisionVendor, ...] = ()
+        if first is not None:
+            if first.name == "radient":
+                # A Radient outage with usable sign-in isn't permission to
+                # change inference providers; retain its original roll-forward.
+                order = leg_order(self._settings)
+            start = order.index(first.name)
+            self._vendors[first.name] = first
+            self._vendor_name = self._vendor_name or first.name
+            legs = tuple(self._vendor_for(name) for name in order[start:])
+        if advisory:
+            self._legs = legs
+        else:
+            self._typed_legs = legs
+        return legs
 
     def _client(self) -> httpx.AsyncClient:
         """The session's keep-alive HTTP client, created on first use.
@@ -1020,6 +1097,8 @@ class ClassificationService:
         self._vendors.clear()
         self._legs = None
         self._routing_trace = None
+        self._typed_legs = None
+        self._typed_trace = None
         self._vendor_name = None
 
     def warm_up(self) -> None:
@@ -1060,7 +1139,12 @@ class ClassificationService:
         vendor = self._vendors.get(name)
         if vendor is None:
             vendor = build_vendor(
-                name, self._config_dir, model=model_override(self._settings), client=self._client()
+                name,
+                self._config_dir,
+                model=model_override(self._settings),
+                client=self._client(),
+                auth_store=self._auth_store,
+                session_id=self._advisory_session_id,
             )
             self._vendors[name] = vendor
         return vendor

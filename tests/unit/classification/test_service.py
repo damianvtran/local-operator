@@ -60,6 +60,33 @@ def service(manager, install_legs, settings_map=None, **leg_specs):
 # ---------------------------------------------------------------------------
 
 
+async def test_subscription_legs_are_automatic_only() -> None:
+    from local_operator.classification.cascade import leg_order
+
+    kwargs = {"advisory": True}
+    assert leg_order(settings(), **kwargs) == (
+        "radient",
+        "openai-subscription",
+        "google-vertex",
+        "typesafe",
+        "openrouter",
+    )
+    assert leg_order(settings(), preferred_provider="google-vertex", **kwargs) == (
+        "radient",
+        "google-vertex",
+        "openai-subscription",
+        "typesafe",
+        "openrouter",
+    )
+    assert leg_order(settings(vendor="radient"), **kwargs) == ("radient",)
+    assert leg_order(settings(model="explicit-model"), **kwargs) == (
+        "radient",
+        "typesafe",
+        "openrouter",
+    )
+    assert leg_order(settings()) == ("radient", "typesafe", "openrouter")
+
+
 async def test_the_defaults_are_the_contract_defaults() -> None:
     assert DEFAULT_AUTO is True
     assert DEFAULT_TIMEOUT_MS == 1500

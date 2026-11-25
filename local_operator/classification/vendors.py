@@ -106,11 +106,13 @@ import httpx
 from pydantic import SecretStr
 
 from local_operator.classification.accounting import note_post
+from local_operator.classification.advisory import ADVISORY_VENDORS, AdvisoryVendor
 from local_operator.classification.types import (
     Answer,
     DecisionRequest,
     DecisionResponse,
     DecisionSchemaError,
+    DecisionVendor,
     DecisionVendorError,
     Question,
 )
@@ -126,6 +128,8 @@ from local_operator.session.channel_spend import BASIS_NOT_TRACKED
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from local_operator.classification.advisory import AdvisoryAuthSource
 
 logger = logging.getLogger(__name__)
 
@@ -1074,6 +1078,12 @@ def build_vendor(
     *,
     model: str = "",
     client: httpx.AsyncClient | None = None,
-) -> _HttpDecisionVendor:
-    """Construct one leg by name. Raises ``KeyError`` for an unknown name."""
+    auth_store: AdvisoryAuthSource | None = None,
+    session_id: str | None = None,
+) -> DecisionVendor:
+    """Construct a native leg or a private, auto-only structured hint leg."""
+    if name in ADVISORY_VENDORS:
+        return AdvisoryVendor(
+            name, config_dir, client=client, auth_store=auth_store, session_id=session_id
+        )
     return VENDOR_CLASSES[name](config_dir, model=model, client=client)

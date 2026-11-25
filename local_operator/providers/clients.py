@@ -7336,8 +7336,10 @@ class GoogleClient:
         model_id: str,
         api_key: str | None,
         oauth_access: "OAuthAccess | None",
+        *,
+        streaming: bool = True,
     ) -> tuple[str, dict[str, str]]:
-        """Resolve Vertex AI's streaming URL and auth headers for this credential.
+        """Resolve Vertex AI's content URL and auth headers for this credential.
 
         OAuth and service-account credentials call the project/location path
         with a Bearer token; API keys (express mode or service-account-bound)
@@ -7350,6 +7352,9 @@ class GoogleClient:
         from local_operator.providers.oauth.vertex import LOCATION_RE, PROJECT_ID_RE
 
         quoted_model = urllib.parse.quote(model_id, safe="")
+        # The advisory one-shot call must follow the same validated OAuth
+        # project/location and host rules as the normal streaming client.
+        method = "streamGenerateContent?alt=sse" if streaming else "generateContent"
         headers = {"Content-Type": "application/json"}
         if oauth_access is not None and oauth_access.kind == "oauth":
             raw = oauth_access.raw or {}
@@ -7395,16 +7400,13 @@ class GoogleClient:
             url = (
                 f"{host}/v1/projects/{urllib.parse.quote(project_id, safe='')}"
                 f"/locations/{urllib.parse.quote(location, safe='')}"
-                f"/publishers/google/models/{quoted_model}:streamGenerateContent?alt=sse"
+                f"/publishers/google/models/{quoted_model}:{method}"
             )
             headers["Authorization"] = f"Bearer {oauth_access.access_token}"
             headers["x-goog-user-project"] = project_id
             return url, headers
 
-        url = (
-            f"{self._base_url}/v1/publishers/google/models/{quoted_model}"
-            ":streamGenerateContent?alt=sse"
-        )
+        url = f"{self._base_url}/v1/publishers/google/models/{quoted_model}" f":{method}"
         if api_key:
             headers["x-goog-api-key"] = api_key
         return url, headers
