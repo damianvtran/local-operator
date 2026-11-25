@@ -343,6 +343,13 @@ def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> 
 
     Identifier fields: every row's session id and title are marked spans, so
     redaction leaves the names a caller resumes or peeks by.
+
+    A row with no directory HERE is ``[missing]`` only on a device in no
+    network; otherwise its ``holder`` block (``projects._holder_resolver``,
+    cache-only) decides the line, so a session another device holds reads as
+    remote with its owner instead of as the deleted row the projects guide tells
+    agents to unlink. ``unresolved``/``unreachable`` say what the cached listing
+    could not confirm — never "deleted".
     """
     rows = view.get("sessions") or []
     if not rows:
@@ -358,7 +365,7 @@ def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> 
             busy = ", busy" if runtime.get("busy") else ""
             session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
-                lines.append(f"  - {session_id} [missing] — no session directory")
+                lines.append(_holder_line(session_id, row, context, filed=False))
                 continue
             title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = [state + busy]
@@ -376,7 +383,7 @@ def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> 
         for row in filed:
             session_id = identifier_text(context, str(row["session_id"]))
             if not row.get("exists"):
-                lines.append(f"  - {session_id} [filed] — no session directory")
+                lines.append(_holder_line(session_id, row, context, filed=True))
                 continue
             title = identifier_text(context, str(row.get("title") or "")) or "(untitled)"
             bits = ["filed"]
@@ -384,6 +391,52 @@ def _session_lines(view: dict[str, Any], context: ToolContext | None = None) -> 
                 bits.append("archived")
             lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
     return lines
+
+
+def _holder_line(
+    session_id: str, row: dict[str, Any], context: ToolContext | None, *, filed: bool
+) -> str:
+    """One line for a linked session with no directory on this device.
+
+    No ``holder`` key (a device in no network) keeps the pre-mesh sentence
+    byte-for-byte. A filing (``filed=True``) never gets a runtime state: its
+    holder carries none, by construction in ``build_project_view``.
+    """
+    holder = row.get("holder")
+    lead = "filed · " if filed else ""
+    if not isinstance(holder, dict):
+        tag = "filed" if filed else "missing"
+        return f"  - {session_id} [{tag}] — no session directory"
+    kind = holder.get("kind")
+    device = identifier_text(
+        context, str(holder.get("device_name") or holder.get("device_id") or "")
+    )
+    if kind == "remote" and device:
+        title = identifier_text(context, str(holder.get("title") or "")) or "(untitled)"
+        bits = [f"{lead}remote", device]
+        if not filed:
+            state = str(holder.get("state") or "unknown")
+            if state == "unknown":
+                bits.append("state unknown")
+            else:
+                bits.append(state + (", busy" if holder.get("busy") else ""))
+            age = holder.get("listing_age_s")
+            if isinstance(age, (int, float)):
+                # The state is a cached listing's claim; its age is what lets a
+                # reader judge it (the cache is TTL'd, not live).
+                bits.append(f"listed {int(age)}s ago")
+        if row.get("archived"):
+            bits.append("archived")
+        return f"  - {session_id} [{' · '.join(bits)}] {title}"
+    if kind == "unreachable" and device:
+        return (
+            f"  - {session_id} [{lead}unreachable · {device}] — peer not answering; "
+            "last listing could not confirm it"
+        )
+    return (
+        f"  - {session_id} [{lead}unresolved] — not on this device; no peer listing names it "
+        "(not verified deleted)"
+    )
 
 
 def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:

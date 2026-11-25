@@ -91,7 +91,7 @@ It fires at most once per turn, only after a worked turn, only for stale records
 
 ## Housekeeping
 
-- **Stale links are marked, never auto-removed.** A linked session whose directory is gone renders as `missing`; clear it with `op='unlink'` when you see it.
+- **Stale links are marked, never auto-removed.** A linked session whose directory is gone renders as `missing`; clear it with `op='unlink'` when you see it. On a device in a mesh, a session another device holds renders as `remote · <device>` instead; `unreachable` (its peer is not answering) and `unresolved` (no cached peer listing names it) are not proof of deletion — do not unlink those on that basis.
 - **Archive finished work** with `status='archived'` (or `'done'`, which also records the completion date). The views keep archived rows out of the way when they can.
 - **Milestones**: keep them few and dated; complete them as they land rather than at the end, and remove ones that no longer describe the plan.
 - The link cap is 64 per project and the milestone cap is 20. Both refusals name the remedy.
