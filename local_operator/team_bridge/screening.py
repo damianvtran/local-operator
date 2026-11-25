@@ -58,13 +58,12 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from local_operator.team_bridge.client import (
+    RENDER_ONLY_SCREENING_VERSIONS,
     SCREENING_ENGINE_VERSION,
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
     SCREENING_VERSION_V4,
-    SCREENING_VERSION_V5,
-    SCREENING_VERSION_V6,
     screening_template_sha256,
 )
 from local_operator.team_bridge.privacy_pass import (
@@ -264,7 +263,7 @@ class PolicySnapshot:
     #: (R7/Q3: one capture certifies the dispatch).
     provider: str = ""
     #: The addressed-aware template the hub OFFERS beside the policy template
-    #: (``client.screening_addressed_version``: ``bridge-screen-v5`` or ``""``).
+    #: (``client.screening_addressed_version`` selects it, or returns ``""``).
     #: A per-message RENDER option, never the policy: the published row, the
     #: local receipt and every store fence keep ``screening_version``. Part of
     #: the snapshot so ``matches_live`` refuses a run whose offer changed mid-flight.
@@ -1120,17 +1119,15 @@ RELATION_VALUES = FEED_RELATION_VALUES
 def text_screening_version(
     snapshot: "PolicySnapshot", envelope: "Envelope", *, images: Any, files: Any
 ) -> str:
-    """The ONE template a screen renders under: v4 files, v3 images, v5 or policy text.
+    """The ONE template to render: v4 files, v3 images, addressed or policy text.
 
     A FILE envelope ALWAYS renders under v4 — the only embedded template whose
     wrapper tells the screener that the file text which follows is submission
     data, and the only one the hub accepts a files_hash under. An image-only
-    envelope renders under v3. A TEXT-ONLY envelope renders under the
-    addressed-aware v5 when the hub offers it with bytes this client embeds
-    (``snapshot.addressed_version``) AND the envelope carries a routing value;
-    otherwise under the served policy template (v1/v2), byte-for-byte as before.
-    v5 covers no attachments, so an image/file message never reaches it. Used by
-    the render AND by the outcome's ``rendered_version`` so the two cannot differ.
+    envelope renders under v3. The exact hub offer only selects an addressed
+    template for TEXT-ONLY envelopes that carry a routing value; otherwise use
+    the served policy template. Used by the render AND by the outcome's
+    ``rendered_version`` so the two cannot differ.
     """
 
     if files is not None:
@@ -1138,11 +1135,9 @@ def text_screening_version(
     if images is not None:
         return SCREENING_VERSION_V3
     if (
-        snapshot.addressed_version in (SCREENING_VERSION_V5, SCREENING_VERSION_V6)
+        snapshot.addressed_version in RENDER_ONLY_SCREENING_VERSIONS
         and envelope.addressed in ADDRESSED_VALUES
     ):
-        # v6 (holds triage 2026-11-18) is v5's successor in the same hub slot;
-        # either is rendered only as the version the hub offered with bytes we embed.
         return snapshot.addressed_version
     return snapshot.screening_version
 

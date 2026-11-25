@@ -73,8 +73,10 @@ from ..client import (
     SCREENING_TEMPLATE_V4_SHA256,
     SCREENING_TEMPLATE_V5_PIN,
     SCREENING_TEMPLATE_V6_PIN,
+    SCREENING_TEMPLATE_V7_PIN,
     SCREENING_VERSION_V5,
     SCREENING_VERSION_V6,
+    SCREENING_VERSION_V7,
     BridgeRefusal,
     agent_file_reads_capability,
     screening_template_v4_usable,
@@ -2705,12 +2707,9 @@ def _text_admit_template(result: Any) -> str | None:
     """The ``template_sha256`` a TEXT-ONLY allow carries to the hub's admit.
 
     ``None`` (omitted) is the pre-v5 shape: the hub reads it as the ``screening``
-    slot's template. A screen that actually rendered bridge-screen-v5 must say so,
-    because the hub validates a named template's vocabulary on a text-only admit
-    and accepts the v5 hash beside the older text templates (agent-server
-    ``admitAttachmentGrant``; it does not record it, code review round 2, N1).
-    Only the pinned v5 hash qualifies; any other rendered value (a cache hit
-    renders nothing) keeps the omitted shape.
+    slot's template. An addressed screen must name its exact rendered pin on a
+    text allow; the hub checks the text-only vocabulary (``admitAttachmentGrant``).
+    Legacy policy renders and cached results keep the omitted shape.
     """
 
     rendered = getattr(result, "rendered_template_sha256", None)
@@ -2726,6 +2725,11 @@ def _text_admit_template(result: Any) -> str | None:
         and rendered == SCREENING_TEMPLATE_V6_PIN
     ):
         return SCREENING_TEMPLATE_V6_PIN
+    if (
+        getattr(result, "rendered_version", None) == SCREENING_VERSION_V7
+        and rendered == SCREENING_TEMPLATE_V7_PIN
+    ):
+        return SCREENING_TEMPLATE_V7_PIN
     return None
 
 
