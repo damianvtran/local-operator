@@ -238,9 +238,14 @@ class _Link:
         self.capabilities = capabilities
         self.answer = answer
         self.frames: list[dict[str, Any]] = []
+        # Kept so a test can pin the hop budget: the ctl op spells the frame and
+        # its timeout inline (R1), so nothing else would notice them drifting from
+        # what ``_local_peer_call`` used to pass.
+        self.timeouts: list[float | None] = []
 
     def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> Any:
         self.frames.append(frame)
+        self.timeouts.append(timeout)
         if isinstance(self.answer, BaseException):
             raise self.answer
         return self.answer
@@ -313,6 +318,13 @@ def test_ctl_sends_exactly_one_idle_only_frame_and_passes_the_receipt(
     assert reply["op"] == "ack" and reply["detail"] == detail, reply
     assert [frame["op"] for frame in link.frames] == ["net_session_stop_idle"]
     assert "mode" not in link.frames[0] and "force" not in link.frames[0]
+    # The inline frame must keep the shape and budget ``_local_peer_call`` gave it
+    # (reviewer round-2 M1): a remote-locality hop with a fresh int request id,
+    # bounded by the engage hop budget rather than the bare op wait.
+    frame = link.frames[0]
+    assert frame["locality"] == "remote"
+    assert isinstance(frame["req"], int) and not isinstance(frame["req"], bool)
+    assert link.timeouts == [relay.engage_hop_bound_s(server_a.settings.op_wait_s)]
 
 
 @pytest.mark.parametrize(

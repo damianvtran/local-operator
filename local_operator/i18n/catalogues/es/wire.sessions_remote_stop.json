@@ -1,13 +1,13 @@
 {
-  "wire.sessions_remote_stop.approval_stop_peer_force": "detener {address} en {peer} forzando: siempre se rechaza — el forzado nunca se envía a otro dispositivo, así que no se enviará nada",
+  "wire.sessions_remote_stop.approval_stop_peer_force": "detener {address} en {peer} forzando: siempre se rechaza — la detención forzada nunca se envía a otro dispositivo, así que no se enviará nada",
   "wire.sessions_remote_stop.approval_stop_peer_idle": "detener {address} en {peer} si allí está inactiva: su dispositivo solo la detiene cuando confirma que está inactiva y nunca envía señales; se rechaza mientras esté trabajando",
-  "wire.sessions_remote_stop.dormant_hint": "Sus despertares y monitorizaciones en {peer} quedan INACTIVOS hasta que se reabra la sesión allí. Para reactivarlos, reábrala con `sessions op=resume session={address} peer={peer}`.",
-  "wire.sessions_remote_stop.force_refused": "Desde aquí, una sesión en otro dispositivo solo se puede detener si está inactiva: el forzado nunca se envía a otro dispositivo, así que no se envió nada. El operador puede forzar su detención en ese dispositivo.",
-  "wire.sessions_remote_stop.not_running": "«{name}» no se está ejecutando en {peer}, así que no había nada que detener.",
-  "wire.sessions_remote_stop.not_served": "{peer} no ejecutó la detención limitada a sesiones inactivas que se le envió, así que no se detuvo nada. Actualice ese dispositivo o pida al operador que detenga la sesión allí.",
-  "wire.sessions_remote_stop.pending": "“{name}” aceptó la detención en {peer}, pero seguía sin salir tras {seconds} s. No se envió ninguna señal — compruébelo con `sessions op=list peer={peer}` antes de reintentar.",
-  "wire.sessions_remote_stop.refused_unanswered": "“{name}” no respondió en {peer}, así que no se pudo confirmar una detención limitada a sesiones inactivas y no se envió ninguna señal. Compruébelo primero con `sessions op=list peer={peer}`: puede que ya no exista.",
-  "wire.sessions_remote_stop.relay_restart": "El relé de este dispositivo es más antiguo que este lop y no puede enviar una detención limitada a sesiones inactivas, así que no se envió nada y no se detuvo nada. Reinícielo con `lop network restart` y vuelva a intentarlo.",
-  "wire.sessions_remote_stop.unconfirmed": "Sin confirmar: puede que la sesión se haya detenido en {peer} o no, y no se reintentó nada. Compruébelo con `sessions op=list peer={peer}` antes de volver a intentarlo.",
-  "wire.sessions_remote_stop.unsupported": "{peer} ejecuta una compilación sin la detención limitada a sesiones inactivas, así que no se envió nada y no se detuvo nada. Actualice ese dispositivo o pida al operador que detenga la sesión allí."
+  "wire.sessions_remote_stop.dormant_hint": "Sus despertares y monitorizaciones en {peer} quedan INACTIVOS hasta que se reabra la sesión allí. Para reactivarlos, reábrela con `sessions op=resume session={address} peer={peer}`.",
+  "wire.sessions_remote_stop.force_refused": "Desde aquí, una sesión en otro dispositivo solo se puede detener si está inactiva: la detención forzada nunca se envía a otro dispositivo, así que no se envió nada. El operador puede forzar su detención en ese dispositivo.",
+  "wire.sessions_remote_stop.not_running": "“{name}” no se está ejecutando en {peer}, así que no había nada que detener.",
+  "wire.sessions_remote_stop.not_served": "{peer} no ejecutó la detención limitada a sesiones inactivas que se le envió, así que no se detuvo nada. Actualiza ese dispositivo o pide al operador que detenga la sesión allí.",
+  "wire.sessions_remote_stop.pending": "“{name}” aceptó la detención en {peer}, pero seguía sin terminar tras {seconds} s. No se envió ninguna señal — compruébalo con `sessions op=list peer={peer}` antes de reintentar.",
+  "wire.sessions_remote_stop.refused_unanswered": "“{name}” no respondió en {peer}, así que no se pudo confirmar una detención limitada a sesiones inactivas y no se envió ninguna señal. Compruébalo primero con `sessions op=list peer={peer}`: puede que ya no exista.",
+  "wire.sessions_remote_stop.relay_restart": "El relé de este dispositivo es más antiguo que este lop y no puede enviar una detención limitada a sesiones inactivas, así que no se envió nada y no se detuvo nada. Reinícialo con `lop network restart` y vuelve a intentarlo.",
+  "wire.sessions_remote_stop.unconfirmed": "Sin confirmar: puede que la sesión se haya detenido en {peer} o no, y no se reintentó nada. Compruébalo con `sessions op=list peer={peer}` antes de volver a intentarlo.",
+  "wire.sessions_remote_stop.unsupported": "{peer} ejecuta una compilación sin la detención limitada a sesiones inactivas, así que no se envió nada y no se detuvo nada. Actualiza ese dispositivo o pide al operador que detenga la sesión allí."
 }

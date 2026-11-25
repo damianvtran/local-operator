@@ -1,13 +1,13 @@
 {
-  "wire.sessions_remote_stop.approval_stop_peer_force": "强制停止 {address}（位于 {peer}）：始终被拒绝——强制从不发送到其他设备，因此不会发送任何内容",
-  "wire.sessions_remote_stop.approval_stop_peer_idle": "如果 {address} 在 {peer} 上处于空闲状态则停止它：只有该设备确认其空闲时才会结束它，且绝不发送信号；它正在工作时会被拒绝",
-  "wire.sessions_remote_stop.dormant_hint": "它在 {peer} 上的唤醒和监控处于休眠状态，直到会话在那里被重新打开。要重新启用它们，请用 `sessions op=resume session={address} peer={peer}` 重新打开它。",
+  "wire.sessions_remote_stop.approval_stop_peer_force": "强制停止{address}（位于{peer}）：始终被拒绝——强制停止从不发送到其他设备，因此不会发送任何内容",
+  "wire.sessions_remote_stop.approval_stop_peer_idle": "如果{address}在{peer}上处于空闲状态则停止它：只有该设备确认其空闲时才会结束它，且绝不发送信号；它正在工作时会被拒绝",
+  "wire.sessions_remote_stop.dormant_hint": "它在{peer}上的唤醒和监控处于休眠状态，直到会话在那里被重新打开。要重新启用它们，请用`sessions op=resume session={address} peer={peer}`重新打开它。",
   "wire.sessions_remote_stop.force_refused": "从此处只能以“仅空闲时”方式停止其他设备上的会话：强制停止从不发送给其他设备，因此没有发送任何内容。操作员可以在该设备上强制停止它。",
-  "wire.sessions_remote_stop.not_running": "“{name}”未在 {peer} 上运行，因此没有需要停止的内容。",
-  "wire.sessions_remote_stop.not_served": "{peer} 没有执行发给它的仅空闲时停止请求，因此没有停止任何内容。请更新该设备，或请操作员在那台设备上停止该会话。",
-  "wire.sessions_remote_stop.pending": "“{name}”已在 {peer} 上接受停止，但{seconds} s后仍未退出。没有发送任何信号——重试前请先用 `sessions op=list peer={peer}` 检查。",
-  "wire.sessions_remote_stop.refused_unanswered": "“{name}”在 {peer} 上没有应答，无法确认只在空闲时停止，也没有发送任何信号。请先用 `sessions op=list peer={peer}` 检查——它可能已经不在了。",
-  "wire.sessions_remote_stop.relay_restart": "此设备的中继比此 lop 旧，无法发送仅空闲时停止的请求，因此没有发送任何内容，也没有停止任何内容。请用 `lop network restart` 重启它，然后重试。",
-  "wire.sessions_remote_stop.unconfirmed": "未确认：该会话可能已在 {peer} 上停止，也可能没有，且未进行任何重试。重试前请先用 `sessions op=list peer={peer}` 检查。",
-  "wire.sessions_remote_stop.unsupported": "{peer} 运行的构建不支持仅空闲时停止，因此没有发送任何内容，也没有停止任何会话。请更新该设备，或请操作员在该设备上停止此会话。"
+  "wire.sessions_remote_stop.not_running": "“{name}”未在{peer}上运行，因此没有需要停止的内容。",
+  "wire.sessions_remote_stop.not_served": "{peer}没有执行发给它的仅空闲时停止请求，因此没有停止任何内容。请更新该设备，或请操作员在那台设备上停止该会话。",
+  "wire.sessions_remote_stop.pending": "“{name}”已在{peer}上接受停止，但{seconds}秒后仍未退出。没有发送任何信号——重试前请先用`sessions op=list peer={peer}`检查。",
+  "wire.sessions_remote_stop.refused_unanswered": "“{name}”在{peer}上没有应答，无法确认只在空闲时停止，也没有发送任何信号。请先用`sessions op=list peer={peer}`检查——它可能已经不在了。",
+  "wire.sessions_remote_stop.relay_restart": "此设备的中继比此lop旧，无法发送仅空闲时停止的请求，因此没有发送任何内容，也没有停止任何内容。请用`lop network restart`重启它，然后重试。",
+  "wire.sessions_remote_stop.unconfirmed": "未确认：该会话可能已在{peer}上停止，也可能没有，且未进行任何重试。重试前请先用`sessions op=list peer={peer}`检查。",
+  "wire.sessions_remote_stop.unsupported": "{peer}运行的构建不支持仅空闲时停止，因此没有发送任何内容，也没有停止任何会话。请更新该设备，或请操作员在该设备上停止此会话。"
 }
