@@ -249,8 +249,15 @@ def test_the_managed_frontend_reports_the_owners_sealed_outcome(
     assert payload["record_root"]
     outcome_file = Path(str(payload["record_root"])) / "outcome.json"
     assert outcome_file.exists()
-    # The owner ended terminal and its process is gone.
-    assert completed.returncode == (0 if payload["status"] == "completed" else 1)
+    # The owner ended terminal and its process is gone. The exit code follows
+    # run_episode's ``_episode_exit_code`` contract: 0 only when the score is
+    # ``scored`` AND the outcome ended cleanly (completed, truncated or
+    # agent_stop) -- a capped run is a valid datum, not a process failure.
+    score = payload["score"]
+    score_status = score.get("status") if isinstance(score, dict) else None
+    clean_end = payload["status"] in ("completed", "truncated", "agent_stop")
+    expected = 0 if score_status == "scored" and clean_end else 1
+    assert completed.returncode == expected, payload
 
 
 def test_a_frontend_that_stops_waiting_leaves_the_owner_to_finish_and_seal(
