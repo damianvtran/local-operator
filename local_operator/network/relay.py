@@ -521,6 +521,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_sync",
         "net_file_get",
         "net_session_files",
+        "net_mentioned_file",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
