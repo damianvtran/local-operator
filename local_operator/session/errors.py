@@ -21,10 +21,16 @@ class AttachmentUnavailable(ValueError):
     code = "unresolved_attachment"
 
     def __init__(self) -> None:
-        super().__init__(
-            "The attached profile or team could not be restored. "
-            "Choose an available profile or detach it before sending."
-        )
+        # Keyed (``session.attachment.refusal``) and rebuilt from ``code`` on
+        # the viewer (:func:`admission_error`), so the peer and the owner read
+        # the same remedy. It names the explicit re-attach (``/team <name>``)
+        # because the GHSA-wmg2-rrrj-p599 authority gate makes that the only
+        # cure; the old "choose an available profile" named none. Lazy import
+        # keeps this module importable before the catalogues load.
+        from local_operator.i18n.keys import session_attachment
+        from local_operator.i18n.messages import render_resolved
+
+        super().__init__(render_resolved(session_attachment.refusal()))
 
 
 class AttachmentMissing(ValueError):

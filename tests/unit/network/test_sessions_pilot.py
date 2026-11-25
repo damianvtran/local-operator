@@ -2074,3 +2074,33 @@ def test_an_agent_asked_create_is_stamped_agent_origin(monkeypatch: pytest.Monke
     monkeypatch.setenv(AGENT_SHELL_ENV, "1")
     assert net_cli._create_origin(argparse.Namespace(origin="")) == "agent"
     assert net_cli._create_origin(argparse.Namespace(origin="user")) == "user", "explicit wins"
+
+
+def test_a_cold_slash_waits_for_publication_like_a_cold_send(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Head-node ``--slash "/team lopdev"`` on a STORED peer session (2026-11-25).
+
+    The engage succeeded, but the bind's three short locates (~0.3 s) missed the
+    cold boot's record (15.9-22.1 s to publish), so the verb answered "could not
+    start a runtime for this session" and ``/team`` never reached the owner. A
+    slash now takes #4470's bounded publication wait; here the budget is cut to
+    expire, so the answer is that wait's "still starting" refusal — and nothing
+    was delivered, because the wait only reads the published record.
+    """
+    viewer = _FakeViewer()
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    assert opened.owner is not None
+    opened.owner.records_after = 99
+    _use_real_cold_bind(monkeypatch, tmp_path, opened.owner)
+    monkeypatch.setattr(net_cli, "PILOT_COLD_BOOT_BUDGET_S", 0.05, raising=False)
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+    assert _run(["sessions", "--json", "--peer", PEER, "--slash", SESSION, "/team lopdev"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert "could not start a runtime for this session" not in payload["message"]
+    assert payload["code"] == "session_unreachable"
+    assert f"still starting on {PEER}" in payload["message"]
+    assert opened.owner.engaged == 1 and opened.owner.connects == []
+    assert viewer.slashes == []
