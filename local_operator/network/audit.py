@@ -29,9 +29,14 @@ relay's counter passed the other writer's. Every append now runs under an exclus
 lock on the sibling ``audit.jsonl.lock`` (:data:`AUDIT_LOCK_SUFFIX`): re-read the
 tail's last ``seq``, renumber this writer's still-buffered rows to follow it,
 rotate if due, append, and (durable) fsync, all as one critical section. Details
-and the timeout contract: :meth:`AuditLog._acquire_file_lock`.
+and the timeout contract: :meth:`AuditLog._enter_file_lock`. A writer that is being
+DISCARDED while the lock is still held elsewhere (a one-shot ``approvals._audit`` or
+``write_event`` whose ``close`` timed out) never writes unlocked and never drops the
+row either: it parks the rows in ``audit.jsonl.pending/`` and the next writer to take
+the lock appends them (:meth:`AuditLog._spill_pending`, :meth:`AuditLog._drain_pending`).
 
-AND ONE THREAD LOCK PER WRITER. Within a process the writer is shared by EVERY relay thread — the accept loop, each handshake thread,
+AND ONE THREAD LOCK PER WRITER. Within a process the writer is shared by EVERY relay
+thread — the accept loop, each handshake thread,
 the control loop and the heartbeat all ``record`` or ``flush`` — and "no other
 process" says nothing about those. Two of them used to read the same buffer and
 each write it out, so the log carried the SAME record twice with an identical
@@ -124,16 +129,33 @@ AUDIT_TICK_S = 1.0
 #: (the hazard ``wakes/lock.py`` documents) — and ``_generations_on_disk`` globs only
 #: ``audit.jsonl.<n>.gz``, so it is never mistaken for a generation.
 AUDIT_LOCK_SUFFIX = ".lock"
+#: Rows a DISCARDED writer could not append because another writer held the lock past
+#: :data:`AUDIT_LOCK_WAIT_S` (``audit.jsonl.pending/``). A directory of one file per
+#: spill rather than one shared file, so a spiller that cannot take the lock never
+#: has to coordinate with anyone: it writes ``<stem>.tmp``, fsyncs, and renames it to
+#: ``<stem>.jsonl`` (a drainer ignores ``.tmp``, so it never reads half a spill).
+AUDIT_PENDING_SUFFIX = ".pending"
+#: A drainer renames ``<stem>.jsonl`` to ``<stem>.<first>-<last>.draining`` BEFORE it
+#: appends, naming the numbers it is about to use. That claim is what makes a crash
+#: between the append and the unlink idempotent without touching row bytes: the next
+#: lock holder compares the claim to the file's tail (see :meth:`AuditLog._recover`).
+_PENDING_READY_SUFFIX = ".jsonl"
+_PENDING_CLAIM_SUFFIX = ".draining"
+_PENDING_TEMP_SUFFIX = ".tmp"
 #: How long one writer waits for another PROCESS's writer before giving up.
 #: MEASURED on the reference Linux node (2026-11-25, base a9ecde898, scratch
 #: script): the longest hold is a rotation of a full 8 MiB generation (gzip +
 #: two fsyncs), n=5, median 30 ms, max 32 ms; a durable fsynced append is n=200,
 #: median 2.8 ms, p95 3.1 ms, max 115 ms; the tail re-read is n=2000, median
 #: 0.05 ms, max 0.44 ms. 5 s is ~40x the worst observed hold, which leaves room for
-#: a slow disk's fsync under load, and short enough that a wedged peer cannot park
-#: a relay thread (``record`` runs on the accept/handshake/heartbeat threads) for
-#: longer than one heartbeat-scale pause. What a timeout MEANS differs per path —
-#: see :meth:`AuditLog._acquire_file_lock` — but no path ever writes unlocked.
+#: a slow disk's fsync under load. ONLY the paths that must not move on without the
+#: lock wait for it: durable events, the content admissions, an explicit ``flush``
+#: and ``close``. The batched tick/size flush inside ``record`` makes ONE non-blocking
+#: attempt and re-arms the tick on a miss, so a wedged peer cannot park the relay's
+#: accept/handshake/heartbeat threads on ordinary telemetry (agent review round 1,
+#: S1-2: measured 5 s per ``record``, call after call, before that split). What a
+#: timeout MEANS differs per path — see :meth:`AuditLog._enter_file_lock` — but no
+#: path ever writes unlocked.
 AUDIT_LOCK_WAIT_S = 5.0
 #: Backoff between non-blocking attempts: start short (the common hold is ~3 ms),
 #: cap low so a released lock is noticed within one fsync's time.
@@ -1188,7 +1210,7 @@ class MentionedFileAuditIdentity:
 class MentionedFileAdmissionReceipt:
     """Exact persisted P3 row, not a capability to emit content.
 
-    The inode and row bytes are captured only after the sole rotating writer's
+    The inode and row bytes are captured only after this writer's (lock-held)
     durability/readback boundary. B2 still owns revocation and socket release.
     """
 
@@ -1200,7 +1222,8 @@ class MentionedFileAdmissionReceipt:
 
 
 class AuditLog:
-    """Append-only, batched, bounded. The only writer of ``audit.jsonl``."""
+    """Append-only, batched, bounded. One of several writers of ``audit.jsonl``, all
+    serialized by ``audit.jsonl.lock`` (see the module note)."""
 
     BUFFER_BYTES = AUDIT_BUFFER_BYTES
     TICK_S = AUDIT_TICK_S
@@ -1301,9 +1324,21 @@ class AuditLog:
         self._file_lock_depth = 0
         #: Acquisitions that gave up at :data:`AUDIT_LOCK_WAIT_S`. Deliberately NOT
         #: ``degraded``: nothing was lost (rows stay buffered and the next flush
-        #: retries), and ``degraded`` is sticky - it would refuse every later content
-        #: admission over one slow peer.
+        #: retries, or ``close`` parks them in ``audit.jsonl.pending/``), and
+        #: ``degraded`` is sticky - it would refuse every later content admission
+        #: over one slow peer.
         self.lock_timeouts = 0
+        #: The batched tick/size flush's single non-blocking attempts that found the
+        #: lock taken. Ordinary contention (another writer's ~3 ms append), so no
+        #: stderr line: the rows stay buffered and the tick is re-armed.
+        self.lock_busy = 0
+        #: Rows ``close`` parked durably because the lock was still unavailable, and
+        #: rows this writer appended on behalf of a discarded writer (drained).
+        self.rows_spilled = 0
+        self.rows_drained = 0
+        #: The ONE remaining loss: ``close`` could neither take the lock nor write
+        #: the spill file (a full or read-only disk). ``degraded`` is set with it.
+        self.rows_dropped = 0
 
     @property
     def max_bytes(self) -> int:
@@ -1416,7 +1451,8 @@ class AuditLog:
         however, must fail closed: disabled, previously degraded, failed append
         and failed fsync are all refusals. Hold the writer's existing lock over
         both the write and its acknowledgement so concurrent rows cannot stand
-        in for this one. This reuses the sole rotating writer, not another log.
+        in for this one. This reuses this log's numbering/rotation path, serialized by
+        ``audit.jsonl.lock``, not another log.
         """
         if event.event not in self.DURABLE_EVENTS:
             raise ValueError("a required audit record must be a durable event")
@@ -1486,7 +1522,7 @@ class AuditLog:
     def record_mentioned_file_required(
         self, identity: MentionedFileAuditIdentity
     ) -> MentionedFileAdmissionReceipt | None:
-        """Persist and READ BACK the exact P3 admission, under the sole writer lock.
+        """Persist and READ BACK the exact P3 admission, under the writer and file locks.
 
         Legacy S1 acknowledgements intentionally retain their historical contract.
         An in-memory rendered line or a sequence counter cannot prove what reached
@@ -1670,7 +1706,12 @@ class AuditLog:
                 return
             elapsed = time.monotonic() - self._last_flush
             if self._buffered_bytes >= self.BUFFER_BYTES or elapsed >= self.TICK_S:
-                self.flush()
+                # OPPORTUNISTIC: one non-blocking attempt, never the deadline. This
+                # runs on the relay's accept/handshake/heartbeat threads while they
+                # hold ``_write_lock``; waiting here parked all of them behind a
+                # wedged peer for 5 s per call (round 1, S1-2/R1-2/Q1-1). A miss
+                # re-arms the tick, so the next attempt is a tick later.
+                self._flush(wait=False)
 
     def flush(self) -> None:
         """Write the buffer to disk, rotating first if the file is at its cap.
@@ -1690,13 +1731,20 @@ class AuditLog:
         is written; rotation (which renames the file and writes ``audit_rotated``)
         runs inside the same hold. If the lock cannot be taken the rows stay in the
         buffer for the next flush: publishing them unlocked IS the duplicate-``seq``
-        bug, and dropping them would be a hole.
+        bug, and dropping them would be a hole (a writer about to be discarded parks
+        them instead - :meth:`close`).
         """
+        self._flush(wait=True)
+
+    def _flush(self, *, wait: bool) -> None:
         with self._write_lock:
             if not self._buffer:
                 self._last_flush = time.monotonic()
                 return
-            if not self._enter_file_lock():
+            if not self._enter_file_lock(wait=wait):
+                # Re-arm on a miss as well: without it every later ``record`` past
+                # the tick retried at once (round 1, S1-2).
+                self._last_flush = time.monotonic()
                 return
             try:
                 self._flush_locked()
@@ -1706,9 +1754,7 @@ class AuditLog:
     def _flush_locked(self) -> None:
         self._renumber_buffer(self._disk_sequence() + 1)
         payload = "".join(self._buffer)
-        contains_required = (
-            self._required_line is not None and self._required_line in self._buffer
-        )
+        contains_required = self._required_line is not None and self._required_line in self._buffer
         self._buffer.clear()
         self._buffered_bytes = 0
         try:
@@ -1754,7 +1800,145 @@ class AuditLog:
             )
 
     def close(self) -> None:
-        self.flush()
+        """Flush (waiting the full deadline); if the lock is STILL held, park the rows.
+
+        ``close`` is the last chance a short-lived writer has - ``approvals._audit``
+        and ``write_event`` open one instance per event and discard it - so a timeout
+        here used to drop the row with a stderr line claiming it "stays buffered"
+        (round 1, S1-1/R1-3). Writing unlocked is the duplicate-``seq`` bug, and a
+        lock timeout must never lose a row, so the rows go to a durable sidecar the
+        next lock holder appends (:meth:`_spill_pending`). ``close`` keeps the
+        never-raises contract the approvals path relies on; only a failed spill
+        write (the disk itself refusing) loses rows, and that sets ``degraded``.
+        """
+        with self._write_lock:
+            self.flush()
+            if not self._buffer:
+                return
+            lines = list(self._buffer)
+            self._buffer.clear()
+            self._buffered_bytes = 0
+            names = ", ".join(sorted({str(json.loads(line).get("event")) for line in lines}))
+            try:
+                self._spill_pending(lines)
+            except OSError as exc:
+                self.rows_dropped += len(lines)
+                self.degraded = True
+                self.degraded_reason = f"{len(lines)} audit rows lost: {exc}"
+                print(
+                    f"warning: {len(lines)} network audit rows ({names}) were NOT written "
+                    f"and could not be parked for a later writer: {exc}",
+                    file=sys.stderr,
+                )
+                return
+            self.rows_spilled += len(lines)
+            print(
+                f"warning: {len(lines)} network audit rows ({names}) are parked in "
+                f"{self._pending_dir.name}/ until the lock frees; the next writer appends "
+                "them",
+                file=sys.stderr,
+            )
+
+    @property
+    def _pending_dir(self) -> Path:
+        return self._path.with_name(self._path.name + AUDIT_PENDING_SUFFIX)
+
+    def _spill_pending(self, lines: list[str]) -> None:
+        """Park rendered rows durably for the next lock holder; raises ``OSError``.
+
+        THE ROWS ARE STORED AS RENDERED, and their ``seq`` is provisional: the
+        drainer restamps it with :func:`_restamp`, the same re-serialisation
+        :meth:`_renumber_buffer` uses, so the published bytes are exactly what this
+        writer would have appended had it got the lock (only the number differs,
+        which is already true of any renumbered row). No lock is needed to spill: a
+        file of its own, written as ``.tmp`` (never read), fsynced, then renamed to
+        ``.jsonl`` and the directory fsynced, so a drainer sees a whole spill or none.
+        Named by ``time_ns`` first so drainers append spills in the order they happened.
+        """
+        from local_operator.procstate import O_BINARY
+
+        directory = self._pending_dir
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = os.lstat(directory)
+        if not stat.S_ISDIR(info.st_mode):
+            raise OSError(f"{directory.name} is not a directory")
+        os.chmod(directory, 0o700)
+        stem = f"{time.time_ns():020d}-{os.getpid()}-{os.urandom(8).hex()}"
+        temp = directory / (stem + _PENDING_TEMP_SUFFIX)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp, flags, 0o600)
+        try:
+            os.write(fd, "".join(lines).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temp, directory / (stem + _PENDING_READY_SUFFIX))
+        _fsync_directory(directory)
+
+    def _drain_pending(self) -> None:
+        """Append every parked spill, oldest first; call ONLY right after taking the lock.
+
+        EXACTLY ONCE ACROSS A CRASH, without a marker in the row (row bytes are
+        pinned): each spill is RENAMED to ``<stem>.<first>-<last>.draining`` - the
+        numbers it is about to take - and that rename is made durable BEFORE the
+        append. A later lock holder that finds a claim compares it with the live
+        file's highest ``seq``: at or past ``last`` the append happened (unlink the
+        claim); below ``first`` it did not (append it now); between, a torn append
+        (append the rest). That comparison is sound only because nothing else can
+        write between claim and append (we hold the lock) and recovery runs first
+        at every acquisition, before any other row - which is also why the drain
+        appends directly and never rotates: a rotation row numbered past the claim
+        would read as "already appended". The batch's own flush rotates afterwards.
+        """
+        try:
+            names = sorted(os.listdir(self._pending_dir))
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            print(f"warning: parked audit rows could not be listed: {exc}", file=sys.stderr)
+            return
+        claims = [name for name in names if name.endswith(_PENDING_CLAIM_SUFFIX)]
+        ready = [name for name in names if name.endswith(_PENDING_READY_SUFFIX)]
+        for name in claims + ready:
+            source = self._pending_dir / name
+            try:
+                with source.open("r", encoding="utf-8") as handle:
+                    lines = [line if line.endswith("\n") else line + "\n" for line in handle]
+                if name.endswith(_PENDING_CLAIM_SUFFIX):
+                    first, last = (int(part) for part in name.split(".")[-2].split("-"))
+                    on_disk = _last_sequence(self._path)
+                    if on_disk >= last:
+                        source.unlink()
+                        continue
+                    lines = lines[max(0, on_disk - first + 1) :]
+                self._append_drained(source, name.split(".")[0], lines)
+            except (OSError, ValueError) as exc:
+                # Left in place for the next lock holder: a spill is never deleted
+                # unless its rows are known to be in the live file.
+                self.degraded = True
+                self.degraded_reason = f"parked audit rows could not be appended: {exc}"
+                print(f"warning: {self.degraded_reason} ({name})", file=sys.stderr)
+                return
+
+    def _append_drained(self, source: Path, stem: str, lines: list[str]) -> None:
+        start = self._disk_sequence() + 1
+        numbered = [_restamp(line, start + offset) for offset, line in enumerate(lines)]
+        if numbered:
+            claim = self._pending_dir / (
+                f"{stem}.{start}-{start + len(numbered) - 1}{_PENDING_CLAIM_SUFFIX}"
+            )
+            os.replace(source, claim)
+            _fsync_directory(self._pending_dir)
+            if not self._path.exists():
+                os.close(os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600))
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write("".join(numbered))
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._sync_directories()
+            source = claim
+        source.unlink()
+        self.rows_drained += len(numbered)
 
     def sync(self) -> None:
         """``fsync`` the live file — durable events and rotation, nothing else.
@@ -1834,8 +2018,13 @@ class AuditLog:
 
     # -- the cross-process lock ---------------------------------------------
 
-    def _enter_file_lock(self) -> bool:
+    def _enter_file_lock(self, *, wait: bool = True) -> bool:
         """Take (or re-enter) the exclusive lock on ``audit.jsonl.lock``; ``False`` = refused.
+
+        ``wait=False`` is the batched tick/size flush: ONE attempt, no deadline, no
+        stderr line (``lock_busy`` counts it) - see :data:`AUDIT_LOCK_WAIT_S`. Every
+        fresh acquisition first appends rows a discarded writer parked
+        (:meth:`_drain_pending`), so they publish before anything newer.
 
         WHY A FILE LOCK: ``_write_lock`` only orders THIS instance's threads; the
         approvals path opens a fresh ``AuditLog`` per event, the CLI's ``write_event``
@@ -1851,6 +2040,12 @@ class AuditLog:
         * ``flush`` / ``record``: rows stay buffered, a warning goes to stderr,
           ``lock_timeouts`` counts it, the next flush retries. ``record`` keeps its
           never-raises contract; ``degraded`` is NOT set for a timeout (nothing lost).
+        * ``close``: the rows are parked in ``audit.jsonl.pending/`` for the next
+          lock holder (:meth:`close`) - a discarded writer has no next flush.
+        * The lock file cannot be opened, or is not a regular file (``EACCES``,
+          ``ELOOP``, a planted directory): refused AND ``degraded``, because that
+          is a permission/placement fault that recurs on every call, not a slow
+          peer, and the status surfaces must say so (round 1, S1-3).
         * ``record_required`` / ``record_mentioned_file_required``: a refusal
           (``False`` / ``None``) before anything is rendered - content egress fails
           closed.
@@ -1877,12 +2072,31 @@ class AuditLog:
             flags = os.O_CREAT | os.O_RDWR | O_BINARY | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(lock_path, flags, 0o600)
         except OSError as exc:
-            return self._lock_refused(f"the audit lock could not be opened: {exc}")
+            self.degraded = True
+            self.degraded_reason = f"the audit lock could not be opened: {exc}"
+            return self._lock_refused(self.degraded_reason)
+        try:
+            # Mirrors ``credentials.placement._open_lock``: a pre-existing lock leaf
+            # keeps whatever mode it was created with, and O_NOFOLLOW does not stop a
+            # FIFO or device planted under the name (round 1, S1-4).
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(f"{lock_path.name} is not a regular file")
+            if os.name != "nt" and hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+        except OSError as exc:
+            os.close(fd)
+            self.degraded = True
+            self.degraded_reason = f"the audit lock could not be opened: {exc}"
+            return self._lock_refused(self.degraded_reason)
         reason = ""
         try:
             deadline = time.monotonic() + AUDIT_LOCK_WAIT_S
             pause = _AUDIT_LOCK_RETRY_S
             while not wake_lock._try_lock(fd):
+                if not wait:
+                    self.lock_busy += 1
+                    os.close(fd)
+                    return False
                 if time.monotonic() >= deadline:
                     self.lock_timeouts += 1
                     reason = (
@@ -1904,6 +2118,7 @@ class AuditLog:
             return self._lock_refused(reason)
         self._file_lock_fd = fd
         self._file_lock_depth = 1
+        self._drain_pending()
         return True
 
     def _exit_file_lock(self) -> None:
@@ -1967,17 +2182,10 @@ class AuditLog:
         renumbered: list[str] = []
         for offset, line in enumerate(self._buffer):
             seq = start + offset
-            row = json.loads(line)
-            if row.get("seq") != seq:
-                row["seq"] = seq
-                fresh = (
-                    json.dumps(row, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
-                    + "\n"
-                )
-                if line == self._required_line:
-                    self._required_line = None
-                line = fresh
-            renumbered.append(line)
+            fresh = _restamp(line, seq)
+            if fresh != line and line == self._required_line:
+                self._required_line = None
+            renumbered.append(fresh)
         self._buffer[:] = renumbered
         self._buffered_bytes = sum(len(line) for line in renumbered)
         self._seq = start - 1 + len(renumbered)
@@ -2428,6 +2636,31 @@ def _iso(ts: float) -> str:
         seconds += 1
         millis = 0
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds)) + f".{millis:03d}Z"
+
+
+def _restamp(line: str, seq: int) -> str:
+    """``line`` with ``seq`` replaced, re-serialised with ``_render``'s exact arguments.
+
+    A row already carrying ``seq`` keeps its original string, so an unmoved row is
+    byte-identical to its first render.
+    """
+    row = json.loads(line)
+    if row.get("seq") == seq:
+        return line
+    row["seq"] = seq
+    return json.dumps(row, separators=(",", ":"), ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a rename in ``path`` durable; a no-op where directories cannot be opened."""
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    descriptor = os.open(path, os.O_RDONLY | directory_flag)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _last_sequence(path: Path) -> int:

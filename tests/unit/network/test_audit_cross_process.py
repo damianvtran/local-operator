@@ -167,7 +167,11 @@ def test_buffered_rows_are_renumbered_after_another_writers_flush(tmp_path: Path
     a.flush()
     rows = _all_rows(tmp_path)
     assert [(r["seq"], r["actor"]) for r in rows] == [
-        (1, "b"), (2, "b"), (3, "a"), (4, "a"), (5, "a")
+        (1, "b"),
+        (2, "b"),
+        (3, "a"),
+        (4, "a"),
+        (5, "a"),
     ]
     assert a.published_through == a.recorded_through == 5
 
@@ -291,4 +295,167 @@ def test_windows_branch_contention_retries_then_refuses(
     calls = _windows(monkeypatch, contended=True, log_path=[log._path])
     assert log.record_required(audit.AuditEvent(event="panic_raised")) is False
     assert len([c for c in calls if c[0] == "lock"]) > 1, "no retry before refusing"
+    assert not log._path.exists()
+
+
+def test_one_shot_writers_lose_no_row_to_a_lock_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED-FIRST (round-1 remediation, L3): the REAL per-event writers time out on a
+    held lock, the holder releases, and the next writer's flush must publish both
+    rows exactly once with unique numbers - a timeout may delay a row, never drop it."""
+    monkeypatch.setattr(audit, "AUDIT_LOCK_WAIT_S", 0.05)
+    held = _hold_lock(tmp_path)  # a separate open file description: real contention
+    try:
+        approvals._audit("onboard_approved", actor="self", subject="sess-a", root=tmp_path)
+        audit.write_event(tmp_path, event="member_removed", subject="dev-b")
+        assert not (tmp_path / "network" / "audit.jsonl").exists()
+    finally:
+        wake_lock._unlock(held)
+        os.close(held)
+    later = audit.AuditLog(tmp_path)
+    later.record(_event(subject="later"))
+    later.close()
+    rows = _all_rows(tmp_path)
+    events = [(r["event"], r.get("subject")) for r in rows]
+    assert events.count(("onboard_approved", "sess-a")) == 1, events
+    assert events.count(("member_removed", "dev-b")) == 1, events
+    assert sorted(r["seq"] for r in rows) == list(range(1, len(rows) + 1)), rows
+
+
+def test_batched_record_makes_one_non_blocking_attempt_and_rearms_the_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """L2 (S1-2/R1-2/Q1-1): with the lock wedged, a batched ``record`` past the tick
+    must never wait the deadline. Structural, not wall-clock: a deadline wait would
+    count a ``lock_timeouts``; the single attempt counts ``lock_busy`` and re-arms."""
+    monkeypatch.setattr(audit, "AUDIT_LOCK_WAIT_S", 30.0)  # any wait would be obvious
+    held = _hold_lock(tmp_path)
+    log = audit.AuditLog(tmp_path)
+    log.TICK_S = 0.0  # every record is past the tick
+    try:
+        started = time.monotonic()
+        for index in range(20):
+            log.record(_event(subject=f"s{index}"))
+        assert time.monotonic() - started < 10.0  # one 30 s wait would blow this
+        assert log.lock_timeouts == 0 and log.lock_busy == 20 and not log.degraded
+        assert not log._path.exists() and log.publication_of(20) == "buffered"
+        log.TICK_S = 3600.0
+        before = log._last_flush
+        log.record(_event(subject="tick-not-due"))
+        assert log.lock_busy == 20 and log._last_flush == before  # no attempt at all
+    finally:
+        wake_lock._unlock(held)
+        os.close(held)
+    log.close()
+    rows = _all_rows(tmp_path)
+    assert [r["seq"] for r in rows] == list(range(1, 22))
+    assert [r["subject"] for r in rows][:2] == ["s0", "s1"]
+
+
+def _parked(root: Path) -> list[str]:
+    directory = root / "network" / "audit.jsonl.pending"
+    return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
+
+
+def test_close_parks_rows_0600_and_a_drain_keeps_their_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(audit, "AUDIT_LOCK_WAIT_S", 0.05)
+    held = _hold_lock(tmp_path)
+    try:
+        log = _quiet(audit.AuditLog(tmp_path))
+        log.record(_event(subject="parked", ts=1700000000.0))
+        expected = log._buffer[0]
+        log.close()
+        assert log.rows_spilled == 1 and log.rows_dropped == 0 and not log.degraded
+        (spill,) = _parked(tmp_path)
+        assert spill.endswith(".jsonl")
+        path = tmp_path / "network" / "audit.jsonl.pending" / spill
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
+        assert path.read_text() == expected
+    finally:
+        wake_lock._unlock(held)
+        os.close(held)
+    relay = audit.AuditLog(tmp_path)
+    relay.flush()  # an empty flush does not take the lock; a record does
+    relay.record(audit.AuditEvent(event="panic_raised"))  # durable: locks, drains
+    lines = (tmp_path / "network" / "audit.jsonl").read_text().splitlines(keepends=True)
+    assert lines[0] == expected  # seq 1 on both sides: byte-identical
+    assert [json.loads(line)["seq"] for line in lines] == [1, 2]
+    assert relay.rows_drained == 1 and _parked(tmp_path) == []
+
+
+def test_a_crash_after_the_claim_neither_loses_nor_duplicates(tmp_path: Path) -> None:
+    """The claim names the numbers it will take; recovery reads the tail against it."""
+    pending = tmp_path / "network" / "audit.jsonl.pending"
+    pending.mkdir(parents=True)
+    seed = audit.AuditLog(tmp_path)
+    seed.record(audit.AuditEvent(event="panic_raised"))  # seq 1 on disk
+    row = lambda seq, subject: json.dumps(  # noqa: E731
+        {"event": "onboard_requested", "seq": seq, "subject": subject}, sort_keys=True
+    )
+    # Claimed 2-3 and fully appended before the crash: must not be appended again.
+    (pending / "00000000000000000001-1-aa.2-3.draining").write_text(
+        row(2, "a") + "\n" + row(3, "b") + "\n"
+    )
+    with (tmp_path / "network" / "audit.jsonl").open("a") as handle:
+        handle.write(row(2, "a") + "\n" + row(3, "b") + "\n")
+    # Claimed 4-5 but the crash came before the append: must be appended once.
+    (pending / "00000000000000000002-1-bb.4-5.draining").write_text(
+        row(4, "c") + "\n" + row(5, "d") + "\n"
+    )
+    audit.AuditLog(tmp_path).record(audit.AuditEvent(event="panic_raised"))
+    rows = _all_rows(tmp_path)
+    assert [r["seq"] for r in rows] == [1, 2, 3, 4, 5, 6]
+    assert [r.get("subject") for r in rows][1:5] == ["a", "b", "c", "d"]
+    assert _parked(tmp_path) == []
+
+
+def test_a_failed_spill_is_the_one_loss_and_it_is_degraded_and_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(audit, "AUDIT_LOCK_WAIT_S", 0.05)
+    (tmp_path / "network").mkdir(parents=True)
+    (tmp_path / "network" / "audit.jsonl.pending").write_text("not a directory")
+    held = _hold_lock(tmp_path)
+    try:
+        log = _quiet(audit.AuditLog(tmp_path))
+        log.record(_event())
+        log.close()
+    finally:
+        wake_lock._unlock(held)
+        os.close(held)
+    assert log.rows_dropped == 1 and log.degraded and not log.admits_required()
+    assert "were NOT written" in capsys.readouterr().err
+    assert "onboard_requested" in log.degraded_reason or "1 audit rows lost" in log.degraded_reason
+
+
+def test_an_unopenable_lock_degrades_the_log(tmp_path: Path) -> None:
+    """L4 (S1-3): a permission/placement fault recurs on every call - degraded."""
+    (tmp_path / "network").mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.write_text("")
+    (tmp_path / "network" / "audit.jsonl.lock").symlink_to(target)  # ELOOP
+    log = audit.AuditLog(tmp_path)
+    log.record(audit.AuditEvent(event="panic_raised"))
+    assert log.degraded and "could not be opened" in log.degraded_reason
+    assert not log.admits_required() and not log._path.exists()
+    assert target.read_text() == ""
+
+
+def test_an_existing_lock_leaf_is_checked_and_reset_to_0600(tmp_path: Path) -> None:
+    """L5 (S1-4): mirrors ``credentials.placement._open_lock``."""
+    lock = tmp_path / "network" / "audit.jsonl.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("")
+    os.chmod(lock, 0o644)
+    audit.AuditLog(tmp_path).record(audit.AuditEvent(event="panic_raised"))
+    assert oct(lock.stat().st_mode & 0o777) == "0o600"
+    other = tmp_path / "b"
+    (other / "network").mkdir(parents=True)
+    os.mkfifo(other / "network" / "audit.jsonl.lock")  # opens O_RDWR without blocking
+    log = audit.AuditLog(other)
+    log.record(audit.AuditEvent(event="panic_raised"))
+    assert log.degraded and "not a regular file" in log.degraded_reason
     assert not log._path.exists()

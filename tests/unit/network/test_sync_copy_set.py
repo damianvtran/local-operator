@@ -1218,9 +1218,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
-        1,
+        6,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
-        "``network/audit`` — a store file, never a session entry",
+        "``network/audit`` — a store file, never a session entry. "
+        "``AUDIT_LOCK_SUFFIX`` (``.lock``): the sibling ``network/audit.jsonl.lock`` "
+        "cross-process append lock — per-device store state beside the log, never a "
+        "session entry and never synced. ``AUDIT_PENDING_SUFFIX`` (``.pending``) and "
+        "``_PENDING_READY_SUFFIX``/``_PENDING_CLAIM_SUFFIX``/``_PENDING_TEMP_SUFFIX``: "
+        "the ``network/audit.jsonl.pending/`` directory of rows a discarded writer parked "
+        "on a lock timeout, and its file suffixes — device-local, drained into this "
+        "device's own log, never a session entry and never synced",
     ),
     "local_operator/network/enrollment.py": (
         1,

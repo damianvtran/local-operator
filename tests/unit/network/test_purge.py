@@ -80,6 +80,10 @@ def test_purge_deletes_the_networks_and_keeps_the_device_identity(root: Path) ->
     identity.mint(root, name="this-device")
     before = _paths(root)
     assert all(before.values()), before  # nothing was missing to begin with
+    parked = store.audit_path(root).with_name("audit.jsonl.pending")
+    parked.mkdir(exist_ok=True)
+    (parked / "0-1-aa.jsonl").write_text("")
+    assert store.audit_path(root).with_name("audit.jsonl.lock").is_file()
 
     result = relay.uninstall(purge=True, root=root, dry_run=True)
     # Dry run: the receipt is computed, nothing is deleted.
@@ -102,6 +106,12 @@ def test_purge_deletes_the_networks_and_keeps_the_device_identity(root: Path) ->
     assert result["deleted"]["queues"] == 1
     assert result["deleted"]["pending"] == 1
     assert "audit.jsonl" in result["deleted"]["audit_files"]
+    # The writers' siblings go with the log (round 1, R1-4): the append lock and the
+    # parked-rows directory a timed-out writer leaves.
+    network_dir = store.audit_path(root).parent
+    assert not (network_dir / "audit.jsonl.lock").exists()
+    assert not (network_dir / "audit.jsonl.pending").exists()
+    assert {"audit.jsonl.lock", "audit.jsonl.pending"} <= set(result["deleted"]["audit_files"])
     # The receipt SAYS what happened to the keypair rather than implying it went.
     assert any("NOT deleted" in step for step in result["steps"]), result["steps"]
 
