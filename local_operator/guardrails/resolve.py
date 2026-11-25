@@ -5022,7 +5022,9 @@ class _Walker:
         readonly = read_only_argv(name, [w.text for w in args], assigned=assigned) or (
             # Needs the EXPANDED words (glob/opaque facts) and the cwd, which
             # ``read_only_argv``'s string argv cannot carry (field case 0.113.2).
-            name == "sqlite3" and not raw_assigns and _sqlite_read_only(args, st.cwd)
+            name == "sqlite3"
+            and not raw_assigns
+            and _sqlite_read_only(args, st.cwd)
         )
         # A move, link, arbitrary interpreter, or unmodelled writer can replace
         # the fresh directory or its parent. Never carry containment past it.

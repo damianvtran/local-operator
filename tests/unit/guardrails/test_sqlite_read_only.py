@@ -136,11 +136,10 @@ _REFUSED = [
     (f'sqlite3 "file:{_LEDGER_ABS}?mode=ro#x" "delete from t"', Risk.HIGH),
     # Security round 1, M1: a TEMP virtual table's module writes outside the
     # read-only database (measured: this exact command creates the zip).
-    (f"sqlite3 -readonly {LEDGER} \"{_ZIP_WRITE}\"", Risk.HIGH),
+    (f'sqlite3 -readonly {LEDGER} "{_ZIP_WRITE}"', Risk.HIGH),
     (f'sqlite3 "file:{_LEDGER_ABS}?mode=ro" "{_ZIP_WRITE}"', Risk.HIGH),
     (
-        f"sqlite3 -readonly {LEDGER} \"create virtual table temp.g using "
-        "generate_series(1,2)\"",
+        f'sqlite3 -readonly {LEDGER} "create virtual table temp.g using ' 'generate_series(1,2)"',
         Risk.HIGH,
     ),
     (f"sqlite3 -readonly {LEDGER} \"select * from zipfile('/x/a.zip')\"", Risk.HIGH),
@@ -148,9 +147,7 @@ _REFUSED = [
 
 
 @pytest.mark.parametrize(("command", "risk"), _REFUSED)
-def test_sqlite_write_shapes_keep_their_rank(
-    home: Path, command: str, risk: Risk
-) -> None:
+def test_sqlite_write_shapes_keep_their_rank(home: Path, command: str, risk: Risk) -> None:
     assert _risk(home, command) is risk, command
 
 
@@ -177,9 +174,7 @@ def test_preview_of_field_command_allows(home: Path) -> None:
 
 
 def test_hint_only_on_sqlite_refusals(home: Path) -> None:
-    ctx = CallContext(
-        cwd=str(home / "repo"), env=_env(home), scratchpad=None, session_id="own"
-    )
+    ctx = CallContext(cwd=str(home / "repo"), env=_env(home), scratchpad=None, session_id="own")
     rules = home / "rules"
     rules.mkdir()
     report = preview_tool_call(
@@ -195,9 +190,7 @@ def test_hint_only_on_sqlite_refusals(home: Path) -> None:
 def test_hint_skipped_when_sqlite_is_not_the_only_target(home: Path) -> None:
     """Security round 1, N1: in a mixed command the read-only form would not
     lift the refusal, so the hint is left out."""
-    ctx = CallContext(
-        cwd=str(home / "repo"), env=_env(home), scratchpad=None, session_id="own"
-    )
+    ctx = CallContext(cwd=str(home / "repo"), env=_env(home), scratchpad=None, session_id="own")
     rules = home / "rules"
     rules.mkdir()
     settings = GuardSettings(rules_dirs=(rules,))
