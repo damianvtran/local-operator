@@ -2740,3 +2740,166 @@ async def test_the_tools_close_settles_an_owed_tab_and_says_so(
     assert "Also closed earlier tab" in closed.text, closed.text
     assert fake.opened == 1, "the close must not open anything"
     assert "stranded_surfaces" not in json.loads(resource.path.read_text())
+
+
+# -- pending-ask handoff: the recorded host is the only host ------------------
+#
+# A user signed in on one browser host (say the extension's real profile) is
+# NOT signed in on the other (the desktop app's profile). A reopen or a pinned
+# handoff that silently moved hosts would land them on a login wall that looks
+# like the handoff worked. Both hosts are faked so "went to the right host" is
+# distinguishable from "there was only one host".
+
+_HANDOFF_URL = "https://signin.example.test/login?next=%2Fapps"
+_HANDLES = {"bridge": "bridge:5:capability", "ui": "ui:100:capability"}
+
+
+def _queue_open_ask(directory: Path, ask_id: str) -> None:
+    from local_operator.asks import store
+
+    now = store.now_ms()
+    store.append_event(
+        directory,
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "questions": [{"id": "signin", "question": "Sign in?", "options": []}],
+            "tool_call_id": "call_synthetic",
+            "urgent": False,
+        },
+    )
+
+
+def _previous_run_with_reference(tmp_path: Path, host: str) -> None:
+    """A run that held a tab on `host`, asked about it, and lost the tab."""
+    previous = BrowserResource(tmp_path, tmp_path.name)
+    previous.initialize()
+    previous.remember(_HANDLES[host], host=host)
+    previous.note_surface_origin(_HANDOFF_URL)
+    _queue_open_ask(tmp_path, "a-signin")
+    previous.record_handoff_ref("a-signin")
+    previous.remember("")  # the tab is gone; the host field stays
+
+
+def _recover_reports_no_tab(client: Any) -> None:
+    original = client.call
+
+    async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "owner_recover":
+            client.calls.append((method, params))
+            return {"ownership_version": 1, "state": "closed", "tab": ""}
+        return await original(method, params)
+
+    client.call = call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["bridge", "ui"])
+async def test_reopen_opens_on_the_recorded_host_with_both_reachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+    host: str,
+) -> None:
+    _hosts(monkeypatch, ui=True, bridge=True)
+    _previous_run_with_reference(tmp_path, host)
+    _recover_reports_no_tab(ui_client)
+    _recover_reports_no_tab(bridge_client)
+    context, _resource = _context(tmp_path)
+    result = await builtin.execute_browser("r1", {"action": "snapshot"}, None, None, context)
+    print(f"HOST-{host}:", result.text.splitlines()[-1])
+    recorded, other = (bridge_client, ui_client) if host == "bridge" else (ui_client, bridge_client)
+    assert [p["url"] for p in _opens(recorded)] == [_HANDOFF_URL]
+    assert _opens(other) == []
+    assert result.details["reopened_handoff"] == "a-signin"
+    label = "the browser extension" if host == "bridge" else "desktop app's browser host"
+    assert label in result.text.splitlines()[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("host", "down"), [("bridge", "bridge"), ("ui", "ui")])
+async def test_reopen_on_an_unavailable_recorded_host_fails_and_never_falls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+    host: str,
+    down: str,
+) -> None:
+    _hosts(monkeypatch, ui=down != "ui", bridge=down != "bridge")
+    _previous_run_with_reference(tmp_path, host)
+    _recover_reports_no_tab(ui_client)
+    _recover_reports_no_tab(bridge_client)
+    context, _resource = _context(tmp_path)
+    for action in ("snapshot", "recover"):
+        result = await builtin.execute_browser("r2", {"action": action}, None, None, context)
+        print(f"DOWN-{host}-{action}:", result.is_error, result.text.replace("\n", " | ")[-330:])
+        assert result.is_error, result.text
+        assert "nothing was opened on any other browser host" in result.text
+    assert _opens(ui_client) == [] and _opens(bridge_client) == []
+    assert context.browser is not None and context.browser.surface_id == ""
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_extension_handoff_stays_on_the_extension_across_disposal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+) -> None:
+    _hosts(monkeypatch, ui=True, bridge=True)
+    original = bridge_client.call
+    retained = {"on": False}
+
+    async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "owner_retain":
+            retained["on"] = True
+        if method == "owner_finish" and retained["on"]:
+            bridge_client.calls.append((method, params))
+            return {"state": "retained"}
+        return await original(method, params)
+
+    bridge_client.call = call
+    first = BrowserResource(tmp_path, tmp_path.name)
+    first.initialize()
+    first.remember(_HANDLES["bridge"], host="bridge")
+    first.note_surface_origin(_HANDOFF_URL)
+    _queue_open_ask(tmp_path, "a-signin")
+    first.bind_ask_handoff("a-signin", None)
+    assert (await first.finish(first.generation, "disposed")).state == "retained"
+
+    context, resumed = _context(tmp_path)
+    result = await builtin.execute_browser("r3", {"action": "snapshot"}, None, None, context)
+    assert not result.is_error, result.text
+    assert context.browser is not None and context.browser.surface_id.startswith("bridge:")
+    assert resumed.record["host"] == "bridge"
+    assert resumed.record["retention"] == "pending ask a-signin"
+    # Neither recovery nor anything else touched the desktop app's host.
+    assert ui_client.calls == []
+    assert "reopened_handoff" not in (result.details or {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["bridge", "ui"])
+async def test_a_tab_with_no_ask_still_closes_on_either_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ui_client: FakeUiClient,
+    bridge_client: FakeBridgeClient,
+    host: str,
+) -> None:
+    _hosts(monkeypatch, ui=True, bridge=True)
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    resource.remember(_HANDLES[host], host=host)
+    resource.note_surface_origin(_HANDOFF_URL)
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    client = bridge_client if host == "bridge" else ui_client
+    assert "owner_finish" in [m for m, _ in client.calls]
+    assert "owner_retain" not in [m for m, _ in client.calls]

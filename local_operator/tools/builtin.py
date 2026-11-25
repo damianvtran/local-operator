@@ -31718,16 +31718,27 @@ async def _reopen_handoff_if_gone(
     # only, because a path or query can hold a token and transcripts travel.
     origin = url_origin_for_copy(ref["url"])
     label = f"ask {ref['ask_id']} ({ref.get('ask_status')})"
+    recorded_host = _host_label(HOST_UI_PREFIX if str(ref.get("host", "")) == "ui" else "bridge")
     if reopened.is_error:
-        return _append_result_text(
-            result,
-            f"The tab for {label} is no longer open, and reopening {origin} failed: "
-            f"{_origin_only_text(reopened.text)}",
+        # ALWAYS an error result, whatever the triggering action returned (a
+        # `recover` answers in plain text): a failed reopen must be impossible
+        # to read as success. The backend hint above names the recorded host,
+        # and a named host that cannot serve refuses instead of falling back,
+        # so nothing opened on the other profile.
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{result.text}\n\nThe tab for {label} is no longer open, and reopening {origin} "
+            f"on {recorded_host} (where it was recorded) failed; nothing was opened on any "
+            f"other browser host: {_origin_only_text(reopened.text)}",
         )
+    # Named from the handle the host actually returned, never from the hint, so
+    # the reply cannot claim a host the tab did not open on.
+    opened_on = _host_label(_host_of_surface(str((reopened.details or {}).get("surface_id", ""))))
     note = (
         f"Reopened handoff: the tab for {label} is no longer open, so its page on {origin} "
-        "was reopened in a new background tab of this session. This is the earlier "
-        "handoff, not a fresh start; check what the page shows before acting."
+        f"was reopened in a new background tab of this session in {opened_on}. This is the "
+        "earlier handoff, not a fresh start; check what the page shows before acting."
     )
     # The internal reopen's OWN reply is rebuilt origin-only (review M3-1 / QA
     # Q7): the ordinary `open` reply prints the full URL, which on this path is
@@ -31737,7 +31748,7 @@ async def _reopen_handoff_if_gone(
     opened = _text(
         tool_call_id,
         "browser",
-        f"Opened a new background tab on {origin}.",
+        f"Opened a new background tab on {origin} in {opened_on}.",
         details={
             "surface_id": (reopened.details or {}).get("surface_id", ""),
             "origin": origin,
@@ -38850,7 +38861,9 @@ async def execute_ask(
             if browser_ref
             else enqueue(questions, params.timeout, tool_call_id=tool_call_id)
         )
-        if outcome.get("ok") and browser_ref:
+        # `ref_resource` is re-checked: pyright cannot see that a non-empty
+        # `browser_ref` implies the resource that produced it exists.
+        if outcome.get("ok") and browser_ref and ref_resource is not None:
             try:
                 ref_resource.record_handoff_ref(str((outcome.get("details") or {}).get("ask_id")))
             except Exception:  # noqa: BLE001
