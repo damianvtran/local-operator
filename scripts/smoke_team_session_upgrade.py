@@ -146,6 +146,9 @@ class Device:
         self.root = root
         self.lop = lop
         self.env = _clean_env(root)
+        # Both installed versions spawn real runtimes. Keep mock replies off the
+        # operator's lock screen even if the shared base environment changes.
+        self.env["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
         self.owner = secrets.token_hex(16)
         self.env[OWNER_ENV] = self.owner
         self.config = Path(self.env["LOCAL_OPERATOR_CONFIG_DIR"])
