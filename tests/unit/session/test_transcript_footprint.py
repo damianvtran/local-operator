@@ -1036,7 +1036,10 @@ def _rows_of(transcript: Transcript, custom_type: str) -> list[Any]:
 def _reader_answers(directory: Path, transcript: Transcript) -> dict[str, Any]:
     """Every newest-wins entry point the audited readers use, for both types."""
     from local_operator.network.carry import latest_custom_details
-    from local_operator.session.transcript import read_latest_custom, read_latest_custom_entry
+    from local_operator.session.transcript import (
+        read_latest_custom,
+        read_latest_custom_entry,
+    )
 
     answers: dict[str, Any] = {}
     for custom_type in (_TODO, _WAKES):
