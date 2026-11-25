@@ -3939,6 +3939,42 @@ client supplied: it re-resolves every source itself.
   baseline is the slot at connect.
 
 
+## Team Bridge held messages (`/v1/desktop/team-bridge/holds`)
+
+`GET /v1/desktop/team-bridge/holds?expected_account_id=…` lists every held
+conversation message on this machine, metadata only (no body, sender label or
+screener reason: the renderer joins those itself). `{enabled, key_protection,
+items: [...]}`, oldest hold first. Each item:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `message_id` | string (`bcmsg_…`) | The held message. |
+| `conversation_id` | string | Its conversation (`bcv_…`); `""` when unknown. |
+| `seq` | int \| null | Conversation sequence, when the hold ref carried one. |
+| `thread_root_id` | string (`bcmsg_…`) \| null | The root a thread REPLY answers; `null` for a channel-level message or a ref that did not carry one (a damaged tag reads `null`). The hub's owner-audit messages page excludes replies, so a reply's sender/body must be read from its thread, never that page. |
+| `held_at` / `first_held_at` | ISO-8601 UTC | Decision time (the Deliver window's start) / when the hold was first written. |
+| `kind` | `owner_decision` \| `screening` \| `waiting` | Coarse class. |
+| `hold_code` | closed code \| `unknown_hold` | The hold code. |
+| `releasable` | bool | An eligible owner decision exists. |
+| `can_deliver` / `can_discard` | bool | Which words the route accepts now. Every releasable hold has `can_discard`; `can_deliver` is false past `deliver_until`, for `screening_failed`, and for a `write_once_conflict` whose current screener pass rejected (Discard-only). |
+| `actionable` | bool | THE count predicate: undecided, a word is open, and the decision is bound to this row (its `conversation_id` equals the row's; `decide` refuses otherwise). The badge, nav count and "Dismiss all" count exactly these. |
+| `discard_receipt` | string (64 hex) \| null | Present exactly when a Discard is open, undecided and the decision is bound to this row (same `conversation_id`), so a `can_discard: true` row can still carry `null` here. POST it as `hold_receipt` (instead of `body_sha256`) to discard with no body on screen. Never accepted for Deliver. |
+| `unscreened` | bool | A review hold no model read. |
+| `deliver_until` | ISO-8601 UTC \| null | End of the Deliver window. |
+| `decision` | `{word, decided_at, outcome, key_id}` \| null | The recorded answer; `outcome` is `pending`, `admitted`, `rejected`, `discarded_local_unconfirmed` or `refused`. |
+
+`POST …/holds/{message_id}/deliver|discard` takes `{expected_account_id,
+conversation_id}` plus exactly one of `body_sha256` (the body the person saw)
+or `hold_receipt` (Discard only). A Discard never delivers. It is settled
+LOCALLY (`outcome: discarded_local_unconfirmed`, an
+`owner_release_local_terminals` audit row, no hub call, no connector pass)
+when it is receipt-bound past `deliver_until`, or for ANY Discard of a
+`write_once_conflict` hold (the connector could never commit a reject over the
+committed allow); otherwise it is queued `pending` for the connector, which
+bounces it. A row with `actionable: false` and no `decision` has no decision
+row to sign (an infrastructure wait the connector re-drives itself): offer
+no Discard for it, and never count it.
+
 ## Capability keys
 
 | Key | Version | Advertises | Absent means |

@@ -105,6 +105,20 @@ WORK_SCOPE_HOLD = "work_scope_hold"
 #: has a decision row, a notice and a replay with no further dispatch.
 SCREENING_FAILED_HOLD = "screening_failed"
 
+#: A message whose committed screening receipt conflicts with a later pass
+#: (``screening.WRITE_ONCE_CONFLICT_HOLD``; same literal, kept here because
+#: this module cannot import ``screening`` at load time). A review code ONLY
+#: through :func:`owner_reviewable`: its decision row is written, listed and
+#: signed solely while the committed receipt is a readable SCREENER allow for
+#: these body bytes — the one case PR #4533's owner Deliver can commit
+#: (``Store._owner_deliver_supersedes``). Live evidence 2026-11-24: seq 3318
+#: and 3319 sat in this hold, published to agents as ``awaiting_review``, with
+#: nothing in the owner's review list. A reject-backed or damaged conflict
+#: gets no decision row, so it is never offered: a Deliver could never commit
+#: there, and a button that records a word nothing settles is the stuck-badge
+#: class #4358 removed.
+WRITE_ONCE_CONFLICT_HOLD = "write_once_conflict"
+
 REVIEW_HOLD_CODES = frozenset(
     {
         "model_hold",
@@ -112,12 +126,35 @@ REVIEW_HOLD_CODES = frozenset(
         "reply_truncated",
         "bounce_without_category",
         SCREENING_FAILED_HOLD,
+        WRITE_ONCE_CONFLICT_HOLD,
     }
 )
 #: Review codes whose only word is Discard. Enforced where a Deliver could be
 #: signed (the desktop decide route) AND where one is consumed (the connector),
 #: so a hand-written release row cannot deliver one either.
 DISCARD_ONLY_HOLD_CODES = frozenset({SCREENING_FAILED_HOLD})
+#: Review codes whose Discard is ALWAYS settled as a local terminal
+#: (``Store.record_owner_release_local_terminal``), in or out of the Deliver
+#: window, body-bound or receipt-bound. A write-once conflict's Discard can
+#: never be applied by the connector: it would have to commit a REJECT over
+#: the committed screener allow, which write-once refuses by design (#4533
+#: lets only an AGREEING Deliver move the head), so a queued word would sit
+#: ``refused:write_once_conflict`` forever and the badge with it. An earlier
+#: revision of PR #4546 therefore offered Deliver only, which left a conflict
+#: whose body could not be loaded with NO working button (operator report
+#: 2026-11-24). Settling the Discard locally gives every reviewable hold an
+#: exit: nothing is delivered, nothing is posted or ACKed on the hub, and the
+#: ``owner_release_local_terminals`` audit row records it. If the hub serves
+#: the envelope again, the connector's ``_consume_owner_release`` reads this
+#: Discard first and its reject commit is refused by write-once, so the
+#: message stays HELD — the signed Discard keeps a later re-screen's allow
+#: from delivering it (``_consume_owner_release`` runs before the re-drive
+#: that #4546 keeps for undecided conflicts). It also holds with the review
+#: setting OFF (#4546 security round 1, S-1): ``_consume_owner_release`` is
+#: inert then, so ``screening._replay_work_scope_decision`` re-holds a
+#: conflict whose verified Discard exists before any re-screen could deliver
+#: it — an already-signed narrowing outlives the setting, as for every class.
+LOCAL_DISCARD_HOLD_CODES = frozenset({WRITE_ONCE_CONFLICT_HOLD})
 RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).
@@ -396,6 +433,51 @@ def enabled_for(config_dir: Path | str, hold_code: str | None) -> bool:
     if hold_code in REVIEW_HOLD_CODES:
         return review_enabled(config_dir)
     return enabled(config_dir)
+
+
+def owner_reviewable(
+    store: Any, owner: Any, message_id: str, hold_code: str, *, body_sha256: str
+) -> bool:
+    """THE extra gate a review code may need beyond its decision row.
+
+    Every review code but :data:`WRITE_ONCE_CONFLICT_HOLD` is reviewable as
+    soon as its decision row exists. A conflict is reviewable only while the
+    message's COMMITTED receipt is one an owner Deliver can supersede (a
+    readable screener allow for exactly ``body_sha256``;
+    ``Store.write_once_conflict_deliverable``). One predicate, read where the
+    decision row is written (screening), where the list offers it, and where
+    the decide route signs, so the three cannot disagree. Re-read live each
+    time: the head can move (a fresh allow supersedes it and delivers) between
+    the row being written and the person answering.
+    """
+
+    if hold_code != WRITE_ONCE_CONFLICT_HOLD:
+        return True
+    return bool(store.write_once_conflict_deliverable(owner, message_id, body_sha256=body_sha256))
+
+
+def deliver_refused(decision: Mapping[str, Any]) -> bool:
+    """Is this decision row Discard-only (no Deliver may be offered, signed or admitted)?
+
+    Read at all three ends — the list's ``can_deliver``, the decide route and
+    the connector's ``_consume_owner_release`` — so a hand-written release row
+    cannot deliver what the list never offered.
+
+    * :data:`DISCARD_ONLY_HOLD_CODES` (PR #4212 round 3, S-13).
+    * A :data:`WRITE_ONCE_CONFLICT_HOLD` row whose CONFLICTING (current) pass
+      did not also allow (#4546 security round 1, S-2). The committed receipt
+      is a stale allow either way, but when the current screener bounced the
+      message (``personal_info_request``, ``out_of_scope_work``…) a Deliver
+      would release, one click away and unexplained, exactly the categories
+      this module declares never releasable. Only an allow-vs-allow mismatch
+      (the measured live case: a served-model/revision mismatch) keeps both
+      words; every other conflict still has its Discard.
+    """
+
+    code = str(decision.get("hold_code") or "")
+    if code in DISCARD_ONLY_HOLD_CODES:
+        return True
+    return code == WRITE_ONCE_CONFLICT_HOLD and decision.get("screener_verdict") != "allow"
 
 
 def any_enabled(config_dir: Path | str) -> bool:
