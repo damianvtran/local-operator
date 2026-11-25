@@ -189,6 +189,13 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "httpx",
     "httpcore",
     "truststore",
+    # The cold open of a team-bound session checks the profile catalogue is
+    # complete before painting the team (``AttachedSession._cold_bound_team`` ->
+    # ``AgentRegistry.require_complete_metadata``). ~12 ms own time, no
+    # module-scope side effect (``AgentRegistry`` only touches disk when
+    # constructed), and it pulls ``local_operator.jsonl`` with it; the standby
+    # runtime already warms it via ``_WARM_EXTRA``.
+    "local_operator.agents",
     "local_operator.classification",
     "local_operator.compaction.api",
     "local_operator.mcp.manager",
