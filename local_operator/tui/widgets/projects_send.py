@@ -456,6 +456,19 @@ class SendTargetCard(Container):
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 
+    def on_unmount(self) -> None:
+        # Leave the locale-refresh registry the moment the card leaves the DOM.
+        # ``_cards`` is a WeakSet, but a removed card can outlive its removal
+        # (the app, a closure or an uncollected cycle still holds it), and
+        # Textual never clears ``_is_mounted`` on removal -- so the next
+        # ``set_active_locale`` reached ``_refresh_copy`` on a card whose
+        # children were already gone and raised ``NoMatches`` for
+        # ``.projects-send-title``. In the app that can crash ``/language`` once
+        # the picker has been closed and not yet collected; in CI it surfaced as teardown
+        # errors in tests/unit/tui/test_provider_state.py whenever a
+        # tests/unit/tui/test_projects_send.py test ran earlier in the shard.
+        _cards.discard(self)
+
     def on_resize(self) -> None:
         # The rule is cut to the card's measured width, which only exists once
         # layout has run; this repaint is where the first cut happens.
