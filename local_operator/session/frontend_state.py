@@ -10748,21 +10748,20 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         # longer shows. Read off the queue, because the queue knows the config
         # directory its log lives under.
         window = getattr(queue, "lapsed_visible_ms", None)
+        options: dict[str, Any] = {"drafts": True}
+        if callable(window):
+            options["lapsed_visible_ms"] = window()
         try:
-            if callable(window):
-                rows = [
-                    dict(row)
-                    for row in cast(
-                        "Any",
-                        folder(drafts=True, lapsed_visible_ms=window(), conversation_only=True),
-                    )
-                ]
-            else:
-                rows = [
-                    dict(row) for row in cast("Any", folder(drafts=True, conversation_only=True))
-                ]
+            rows = [dict(row) for row in cast("Any", folder(**options, conversation_only=True))]
         except TypeError:
-            rows = [dict(row) for row in cast("Any", folder())]
+            # A pre-flag queue may still support drafts and the lapsed window.
+            # Its fold may already be capped, but never publish its native rows.
+            try:
+                legacy_rows = folder(**options)
+            except TypeError:
+                legacy_rows = folder()
+            rows = [dict(row) for row in cast("Any", legacy_rows)]
+            rows = [row for row in rows if not store.is_native_bridge_request(row)]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero
         logger.debug("ask: could not fold the queue for the wire", exc_info=True)
         return None, None

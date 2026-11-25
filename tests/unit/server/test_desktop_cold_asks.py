@@ -128,6 +128,55 @@ async def test_a_cold_snapshot_serves_the_index_instead_of_the_retained_rows(tmp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("include_site", [False, True])
+async def test_cold_snapshot_keeps_native_requests_out_of_conversation(
+    tmp_path: Path, include_site: bool
+) -> None:
+    from local_operator.browser_bridge.site_approval import site_ask_question
+
+    bridge = _bridge_with_retained_asks(tmp_path)
+    questions = {
+        "a-bridge": {
+            "id": "q1",
+            "question": "Allow this request?",
+            "question_id": "bmsg_test",
+            "bridge": {"kind": "bridge"},
+        },
+    }
+    if include_site:
+        questions["a-site"] = site_ask_question(
+            origin="https://example.com",
+            node_name="QA node",
+            node_device_id="node_qa",
+            entry_id="site_qa",
+        )
+    requests = [
+        {
+            "ask_id": ask_id,
+            "created_at": BASE + (ask_id == "a-bridge"),
+            "expires_at": EXPIRES_AT,
+            "timeout_s": TIMEOUT_S,
+            "status": store.STATUS_OPEN,
+            "questions": [question],
+        }
+        for ask_id, question in questions.items()
+    ]
+    store.write_entry(tmp_path, "s1", cwd=str(tmp_path), asks=requests)
+
+    rows, open_count = _snapshot_asks(await bridge.snapshot())
+
+    # A request-only entry claims an empty queue; it is not a missing index.
+    assert open_count == int(include_site)
+    if include_site:
+        assert [row["ask_id"] for row in rows] == ["a-site"]
+    else:
+        assert rows is None
+    assert [row["ask_id"] for row in store.session_asks(tmp_path, "s1")] == [
+        row["ask_id"] for row in requests
+    ], "the default read still supplies native request lookup"
+
+
+@pytest.mark.asyncio
 async def test_a_cold_snapshot_still_says_nothing_when_the_index_has_no_entry(tmp_path: Path):
     """Absence of the entry is not a claim that the queue is empty."""
     bridge = _bridge_with_retained_asks(tmp_path)

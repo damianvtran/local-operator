@@ -2605,10 +2605,8 @@ class AskQueue:
         horizon_ms = store.LATE_WINDOW_S * 1000
         rows: list[dict[str, Any]] = []
         for record in self.records(stamp):
-            # Exclude before the cap so hidden requests cannot displace visible
-            # asks. The host-stamped scope distinguishes a native request from
-            # browser site consent, which also carries a signed question id.
-            if conversation_only and _is_native_bridge_request(record):
+            # Exclude before the cap so hidden requests cannot displace visible asks.
+            if conversation_only and store.is_native_bridge_request(record):
                 continue
             status = record["status"]
             if status == store.STATUS_EXPIRED:
@@ -3218,15 +3216,6 @@ def _ask_cap_refusal(rows: Sequence[Mapping[str, Any]], *, incoming_is_bridge: b
             f"{policy.OPEN_ASK_CAP}); wait for responses; do not re-ask."
         )
     return ""
-
-
-def _is_native_bridge_request(row: Mapping[str, Any]) -> bool:
-    for question in row.get("questions") or ():
-        if isinstance(question, Mapping) and question.get("question_id"):
-            bridge = question.get("bridge")
-            if isinstance(bridge, Mapping) and bridge.get("kind") == "bridge":
-                return True
-    return False
 
 
 def _bridge_fingerprint_from_row(row: Mapping[str, Any]) -> str:

@@ -4233,6 +4233,7 @@ class DesktopSessionBridge:
                 root,
                 self.session_id,
                 lapsed_visible_ms=window,
+                conversation_only=True,
             )
         except Exception:  # noqa: BLE001 — a read of derived data never fails a paint
             logger.debug("cold ask rows unavailable for %s", self.session_id, exc_info=True)

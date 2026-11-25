@@ -3114,6 +3114,53 @@ def test_durable_projection_carries_the_stopped_session_s_asks_from_the_index(
     assert projection.asks_open == 0
 
 
+@pytest.mark.parametrize("include_ordinary", [False, True])
+def test_durable_projection_keeps_native_requests_out_of_conversation(
+    tmp_path, monkeypatch, include_ordinary: bool
+) -> None:
+    from local_operator.asks import policy, store
+    from local_operator.mobile.daemon import _durable_projection
+
+    session_id = "stopped-session"
+    cfg = _durable_ask_session(tmp_path, monkeypatch, session_id)
+    now = store.now_ms()
+    native_questions = [
+        {
+            "id": "q1",
+            "question": "Allow this teammate request?",
+            "question_id": "bmsg_test",
+            "bridge": {"kind": "bridge"},
+        }
+    ]
+    asks = [
+        {
+            "ask_id": ask_id,
+            "created_at": now - (ask_id != "a-bridge"),
+            "expires_at": now + 60_000,
+            "timeout_s": 60,
+            "status": store.STATUS_OPEN,
+            "questions": questions,
+        }
+        for ask_id, questions in [
+            ("a-bridge", native_questions),
+            ("a-ordinary", [{"id": "q1", "question": "Ship it?"}]),
+        ]
+        if ask_id == "a-bridge" or include_ordinary
+    ]
+    store.write_entry(cfg, session_id, cwd=str(tmp_path), asks=asks)
+    # The newest native row would take the only slot if excluded after the cap.
+    monkeypatch.setattr(policy, "PROJECTION_CAP", 1)
+
+    projection = _durable_projection(session_id)
+
+    assert projection is not None
+    assert projection.asks_open == int(include_ordinary)
+    assert projection.asks is not None, "an existing entry claims visible state"
+    assert [row.ask_id for row in projection.asks] == (["a-ordinary"] if include_ordinary else [])
+    if not include_ordinary:
+        assert projection.pending is None
+
+
 def test_durable_projection_leaves_asks_absent_without_an_index_entry(
     tmp_path, monkeypatch
 ) -> None:

@@ -1048,6 +1048,24 @@ def _relay_record(
     return record
 
 
+def is_native_bridge_request(row: Mapping[str, Any]) -> bool:
+    """Whether a live or durable row belongs only in the Team Bridge Requests inbox.
+
+    The host-stamped bridge scope distinguishes native requests from browser
+    site consent, which also carries a signed question ID. This is only a
+    presentation rule: the index, fleet, and decision paths still need the row.
+    """
+    questions = row.get("questions")
+    if not isinstance(questions, (list, tuple)):
+        return False
+    for question in questions:
+        if isinstance(question, Mapping) and question.get("question_id"):
+            bridge = question.get("bridge")
+            if isinstance(bridge, Mapping) and bridge.get("kind") == "bridge":
+                return True
+    return False
+
+
 def is_outstanding(status: Any) -> bool:
     """Whether a folded ask status still wants the user (see
     :data:`OUTSTANDING_STATUSES`).
@@ -1480,6 +1498,8 @@ def _shown_rows(
     entry: Mapping[str, Any],
     stamp: int,
     lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+    *,
+    conversation_only: bool = False,
 ) -> list[dict[str, Any]]:
     """One entry's asks worth showing, stamped with the session they belong to.
 
@@ -1490,6 +1510,8 @@ def _shown_rows(
     horizon_ms = LATE_WINDOW_S * _MILLIS
     rows: list[dict[str, Any]] = []
     for ask in _entry_asks(entry):
+        if conversation_only and is_native_bridge_request(ask):
+            continue
         status = str(ask.get("status") or "")
         if status == STATUS_EXPIRED:
             continue
@@ -1543,13 +1565,13 @@ def session_asks(
     *,
     now: int | None = None,
     lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+    conversation_only: bool = False,
 ) -> list[dict[str, Any]]:
     """One session's asks worth showing, from its index entry, open first.
 
-    The per-session twin of :func:`index_asks`, for a reader that needs ONE
-    conversation's asks with no runtime to ask: the relay's durable projection
-    of a stopped conversation, which is the only screen that conversation's
-    asks can appear on once the phone's sheet lists its own conversation only.
+    Cold conversation views opt into ``conversation_only`` to match the live
+    fold before they count or cap rows. The default still includes native Team
+    Bridge requests for readers that need all of the session's asks.
 
     Empty when the session has no entry (never queued, or swept) or nothing on
     it is still worth showing. Reads the entry directly rather than the whole
@@ -1561,7 +1583,9 @@ def session_asks(
     if entry is None:
         return []
     stamp = now if now is not None else now_ms()
-    rows = _shown_rows(session_id, entry, stamp, lapsed_visible_ms)
+    rows = _shown_rows(
+        session_id, entry, stamp, lapsed_visible_ms, conversation_only=conversation_only
+    )
     rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
     return rows
 
@@ -1656,6 +1680,7 @@ __all__ = [
     "expected_row_ids",
     "fold",
     "is_lapsed",
+    "is_native_bridge_request",
     "is_outstanding",
     "lapsed_hidden",
     "new_ask_id",

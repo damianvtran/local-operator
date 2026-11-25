@@ -21,6 +21,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -280,6 +281,32 @@ def test_native_bridge_requests_stay_in_the_inbox_not_the_conversation(
     assert projection.pending is not None
     assert projection.pending.request_id == store.mirror_request_id(site["details"]["ask_id"], 0)
     assert bridge_asks_by_message(tmp_path)[message_id] == inbox
+
+
+def test_ask_wire_preserves_legacy_projection_keywords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LegacyQueue:
+        def lapsed_visible_ms(self) -> int:
+            return 1
+
+        def projection(
+            self, *, drafts: bool = False, lapsed_visible_ms: int = store.DEFAULT_LAPSED_VISIBLE_MS
+        ) -> list[dict[str, Any]]:
+            assert (drafts, lapsed_visible_ms) == (True, 1)
+            return [
+                {"ask_id": "a-ordinary", "status": store.STATUS_OPEN},
+                {
+                    "ask_id": "a-bridge",
+                    "status": store.STATUS_OPEN,
+                    "questions": [{"question_id": "bmsg_test", "bridge": {"kind": "bridge"}}],
+                },
+            ]
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    rows, outstanding = ask_wire(SimpleNamespace(ask_queue=LegacyQueue))
+    assert rows == [{"ask_id": "a-ordinary", "status": store.STATUS_OPEN}]
+    assert outstanding == 1
 
 
 def test_ask_wire_on_a_live_empty_queue_publishes_only_the_tally(
