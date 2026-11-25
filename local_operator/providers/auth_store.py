@@ -6243,8 +6243,8 @@ class AuthStore:
         broker hiding owner rows must reach an eligible stored API key rather
         than stop at an ambient winner that its safety backstop must discard.
         None preserves the ordinary cascade, including override short-circuiting.
-        ``local_oauth_only`` is for automatic advisory work: neither a key nor
-        an OAuth row imported from another device may authorize that work.
+        ``local_oauth_only`` is for automatic advisory work: use an already
+        fresh local bearer, never refresh it, borrow, or move session routing.
         """
         if persisted_kinds is None and (
             self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
@@ -6254,6 +6254,7 @@ class AuthStore:
             if self.override_keys(provider):
                 return None  # An explicit gateway is not consent for a public OAuth route.
             persisted_kinds = frozenset({"oauth"})
+            read_only = True
         # An inherited ContextVar value is a shared object, not a deep copy.
         # Give EACH getter a collector so nested provider lookups or parallel
         # getters under one opt-in cannot overwrite the returning row's rank.
@@ -6706,12 +6707,36 @@ class AuthStore:
             )
         )
         if local_oauth_only:
-            # Synced copies and refresh delegations are normal-looking local
-            # rows. Exclude both BEFORE resolving or refreshing a bearer.
-            oauth_rows = [row for row in oauth_rows if "mesh_origin" not in row.data]
+            oauth_rows = [
+                row
+                for row in oauth_rows
+                if "mesh_origin" not in row.data and REFRESH_DELEGATE_KEY not in row.data
+            ]
         for row in self._selection_order(
             oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
         ):
+            if local_oauth_only:
+                # Advisory work cannot rotate a grant. Read the current row and
+                # take only its already-fresh bearer without any suspension or
+                # entry into the chat refresh lock, lease or mesh send fence.
+                current = self.get_credential(row.id)
+                if current is None or current.disabled_cause is not None:
+                    continue
+                data = current.data
+                if (
+                    "mesh_origin" in data
+                    or REFRESH_DELEGATE_KEY in data
+                    or data.get(AWAITING_WRITEBACK_KEY)
+                    or self._grant_dead_at(data) is not None
+                    or self._family_moved_at(data) is not None
+                    or self._needs_refresh(data, force=force_refresh)
+                ):
+                    continue
+                key_fn = self._oauth_key_fn(provider)
+                key = key_fn(data) if key_fn else data.get("access")
+                if key:
+                    return key, current
+                continue
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
             except LendClaimPendingError:
@@ -6726,15 +6751,8 @@ class AuthStore:
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
                 pin(row.id)
-                refreshed = self.get_credential(row.id)
-                if local_oauth_only and (
-                    refreshed is None
-                    or refreshed.disabled_cause is not None
-                    or "mesh_origin" in refreshed.data
-                ):
-                    continue  # Provenance or eligibility changed while the refresh suspended.
-                return key, refreshed or row
-        if oauth_rows and force_refresh:
+                return key, self.get_credential(row.id) or row
+        if oauth_rows and force_refresh and not local_oauth_only:
             # Every sibling failed its refresh — surface the failure so the
             # failover layer can block/back off instead of silently looping.
             raise AuthStoreError(f"All OAuth credentials for '{provider}' failed to refresh")

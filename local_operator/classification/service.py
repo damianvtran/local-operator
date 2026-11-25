@@ -161,7 +161,7 @@ from local_operator.classification.types import (
     DecisionVendorError,
     Question,
 )
-from local_operator.classification.vendors import build_vendor
+from local_operator.classification.vendors import _HttpDecisionVendor, build_vendor
 from local_operator.settings_io import strict_bool
 
 if TYPE_CHECKING:
@@ -816,16 +816,24 @@ class ClassificationService:
         # Keep this snapshot with THIS walk. A parallel turn may publish a
         # newer memo while this one is suspended in OAuth resolution.
         authorized_stamp = self._advisory_radient_stamp() if advisory else None
-        legs = await self._available_legs(
-            advisory=advisory, on_probe=on_leg, radient_snapshot=authorized_stamp
-        )
 
         def check_radient() -> None:
             if authorized_stamp != radient_stamp(self._config_dir):
                 raise RadientCredentialsChanged
 
+        after_probe = check_radient if authorized_stamp is not None else None
+        legs = await self._available_legs(
+            advisory=advisory,
+            on_probe=on_leg,
+            radient_snapshot=authorized_stamp,
+            after_probe=after_probe,
+        )
         if not legs:
+            if after_probe is not None:
+                after_probe()
             raise _NoUsableLeg("no leg has a usable credential")
+        # The legacy fall-through after an actual Radient attempt is unchanged.
+        guard = after_probe if legs[0].name != "radient" else None
         # Leave time for a native fallback only when it can actually send.
         # A missing key is not a native failure and must not move its breaker
         # when an OAuth-only walk fails. Preserve the legacy native-only walk.
@@ -837,14 +845,16 @@ class ClassificationService:
                     eligible.append(vendor)
                     continue
                 try:
-                    if await vendor.credential(self._config_dir):
-                        # From the first usable native leg onward, preserve its
-                        # full legacy tail (including credential/refusal handling).
-                        eligible.extend(legs[index:])
-                        reserve_for_native = True
-                        break
+                    credential = await vendor.credential(self._config_dir)
                 except Exception:  # A credential probe is not a decision attempt.
-                    continue
+                    credential = None
+                if guard is not None:
+                    guard()
+                if credential:
+                    # Preserve the legacy tail from the first usable native leg.
+                    eligible.extend(legs[index:])
+                    reserve_for_native = True
+                    break
             legs = tuple(eligible)
         attempts: list[str] = []
         last: DecisionVendorError | None = None
@@ -867,7 +877,7 @@ class ClassificationService:
                                     request,
                                     leg_budget,
                                     note=note,
-                                    check_radient=check_radient,
+                                    check_radient=guard,
                                 )
                         except TimeoutError:
                             raise DecisionVendorError(
@@ -879,9 +889,7 @@ class ClassificationService:
                             request,
                             timeout_s,
                             note=note,
-                            check_radient=(
-                                check_radient if vendor.name in ADVISORY_VENDORS else None
-                            ),
+                            check_radient=guard,
                         )
                 except DecisionSchemaError:
                     raise
@@ -965,10 +973,12 @@ class ClassificationService:
         """
 
         async def send() -> DecisionResponse:
-            if isinstance(vendor, AdvisoryVendor):
-                return await vendor.decide(
-                    request, timeout_s=timeout_s, check_radient=check_radient
-                )
+            if check_radient is not None:
+                check_radient()
+                if isinstance(vendor, (AdvisoryVendor, _HttpDecisionVendor)):
+                    return await vendor.decide(
+                        request, timeout_s=timeout_s, check_radient=check_radient
+                    )
             return await vendor.decide(request, timeout_s=timeout_s)
 
         # A bare service has no session ledger; do not even construct rows. Apart
@@ -1087,6 +1097,7 @@ class ClassificationService:
         advisory: bool,
         on_probe: Callable[[str], None] | None = None,
         radient_snapshot: RadientStamp | None = None,
+        after_probe: Callable[[], None] | None = None,
     ) -> tuple[DecisionVendor, ...]:
         """Resolve the cascade once per session, keeping the instances.
 
@@ -1101,7 +1112,9 @@ class ClassificationService:
         preferred = self._active_provider() if advisory and self._active_provider else ""
         prefer_vertex = preferred == GOOGLE_VERTEX
         if advisory and prefer_vertex != self._prefer_vertex:
-            self._legs = None
+            # Preference only orders OAuth legs, not a selected Radient route.
+            if not self._legs or self._legs[0].name != "radient":
+                self._legs = None
             self._prefer_vertex = prefer_vertex
         cached = self._legs if advisory else self._typed_legs
         order = leg_order(self._settings, advisory=advisory, preferred_provider=preferred)
@@ -1123,6 +1136,7 @@ class ClassificationService:
             auth_store=self._auth_store,
             session_id=self._advisory_session_id,
             on_probe=on_probe,
+            after_probe=after_probe,
         )
         # Record the trace even when nothing resolved: the next re-resolution starts
         # from ``_legs is None`` anyway, and keeping the skipped rows here lets the

@@ -12,9 +12,10 @@ from local_operator.classification.advisory import GOOGLE_VERTEX, OPENAI_SUBSCRI
 from local_operator.classification.recommend import RecommendationRequest
 from local_operator.classification.service import ClassificationService
 from local_operator.classification.types import Answer, Question
-from local_operator.classification.vendors import build_vendor
+from local_operator.classification.vendors import TypeSafeVendor, build_vendor
+from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.store import MeshAwareAuthStore
-from local_operator.providers.auth_store import AuthStore, OAuthAccess
+from local_operator.providers.auth_store import AuthStore, AuthStoreError, OAuthAccess
 from tests.unit.classification.support import candidate, store_row
 
 pytestmark = pytest.mark.asyncio
@@ -374,6 +375,99 @@ async def test_login_during_awaited_oauth_lookup_prevents_stale_post(bare_manage
         await subject.aclose()
 
 
+@pytest.mark.parametrize("warm", [False, True], ids=["cold-selection", "warm-oauth-miss"])
+async def test_wal_radient_login_during_oauth_miss_wins_this_turn(bare_manager, warm):
+    resolving = asyncio.Event()
+    resume = asyncio.Event()
+    posts = []
+    db = bare_manager / "auth.db"
+    reader = AuthStore(db, config_dir=bare_manager)
+    writer = AuthStore(db, config_dir=bare_manager)
+    row_id = writer.upsert_credential(
+        "openai", {"type": "oauth", "access": "synthetic", "org_id": "synthetic"}
+    ).id
+    store_row(bare_manager, "TYPESAFE_API_KEY", "synthetic")
+
+    class PausedAuth(MeshAwareAuthStore):
+        pause = not warm
+
+        async def get_oauth_access(self, provider, *args, **kwargs):
+            if self.pause and provider == "openai":
+                self.pause = False
+                resolving.set()
+                await resume.wait()
+            return await super().get_oauth_access(provider, *args, **kwargs)
+
+    def transport(http):
+        posts.append(http.url.host)
+        return codex() if http.url.host == "chatgpt.com" else native()
+
+    auth = PausedAuth(reader, mesh=None, config_dir=bare_manager)
+    subject = service(bare_manager, auth, transport)
+    try:
+        if warm:
+            assert (await subject.recommend_resources(REQUEST)).vendor == OPENAI_SUBSCRIPTION
+            auth.pause = True
+        db_mtime = db.stat().st_mtime_ns
+        async with asyncio.timeout(1):
+            async with asyncio.TaskGroup() as tasks:
+                pending = tasks.create_task(subject.recommend_resources(next_request(1)))
+                await resolving.wait()
+                writer.disable_credential(row_id, "fixture logout")
+                writer.upsert_credential(
+                    "radient",
+                    {"type": "api_key", "key": "synthetic", "source": "login"},
+                )
+                assert db.stat().st_mtime_ns == db_mtime  # The change is in the WAL only.
+                resume.set()
+        assert pending.result().vendor == "radient", posts
+        assert posts == ["chatgpt.com"] * warm + ["api.radienthq.com"]
+    finally:
+        await subject.aclose()
+        auth.close()
+        writer.close()
+
+
+async def test_radient_login_during_native_401_reresolve_prevents_second_post(
+    bare_manager, monkeypatch
+):
+    store_row(bare_manager, "TYPESAFE_API_KEY", "synthetic")
+    resolving = asyncio.Event()
+    resume = asyncio.Event()
+    posts = []
+    retrying = False
+    original = TypeSafeVendor.credential
+
+    async def credential(vendor, config_dir):
+        if retrying:
+            resolving.set()
+            await resume.wait()
+        return await original(vendor, config_dir)
+
+    def transport(http):
+        nonlocal retrying
+        posts.append(http.url.host)
+        if len(posts) == 2:
+            retrying = True
+            return httpx.Response(401)
+        return native()
+
+    monkeypatch.setattr(TypeSafeVendor, "credential", credential)
+    subject = service(bare_manager, Auth(), transport)
+    try:
+        assert (await subject.recommend_resources(REQUEST)).vendor == "typesafe"
+        async with asyncio.timeout(1):
+            async with asyncio.TaskGroup() as tasks:
+                pending = tasks.create_task(subject.recommend_resources(next_request(1)))
+                await resolving.wait()
+                monkeypatch.setenv("RADIENT_API_KEY", "synthetic")
+                resume.set()
+        assert pending.result().vendor == "radient", posts
+        assert posts == ["api.typesafe.ai", "api.typesafe.ai", "api.radienthq.com"]
+    finally:
+        await subject.aclose()
+
+
 @pytest.mark.parametrize("failure", ["401", "refusal", "timeout"])
 async def test_advisory_breaker_does_not_open_native_typed_breaker(bare_manager, failure):
     posts = []
@@ -445,6 +539,82 @@ async def test_advisory_never_borrows_or_spends_another_devices_grant(
     finally:
         await subject.aclose()
         auth.close()
+
+
+@pytest.mark.parametrize("expires", [True, False], ids=["moves-while-refresh-blocked", "fresh"])
+async def test_advisory_uses_fresh_local_bearer_without_entering_refresh(
+    bare_manager, monkeypatch, expires
+):
+    db = bare_manager / "auth.db"
+    reader = AuthStore(db, config_dir=bare_manager)
+    writer = AuthStore(db, config_dir=bare_manager)
+    local = {
+        "access": "synthetic-local",
+        "refresh": "synthetic-local-refresh",
+        "expires": 1 if expires else AuthStore._now_ms() + 3_600_000,
+        # Delegation carries account_id, not org_id; use the same dedupe key.
+        "account_id": "synthetic-org",
+        "org_id": "synthetic-org",
+    }
+    row = writer.upsert_credential("openai", local)
+    selected = asyncio.Event()
+    refreshes = []
+    posts = []
+
+    class ObservedStore(MeshAwareAuthStore):
+        async def get_oauth_access(self, provider, *args, **kwargs):
+            if provider == "openai":
+                selected.set()
+            return await super().get_oauth_access(provider, *args, **kwargs)
+
+    async def refresh(data):
+        refreshes.append(data["refresh"])
+        raise AuthStoreError("synthetic dispatch boundary")
+
+    def transport(http):
+        posts.append(http.url.host)
+        return codex()
+
+    # Use the production delegation writer; only its store supplier and the
+    # signed-grant check are synthetic. The ordinary send fence would allow it.
+    delegate_writer = MeshCredentialClient(root=bare_manager)
+    monkeypatch.setattr(delegate_writer, "_auth_store", lambda: writer)
+    reader.set_refresh_fence(lambda *_: None)
+    monkeypatch.setattr(reader, "_refresh_fn", lambda _: refresh)
+    auth = ObservedStore(reader, mesh=None, config_dir=bare_manager)
+    subject = service(bare_manager, auth, transport)
+    try:
+        async with asyncio.timeout(1):
+            async with asyncio.TaskGroup() as tasks:
+                async with reader._refresh_lock_for(row.id):
+                    pending = tasks.create_task(subject.recommend_resources(REQUEST))
+                    await selected.wait()
+                    if expires:
+                        assert delegate_writer._write_delegated_row(
+                            "openai",
+                            owner="synthetic-owner",
+                            provider="openai",
+                            grant_id="synthetic-grant",
+                            epoch=1,
+                            data={
+                                **local,
+                                "access": "synthetic-delegated",
+                                "refresh": "synthetic-delegated-refresh",
+                            },
+                        )
+                        moved = writer.get_credential(row.id)
+                        assert moved and moved.data["mesh_origin"]["grant_id"] == "synthetic-grant"
+        assert refreshes == []
+        if expires:
+            assert pending.result().skipped == "no-vendor"
+            assert posts == []
+        else:
+            assert pending.result().vendor == OPENAI_SUBSCRIPTION
+            assert posts == ["chatgpt.com"]
+    finally:
+        await subject.aclose()
+        auth.close()
+        writer.close()
 
 
 @pytest.mark.parametrize("project", [None, "persisted-vertex-project"])

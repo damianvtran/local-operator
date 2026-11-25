@@ -55,8 +55,10 @@ same answer shape. Typed consumers always use that cascade.
 Automatic **resource suggestions** can also use an existing OpenAI or Google Vertex sign-in when
 no Radient credential can be resolved. A local Radient sign-in or key added mid-session takes
 precedence before the next fallback request. The session's signed-in provider is tried first
-when both are available. Automatic hints use local OAuth only, not borrowed, synced or delegated
-mesh credentials. OpenAI uses ChatGPT's subscription Responses route, never an OpenAI API key.
+when both are available. Automatic hints use already-fresh local OAuth only, not borrowed,
+synced or delegated mesh credentials. If the bearer needs renewal on the first turn, that hint
+skips the OAuth leg; ordinary chat can still renew it for subsequent turns. OpenAI uses
+ChatGPT's subscription Responses route, never an OpenAI API key.
 Vertex uses Gemini 3.1 Flash-Lite in the project stored with the login (never an ambient billing
 project), subject to that project's Vertex quota and billing; it does not use a Gemini Developer
 API key. These routes return only a listed resource (or `none`), with no generated confidence

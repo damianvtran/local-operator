@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from collections.abc import Callable, Mapping
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -38,35 +40,61 @@ class RadientCredentialsChanged(Exception):
     """The no-Radient check no longer authorizes this POST; resolve again."""
 
 
-RadientStamp = tuple[bool, tuple[tuple[int, int, int, int, int] | None, ...]]
+_FileStamp = tuple[int, int, int, int, int] | None
+_StoreStamp = tuple[_FileStamp, _FileStamp]
+RadientStamp = tuple[bool, _StoreStamp, tuple[str, float] | None]
+
+
+@lru_cache(maxsize=1)  # Only the last observed on-disk generation can be reused.
+def _radient_provider_row(
+    config_dir: Path | None, files: _StoreStamp
+) -> tuple[str, float] | None:
+    # A TypeSafe/OpenRouter key read writes its usage audit to the same DB.
+    # File changes trigger a metadata read, but only the Radient row's own
+    # generation invalidates a negative result. Never retain or log a key.
+    if files[0] is None:
+        return None
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretNotFound
+    from local_operator.secrets.store import provider_secret_name
+
+    try:
+        record = open_store(config_dir).describe(
+            provider_secret_name("RADIENT_API_KEY"), role="provider"
+        )
+    except SecretNotFound:
+        return None
+    return record.record_id, record.updated_at
 
 
 def radient_stamp(config_dir: Path | None) -> RadientStamp:
-    """Cheap invalidation of a negative Radient probe, not a credential lookup.
+    """Invalidate a negative Radient probe after a local login or key write.
 
-    Login, provider-key writes and rotations can happen in another process.
-    Watch the main files AND their WALs: SQLite can commit without touching
-    the main file (including an in-place update inside an existing WAL).
-    The only ambient key tier is RADIENT_API_KEY; changes between nonempty
-    values do not change its availability. Keep no key material in the memo.
+    Check main files AND WALs: SQLite can commit without touching the main
+    file (including an in-place update inside an existing WAL).
     """
     from local_operator.providers.auth_store import default_db_path
+    from local_operator.secrets.errors import SecretStoreError
     from local_operator.secrets.keys import store_path
 
-    def stamp(path: Path) -> tuple[int, int, int, int, int] | None:
+    def stamp(path: Path) -> _FileStamp:
         try:
             info = path.stat()
         except FileNotFoundError:
             return None
         return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
+    def db_stamp(db: Path) -> _StoreStamp:
+        return stamp(db), stamp(db.with_name(db.name + "-wal"))
+
     auth = config_dir / "auth.db" if config_dir is not None else default_db_path()
-    secrets = store_path(config_dir)
-    return bool(os.environ.get("RADIENT_API_KEY")), tuple(
-        stamp(candidate)
-        for db in (auth, secrets)
-        for candidate in (db, db.with_name(db.name + "-wal"))
-    )
+    try:
+        row = _radient_provider_row(config_dir, db_stamp(store_path(config_dir)))
+    except (SecretStoreError, OSError, sqlite3.Error, TypeError, ValueError):
+        # Match native eligibility for an absent/locked/unreadable key store;
+        # unlike a confirmed miss this failure is not memoized.
+        row = None
+    return bool(os.environ.get("RADIENT_API_KEY")), db_stamp(auth), row
 
 
 class AdvisoryAuthSource(Protocol):
@@ -163,12 +191,12 @@ class AdvisoryVendor:
         if not request.questions or any(q.kind != "choice" for q in request.questions):
             raise VendorError("structured hints require choice questions", kind="response")
         access = await self._access(self._config_dir)
-        if access is None:
-            raise VendorError("no eligible OAuth sign-in", kind="auth")
-        # OAuth resolution can suspend (even after the cascade was memoized).
-        # Check again after it, before handing any turn text to the HTTP client.
+        # Even a miss can follow a suspended lookup. Do not let it fall
+        # through to another inference provider after a concurrent login.
         if check_radient is not None:
             check_radient()
+        if access is None:
+            raise VendorError("no eligible OAuth sign-in", kind="auth")
         started = time.monotonic()
         if self._client is None:
             async with httpx.AsyncClient() as client:

@@ -708,8 +708,22 @@ class _HttpDecisionVendor:
         self.invalidate_credential()
         return True
 
-    async def decide(self, request: DecisionRequest, *, timeout_s: float) -> DecisionResponse:
-        key = await self.credential(self._config_dir)
+    async def decide(
+        self,
+        request: DecisionRequest,
+        *,
+        timeout_s: float,
+        check_radient: Callable[[], None] | None = None,
+    ) -> DecisionResponse:
+        # A native leg can suspend for credentials too, including between
+        # POSTs after a refusal. Guard each send, not just entry to the leg.
+        async def resolve_key() -> SecretStr | None:
+            key = await self.credential(self._config_dir)
+            if check_radient is not None:
+                check_radient()
+            return key
+
+        key = await resolve_key()
         if key is None or not key.get_secret_value():
             raise DecisionVendorError(f"{self.name} has no credential", kind="auth", status=401)
         body = request_body(request, self.model_id)
@@ -746,7 +760,7 @@ class _HttpDecisionVendor:
                 self.name,
             )
             self.invalidate_credential()
-            refreshed = await self.credential(self._config_dir)
+            refreshed = await resolve_key()
             if refreshed is None or not refreshed.get_secret_value():
                 raise refusal
             response = await self._send_with(
@@ -771,7 +785,7 @@ class _HttpDecisionVendor:
                     self.name,
                     self.credential_tiers[self._tier],
                 )
-                fallback = await self.credential(self._config_dir)
+                fallback = await resolve_key()
                 if fallback is None or not fallback.get_secret_value():
                     raise refusal
                 response = await self._send_with(

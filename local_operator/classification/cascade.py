@@ -213,6 +213,7 @@ async def resolve_vendor_with_trace(
     auth_store: AdvisoryAuthSource | None = None,
     session_id: str | None = None,
     on_probe: Callable[[str], None] | None = None,
+    after_probe: Callable[[], None] | None = None,
 ) -> VendorResolution:
     """Resolve the first usable leg AND record every preferred leg skipped before it.
 
@@ -246,9 +247,15 @@ async def resolve_vendor_with_trace(
         try:
             credential = await vendor.credential(config_dir)
         except Exception as exc:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+            if after_probe is not None:
+                after_probe()
             logger.warning("classification: %s credential resolution failed", name, exc_info=True)
             skipped.append(_raised_skip(name, exc))
             continue
+        # Resolving Radient itself can refresh and change the stamp. If it
+        # won, there is no lower-priority selection to discard.
+        if after_probe is not None and (name != "radient" or not credential):
+            after_probe()
         if credential:
             return VendorResolution(vendor=vendor, skipped=tuple(skipped))
         # These OAuth legs do not get the native decision vendors' separate mesh
