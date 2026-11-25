@@ -1354,7 +1354,9 @@ async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
         assert snap.details["reopened_handoff"] == ask_id
         assert "Reopened handoff" in snap.text and "check what the page shows" in snap.text
         assert "earlier runtime" not in snap.text and "Continue there" not in snap.text
-        assert snap.details.get("reopened_url") == SIGNIN_URL
+        assert snap.details.get("reopened_origin") == "https://signin.example.test"
+        # The exact recorded URL is what was reopened (private record only).
+        assert successor._browser.resource.record["surface_url"] == SIGNIN_URL
         assert successor._browser.surface_id and successor._browser.surface_id != first_surface
         assert _control(protocol_peer)["tabs"] == 1
         # Spent: a second action does not reopen again.
@@ -1518,3 +1520,72 @@ async def test_release_spends_the_reopen_reference(
         assert _control(protocol_peer)["tabs"] == 0
     finally:
         await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_blocked_action_after_reopen_carries_no_credential_bytes(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """QA Q7 / review M3-1: the blocked-action reply used to begin with the
+    ordinary open message, which printed the full recorded URL."""
+    tokens = ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99")
+    secret_url = (
+        "https://alice:" + tokens[1] + "@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, secret_url)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+    successor = _asking_session(headless_tui_env)
+    try:
+        acted = await _tool(
+            successor,
+            "synthetic-click",
+            "browser",
+            {"action": "click", "selector": "button[type=submit]"},
+        )
+        print("Q7-TEXT:", acted.text)
+        print("Q7-DETAILS:", json.dumps(acted.details, sort_keys=True))
+        blob = acted.text + json.dumps(acted.details)
+        for token in tokens:
+            assert token not in blob, token
+        assert acted.details["not_run"] == "click"
+        assert acted.details["reopened_handoff"] == ask_id
+        assert "https://signin.example.test:8443" in acted.text
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_clears_references_on_disk_even_when_the_rpc_fails(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M3-2: the cleared references were only in memory until a later save."""
+    from local_operator.browser_bridge import backend
+    from local_operator.browser_bridge.resources import HANDOFF_REFS_FIELD, RESOURCE_NAME
+
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+        assert HANDOFF_REFS_FIELD in json.loads((directory / RESOURCE_NAME).read_text())
+        original = backend.HostClient.call
+
+        async def failing(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "owner_release":
+                raise backend.BridgeError("internal", "synthetic release failure")
+            return await original(client, method, params)
+
+        monkeypatch.setattr(backend.HostClient, "call", failing)
+        released = await _tool(session, "synthetic-release", "browser", {"action": "release"})
+        assert released.is_error, released.text
+        assert HANDOFF_REFS_FIELD not in json.loads((directory / RESOURCE_NAME).read_text())
+        monkeypatch.setattr(backend.HostClient, "call", original)
+    finally:
+        await session.dispose()
