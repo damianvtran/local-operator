@@ -292,6 +292,7 @@ def test_lease_claimed_at_reads_the_claim_only_while_a_verified_holder_lives(roo
     try:
         _backdate_claim(directory, 42.0)
         claimed = lease_claimed_at(root, SESSION)
+        assert claimed is not None
         assert claimed == (directory / LEASE_NAME).stat().st_mtime
         assert 41.0 < time.time() - claimed < 60.0
     finally:
