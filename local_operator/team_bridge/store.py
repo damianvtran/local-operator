@@ -243,6 +243,17 @@ HOLD_CLOCK_REVIEW = "review"
 HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
+def channel_name_key(name: str) -> str:
+    """The comparison form of a room name: trimmed, ``str.lower()``-folded.
+
+    The ONE definition shared by the channel-alias table and the tool's name
+    lookup (``tool._room_name_key`` builds on it); see there for why simple
+    lowering rather than ``casefold``.
+    """
+
+    return name.strip().lower()
+
+
 def state_db_path(config_dir: Path) -> Path:
     """The one database path: ``<config_dir>/team_bridge/state.sqlite3``."""
 
@@ -10849,6 +10860,122 @@ class Store:
                 "blocked_reviewed, pending_reconciliation "
                 "FROM deliveries WHERE owner_key = ?",
                 (_owner_key(owner),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # -- channel rename aliases (tool._resolve_channel_name) ------------------
+    #
+    # WHY. When a hub channel is renamed (``aws-ai-build-day`` -> ``pergamon``)
+    # agents keep addressing it by the old name and got a bare "not found". The
+    # hub deliberately keeps NO rename history and no names in its audit, so
+    # the only place an old name can be remembered is here, on the client,
+    # from what this machine has already been shown: the tenant's open
+    # conversation list and an admitted message's ``conversation_name``.
+    #
+    # CONSTRAINTS.
+    # * NAMES AND IDS ONLY. No body, sender, label or message id ever lands
+    #   here; a row is "conversation X was called N between first_seen and
+    #   last_seen". This is a deliberate, narrow exception to #2856 (durable
+    #   refs carry no display labels): the label is kept in its own table,
+    #   never in a ref or a queue key, and only for CHANNELS.
+    # * ADVISORY, NEVER AUTHORITY. A row only proposes a candidate id; the
+    #   tool re-checks that id against the LIVE list (open and tenant-visible)
+    #   before using it, so a stale or private row can never redirect a post.
+    # * TENANT-SCOPED. Every read and write names the tenant; an alias learnt
+    #   under one tenant is never consulted for another.
+    # * ADDITIVE (the ``_ensure_*`` rule, forward-only): created on first use
+    #   under the caller's write lock, no schema stamp moves, and an older
+    #   binary sharing the file simply never names the table. An absent table
+    #   reads as "no aliases known" — the state every store had before.
+    #
+    # A rename is inferred, not told: the same id seen under a NEW name key
+    # gets a new row whose ``first_seen`` is the first sighting of that name,
+    # which is when this machine learnt of the rename (an approximation of
+    # when it happened: the list is only read when a lookup runs).
+
+    _CHANNEL_ALIAS_DDL = (
+        "CREATE TABLE IF NOT EXISTS channel_aliases ("
+        "tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL, "
+        "name_key TEXT NOT NULL, display_name TEXT NOT NULL, "
+        "first_seen REAL NOT NULL, last_seen REAL NOT NULL, "
+        "PRIMARY KEY (tenant_id, conversation_id, name_key))",
+        "CREATE INDEX IF NOT EXISTS channel_aliases_by_name "
+        "ON channel_aliases (tenant_id, name_key)",
+    )
+
+    #: Bound on the rows one tenant's alias table returns to the near-match
+    #: scan. Each row is a (channel, name) pair this machine has seen, so even a
+    #: large organization with a rename history stays far below it; the bound
+    #: exists so a pathological table cannot turn a lookup into a full scan.
+    CHANNEL_ALIAS_SCAN_MAX = 2000
+
+    @classmethod
+    def _ensure_channel_alias_table(cls, conn: sqlite3.Connection) -> None:
+        for statement in cls._CHANNEL_ALIAS_DDL:
+            conn.execute(statement)
+
+    def record_channel_names(
+        self,
+        tenant_id: str,
+        sightings: Iterable[tuple[str, str]],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Remember ``(conversation_id, display_name)`` sightings of channels.
+
+        The key is :func:`channel_name_key` of the name, computed HERE so the
+        writers (tool listing, inbound connector) and the reader
+        (``tool._room_name_key``) cannot drift apart.
+
+        An existing (tenant, id, key) row only moves ``last_seen`` (and keeps
+        the freshest spelling); a new key for a known id is the rename record.
+        Returns the number of sightings written. Raises :class:`StoreRefused`
+        like every writer; callers treat this as best-effort.
+        """
+
+        rows = [
+            (tenant_id, cid, channel_name_key(display), display.strip())
+            for cid, display in sightings
+            if tenant_id and cid and isinstance(display, str) and channel_name_key(display)
+        ]
+        if not rows:
+            return 0
+        stamp = time.time() if now is None else now
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_channel_alias_table(conn)
+            conn.executemany(
+                "INSERT INTO channel_aliases "
+                "(tenant_id, conversation_id, name_key, display_name, first_seen, last_seen) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT (tenant_id, conversation_id, name_key) DO UPDATE SET "
+                "display_name = excluded.display_name, "
+                "last_seen = MAX(last_seen, excluded.last_seen)",
+                [(*row, stamp, stamp) for row in rows],
+            )
+        return len(rows)
+
+    def channel_alias_rows_readonly(self, tenant_id: str) -> list[dict[str, Any]]:
+        """Every alias row of ONE tenant (bounded), read-only; [] when none.
+
+        Read-only on purpose: a name lookup must not create a store or the
+        table. An absent file or table is "no aliases known", not an error.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'channel_aliases'"
+            ).fetchone()
+            if present is None:
+                return []
+            rows = conn.execute(
+                "SELECT conversation_id, name_key, display_name, first_seen, last_seen "
+                "FROM channel_aliases WHERE tenant_id = ? "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (tenant_id, self.CHANNEL_ALIAS_SCAN_MAX),
             ).fetchall()
             return [dict(row) for row in rows]
 

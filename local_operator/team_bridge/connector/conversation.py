@@ -1092,6 +1092,31 @@ def _card_metadata(
     )
 
 
+def _remember_channel_name(config_dir: Path, owner: Any, metadata: Any) -> None:
+    """Feed the rename-alias table from an admitted message's display name.
+
+    WHY here: an inbound card is often the first time this machine sees a
+    channel's NEW name after a rename, long before any lookup lists rooms.
+    Only ``conversation_kind == "channel"`` rows are kept — a dm/group label
+    (or an older server that states no kind) never becomes durable — and the
+    tool re-checks visibility against the live list before an alias resolves,
+    so a private channel's row can never redirect a post. Names and ids only;
+    best-effort, never the delivery's outcome.
+    """
+
+    if getattr(metadata, "conversation_kind", None) != "channel":
+        return
+    name = getattr(metadata, "conversation_label", "")
+    if not isinstance(name, str) or not name.strip():
+        return
+    from ..store import Store
+
+    try:
+        Store(config_dir).record_channel_names(owner.tenant_id, [(metadata.conversation_id, name)])
+    except Exception as failure:  # noqa: BLE001 - advisory table only
+        logger.debug("channel alias record skipped: %s", type(failure).__name__)
+
+
 async def _wire_for(owner: Any, config_dir: Path, auth_store: Any) -> Any:
     """SEAM: the production client, built lazily like the pair pull seams."""
 
@@ -3208,6 +3233,7 @@ async def handle_conversation_available(
             metadata = _card_metadata(owner, ref, display)
         except ValueError:
             return await held("sender_malformed")
+        _remember_channel_name(config_dir, owner, metadata)
         try:
             served_digest = hashlib.sha256(body_text.encode("utf-8")).hexdigest()
         except UnicodeEncodeError:
