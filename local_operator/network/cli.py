@@ -8683,7 +8683,16 @@ async def _pilot_act(
             # The viewer gets THIS verb's budget as its deadline; without it the
             # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
             deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
-            if verb == "send" and not live:
+            # EVERY SEND, LIVE ROW OR STORED, takes #4470's publication grace.
+            # #4470 limited it to stored rows, but a live row can be mid-restart
+            # too: the measured busy->idle case (Mac->node2) had the peer ACCEPT
+            # the engage while the restarted runtime had not republished its
+            # record yet, and the short bind loop then reported "could not start
+            # a runtime" for a session that was merely starting. The grace only
+            # runs after a SUCCESSFUL engage (a refused engage raises before any
+            # locate), is clamped to this deadline, and ends in the same "still
+            # starting ... NOT queued" refusal — no resend, queue or re-engage.
+            if verb == "send":
 
                 async def _wait_for_publication(
                     locate: _RuntimeLocator, bind_deadline: float
@@ -8854,10 +8863,6 @@ async def _pilot_mailbox_direct(
         remote_owner_for,
     )
     from local_operator.network.types import MeshRefusal
-    from local_operator.session.attached import (
-        _BIND_RETRY_ATTEMPTS,
-        _BIND_RETRY_INITIAL_S,
-    )
 
     peer_row = PeerRow(
         session_id=session_id,
@@ -8885,25 +8890,25 @@ async def _pilot_mailbox_direct(
         # a warm one answers the engage at once. The short locate retry is the
         # bind loop's own, by its constants rather than a copy of their values:
         # a runtime that has just been spawned publishes its record after the
-        # engage returns. Only a catalogued stored session is eligible for the
-        # longer publication wait; a warm row keeps its existing dial failure.
+        # engage returns, so a miss after an ACCEPTED engage takes #4470's
+        # publication grace (``_pilot_wait_for_runtime_record``) for a live row
+        # as well as a stored one. #4470 kept live rows on the short loop and its
+        # "could not start a runtime" dial failure, but the measured busy->idle
+        # restart (Mac->node2, 8.4 s) is a LIVE row whose runtime had not yet
+        # republished: the engage was accepted and the session was only starting.
+        # A refused engage still raises above and never reaches locate, so a
+        # genuinely failed runtime keeps its own reason. The one consequence:
+        # a warm row whose engage is ACCEPTED yet never publishes now answers
+        # "still starting ... NOT queued" after the (clamped) grace instead of
+        # #4470's immediate dial failure; both say nothing was delivered.
         try:
             await owner.engage(cwd="")
         except ProjectionRefusal as exc:
             raise MeshRefusal(exc.code, exc.sentence) from exc
-        delay = _BIND_RETRY_INITIAL_S
-        for attempt in range(_BIND_RETRY_ATTEMPTS):
-            record, _pid = await asyncio.to_thread(owner.locate)
-            if record is not None:
-                return record
-            if not str(getattr(row, "live_state", "") or ""):
-                return await _pilot_wait_for_runtime_record(
-                    owner.locate, bind_deadline, session_id, device
-                )
-            if attempt < _BIND_RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+        record, _pid = await asyncio.to_thread(owner.locate)
+        if record is not None:
+            return record
+        return await _pilot_wait_for_runtime_record(owner.locate, bind_deadline, session_id, device)
 
     try:
         record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
