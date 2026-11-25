@@ -21764,11 +21764,15 @@ def _sessions_open_body(
             # run appeared, and the ledger still says ``starting`` — so the
             # ONLY true sentence is that the reopen was REQUESTED. A receipt
             # that said "reopened" here was the silent no-op this path exists
-            # to make visible (see ``SESSIONS_READY_GRACE_S``).
+            # to make visible (see ``SESSIONS_READY_GRACE_S``). The owner's
+            # acceptance also requires the plain verdict NOT STARTED, and no
+            # model: no run exists yet, so naming one would claim it executed.
+            # The "reopen requested" lead stays first because callers and tests
+            # key on it; the verdict follows it.
             requested = f"reopen requested {named}" if named else "reopen requested"
             text = (
-                f"{requested}{where} — the exec job is still starting, so the session "
-                "is not confirmed live yet; follow it with "
+                f"{requested}{where} — NOT STARTED: the exec job is still starting, so "
+                "no run has begun and the session is not confirmed live yet; follow it with "
                 f"`lop exec --status {details.get('job_id')}` (or `lop sessions`)."
             )
             if details.get("sidebar_visibility") == "hidden":
@@ -35350,6 +35354,15 @@ def _resumed_line(
     model from its previous run, and a different model is a different bill.
     The line says which model applies, and says so again when it changed, so
     the delegating model learns it from the call that caused it.
+
+    TENSE: this line is written as soon as ``resume_async`` returns, BEFORE the
+    child is built (``harness/subagent.py``), so the row's ``model_label`` is the
+    model chosen for the resume, not one that has executed. The clause is
+    therefore future ("will run on X"); a bare "resumed as job N on X" read as a
+    finished run. The model that actually served the run is disclosed later, on
+    the ``wait`` header and job listing, where it is known (owner acceptance,
+    model-provenance lane). Only the PREVIOUS run keeps the past tense, because
+    it really did run.
     """
     line = f"- {label} ({from_id}): resumed as job {new_job_id}"
     model, owns = _row_model(comms, new_job_id) if new_job_id else ("", None)
@@ -35364,15 +35377,15 @@ def _resumed_line(
         # The note names the model's source, so the clause must not name a
         # second one: "on this session's model (X) (its parent's model could not
         # be found; ...)" would state two sources for one model (review R7).
-        line += f" on {model} ({note})"
+        line += f" \u2014 will run on {model} ({note})"  # i18n: ignore model-facing tool output
         return line
     if callable(on_parent) and new_job_id and on_parent(new_job_id):
         # Inherited from an ancestor rather than from this session (D9.4): "on
         # this session's model" would be false, and a bare "on <model>" reads
         # as a pin.
-        line += f" on its parent's model ({model})"
+        line += f" \u2014 will run on its parent's model ({model})"  # i18n: ignore model-facing tool output
     else:
-        line += f" {_model_clause(model, owns, session_model)}"
+        line += f" \u2014 will run {_model_clause(model, owns, session_model)}"  # i18n: ignore model-facing tool output
     if previous_model and previous_model != model:
         line += f" (its previous run was on {previous_model})"
     return line
