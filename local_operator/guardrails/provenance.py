@@ -1639,7 +1639,7 @@ def _own_tree_sheds(physical: str) -> bool:
     return not _holds_git(physical)
 
 
-def _merged_tree_sheds(real: str, entry: str) -> bool:
+def _merged_tree_sheds(real: str, entry: str, *, tool_shaped: bool = False) -> bool:
     """May plain removal of a FINISHED tree (any creator) take this ignored entry?
 
     Field case 2026-11-24 (guard 0.112.7, disk-full crashes): a read-only census
@@ -1697,11 +1697,20 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
     # for every finished tree. (A link was already judged above.)
     if name == "next-env.d.ts":
         return stat.S_ISREG(st.st_mode)
+    # #4590 QA Q1 on the ``--force`` finished route (``tool_shaped``): an
+    # entry at or under a tool-cache name is judged by the cache's CONTENT,
+    # not this blanket allowance — ``--force`` of a tagged ``.ruff_cache``
+    # holding ``notes.md`` (or an untagged one) held on base and still holds.
+    # Plain removal keeps #4565's allowance below for these names too.
     parts = [p for p in entry.rstrip("/").split("/") if p]
-    if not any(_regenerable(p) for p in parts):
-        return False
-    # A FILE named like a tool cache directory (``.ruff_cache`` as notes) is
-    # not the tool's output: those names are only ever directories.
+    if tool_shaped and any(p in _TOOL_CACHE_DIRS for p in parts):
+        return _verified_cache_dir(real, entry, tool_shaped=True)
+    # #4565: NO name list here — the finished-tree proof already covers every
+    # ignored entry (``_regenerable`` gating belongs to the routes WITHOUT that
+    # proof: ``--force`` and plain removal of a not-provably-finished tree).
+    # #4590, type-bound like ``next-env.d.ts`` above: a FILE named like a tool
+    # cache directory (``.ruff_cache`` as notes) is not the tool's output —
+    # those names are only ever directories — so it is held.
     if name in _TOOL_CACHE_DIRS and not stat.S_ISDIR(st.st_mode):
         return False
     if stat.S_ISDIR(st.st_mode):
@@ -3117,7 +3126,11 @@ class IgnoredInventory:
 
 
 def plain_cleanup_ignored_inventory(
-    real: str, *, own_regenerable: bool = False, merged_regenerable: bool = False
+    real: str,
+    *,
+    own_regenerable: bool = False,
+    merged_regenerable: bool = False,
+    tool_shaped: bool = False,
 ) -> IgnoredInventory | None:
     """Count unverified ignored entries and other changes; ``None`` = unreadable.
 
@@ -3136,6 +3149,12 @@ def plain_cleanup_ignored_inventory(
     NOT a witness for anyone else's tree (#4240's point stands there), and
     any ignored entry off the list (``.env``, ``.terraform``) stays held even
     in an own tree: it may be the only copy of hand-made local data.
+
+    ``tool_shaped`` (PR #4590 QA Q1): set by the ``--force`` finished-tree
+    caller (``classify._merged_force_payload``). Tool-cache entries must then
+    hold only what their tool writes (:func:`_tool_shaped_cache`) rather than
+    pass on a ``CACHEDIR.TAG`` or #4565's blanket finished-tree allowance;
+    every other entry keeps #4565's rule (anything but a nested repository).
     """
     status = _strict_cleanup_status(real)
     if status is None:
@@ -3159,7 +3178,7 @@ def plain_cleanup_ignored_inventory(
         if (
             _shared_dependencies_link(real, entry)
             or _finder_metadata_file(real, entry)
-            or _verified_cache_dir(real, entry)
+            or _verified_cache_dir(real, entry, tool_shaped=tool_shaped)
             or _ignored_symlink(real, entry)
             or _next_env_types_file(real, entry)
         ):
@@ -3168,7 +3187,7 @@ def plain_cleanup_ignored_inventory(
             continue
         # ``merged_regenerable``: the caller ALSO holds a finished-tree proof
         # (``classify``; see :func:`_merged_tree_sheds`).
-        if merged_regenerable and _merged_tree_sheds(real, entry):
+        if merged_regenerable and _merged_tree_sheds(real, entry, tool_shaped=tool_shaped):
             continue
         unverified += 1
     return IgnoredInventory(unverified, changes)
