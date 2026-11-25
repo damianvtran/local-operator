@@ -185,6 +185,44 @@ async def test_m_opens_the_picker_and_esc_puts_it_away(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_closed_card_leaves_the_locale_refresh_registry(tmp_path) -> None:
+    # Regression: a closed card stayed in ``projects_send._cards`` while still
+    # reporting ``is_mounted`` (Textual never clears it on removal), so the next
+    # locale move ran ``_refresh_copy`` on a childless card and raised
+    # ``NoMatches: '.projects-send-title'``. In CI this surfaced as teardown
+    # errors in tests/unit/tui/test_provider_state.py in shard `test (3.13, 5)`.
+    from local_operator.i18n.text import active_locale, set_active_locale
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets import projects_send
+
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    before = active_locale()
+    card = None
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app)
+            target = SendTarget(
+                kind="session", session_id="s1", label="work", state="live", live=True
+            )
+            view._send_targets = lambda: [target]  # type: ignore[method-assign]
+            await pilot.press("m")
+            await pilot.pause()
+            card = view._send_card
+            assert card is not None and card in projects_send._cards
+            await pilot.press("escape")
+            await pilot.pause()
+            assert view._send_card is None
+        assert card not in projects_send._cards
+        # The real-path symptom: a locale move after the picker closed must not raise.
+        set_active_locale("fr" if before != "fr" else "en")
+    finally:
+        set_active_locale(before)
+
+
+@pytest.mark.asyncio
 async def test_choosing_a_target_hands_the_composer_over_and_submits(tmp_path) -> None:
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
