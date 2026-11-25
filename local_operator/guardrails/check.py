@@ -387,34 +387,34 @@ def _targets_text(verdict: Verdict) -> str:
 
 
 def _cleared_text(verdict: Verdict) -> str:
-    """Name the worktree targets of a refused call that passed on their own.
+    """Report LOW worktree rankings, not authority to change a refused call.
 
-    Field case (guard 0.113.3): a loop removing nine worktrees was refused for
-    one, and the refusal read as if all nine were ineligible, so the agent
-    asked about the eight it was free to remove. A bash call runs whole or not
-    at all, so the refusal still stops it; this only says which targets are
-    not the reason and that a call without the refused ones is a new action.
-    Limited to ``git worktree remove`` targets so every other refusal stays
-    byte-identical; empty when nothing in the call ranked LOW.
+    A bash call runs whole or not at all. The same resolved path can have
+    multiple rows (plain and forced, for example); any non-LOW row rules it
+    out of this diagnostic, regardless of which spelling received LOW.
     """
     flagged = verdict.flagged_targets
-    cleared = [
-        r.path
-        for r in verdict.targets
-        if r.risk is Risk.LOW and r.target.worktree_remove and r.target.path
-    ]
-    if not flagged or not cleared:
+    if not flagged:
         return ""
-    more = f", … and {len(cleared) - 6} more" if len(cleared) > 6 else ""
-    shown = ", ".join(cleared[:6]) + more
-    n = len(flagged)
+    non_low_paths = {r.path for r in flagged}
+    low_paths = list(
+        dict.fromkeys(
+            r.path
+            for r in verdict.targets
+            if r.risk is Risk.LOW
+            and r.target.worktree_remove
+            and r.target.path
+            and r.path not in non_low_paths
+        )
+    )
+    if not low_paths:
+        return ""
+    more = f", … and {len(low_paths) - 6} more" if len(low_paths) > 6 else ""
+    shown = ", ".join(low_paths[:6]) + more
     return (
-        f". Only the {n} target{'' if n == 1 else 's'} above "
-        f"{'is' if n == 1 else 'are'} refused; {len(cleared)} other worktree "
-        f"target{'' if len(cleared) == 1 else 's'} in this call passed on "
-        f"{'its' if len(cleared) == 1 else 'their'} own ({shown}) — re-issue "
-        f"{'it' if len(cleared) == 1 else 'them'} without the refused "
-        f"target{'' if n == 1 else 's'}"
+        f". Diagnostic only: {len(low_paths)} other resolved worktree "
+        f"path{'' if len(low_paths) == 1 else 's'} ranked LOW in every row ({shown}); "
+        "these rankings do not authorize any part of the original call"
     )
 
 

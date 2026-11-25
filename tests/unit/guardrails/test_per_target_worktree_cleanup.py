@@ -20,10 +20,10 @@ import pytest
 
 from local_operator.guardrails import classify as classify_mod
 from local_operator.guardrails.classify import Risk
+from local_operator.guardrails.resolve import resolve_command
 from tests.unit.guardrails.test_finished_work_cleanup import (  # noqa: F401
     ME,
     _branch_tree,
-    _check,
     _git,
     _Judge,
     _rank,
@@ -31,6 +31,7 @@ from tests.unit.guardrails.test_finished_work_cleanup import (  # noqa: F401
     home,
     repo,
 )
+from tests.unit.harness.test_loop_guardrail import _run, _text
 
 NAMES = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"]
 
@@ -56,7 +57,7 @@ def _finished(root: Path, git_repo: Path, name: str) -> Path:
 def _loop(git_repo: Path, names: list[str]) -> str:
     return (
         f"for n in {' '.join(names)}; do git -C {git_repo} worktree remove --force -- "
-        f"{git_repo}/.worktrees/$n; done"
+        f'"{git_repo}/.worktrees/$n"; done'
     )
 
 
@@ -82,16 +83,22 @@ async def test_nine_path_loop_refuses_only_the_ineligible_tree(real_home: Path) 
         assert ranked[name].reason == alone[name].targets[0].reason
     assert ranked[bad.name].risk is not Risk.LOW
     assert [os.path.basename(r.path) for r in verdict.flagged_targets] == [bad.name]
-    judge = _Judge()
-    result = await _check(real_home, _loop(repo_, [*NAMES, bad.name]), judge)
-    assert result.blocked
-    assert f"{bad} (" in result.text
-    assert "Only the 1 target above is refused; 8 other worktree targets" in result.text
-    assert f"{trees[0]}, " in result.text
-    assert "re-issue them without the refused target" in result.text
-    # The eight alone are a new call and pass.
-    clean = await _check(real_home, _loop(repo_, NAMES), _Judge())
-    assert not clean.blocked, clean.text
+    # The real runner has a fake bash callback: even under auto-approval the
+    # mixed call never reaches execute, whereas the all-LOW control does.
+    mixed, dispatched = await _run(
+        real_home, _loop(repo_, [*NAMES, bad.name]), judge=_Judge(), session_id=ME
+    )
+    assert mixed.is_error and dispatched == []
+    text = _text(mixed)
+    assert f"{bad} (" in text
+    assert "Nothing was run." in text
+    assert "Diagnostic only: 8 other resolved worktree paths ranked LOW" in text
+    assert f"{trees[0]}, " in text
+    assert "without the refused" not in text
+    clean_cmd = _loop(repo_, NAMES)
+    clean, dispatched = await _run(real_home, clean_cmd, session_id=ME)
+    assert not clean.is_error, _text(clean)
+    assert dispatched == [{"command": clean_cmd}]
 
 
 @pytest.mark.parametrize("sep", [" && ", "; ", "\n"])
@@ -119,12 +126,8 @@ def test_unpinned_group_keeps_the_whole_call_off_the_exact_route(
 ) -> None:
     repo_ = real_home / "repo"
     _finished(real_home, repo_, "a1")
-    cmd = (
-        f"for n in {words}; do git -C {repo_} worktree remove --force -- "
-        f"{real_home}/$n; done"
-    )
+    cmd = f'for n in {words}; do git -C {repo_} worktree remove --force -- "{real_home}/$n"; done'
     env = {"HOME": str(real_home)}
-    from local_operator.guardrails.resolve import resolve_command
 
     res = resolve_command(cmd, cwd=str(real_home), env=env, home=str(real_home))
     assert classify_mod._literal_worktree_remove(cmd, res.targets) == frozenset()
@@ -135,12 +138,45 @@ def test_unpinned_group_keeps_the_whole_call_off_the_exact_route(
         assert verdict.risk is Risk.CRITICAL
 
 
+@pytest.mark.parametrize("operand", ['"{root}/$n"', '"{root}/${{n}}"'])
+def test_only_quoted_loop_reference_proves_one_operand(real_home: Path, operand: str) -> None:
+    body = "git worktree remove --force -- " + operand.format(root=real_home)
+    cmd = f"for n in 'two words'\ndo\n  {body}\ndone"
+    env = {"HOME": str(real_home)}
+    res = resolve_command(cmd, cwd=str(real_home), env=env, home=str(real_home))
+    assert classify_mod._literal_worktree_remove(cmd, res.targets) == frozenset(
+        {str(real_home / "two words")}
+    )
+    # Classification only: neither command is passed to Bash or a real tool.
+    assert classify_mod._literal_remove_paths(cmd.replace('"', "")) is None
+
+
+@pytest.mark.asyncio
+async def test_one_high_row_excludes_path_from_low_diagnostic(real_home: Path) -> None:
+    repo_ = real_home / "repo"
+    mixed = _finished(real_home, repo_, "mixed")
+    low = _finished(real_home, repo_, "low")
+    prefix = f"git -C {repo_} worktree remove"
+    cmd = "; ".join(
+        [f"{prefix} -- {mixed}", f"{prefix} --force -- {mixed}", f"{prefix} --force -- {low}"]
+    )
+    verdict = _rank(real_home, cmd)
+    assert {r.risk for r in verdict.targets if r.path == str(mixed)} == {Risk.LOW, Risk.HIGH}
+    assert any(r.cleanup_hold and r.path == str(mixed) for r in verdict.targets)
+    result, dispatched = await _run(real_home, cmd, session_id=ME)
+    assert result.is_error and dispatched == []
+    text = _text(result)
+    assert "Nothing was run." in text
+    flagged, diagnostic = text.split("Diagnostic only:", 1)
+    assert str(mixed) in flagged and str(mixed) not in diagnostic
+    assert f"1 other resolved worktree path ranked LOW in every row ({low})" in diagnostic
+    assert "without the refused" not in text
+
+
 def test_single_target_control_is_unchanged(real_home: Path) -> None:
     repo_ = real_home / "repo"
     wt = _finished(real_home, repo_, "solo")
     cmd = f"git -C {repo_} worktree remove --force -- {wt}"
-    from local_operator.guardrails.resolve import resolve_command
-
     env = {"HOME": str(real_home)}
     res = resolve_command(cmd, cwd=str(real_home), env=env, home=str(real_home))
     assert classify_mod._literal_worktree_remove(cmd, res.targets) == frozenset({str(wt)})

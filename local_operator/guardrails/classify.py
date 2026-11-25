@@ -2624,11 +2624,19 @@ def _finished_rig_reason(
 #: A bare word the literal-cleanup parser accepts without quoting: nothing in
 #: it can expand, split or glob.
 _LITERAL_BARE = re.compile(r"[a-zA-Z0-9_./-]+")
+#: The shared scanner is a resolver, not a proof of shell syntax: it accepts
+#: more quoting forms and can skip redirections. Require the raw segment to
+#: consist only of ordinary shell words before reading their decoded parts.
+#: Horizontal ASCII whitespace alone separates words; quoted spaces stay data.
+_LITERAL_RAW_WORD = r"""(?:[A-Za-z0-9_./-]|'[^'\r\n]*'|"(?:[^"\\\r\n]|\\[^\r\n])*"|\\[ -~])+"""
+_LITERAL_WORDS = re.compile(rf"{_LITERAL_RAW_WORD}(?:[ \t]+{_LITERAL_RAW_WORD})*")
 #: Separators between literal ``git worktree remove`` invocations. A pipe, a
 #: background ``&`` or ``||`` is not a plain sequence of the same command.
 _LITERAL_SEPARATORS = ("&&", ";", "\n", "")
-#: ``for <name> in <words>`` — the loop shape the field case used.
-_LITERAL_FOR = re.compile(r"for ([A-Za-z_][A-Za-z0-9_]*) in (.+)", re.S)
+#: Only ordinary lowercase loop identifiers: Bash-maintained variables such
+#: as RANDOM do not necessarily expand to the literal assigned by the loop.
+_LITERAL_FOR = re.compile(r"for[ \t]+([a-z][a-z0-9_]*)[ \t]+in[ \t]+(.+)")
+_LITERAL_LOOP_SEPARATORS = (";", "\n")
 
 
 def _literal_remove_path(segment: str, var: tuple[str, str] | None = None) -> str | None:
@@ -2636,8 +2644,12 @@ def _literal_remove_path(segment: str, var: tuple[str, str] | None = None) -> st
     segment names, or ``None`` for any other shape.
 
     ``var`` is a loop variable and its value for one iteration: only that exact
-    ``$name``/``${name}`` reference is substituted, nothing else bash expands.
+    double-quoted ``$name``/``${name}`` reference is substituted, nothing else
+    bash expands. An unquoted reference does not prove one operand: even a
+    literal list value can undergo field splitting and pathname expansion.
     """
+    if not _LITERAL_WORDS.fullmatch(segment):
+        return None
     words, redirects = scan(segment)
     if redirects:
         return None
@@ -2652,7 +2664,7 @@ def _literal_remove_path(segment: str, var: tuple[str, str] | None = None) -> st
                 part.kind == "bare" and _LITERAL_BARE.fullmatch(part.text)
             ):
                 pieces.append(part.text)
-            elif var is not None and part.kind in ("pbare", "pdq") and part.text in refs:
+            elif var is not None and part.kind == "pdq" and part.text in refs:
                 pieces.append(var[1])
             else:
                 return None
@@ -2684,7 +2696,7 @@ def _literal_remove_paths(command: str) -> list[str] | None:
     """Every path of a call made ONLY of literal ``git worktree remove`` invocations.
 
     Three shapes: one invocation; a ``&&``/``;``/newline chain of them; one
-    ``for n in <literal words>; do <one invocation using $n>; done`` loop. Any
+    ``for n in <literal words>; do <one invocation using "$n">; done`` loop. Any
     other program in the call (a ``cd``, an ``echo >``, a pipe) returns
     ``None``: something else running in the same call could change a tree
     between the check and the removal, which is why the allowance was for one
@@ -2695,30 +2707,47 @@ def _literal_remove_paths(command: str) -> list[str] | None:
     if parsed.open or not parsed.segments:
         return None
     segments = parsed.segments
-    if any(piped or op not in _LITERAL_SEPARATORS for _, piped, op in segments):
-        return None
-    # lex drops comments and some operators; demand that the segments and
-    # their separators spell the whole command (whitespace aside) so nothing
-    # bash would run hides outside them, including a trailing background '&'.
-    if re.sub(r"\s+", "", text) != re.sub(
-        r"\s+", "", "".join(seg + op for seg, _, op in segments)
+    if segments[-1][2] == "&&" or any(
+        piped or op not in _LITERAL_SEPARATORS for _, piped, op in segments
     ):
+        return None
+    # lex drops comments and some operators. Account for every raw segment
+    # byte and each separator, allowing only shell whitespace in the gaps.
+    # Normalizing whitespace inside the segment would also normalize operands.
+    offset = 0
+    for segment, _, op in segments:
+        while offset < len(text) and text[offset] in " \t\n":
+            offset += 1
+        if not text.startswith(segment, offset):
+            return None
+        offset += len(segment)
+        while offset < len(text) and text[offset] in " \t":
+            offset += 1
+        if not text.startswith(op, offset):
+            return None
+        offset += len(op)
+    if offset != len(text):
         return None
     head = _LITERAL_FOR.fullmatch(segments[0][0])
     if head is None:
         paths = [_literal_remove_path(seg) for seg, _, _ in segments]
         return None if any(p is None for p in paths) else [p for p in paths if p]
-    # for-loop: ``for n in w…`` / ``do <body>`` (or ``do`` then body) / ``done``.
+    # A loop is not a chain: its header, optional standalone ``do`` and
+    # single body must have shell loop delimiters, not conditional operators.
+    if any(op not in _LITERAL_LOOP_SEPARATORS for _, _, op in segments[:-1]):
+        return None
     rest = [seg for seg, _, _ in segments[1:]]
-    if rest[:1] == ["do"]:
+    if rest[:1] == ["do"] and segments[1][2] == "\n":
         rest = rest[1:]
     elif rest and rest[0].startswith(("do ", "do\t")):
-        rest = [rest[0][3:].strip(), *rest[1:]]
+        rest = [rest[0][3:].lstrip(" \t"), *rest[1:]]
     else:
         return None
     if len(rest) != 2 or rest[1] != "done":
         return None
     name, listed = head.group(1), head.group(2)
+    if not _LITERAL_WORDS.fullmatch(listed):
+        return None
     values = []
     words, redirects = scan(listed)
     if redirects or not words:
@@ -2731,7 +2760,10 @@ def _literal_remove_paths(command: str) -> list[str] | None:
             for p in word.parts
         ):
             return None
-        values.append("".join(p.text for p in word.parts))
+        value = "".join(p.text for p in word.parts)
+        if not value or any(ord(ch) < 32 or ch == "\x7f" for ch in value):
+            return None
+        values.append(value)
     paths = [_literal_remove_path(rest[0], (name, v)) for v in values]
     return None if any(p is None for p in paths) else [p for p in paths if p]
 

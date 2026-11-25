@@ -86,6 +86,7 @@ async def _run(
     authorised: bool = False,
     tool_text: str = "ok",
     user_text: str = "please clean up the ds* scratch files",
+    session_id: str = "own",
 ) -> tuple[ToolResult, list[dict[str, Any]]]:
     executed: list[dict[str, Any]] = []
 
@@ -97,8 +98,8 @@ async def _run(
         messages=[Message.user(user_text)],
         tool_context=ToolContext(
             cwd=str(home),
-            session_id="own",
-            scratchpad_dir=str(state / "sessions" / "own" / "scratchpad"),
+            session_id=session_id,
+            scratchpad_dir=str(state / "sessions" / session_id / "scratchpad"),
             request_approval=request_approval if approve else None,
         ),
     )
