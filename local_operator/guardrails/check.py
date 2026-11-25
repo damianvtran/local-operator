@@ -1378,6 +1378,27 @@ _BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
 _DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
 
 
+def _literal_compatibility_target(word: str, home: str, cwd: str | None) -> str | None:
+    from local_operator.guardrails import provenance as prov
+
+    # Prose expansion trims terminal dots and colons. Do not let that turn
+    # distinct basenames into the same literal target and suppress a veto.
+    if word.endswith((".", ":")):
+        return None
+    match = prov._PATHISH.fullmatch(word)
+    if (
+        match is None
+        or match[1] != word
+        or prov._GLOBISH.search(word)
+        or "{" in word
+        or "}" in word
+        or any(part in (".", "..") for part in word.split("/"))
+    ):
+        return None
+    expanded = prov._expand_word(word, home, cwd)
+    return os.path.realpath(expanded) if expanded is not None else None
+
+
 def _exact_firm_ask(
     ask: Any,
     path: str,
@@ -1477,20 +1498,6 @@ def _exact_firm_ask(
                             return True
                 return False
 
-            def literal_target(word: str) -> str | None:
-                match = prov._PATHISH.fullmatch(word)
-                if (
-                    match is None
-                    or match[1] != word
-                    or prov._GLOBISH.search(word)
-                    or "{" in word
-                    or "}" in word
-                    or any(part in (".", "..") for part in word.split("/"))
-                ):
-                    return None
-                expanded = prov._expand_word(word, home, cwd)
-                return os.path.realpath(expanded) if expanded is not None else None
-
             # SEC-R2-B2: an unpicked overlapping option normally represents a
             # competing target. Only in the compatibility check, a literal
             # Delete X / Keep X pair is a choice of action, not of target. It
@@ -1499,7 +1506,9 @@ def _exact_firm_ask(
             pick_names_target = names(words.firm)
             picked_parent = None
             if compatible_parent is not None and label_delete is not None and pick_names_target:
-                picked_parent = literal_target(label[label_delete.end() :].strip())
+                picked_parent = _literal_compatibility_target(
+                    label[label_delete.end() :].strip(), home, cwd
+                )
 
             def competing_option(option: Mapping[str, Any]) -> bool:
                 unpicked = str(option.get("label") or "").strip()
@@ -1509,7 +1518,8 @@ def _exact_firm_ask(
                 if (
                     picked_parent is not None
                     and keep is not None
-                    and literal_target(unpicked[keep.end() :]) == picked_parent
+                    and _literal_compatibility_target(unpicked[keep.end() :], home, cwd)
+                    == picked_parent
                 ):
                     unpicked = ""
                 text = f"{unpicked}\n{option.get('description') or ''}"

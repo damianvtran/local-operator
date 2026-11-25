@@ -1843,6 +1843,19 @@ async def test_newest_exact_approval_beats_older_decline_and_narrower_pick(deep:
     assert not judge.prompts
 
 
+@pytest.mark.parametrize("suffix", [".", ":", ".:"], ids=["dot", "colon", "mixed"])
+def test_compatibility_target_does_not_equate_punctuated_basenames(
+    tmp_path: Path, suffix: str
+) -> None:
+    from local_operator.guardrails.check import _literal_compatibility_target
+
+    plain = tmp_path / "example"
+    punctuated = tmp_path / f"example{suffix}"
+    assert plain != punctuated
+    assert _literal_compatibility_target("~/example", str(tmp_path), None) == str(plain.resolve())
+    assert _literal_compatibility_target(str(punctuated), str(tmp_path), None) is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "exact, older_decline", [(False, False), (False, True), (True, True), (True, False)]
