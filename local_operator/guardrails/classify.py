@@ -2621,54 +2621,154 @@ def _finished_rig_reason(
     return prov.finished_rig(path, session_id)
 
 
-def _literal_worktree_remove(command: str, targets: Sequence[Target]) -> bool:
-    """The new allowance is for one literal command, not a shell program."""
-    if len(targets) != 1:
-        return False
-    target = targets[0]
-    if not target.worktree_remove or not target.path or target.landings or target.empty:
-        return False
-    # Use the resolver's parser, but do not fold anything that bash expands.
-    # Checking the original segment as well excludes comments and operators
-    # that lex would otherwise discard, including a trailing background '&'.
-    text = command.strip(" \t")
-    parsed = lex(text)
-    if parsed.open or parsed.segments != [(text, False, "")]:
-        return False
-    words, redirects = scan(text)
+#: A bare word the literal-cleanup parser accepts without quoting: nothing in
+#: it can expand, split or glob.
+_LITERAL_BARE = re.compile(r"[a-zA-Z0-9_./-]+")
+#: Separators between literal ``git worktree remove`` invocations. A pipe, a
+#: background ``&`` or ``||`` is not a plain sequence of the same command.
+_LITERAL_SEPARATORS = ("&&", ";", "\n", "")
+#: ``for <name> in <words>`` — the loop shape the field case used.
+_LITERAL_FOR = re.compile(r"for ([A-Za-z_][A-Za-z0-9_]*) in (.+)", re.S)
+
+
+def _literal_remove_path(segment: str, var: tuple[str, str] | None = None) -> str | None:
+    """The one absolute path a literal ``git [-C <abs>] worktree remove [-f] [--] <abs>``
+    segment names, or ``None`` for any other shape.
+
+    ``var`` is a loop variable and its value for one iteration: only that exact
+    ``$name``/``${name}`` reference is substituted, nothing else bash expands.
+    """
+    words, redirects = scan(segment)
     if redirects:
-        return False
+        return None
+    refs = ("$" + var[0], "${" + var[0] + "}") if var is not None else ()
     argv = []
     for word in words:
-        if word.broken or any(
-            part.kind not in ("sq", "dq")
-            and (part.kind != "bare" or not re.fullmatch(r"[a-zA-Z0-9_./-]+", part.text))
-            for part in word.parts
-        ):
-            return False
-        arg = "".join(part.text for part in word.parts)
+        if word.broken:
+            return None
+        pieces = []
+        for part in word.parts:
+            if part.kind in ("sq", "dq") or (
+                part.kind == "bare" and _LITERAL_BARE.fullmatch(part.text)
+            ):
+                pieces.append(part.text)
+            elif var is not None and part.kind in ("pbare", "pdq") and part.text in refs:
+                pieces.append(var[1])
+            else:
+                return None
+        arg = "".join(pieces)
         if not arg or any(ord(ch) < 32 or ch == "\x7f" for ch in arg):
-            return False
+            return None
         argv.append(arg)
     if not argv or argv.pop(0) != "git":
-        return False
+        return None
     if argv[:1] == ["-C"]:
         if len(argv) < 2 or not os.path.isabs(argv[1]):
-            return False
+            return None
         del argv[:2]
     if argv[:2] != ["worktree", "remove"]:
-        return False
+        return None
     del argv[:2]
     if argv and argv[0] in ("-f", "--force"):
         del argv[0]
     if argv[:1] == ["--"]:
         del argv[0]
+    # ``git worktree remove`` takes exactly one worktree per invocation.
     if len(argv) != 1 or not os.path.isabs(argv[0]):
-        return False
+        return None
     raw = argv[0]
-    return raw == os.path.normpath(raw) == os.path.realpath(raw) == target.path and not (
-        target.pattern or target.opaque or target.climbs or target.unpinned
-    )
+    return raw if raw == os.path.normpath(raw) == os.path.realpath(raw) else None
+
+
+def _literal_remove_paths(command: str) -> list[str] | None:
+    """Every path of a call made ONLY of literal ``git worktree remove`` invocations.
+
+    Three shapes: one invocation; a ``&&``/``;``/newline chain of them; one
+    ``for n in <literal words>; do <one invocation using $n>; done`` loop. Any
+    other program in the call (a ``cd``, an ``echo >``, a pipe) returns
+    ``None``: something else running in the same call could change a tree
+    between the check and the removal, which is why the allowance was for one
+    literal command in the first place.
+    """
+    text = command.strip(" \t\n")
+    parsed = lex(text)
+    if parsed.open or not parsed.segments:
+        return None
+    segments = parsed.segments
+    if any(piped or op not in _LITERAL_SEPARATORS for _, piped, op in segments):
+        return None
+    # lex drops comments and some operators; demand that the segments and
+    # their separators spell the whole command (whitespace aside) so nothing
+    # bash would run hides outside them, including a trailing background '&'.
+    if re.sub(r"\s+", "", text) != re.sub(
+        r"\s+", "", "".join(seg + op for seg, _, op in segments)
+    ):
+        return None
+    head = _LITERAL_FOR.fullmatch(segments[0][0])
+    if head is None:
+        paths = [_literal_remove_path(seg) for seg, _, _ in segments]
+        return None if any(p is None for p in paths) else [p for p in paths if p]
+    # for-loop: ``for n in w…`` / ``do <body>`` (or ``do`` then body) / ``done``.
+    rest = [seg for seg, _, _ in segments[1:]]
+    if rest[:1] == ["do"]:
+        rest = rest[1:]
+    elif rest and rest[0].startswith(("do ", "do\t")):
+        rest = [rest[0][3:].strip(), *rest[1:]]
+    else:
+        return None
+    if len(rest) != 2 or rest[1] != "done":
+        return None
+    name, listed = head.group(1), head.group(2)
+    values = []
+    words, redirects = scan(listed)
+    if redirects or not words:
+        return None
+    for word in words:
+        # Only words that cannot glob, split or expand: a ``*``, ``~`` or
+        # ``$VAR`` in the list keeps the ordinary ranking for the whole call.
+        if word.broken or not all(
+            p.kind in ("sq", "dq") or (p.kind == "bare" and _LITERAL_BARE.fullmatch(p.text))
+            for p in word.parts
+        ):
+            return None
+        values.append("".join(p.text for p in word.parts))
+    paths = [_literal_remove_path(rest[0], (name, v)) for v in values]
+    return None if any(p is None for p in paths) else [p for p in paths if p]
+
+
+def _literal_worktree_remove(command: str, targets: Sequence[Target]) -> frozenset[str]:
+    """Targets of a literal ``git worktree remove`` call that may take the exact route.
+
+    The allowance is for literal invocations, not a shell program. Field case
+    (guard 0.113.3): it used to require exactly ONE target, so a loop or chain
+    removing nine finished worktrees sent every forced target to the ordinary
+    ranking (HIGH for a deletions-only tree) and the judge saw an empty
+    eligibility list — one ineligible tree sank all nine. Now each path a
+    literal invocation names is judged on its own by ``_exact_linked_cleanup``,
+    exactly as it is alone; per-path rules are unchanged. Anything the
+    resolver cannot pin (glob, ``$VAR`` from outside, ``..``) returns empty
+    for the whole call, and CRITICAL ranking runs before this route anyway.
+    """
+    paths = _literal_remove_paths(command)
+    if not paths or not targets:
+        return frozenset()
+    for target in targets:
+        if (
+            not target.worktree_remove
+            or not target.path
+            or target.landings
+            or target.empty
+            or target.pattern
+            or target.opaque
+            or target.climbs
+            or target.unpinned
+        ):
+            return frozenset()
+    # The resolver's targets and the literal reading must name the same set:
+    # a disagreement means one of the two misread the call.
+    if {t.path for t in targets} != set(paths):
+        return frozenset()
+    return frozenset(paths)
 
 
 def _exact_linked_cleanup(
@@ -3125,7 +3225,7 @@ def classify_targets(
     created: Sequence[Creation] = (),
     blind: Sequence[str] = (),
     globstar: bool = False,
-    exact_cleanup: bool = False,
+    exact_cleanup: frozenset[str] = frozenset(),
 ) -> Verdict:
     prot = _protected(env, scratchpad, session_id) if (targets or touched or created) else None
     evidence_hits: list[RankedTarget] = []
@@ -3214,7 +3314,16 @@ def classify_targets(
     foreign = ForeignCreations(session_id)
     try:
         ranked = [
-            _rank(t, prot, session_id, globstar, foreign=foreign, exact_cleanup=exact_cleanup)
+            _rank(
+                t,
+                prot,
+                session_id,
+                globstar,
+                foreign=foreign,
+                # Per target (0.113.3 field case): one path's ineligibility
+                # must not take the exact route away from the others.
+                exact_cleanup=t.path in exact_cleanup,
+            )
             for t in targets
         ]
     finally:
@@ -3314,5 +3423,6 @@ def classify_bash(
         created=resolution.created,
         blind=resolution.blind,
         globstar=resolution.globstar,
-        exact_cleanup=_literal_worktree_remove(command, resolution.targets),
+        # ``or``: a test that stubs the helper with ``lambda *_: False`` means none.
+        exact_cleanup=_literal_worktree_remove(command, resolution.targets) or frozenset(),
     )
