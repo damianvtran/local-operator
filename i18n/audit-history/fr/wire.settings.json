@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "79f585ef3eaddc897d34de5ce5d14136b98f90825de18531c5c932108fdc1e58",
+  "history_sha256": "df5600208be97aec4e80bbaf7dac6e8d6ae85cd39bbefec78aef24e8d30b38d1",
   "entries": [
     {
       "locale": "fr",
@@ -7560,6 +7560,42 @@
       },
       "status": "passed",
       "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "c515e528ce6932243edaf407642cd3ff581189714410d7111f9adc8b4bd63add",
+      "context_sha256": "8ae319470f58210c1917333219389d1fd81e4fc6951d3db5fbccadc8ebc53c1b",
+      "target_sha256": "1326b8c04002cfbdc5fd5dc5e1b385c725eb506302f2eb45aa0b268207e1d523",
+      "round": "r2",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (remediation commit 5bfa50d8bf0a; applied r1 auditor corrections.json)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commit or the audit brief",
+        "date": "2026-11-25",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-r2, independent of the translator; did not write PR #4569)",
+        "session": "eb15f9c6eb35",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-25",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit",
+        "findings": 1,
+        "independent_from_translator": true,
+        "scope": "round 2 delta e91c217dff52..5bfa50d8bf0a: every changed value read against en + context sidecar, i18n/glossary.md, the locale style guide and namespace/corpus usage; r1 corrections.json checked byte-for-byte (28/37 verbatim, 9 superseded by the D1/D7 source changes); full-namespace placeholder and bidi/zero-width parity scan; widths by rich.cells.cell_len against the 29-cell label, 80-cell help and 24-cell access budgets",
+        "namespace_finding_detail": "minor: help drops 'per search' — current 'Facturé sur l’utilisation supplémentaire de Claude (prix API) ; après Radient.' -> 'Facturé par recherche à l’utilisation suppl. Claude (prix API) ; après Radient.' (79/80 cells); label 'Recherche Claude (payante)' 26/29, help 78/80; the cost reads as cost."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4569 head 5bfa50d8bf0a1db1739807b76b778163681929b7. Minor findings carry corrected strings above and in the PR comment; applying them changes target_sha256 without voiding this pass, but a changed source_sha256 does."
     }
   ]
 }

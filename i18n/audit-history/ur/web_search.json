@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "web_search",
-  "history_sha256": "50d6c7c2ac0fe1acb19714332bce666d3a719d64fe43df1a37eec31f4f371fab",
+  "history_sha256": "5efc14b6c028fc9b50943e6153f41e84eafe9c8248e7cd2350f6c50c82ccb18b",
   "entries": [
     {
       "locale": "ur",
@@ -108,6 +108,42 @@
       },
       "status": "passed",
       "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "ur",
+      "namespace": "web_search",
+      "source_sha256": "3d6b839020bdcaaee4cb6d2d4791f2623fd9276f33f7dfdd711c9736b372e204",
+      "context_sha256": "09d593a22e3e087ecda3188f2234ee73701e4b7cb7fcb3705d50e2ced0ccbf09",
+      "target_sha256": "7060048ed5e555d01372ec11e85db738408b91d53db41f14dff6add11da4887c",
+      "round": "r2",
+      "keys_audited": 3,
+      "translator": {
+        "agent": "PR #4569 implementer (remediation commit 5bfa50d8bf0a; applied r1 auditor corrections.json)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commit or the audit brief",
+        "date": "2026-11-25",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-r2, independent of the translator; did not write PR #4569)",
+        "session": "eb15f9c6eb35",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-25",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 3 minor, 0 nit",
+        "findings": 3,
+        "independent_from_translator": true,
+        "scope": "round 2 delta e91c217dff52..5bfa50d8bf0a: every changed value read against en + context sidecar, i18n/glossary.md, the locale style guide and namespace/corpus usage; r1 corrections.json checked byte-for-byte (28/37 verbatim, 9 superseded by the D1/D7 source changes); full-namespace placeholder and bidi/zero-width parity scan; widths by rich.cells.cell_len against the 29-cell label, 80-cell help and 24-cell access budgets",
+        "namespace_finding_detail": "minor: meaning.auto_native_paid 'فراہم کنندہ' drifts from 'پرووائیڈر' (26 uses in these two namespaces) -> 'آپ کے ماڈل پرووائیڈر کی بلٹ اِن تلاش، ہر تلاش پر بل؛ Radient کے بعد آزمائی جاتی ہے'; minor: detail_claude_signin_off quotes '(ادائیگی)'; change with the label -> '… “Claude سائن اِن تلاش (ادا شدہ)” آن کریں'; minor (RTL, rendered check): U+2192 in '/settings → ویب تلاش' is not bidi-mirrored; corpus is mixed (tui.welcome → vs wire.operator_setup ←); verify on the mirrored web/Electron surface; no bidi/zero-width controls; Urdu ؛ and ۔ punctuation; placeholders exact."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4569 head 5bfa50d8bf0a1db1739807b76b778163681929b7. Minor findings carry corrected strings above and in the PR comment; applying them changes target_sha256 without voiding this pass, but a changed source_sha256 does."
     }
   ]
 }
