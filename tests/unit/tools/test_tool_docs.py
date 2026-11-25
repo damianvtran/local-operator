@@ -932,7 +932,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # description drops its "Use provider only for a specific enabled source"
     # sentence, which repeated the ``provider`` parameter's own description,
     # and tightens the parallel-batching line; pays for the enum growth above.
-    "web_search": 208,
+    # RE-MEASURED (PR #4569 second offset, after main grew +14 chars of
+    # instructions): 208 -> 201 (-7) — "load balancing" kept only in the
+    # ``provider`` description, ``max_results`` drops "Maximum" (the schema
+    # carries the bound), tighter fetch/parallel wording. Enum unchanged.
+    "web_search": 201,
     "write": 137,
 }
 
