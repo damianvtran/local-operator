@@ -3042,7 +3042,7 @@ def _tool_shaped_cache(physical: str, name: str) -> bool:
         if child.name == ".gitignore" and _self_ignore_file(child.path):
             continue
         if name == ".ruff_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
-            if _subtree(child.path, _RUFF_RESULT_FILE.fullmatch):
+            if _subtree(child.path, lambda n: _RUFF_RESULT_FILE.fullmatch(n) is not None):
                 continue
         elif name == ".mypy_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
             if _subtree(child.path, lambda _n: True):

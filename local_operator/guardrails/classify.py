@@ -2838,7 +2838,9 @@ def _merged_force_payload(
     """
     from local_operator.guardrails import provenance as prov
 
-    inventory = prov.plain_cleanup_ignored_inventory(path, merged_regenerable=True, tool_shaped=True)
+    inventory = prov.plain_cleanup_ignored_inventory(
+        path, merged_regenerable=True, tool_shaped=True
+    )
     if inventory is None or inventory.changes or inventory.unverified_ignored:
         return None
     ref = getattr(identity, "ref", None)
