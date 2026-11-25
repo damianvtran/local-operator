@@ -14,11 +14,13 @@ Synthetic repos only (fixtures from ``test_finished_work_cleanup``).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 from local_operator.guardrails import classify as classify_mod
+from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.classify import Risk
 from local_operator.guardrails.resolve import resolve_command
 from tests.unit.guardrails.test_finished_work_cleanup import (  # noqa: F401
@@ -42,15 +44,41 @@ def real_home(home: Path, repo: Path) -> Path:  # noqa: F811
     return Path(os.path.realpath(home))
 
 
-def _finished(root: Path, git_repo: Path, name: str) -> Path:
-    """An own tree whose HEAD is on origin and whose only change is a deletion:
-    the interrupted-cleanup shape that ranks LOW only on the exact route."""
-    wt = _branch_tree(root, git_repo, name)
+@pytest.fixture
+def stable_home(real_home: Path) -> Path:
+    # The child must already exist when the worktree's root is recorded.
+    git_repo = real_home / "repo"
+    tracked = git_repo / "nested" / "tracked.txt"
+    tracked.parent.mkdir()
+    tracked.write_text("tracked\n")
+    _git("add", "nested/tracked.txt", cwd=git_repo)
+    _git("commit", "-qm", "add nested tracked file", cwd=git_repo)
+    _git("push", "-q", "origin", "main", cwd=git_repo)
+    _git("fetch", "-q", "origin", cwd=git_repo)
+    return real_home
+
+
+def _land(git_repo: Path, name: str) -> None:
     _git("merge", "-q", "--ff-only", f"fix/{name}", cwd=git_repo)
     _git("push", "-q", "origin", "main", f"fix/{name}", cwd=git_repo)
     _git("fetch", "-q", "origin", cwd=git_repo)
-    _record(root, wt, creator=ME)
-    (wt / "a.txt").unlink()
+
+
+def _finished(root: Path, git_repo: Path, name: str) -> Path:
+    """An own tree with a pushed HEAD and an interrupted cleanup payload."""
+    wt = _branch_tree(root, git_repo, name, creator=ME)
+    owner = prov.owned_record(str(wt), ME)
+    assert owner is not None and owner.path == str(wt) and owner.creator == ME
+    before = wt.stat()
+    generation = (before.st_dev, before.st_ino, before.st_ctime_ns)
+    _land(git_repo, name)
+    # Unlink inside an existing child: the payload changes, not the root's
+    # generation (including the ctime fallback). Never refresh the ledger.
+    (wt / "nested" / "tracked.txt").unlink()
+    after = wt.stat()
+    assert (after.st_dev, after.st_ino, after.st_ctime_ns) == generation
+    assert owner.stamp == prov.creation_stamp(after)
+    assert prov.worktree_creators(str(wt)) == {ME}
     return wt
 
 
@@ -66,7 +94,8 @@ def _by_name(verdict: classify_mod.Verdict) -> dict[str, classify_mod.RankedTarg
 
 
 @pytest.mark.asyncio
-async def test_nine_path_loop_refuses_only_the_ineligible_tree(real_home: Path) -> None:
+async def test_nine_path_loop_refuses_only_the_ineligible_tree(stable_home: Path) -> None:
+    real_home = stable_home
     repo_ = real_home / "repo"
     trees = [_finished(real_home, repo_, n) for n in NAMES]
     bad = _branch_tree(real_home, repo_, "full-diff-history")
@@ -102,7 +131,8 @@ async def test_nine_path_loop_refuses_only_the_ineligible_tree(real_home: Path) 
 
 
 @pytest.mark.parametrize("sep", [" && ", "; ", "\n"])
-def test_mixed_chain_with_one_untracked_tree(real_home: Path, sep: str) -> None:
+def test_mixed_chain_with_one_untracked_tree(stable_home: Path, sep: str) -> None:
+    real_home = stable_home
     repo_ = real_home / "repo"
     good = [_finished(real_home, repo_, n) for n in NAMES[:3]]
     bad = _branch_tree(real_home, repo_, "wip")
@@ -122,8 +152,9 @@ def test_mixed_chain_with_one_untracked_tree(real_home: Path, sep: str) -> None:
     ids=["var", "glob", "tilde", "dotdot", "sub"],
 )
 def test_unpinned_group_keeps_the_whole_call_off_the_exact_route(
-    real_home: Path, words: str
+    stable_home: Path, words: str
 ) -> None:
+    real_home = stable_home
     repo_ = real_home / "repo"
     _finished(real_home, repo_, "a1")
     cmd = f'for n in {words}; do git -C {repo_} worktree remove --force -- "{real_home}/$n"; done'
@@ -152,7 +183,8 @@ def test_only_quoted_loop_reference_proves_one_operand(real_home: Path, operand:
 
 
 @pytest.mark.asyncio
-async def test_one_high_row_excludes_path_from_low_diagnostic(real_home: Path) -> None:
+async def test_one_high_row_excludes_path_from_low_diagnostic(stable_home: Path) -> None:
+    real_home = stable_home
     repo_ = real_home / "repo"
     mixed = _finished(real_home, repo_, "mixed")
     low = _finished(real_home, repo_, "low")
@@ -173,7 +205,8 @@ async def test_one_high_row_excludes_path_from_low_diagnostic(real_home: Path) -
     assert "without the refused" not in text
 
 
-def test_single_target_control_is_unchanged(real_home: Path) -> None:
+def test_single_target_control_is_unchanged(stable_home: Path) -> None:
+    real_home = stable_home
     repo_ = real_home / "repo"
     wt = _finished(real_home, repo_, "solo")
     cmd = f"git -C {repo_} worktree remove --force -- {wt}"
@@ -187,3 +220,41 @@ def test_single_target_control_is_unchanged(real_home: Path) -> None:
     for other in (f"cd {repo_} && {cmd}", f"{cmd} &", f"{cmd} | cat", f"{cmd} # x"):
         r2 = resolve_command(other, cwd=str(real_home), env=env, home=str(real_home))
         assert classify_mod._literal_worktree_remove(other, r2.targets) == frozenset(), other
+
+
+def test_root_unlink_drift_keeps_single_and_quoted_batch_outside_allowance(
+    real_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercise Linux's generation fallback on macOS as well. Only the stamp
+    # selection is forced; recording, unlink, and strict attribution are real.
+    if sys.platform != "linux":
+        monkeypatch.setattr(prov, "creation_stamp", lambda st: int(st.st_ctime_ns))
+    git_repo = real_home / "repo"
+    names = ["first", "second"]
+    for name in names:
+        wt = _branch_tree(real_home, git_repo, name)
+        _land(git_repo, name)
+        # Preserve the original sequence: land, record own root, unlink its
+        # tracked entry. The changed generation must invalidate that record.
+        _record(real_home, wt, creator=ME)
+        owner = prov.owned_record(str(wt), ME)
+        assert owner is not None and owner.path == str(wt) and owner.creator == ME
+        assert ME in prov.worktree_creators(str(wt))
+        (wt / "a.txt").unlink()
+        assert prov.creation_stamp(wt.stat()) != owner.stamp
+        # Ordinary ownership may still use the .git witness, but the exact
+        # cleanup route requires strict current-generation creator attribution.
+        with pytest.raises(prov.UnattributedWorktree):
+            prov.worktree_creators(str(wt))
+        assert _git("status", "--porcelain", cwd=wt).splitlines() == [" D a.txt"]
+        single = _rank(real_home, f"git -C {git_repo} worktree remove --force -- {wt}")
+        assert single.risk is Risk.HIGH
+        assert [(r.path, r.risk) for r in single.targets] == [(str(wt), Risk.HIGH)]
+        assert single.targets[0].cleanup_hold
+        assert "ownership could not be verified" in single.targets[0].reason
+
+    batch = _rank(real_home, _loop(git_repo, names))
+    assert batch.risk is Risk.HIGH
+    assert {name: row.risk for name, row in _by_name(batch).items()} == dict.fromkeys(
+        names, Risk.HIGH
+    )

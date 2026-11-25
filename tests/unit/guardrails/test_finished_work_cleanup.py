@@ -117,14 +117,16 @@ def repo(home: Path) -> Path:
     return repo
 
 
-def _branch_tree(home: Path, repo: Path, name: str, at: Path | None = None) -> Path:
+def _branch_tree(
+    home: Path, repo: Path, name: str, at: Path | None = None, *, creator: str = DONE
+) -> Path:
     """A worktree on ``fix/<name>`` with one commit, NOT merged anywhere yet."""
     wt = at if at is not None else repo / ".worktrees" / name
     _git("worktree", "add", "-q", "-b", f"fix/{name}", str(wt), "origin/main", cwd=repo)
     (wt / f"{name}.txt").write_text("done\n")
     _git("add", ".", cwd=wt)
     _git("commit", "-qm", f"fix {name}", cwd=wt)
-    _record(home, wt)
+    _record(home, wt, creator=creator)
     return wt
 
 
