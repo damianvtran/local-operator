@@ -748,13 +748,17 @@ def test_mark_automation_session_tolerates_sessions_without_a_stream() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("workstream", "marked"), [(False, True), (True, False)])
-async def test_exec_run_session_marks_automation_except_for_workstreams(
-    monkeypatch, workstream: bool, marked: bool
+@pytest.mark.parametrize(
+    ("workstream", "team", "marked"),
+    [(False, None, True), (True, None, False), (False, "team", False), (True, "team", False)],
+)
+async def test_exec_run_session_marks_automation_except_for_workstreams_and_teams(
+    monkeypatch, workstream: bool, team: Any, marked: bool
 ) -> None:
-    """``lop exec`` marks its session; a ``--workstream`` run (long-lived,
-    engaged later, idles like a main thread) keeps the ordinary policy. Startup
-    is made to fail right after the mark so nothing else of the run executes."""
+    """``lop exec`` marks a solo session; a ``--workstream`` run (long-lived,
+    engaged later) and a team-led run (its manager idles while subagents work;
+    agent review round 1, MAJOR-1) keep the ordinary policy. Startup is made
+    to fail right after the mark so nothing else of the run executes."""
     import types
 
     from local_operator import exec_session
@@ -778,7 +782,10 @@ async def test_exec_run_session_marks_automation_except_for_workstreams(
     try:
         with pytest.raises(_Stop):
             await exec_session.run_session(
-                _Session(), "p", types.SimpleNamespace(workstream=workstream), None
+                _Session(),
+                "p",
+                types.SimpleNamespace(workstream=workstream),
+                object() if team else None,
             )
         assert stream._automation is marked
     finally:

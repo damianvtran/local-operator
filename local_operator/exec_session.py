@@ -96,8 +96,17 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     # Replayed on this machine's ledger (600 agent-workstream sessions, 128,990
     # turn calls): the first >= 240 s gap is a median 834 s and 283 sessions hit
     # one, so 5m-until-the-gap saves ~33.8M base-equivalent tokens of 1h writes
-    # but costs ~44.9M in rewrites at the gap. Plain exec runs never latched.
-    if not getattr(args, "workstream", False):
+    # but costs ~44.9M in rewrites at the gap. The foreground, solo QA runs
+    # measured for this rule (56 ledgers, max start-to-start gap 28 s) never
+    # latched.
+    #
+    # NOT a run with a ``team`` attached either: its manager's turn ends while
+    # its subagents work and a wake opens the next turn minutes later, which is
+    # the idle gap the main thread's 1h exists for. Replayed on this machine's
+    # exec-jobs ledger (agent review round 1, MAJOR-1), team-led exec runs
+    # netted -1.66M base-equivalent under 5m-until-the-gap (57 jobs, median
+    # first long gap 638 s) while solo runs were roughly neutral to positive.
+    if not getattr(args, "workstream", False) and team is None:
         mark_automation_session(session)
     control = None
     try:

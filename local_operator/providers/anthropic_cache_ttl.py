@@ -107,9 +107,11 @@ SUBAGENT_LONG_CALL_1H_THRESHOLD_S = 240.0
 #: ordinary main-thread TTL for the rest of the run.
 #:
 #: Why automation is 5m at all: the main thread's 1h exists for the IDLE gap at
-#: a turn's end (the user, a wake, a subagent). An exec/SDK run has no such gap
-#: inside it: its next model call follows the previous tool results within
-#: seconds, and the run ends at the turn's end, so the 2x write buys nothing.
+#: a turn's end (the user, a wake, a subagent). In the solo exec runs measured
+#: below, the next model call followed the previous tool results within
+#: seconds and the run ended at the turn's end, so the 2x write bought nothing.
+#: Team-led and ``--workstream`` runs DO idle inside the run (a manager waits
+#: on its subagents), so the entry points do not mark them.
 #: Measured (PR #4551 QA, t3_disc paired run, Bedrock Sonnet, ``/Users/Shared/
 #: lopqa-c4551-54ba2d/paid``): lop's r2 unit crossed 150k and wrote 59,231
 #: tokens at 1h on its last two calls, $0.098 of a $0.737 run; across all 56

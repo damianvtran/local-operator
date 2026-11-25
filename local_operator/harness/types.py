@@ -5211,10 +5211,10 @@ class ChatRequest(BaseModel):
     cache_after_long_call: bool = Field(default=False, exclude=True, repr=False)
     #: This conversation is a non-interactive automation run (``lop exec``, an
     #: SDK session), marked on its ``SessionStreamFn`` by the entry point. Read
-    #: only by the cache-TTL policy, which keeps such a main thread at 5m: its
-    #: next call follows within seconds and the run ends at the turn's end, so
-    #: the idle gap the main thread's 1h pays for never happens. Transport
-    #: policy, never wire content.
+    #: only by the cache-TTL policy, which keeps such a main thread at 5m until
+    #: a long gap: in the measured solo runs its next call followed within
+    #: seconds and the run ended at the turn's end. Team-led and workstream runs
+    #: are never marked. Transport policy, never wire content.
     cache_automation: bool = Field(default=False, exclude=True, repr=False)
     #: Two of this conversation's turn requests were already at least
     #: ``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S`` apart, start

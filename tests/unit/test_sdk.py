@@ -223,6 +223,28 @@ async def test_open_session_attaches_a_named_team(scratch: SessionRoots) -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("team", "workstream", "marked"),
+    [
+        (None, False, True),
+        ("lopdev", False, False),
+        (None, True, False),
+    ],
+)
+async def test_open_session_marks_only_solo_sessions_as_cache_automation(
+    scratch: SessionRoots, team: str | None, workstream: bool, marked: bool
+) -> None:
+    """The 5m-until-a-long-gap cache TTL is for solo runs only. A team's
+    manager idles while its subagents work, so a team-led session keeps the
+    ordinary main-thread policy (agent review round 1, MAJOR-1), as does a
+    ``workstream`` spec."""
+    _seed_lopdev(scratch)
+    spec = _mock_spec(team=team, workstream=workstream)
+    async with sdk.open_session(spec, roots=scratch) as session:
+        assert cast(Any, session)._stream_fn._automation is marked
+
+
+@pytest.mark.asyncio
 async def test_open_session_refuses_a_team_this_root_does_not_hold(scratch: SessionRoots) -> None:
     """A missing team is refused by name — the other silent-drop half of Q-MAJOR-3."""
     with pytest.raises(SessionSpecError, match="No team named"):
