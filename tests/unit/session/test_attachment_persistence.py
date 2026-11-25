@@ -31,7 +31,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -777,8 +777,14 @@ def _cold_team(tmp_path: Path, directory: Path) -> str:
 
     from local_operator.session.attached import AttachedSession
 
+    # The cold-preview path reads only these two attributes, so a namespace
+    # stand-in exercises it without booting a session; cast keeps pyright
+    # honest about the deliberately partial ``self``.
     return AttachedSession._cold_bound_team(
-        SimpleNamespace(_config_dir=tmp_path, _session_id=directory.name)
+        cast(
+            "AttachedSession",
+            SimpleNamespace(_config_dir=tmp_path, _session_id=directory.name),
+        )
     )
 
 
