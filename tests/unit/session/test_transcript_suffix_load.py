@@ -310,6 +310,18 @@ async def test_t4_resume_never_materialises_the_prefix(
             await session.dispose()
         else:
             session.dispose()
+        session.transcript.close()
+        # create_session opens the process-wide shared auth store on this
+        # config root (auth.db + WAL/SHM); dispose() deliberately leaves it to
+        # atexit, so close it here or the test leaks those fds (QA r1 Q3).
+        from local_operator.config_watch import process_watcher
+        from local_operator.providers.auth_store import close_shared_auth_stores
+
+        close_shared_auth_stores()
+        # The process-wide config watcher also outlives dispose() (its
+        # kqueue + config-dir fd + wake pipes); stop it the way
+        # test_runtime_locale does.
+        await process_watcher(root).stop()
 
 
 # -- T5 compact_file ----------------------------------------------------------
@@ -540,3 +552,76 @@ def test_cut_between_anchor_and_compaction_row_replays_like_eager(journal: Path)
 
 def _dump_history(messages: list[Any]) -> list[Any]:
     return [message.model_dump() for message in messages]
+
+
+# -- R1 display-page entry times for hoisted preserved turns -------------------
+
+
+def _timed(rows: list[str]) -> list[str]:
+    """``rows`` with a distinct ``ts`` each, so a missing join is visible."""
+    out = []
+    for k, row in enumerate(rows):
+        data = json.loads(row)
+        data["ts"] = 1000.0 + k
+        out.append(json.dumps(data, separators=(",", ":")))
+    return out
+
+
+def test_display_entry_times_resolve_preserved_prefix_turns(tmp_path: Path) -> None:
+    """A compaction's preserved turn sits BEFORE the anchor, so it is a prefix
+    row; the page hoists it and its entry time must still join (R1)."""
+    from local_operator.session.history_window import display_window
+
+    rows = [*_money_prefix(), _user("pu", "keep me"), *_filler("f", 2)]
+    rows += [_user("k0"), _assistant("k1", 5)]
+    rows += [_compaction("c1", "k0", preserved_user_turns=[{"id": "pu", "text": "keep me"}])]
+    rows += [_user("after0"), _assistant("after1", 7)]
+    directory = tmp_path / "sessions" / "pt"
+    _write(directory, _timed(rows))
+    lazy = Transcript(directory)
+    eager = _eager(directory)
+    try:
+        assert lazy.has_prefix
+
+        def window(transcript: Transcript) -> Any:
+            return display_window(
+                transcript,
+                conversation_id="pt",
+                owner_epoch="e",
+                through_id=transcript.live_entries()[-1].id,
+            )
+
+        lazy_page, eager_page = window(lazy), window(eager)
+        assert "pu" in _ids(list(eager_page.messages))
+        assert _ids(list(lazy_page.messages)) == _ids(list(eager_page.messages))
+        assert eager_page.entry_times["pu"] == 1000.0 + rows.index(_user("pu", "keep me"))
+        assert lazy_page.entry_times == eager_page.entry_times
+        assert lazy.full_materialisations == 0
+    finally:
+        lazy.close()
+        eager.close()
+
+
+# -- R2 a read racing our own compact_file replace ------------------------------
+
+
+def test_read_after_verbatim_replace_succeeds_before_identity_adopts(journal: Path) -> None:
+    """``compact_file`` renames a verbatim-prefix copy over the journal in a
+    worker thread and adopts the new inode only afterwards; an ``entries()``
+    landing between must not raise (it made profile trust fail closed and
+    cache "tainted"). Rows are still verified by id, so T8 keeps refusing a
+    foreign replace (R2)."""
+    lazy = Transcript(journal)
+    eager = _eager(journal)
+    try:
+        assert lazy.has_prefix
+        path = journal / "transcript.jsonl"
+        copy = path.with_suffix(".compact")
+        copy.write_bytes(path.read_bytes())
+        before = os.stat(path).st_ino
+        os.replace(copy, path)
+        assert os.stat(path).st_ino != before
+        assert [e.to_json() for e in lazy.entries()] == [e.to_json() for e in eager.entries()]
+    finally:
+        lazy.close()
+        eager.close()

@@ -855,6 +855,24 @@ def _entry_time_join(
     return {entry.id: entry.ts for entry in entries if entry.id in carried}
 
 
+def _carried_entry_times(
+    transcript: Transcript, messages: Sequence[AgentMessage]
+) -> dict[str, float]:
+    """:func:`_entry_time_join` for the context phase, prefix rows included.
+
+    A suffix-only load keeps only rows from the newest compaction's anchor
+    resident, yet the context replay hoists that compaction's preserved user
+    turns, which precede the anchor, onto the page. Joining over the resident
+    list alone dropped their times (PR #4591 review R1), so ask the transcript,
+    whose open scan kept a ``ts`` for every prefix row (no re-read). Doubles
+    without the method keep the old resident-list join.
+    """
+    resolve = getattr(transcript, "entry_times_for", None)
+    if not callable(resolve):
+        return _entry_time_join(transcript._entries, messages)
+    return resolve(str(getattr(message, "id", "")) for message in messages)
+
+
 def _inline_ui_source(message: AgentMessage) -> TypeGuard[Message]:
     return (
         isinstance(message, Message)
@@ -1213,7 +1231,9 @@ def _capture_display_window(
         messages=selected,
         # The id→ts join over the rows THIS page carries, so a reader downstream
         # can stamp a wire row with its true entry time instead of its serve time.
-        entry_times=_entry_time_join(transcript._entries, selected),
+        # Through the transcript, not ``_entries``: on a suffix-only load the
+        # page also carries hoisted preserved turns, which are PREFIX rows.
+        entry_times=_carried_entry_times(transcript, selected),
         durable_seed_tool_ids=seed_tool_ids,
         before_token=before_token,
         snapshot_token=snapshot_token,

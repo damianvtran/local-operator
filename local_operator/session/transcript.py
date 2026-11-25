@@ -42,7 +42,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Set
+from collections.abc import Iterable, Iterator, Mapping, Set
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence, TextIO
@@ -724,6 +724,13 @@ class _PrefixSink:
         self.offsets = array("Q")
         self.lengths = array("Q")
         self.ids: list[str] = []
+        #: Entry time of each prefix row, parallel to ``ids`` (8 bytes/row).
+        #: WHY: a compaction's preserved user turns sit BEFORE its anchor, so
+        #: the display page hoists prefix rows and must stamp their true entry
+        #: time (:meth:`Transcript.entry_times_for`) without re-reading the
+        #: prefix. Kept as a compact array rather than ``TranscriptEntry`` rows
+        #: so the boot footprint stays the index's, not the journal's.
+        self.ts = array("d")
         self.positions: dict[str, int] = {}
         self.compactions: list[TranscriptEntry] = []
         self.residue: list[TranscriptEntry] = []
@@ -750,6 +757,7 @@ class _PrefixSink:
     def observe(self, entry: TranscriptEntry, offset: int, length: int) -> None:
         self.positions[entry.id] = len(self.ids)
         self.ids.append(entry.id)
+        self.ts.append(float(entry.ts))
         self.offsets.append(offset)
         self.lengths.append(length)
         payload = entry.payload or {}
@@ -3264,6 +3272,10 @@ class Transcript:
         #: resident (no compaction, a lockless/read-only open, an unresolvable
         #: anchor). See :class:`_PrefixSink` and :meth:`entries`.
         self._prefix: _PrefixSink | None = None
+        #: Id the row at the suffix cut must carry when the cut is the anchor
+        #: rather than the compaction row itself (set by ``_suffix_cut``,
+        #: checked in ``_load_rows``); ``None`` when there is nothing to check.
+        self._expected_cut_id: str | None = None
         #: Whether the open fold rewrote the journal (offsets then index the
         #: post-fold file, which no longer holds the skipped lines).
         self._open_folded = False
@@ -4434,7 +4446,7 @@ class Transcript:
                 entry = TranscriptEntry.from_json(line)
                 if entry is not None:
                     if sink is not None and number == cut:
-                        expected = getattr(self, "_expected_cut_id", None)
+                        expected = self._expected_cut_id
                         if expected is not None and entry.id != expected:
                             raise _AnchorMoved
                     self._index_entry(entry)
@@ -4460,6 +4472,7 @@ class Transcript:
     def _reset_loaded_state(self) -> None:
         self._entries = []
         self._prefix = None
+        self._expected_cut_id = None
         self._entry_ids.clear()
         self._latest_by_type.clear()
         self._latest_custom_entries.clear()
@@ -4625,6 +4638,32 @@ class Transcript:
         """Every durable row id, prefix included, with no re-read."""
         return set(self._entry_ids)
 
+    def entry_times_for(self, ids: Iterable[str]) -> dict[str, float]:
+        """``{id: ts}`` for each of ``ids`` that is a journal row, prefix included.
+
+        The display page's id→time join (``history_window._entry_time_join``).
+        It must resolve prefix rows too: the context replay hoists a
+        compaction's preserved user turns onto the page, and those rows sit
+        before the anchor by definition, so a join over the resident suffix
+        alone left them unstamped (PR #4591 review R1). Served from the open
+        scan's ``ts`` array: no re-read, not counted as a materialisation.
+        Resident rows win over a prefix row of the same id (last occurrence,
+        the eager ``dict`` comprehension's rule).
+        """
+        wanted = set(ids)
+        wanted.discard("")
+        found: dict[str, float] = {}
+        prefix = self._prefix
+        if prefix is not None:
+            for entry_id in wanted:
+                index = prefix.positions.get(entry_id)
+                if index is not None:
+                    found[entry_id] = prefix.ts[index]
+        for entry in self._entries:
+            if entry.id in wanted:
+                found[entry.id] = entry.ts
+        return found
+
     def history_projection(self) -> list[TranscriptEntry]:
         """The prefix RESIDUE plus the resident rows, in append order.
 
@@ -4688,6 +4727,31 @@ class Transcript:
         ):
             raise _StalePrefix(f"{self.path}: journal replaced under a lazily-loaded prefix")
 
+    def _verify_prefix_read_source(self, handle: BinaryIO) -> None:
+        """I5 for a READ-BACK, tolerant of our own ``compact_file`` replace.
+
+        WHY (PR #4591 review R2): ``compact_file`` runs ``os.replace`` in a
+        worker thread and adopts the new inode only after it, while the event
+        loop keeps serving. An ``entries()`` landing in that window sees a new
+        inode whose prefix bytes are a verbatim copy, and a strict raise there
+        made ``_reconstruct_profile_trust`` fail closed and cache "tainted" for
+        the runtime's life. So an identity mismatch alone is not fatal here:
+        the file must still cover ``prefix_end``, and every row read is then
+        checked against its recorded id (:meth:`_stream_prefix_rows`), which is
+        what still refuses a foreign replace (T8). The COPY in
+        :meth:`_replace_file` stays strict: it writes, so it must be sure.
+        """
+        prefix = self._prefix
+        assert prefix is not None
+        stat = os.fstat(handle.fileno())
+        if (stat.st_ino, stat.st_dev) == prefix.identity and stat.st_size >= prefix.prefix_end:
+            return
+        if stat.st_size < prefix.prefix_end:
+            raise _StalePrefix(f"{self.path}: journal shorter than its lazily-loaded prefix")
+        logger.debug(
+            "transcript: %s changed inode under its prefix; verifying rows by id", self.path
+        )
+
     def _stream_prefix_rows(self, lo: int, hi: int) -> Iterator[TranscriptEntry]:
         """Prefix rows ``[lo, hi)`` read back by offset, verified by id.
 
@@ -4700,7 +4764,7 @@ class Transcript:
         if lo >= hi:
             return
         with self.path.open("rb") as handle:
-            self._verify_prefix_source(handle)
+            self._verify_prefix_read_source(handle)
             handle.seek(prefix.offsets[lo])
             for index in range(lo, hi):
                 handle.seek(prefix.offsets[index])
@@ -5141,6 +5205,14 @@ class Transcript:
         for a few hundred bytes). Crash-safe: the new file is written beside
         the old one and moved over it with an atomic ``os.replace``, so an
         interrupted compaction leaves the original transcript intact.
+
+        SUFFIX-ONLY LOAD (``has_prefix``): the bytes before the newest
+        compaction's anchor are copied VERBATIM, never re-rendered, so a prune
+        row whose target is a PREFIX row is kept unfolded (the eager path folds
+        it). This is intentional: history is unchanged (the replay still
+        applies the kept prune), the prefix row index stays valid byte for byte,
+        and folding would mean re-reading and rewriting the very rows the lazy
+        open exists not to hold. Only prunes of resident rows are folded.
         """
         self._require_writable()
         async with self._lock:
