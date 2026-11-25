@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "اپ ڈیٹ انسٹال ہو گئی، لیکن یہ سروسز ابھی بھی پرانے بلڈ پر چل رہی ہیں:",
+  "cli.update_daemons.incomplete_row": "  {name}: {remedy}",
+  "cli.update_daemons.remedy_fallback": "وجہ اور اسے منتقل کرنے کا طریقہ دیکھنے کے لیے `lop services status` چلائیں"
+}

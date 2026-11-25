@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "bản cập nhật đã được cài, nhưng các dịch vụ sau vẫn chạy bản build cũ:",
+  "cli.update_daemons.incomplete_row": "  {name}: {remedy}",
+  "cli.update_daemons.remedy_fallback": "chạy `lop services status` để xem lý do và cách chuyển nó sang bản mới"
+}

@@ -11005,6 +11005,60 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     }
 
 
+def _incomplete_daemons(report: StageReport) -> list[dict[str, str]]:
+    """Every daemon the stage left short of the new build, with its remedy.
+
+    WHY THIS EXISTS (2026-11-25, updater daemon freshness): the closing report
+    could read as a clean success while ``_reconcile_with_processes`` had just
+    proven a supervised daemon still ran a superseded generation. That row is
+    ``pending``, and ``pending`` rows are deliberately left out of
+    ``daemons[]`` — so the frozen line carried no trace of it, ``ok`` was
+    ``true``, and no sentence named what to run.
+
+    THE REMEDY IS THE CENSUS'S, NEVER A SECOND TABLE: a row's own ``reason``
+    when it has one (the reconciliation folds ``services._DAEMON_MODULES``'s
+    sentence in there, a deferral keeps its own), else the census sentence for
+    that display name (``services.daemon_remedy``), else ``""`` — which the
+    human half renders as "see ``lop services status``". Adding a command list
+    here would let this output disagree with ``lop services status``.
+
+    Disclosure only: nothing here restarts, signals or re-reads a daemon.
+    """
+    from local_operator.services import daemon_remedy
+
+    rows: list[dict[str, str]] = []
+    for status in report.daemons:
+        if status.status in ("refreshed", "already"):
+            continue
+        rows.append(
+            {
+                "name": status.name,
+                "status": status.status,
+                "remedy": status.reason or daemon_remedy(status.name),
+            }
+        )
+    return rows
+
+
+def _print_incomplete_daemons(rows: Sequence[dict[str, str]]) -> None:
+    """The human half of an incomplete daemon stage: a heading plus one row each.
+
+    On STDERR, not stdout: the frozen report must stay stdout's last line and
+    the existing one-line stdout contracts must not grow a line; stderr is
+    where every other "the install is in, but…" warning of this command goes.
+    Printed nowhere on a fully refreshed run, so that output is byte-identical
+    to the pre-change one.
+    """
+    from local_operator.i18n.keys import cli_update_daemons as _k
+    from local_operator.i18n.text import tr
+
+    _t = tr("cli.update_daemons")
+    print(_t(_k.incomplete_heading()), file=sys.stderr)
+    for row in rows:
+        remedy = row["remedy"] or _t(_k.remedy_fallback())
+        print(_t(_k.incomplete_row(name=row["name"], remedy=remedy)), file=sys.stderr)
+
+
 def _emit_update_report(
     *,
     install_version: str,
@@ -11057,6 +11111,17 @@ def _emit_update_report(
             "daemons": daemons,
         }
     }
+    incomplete = _incomplete_daemons(report)
+    if incomplete:
+        # ADDITIVE, AND ONLY WHEN TRUE (frozen ``update.report.v1``): ``ok`` keeps
+        # meaning "the install succeeded" — it did — so it is NOT flipped; these
+        # two keys are how a consumer tells "installed, daemons incomplete" from
+        # "clean". Absent on a complete run, so a healthy line stays
+        # byte-identical; a reader must treat absence as complete. Do not move
+        # ``ok`` or the status words to carry this: that is a schema bump.
+        payload["update_report"]["daemons_complete"] = False
+        payload["update_report"]["daemons_incomplete"] = incomplete
+        _print_incomplete_daemons(incomplete)
     if _is_generation_install() or promoted_generation is not None:
         # Keep the legacy FOUR-status vocabulary. New callers require the rolling
         # contract; empty legacy rows cannot prove central-services completion.

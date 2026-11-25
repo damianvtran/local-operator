@@ -793,3 +793,79 @@ def test_q2_status_names_the_killmode_for_a_control_group_wakes_unit() -> None:
     # KillMode=process (and no unit at all) keep the census sentence.
     assert inventory(2, "process").reason == update.wake_children_deferral(2)
     assert inventory(2, None).reason == update.wake_children_deferral(2)
+
+
+# ------------------------------------------------- daemon freshness disclosure
+
+
+def _emit(stage: update.StageReport, monkeypatch: pytest.MonkeyPatch, capsys: Any) -> Any:
+    # No ``rolling`` block: this pins the base payload, not the generation receipt.
+    monkeypatch.setattr(update, "_is_generation_install", lambda _root=None: False)
+    update._emit_update_report(install_version="0.2.0", target="0.2.0", stage=stage)
+    captured = capsys.readouterr()
+    return captured, json.loads(captured.out.strip().splitlines()[-1])["update_report"]
+
+
+def test_freshness_a_stale_daemon_cannot_render_as_plain_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A row the census proved stale must surface its remedy, in both halves.
+
+    Before this, the reconciled ``pending`` row was dropped from ``daemons[]``
+    and nothing was printed: the run read as a clean success over a relay
+    still on the old generation.
+    """
+    statuses = (
+        update.DaemonStatus("network relay", "already"),
+        update.DaemonStatus("tunnel", "refreshed"),
+    )
+    stale = lambda: [  # noqa: E731
+        services.StaleDaemon("network relay", 4242, OLD.name, "run `lop network restart`")
+    ]
+    stage = update.StageReport(daemons=update._reconcile_with_processes(statuses, inventory=stale))
+    captured, report = _emit(stage, monkeypatch, capsys)
+    # The frozen keys did not move: ``ok`` still means "the install succeeded".
+    assert report["ok"] is True and report["schema"] == "update.report.v1"
+    assert report["daemons_complete"] is False
+    (row,) = report["daemons_incomplete"]
+    assert row["name"] == "network relay" and row["status"] == "pending"
+    assert "lop network restart" in row["remedy"]
+    assert "still on the old build" in captured.err
+    assert "network relay:" in captured.err and "`lop network restart`" in captured.err
+    assert "tunnel" not in captured.err
+
+
+def test_freshness_a_reasonless_failed_row_takes_the_census_remedy(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No second command table: a failed row borrows ``_DAEMON_MODULES``'s sentence."""
+    stage = update.StageReport(
+        daemons=(
+            update.DaemonStatus("mobile", "failed"),
+            update.DaemonStatus("service daemons", "failed"),
+        )
+    )
+    captured, report = _emit(stage, monkeypatch, capsys)
+    remedies = {row["name"]: row["remedy"] for row in report["daemons_incomplete"]}
+    assert remedies["mobile"] == services.daemon_remedy("mobile") == "run `lop mobile restart`"
+    # Unknown to the census: no invented command, the human row points at status.
+    assert remedies["service daemons"] == ""
+    assert "service daemons: run `lop services status`" in captured.err
+
+
+def test_freshness_a_fully_refreshed_report_still_reads_clean(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    statuses = (
+        update.DaemonStatus("network relay", "refreshed"),
+        update.DaemonStatus("tunnel", "already"),
+    )
+    stage = update.StageReport(daemons=update._reconcile_with_processes(statuses, inventory=list))
+    captured, report = _emit(stage, monkeypatch, capsys)
+    assert captured.err == ""
+    assert "daemons_complete" not in report and "daemons_incomplete" not in report
+    assert captured.out == (
+        '{"update_report":{"schema":"update.report.v1","ok":true,"install_version":"0.2.0",'
+        '"target":"0.2.0","serve":[],"daemons":[{"name":"network relay","status":"refreshed",'
+        '"version":"0.2.0"},{"name":"tunnel","status":"already","version":"0.2.0"}]}}\n'
+    )

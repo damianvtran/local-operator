@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "la actualización se instaló, pero estos servicios siguen en la compilación anterior:",
+  "cli.update_daemons.incomplete_row": "  {name}: {remedy}",
+  "cli.update_daemons.remedy_fallback": "ejecuta `lop services status` para ver por qué y cómo moverlo"
+}

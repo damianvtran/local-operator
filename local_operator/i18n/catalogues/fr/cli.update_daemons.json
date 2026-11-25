@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "la mise à jour est installée, mais ces services tournent encore sur l’ancien build :",
+  "cli.update_daemons.incomplete_row": "  {name} : {remedy}",
+  "cli.update_daemons.remedy_fallback": "lancez `lop services status` pour savoir pourquoi et comment le basculer"
+}

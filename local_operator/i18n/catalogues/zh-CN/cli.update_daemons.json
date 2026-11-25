@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "更新已安装，但以下服务仍在运行旧版本：",
+  "cli.update_daemons.incomplete_row": "  {name}：{remedy}",
+  "cli.update_daemons.remedy_fallback": "运行 `lop services status` 查看原因和迁移方法"
+}
