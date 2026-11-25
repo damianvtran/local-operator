@@ -60,6 +60,14 @@ OPENAI_IMAGES_NAMESPACE = "openai-key"
 OPENAI_IMAGES_KINDS = frozenset({"api_key"})
 
 FAL_ENV_KEY = "FAL_API_KEY"
+#: FAL's OWN environment variable name — the one its SDKs and docs use
+#: (``FAL_KEY``). Honoured as the LAST leg, after ``FAL_API_KEY``, so an
+#: operator who exported the key the way FAL tells them to still gets the FAL
+#: rung instead of having it skipped as absent and the cascade falling through
+#: to a later, weaker rung. (A key saved only as a personal ``lop secret``
+#: named ``FAL_KEY`` is deliberately NOT read: provider credentials live in the
+#: provider namespace — ``lop login fal`` — never in the user's own secrets.)
+FAL_SDK_ENV_KEY = "FAL_KEY"
 OPENAI_ENV_KEY = "OPENAI_API_KEY"
 GOOGLE_ENV_KEY = "GOOGLE_AI_STUDIO_API_KEY"
 XAI_ENV_KEY = "XAI_API_KEY"
@@ -121,8 +129,9 @@ def fal_key(config_dir: Path | None = None) -> str | None:
     Store-first, matching every other provider-key reader in the tree. The
     login row wins because it is the credential the user actively signed in
     with; the store row (``lop credential update FAL_API_KEY``) and an
-    exported environment value are kept so an operator who set the rung up
-    that way still runs. Never raises.
+    exported environment value (``FAL_API_KEY``, then FAL's own ``FAL_KEY``)
+    are kept so an operator who set the rung up that way still runs. Never
+    raises.
     """
     try:
         store = _open_store(config_dir)
@@ -140,7 +149,7 @@ def fal_key(config_dir: Path | None = None) -> str | None:
     stored = provider_secret_value(FAL_ENV_KEY, base=config_dir)
     if stored:
         return stored
-    exported = os.environ.get(FAL_ENV_KEY)
+    exported = os.environ.get(FAL_ENV_KEY) or os.environ.get(FAL_SDK_ENV_KEY)
     return exported or None
 
 

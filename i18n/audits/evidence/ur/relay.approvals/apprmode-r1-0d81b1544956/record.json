@@ -1,0 +1,48 @@
+{
+ "schema": 1,
+ "audit_id": "apprmode-r1-0d81b1544956",
+ "audit_kind": "independent semantic audit of the PR #4558 English delta; unchanged keys carried by byte proof",
+ "locale": "ur",
+ "namespace": "relay.approvals",
+ "status": "passed",
+ "verdict": "passed",
+ "pr": "damianvtran/local-operator#4558",
+ "audited_revision": "5a4e48f406ee",
+ "keys_audited": [
+  "relay.approvals.card.always_ask",
+  "relay.approvals.card.guardrails_still_apply",
+  "relay.approvals.card.set_auto_all",
+  "relay.approvals.card.set_auto_session"
+ ],
+ "findings_note": "C3 guardrails_still_apply uses the catalogue guardrail term حفاظتی اصول (wire.settings) instead of the transliteration گارڈ ریل",
+ "mechanical_checks": [
+  "key set parity with en",
+  "no placeholders in audited keys",
+  "sentence case, no full stop on links; full stop on the note",
+  "terminology against glossary and wire.settings guardrail rows"
+ ],
+ "translator": {
+  "agent": "lopdev coder (PR #4558 commit 5a4e48f406ee); identity not recorded in the commit",
+  "model": "unrecorded",
+  "fallback": "unknown (not recorded in the commit)",
+  "date": "2026-11-24"
+ },
+ "auditor": {
+  "agent": "independent i18n/copy auditor (lopdev reviewer role, session 0d81b1544956; not the translator)",
+  "session": "0d81b1544956",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-24",
+  "result": "passed",
+  "findings": 1,
+  "unresolved_blocker_major": 0,
+  "minor": 1,
+  "nit": 0
+ },
+ "source_sha256": "da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767",
+ "target_sha256": "52814d27847d559294a66470c3602613e3466c98a0fcafdfd8b213ba846efa46",
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/relay.approvals.json",
+  "target": "local_operator/i18n/catalogues/ur/relay.approvals.json"
+ }
+}

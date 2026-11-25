@@ -31,11 +31,17 @@ from PIL import Image
 from rich.cells import cell_len
 
 from local_operator import imaging, procstate
+from local_operator.harness.replay_bound import (
+    READ_REPLAY_BOUND_CHARS,
+    REPLAY_RESULT_HEADROOM_CHARS,
+    bound_replay_payloads,
+)
 from local_operator.harness.types import (
     FAULT_KEY,
     AbortSignal,
     AgentTool,
     ImageContent,
+    Message,
     TextContent,
     ToolContext,
     ToolResult,
@@ -117,6 +123,192 @@ async def test_bash_echo_and_streams(tools, context) -> None:
     assert "hello" in result.text
     assert "bad" in result.text
     assert "exit code: 0" in result.text
+
+
+#: BSD sed's real stderr for GNU's ``sed -i 's/a/b/' f``, captured on macOS:
+#: the quoted script carries sed's appended newline, so it spans two lines.
+_BSD_SED_STDERR = 'sed: 1: "f\n": invalid command code f\n'
+
+
+_GNU_SED = "sed -i 's/a/b/' f"
+
+
+@pytest.mark.parametrize(
+    ("platform", "command", "stderr", "expected"),
+    [
+        ("darwin", _GNU_SED, _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        (
+            "darwin",
+            _GNU_SED,
+            'sed: 1: "x\n": extra characters at the end of x command\n',
+            builtin.BSD_SED_INPLACE_HINT,
+        ),
+        ("darwin", _GNU_SED, 'sed: 1: "f": invalid command code f\n', builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -Ei 's/a/b/' f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        # GNU sed words it differently; Linux never gets BSD advice.
+        ("darwin", _GNU_SED, "sed: -e expression #1, char 1: unknown command: `f'\n", None),
+        ("darwin", _GNU_SED, "grep: invalid command code\n", None),
+        ("darwin", _GNU_SED, "", None),
+        ("linux", _GNU_SED, _BSD_SED_STDERR, None),
+        # The same BSD complaint without a GNU-form -i is a different mistake
+        # (round 1, m2): no -i at all, an empty suffix, or an attached suffix.
+        ("darwin", "echo a | sed 'foo'", 'sed: 1: "foo\n": invalid command code f\n', None),
+        ("darwin", "sed -i '' 's/a' f", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
+        (
+            "darwin",
+            "sed -i.bak 's/a' f",
+            'sed: 1: "s/a\n": unterminated substitute pattern\n',
+            None,
+        ),
+        (
+            "darwin",
+            "sed 's/a' f; grep -i x y",
+            'sed: 1: "s/a\n": unterminated substitute pattern\n',
+            None,
+        ),
+        # A ` -i ` inside the script text is not a flag: BSD getopt stops at
+        # the first operand (round 2, n1).
+        (
+            "darwin",
+            "sed 's/a -i b' f",
+            'sed: 1: "s/a -i b\n": unterminated substitute pattern\n',
+            None,
+        ),
+        (
+            "darwin",
+            "sed -e 's/a -i b' f",
+            'sed: 1: "s/a -i b\n": unterminated substitute pattern\n',
+            None,
+        ),
+        # `-i` here is `-e`'s script, so BSD complains about the script `-`,
+        # not about in-place (round 3, M1).
+        ("darwin", "sed -e -i f", 'sed: 1: "-i\n": invalid command code -\n', None),
+        # Flags around `-i` that must keep hinting under the M1 lookahead.
+        ("darwin", "sed -E -i 's/a/b/' f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -n -e p -i f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        ("darwin", "sed -f s.sed -i f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
+        # Past the length cap the hint is skipped rather than risk the loop.
+        ("darwin", _GNU_SED + " " * builtin._SED_HINT_MAX_COMMAND, _BSD_SED_STDERR, None),
+    ],
+)
+def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
+    monkeypatch, platform, command, stderr, expected
+) -> None:
+    monkeypatch.setattr(builtin.sys, "platform", platform)
+    assert builtin._bsd_sed_hint(command, stderr) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Round 3 (M1): overlapping option branches made these 2^n -- >1 s,
+        # >20 s and >100 s respectively -- synchronously on the event loop.
+        "sed" + " -e" * 30 + " x",
+        "sed" + " -e -n" * 24 + " x",
+        "sed" + " -e" * 3333,
+        "sed" + " -e -n" * 1600 + " x",
+    ],
+    ids=["e-x30", "e-n-x24", "e-10KB", "e-n-x1600"],
+)
+def test_gnu_sed_inplace_regex_is_linear_on_option_runs(monkeypatch, command) -> None:
+    # The regex itself, not via _bsd_sed_hint: the hint's length cap would
+    # short-circuit the 10 KB rows and hide a regressed regex.
+    started = time.perf_counter()
+    matched = builtin._GNU_SED_INPLACE_CMD_RE.search(command)
+    elapsed = time.perf_counter() - started
+    assert matched is None
+    assert elapsed < 0.05, f"{elapsed * 1000:.1f} ms on a {len(command)}-char command"
+    monkeypatch.setattr(builtin.sys, "platform", "darwin")
+    started = time.perf_counter()
+    hint = builtin._bsd_sed_hint(command, 'sed: 1: "-e\n": invalid command code -\n')
+    assert hint is None
+    assert time.perf_counter() - started < 0.05
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs the real BSD sed")
+@pytest.mark.parametrize(
+    "name",
+    # One file per distinct BSD message: BSD parses FILE as the script, so its
+    # first character picks the complaint (round 1, m1).
+    [
+        "f",
+        "x.py",
+        "src/main.py",
+        "app.py",
+        "config.py",
+        "index.ts",
+        "tests/x.py",
+        "yarn.lock",
+        "README.md",
+        "./x.py",
+        "lib/a.py",
+        "requirements.txt",
+        ":x.py",
+    ],
+)
+def test_bsd_sed_hint_matches_real_failures_for_every_first_letter(tmp_path, name) -> None:
+    target = tmp_path / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("a\n")
+    command = f"sed -i 's/a/b/' {name}"
+    ran = subprocess.run(
+        ["/bin/sh", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert ran.returncode != 0, ran
+    assert builtin._bsd_sed_hint(command, ran.stderr) == builtin.BSD_SED_INPLACE_HINT, ran.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs the real BSD sed")
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # GNU-form spellings the first prefix missed (round 2, m2): the shell
+        # drops `''`/`""`, so `-i''` reaches sed as a bare `-i`; a path-qualified
+        # sed; a sed inside a nested shell's quoted script; `-i` after `-e SCRIPT`.
+        ("sed -i'' 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("sed -i\"\" 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("/usr/bin/sed -i 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("bash -c \"sed -i 's/a/b/' f\"", builtin.BSD_SED_INPLACE_HINT),
+        ("sed -e 's/a/b/' -i f", builtin.BSD_SED_INPLACE_HINT),
+        # ` -i ` only inside the script text: a bad script, not GNU's -i (n1).
+        ("sed 's/a -i b' f", None),
+        ("sed -i '' 's/a -i b' f", None),
+    ],
+)
+def test_bsd_sed_hint_on_real_sed_spellings(tmp_path, command, expected) -> None:
+    (tmp_path / "f").write_text("a\n")
+    ran = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    assert ran.returncode != 0, ran
+    assert builtin._bsd_sed_hint(command, ran.stderr) == expected, ran.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="the hint is Darwin-only by design")
+@pytest.mark.asyncio
+async def test_bash_result_carries_the_bsd_sed_hint_once(tools, context, tmp_path) -> None:
+    # The REAL failure, not a fabricated stderr: the fabricated one-line form
+    # once passed while macOS's two-line rendering never matched.
+    (tmp_path / "f").write_text("a\n")
+    command = "echo out; sed -i 's/a/b/' f"
+    result = await _call(tools, "bash", {"command": command}, context)
+    assert "invalid command code f" in result.text
+    assert result.text.count(builtin.BSD_SED_INPLACE_HINT) == 1
+    # Its own line under the exit code; both stream bodies untouched.
+    assert result.text.splitlines()[1] == builtin.BSD_SED_INPLACE_HINT
+    assert "--- stdout ---\nout\n" in result.text
+    assert f"--- stderr ---\n{_BSD_SED_STDERR}" in result.text
+
+
+@pytest.mark.asyncio
+async def test_bash_result_without_sed_failure_has_no_hint(tools, context) -> None:
+    result = await _call(tools, "bash", {"command": "echo 'sed: fine' >&2; exit 1"}, context)
+    assert builtin.BSD_SED_INPLACE_HINT not in result.text
 
 
 @pytest.mark.asyncio
@@ -834,6 +1026,30 @@ async def test_read_line_range(tools, context) -> None:
     assert "a\n" not in result.text
 
 
+@pytest.mark.parametrize(
+    ("spec", "expected"),
+    [("76", (76, None)), (" 76 ", (76, None)), ("76-", (76, None)), ("2-3", (2, 3))],
+)
+def test_parse_line_range_accepts_a_bare_start(spec, expected) -> None:
+    # A bare start is "start-": the superset reading, so it never costs the
+    # model a retry call the way the old rejection did.
+    assert builtin._parse_line_range(spec) == expected
+
+
+@pytest.mark.parametrize("spec", ["0", "0-5", '"270-330"', "abc", "5-3", "-5", ""])
+def test_parse_line_range_still_rejects_malformed_specs(spec) -> None:
+    with pytest.raises(builtin.InvalidToolArgumentsError):
+        builtin._parse_line_range(spec)
+
+
+@pytest.mark.asyncio
+async def test_read_bare_start_line_reads_to_the_end(tools, context) -> None:
+    await _call(tools, "write", {"path": "r.txt", "content": "a\nb\nc\n"}, context)
+    result = await _call(tools, "read", {"path": "r.txt", "range": "2"}, context)
+    assert result.is_error is False
+    assert result.text.splitlines() == ["2| b", "3| c"]
+
+
 @pytest.mark.asyncio
 async def test_read_range_beyond_eof_is_useless(tools, context) -> None:
     # RT-32: a range past the last line is useless, not an error.
@@ -865,6 +1081,88 @@ async def test_read_large_file_capped_with_footer(tools, context, tmp_path) -> N
     # The range genuinely continues past wherever the cap landed.
     more = await _call(tools, "read", {"path": "big.txt", "range": "2001-2500"}, context)
     assert "line 2500" in more.text
+
+
+def _source_lines(count: int) -> list[str]:
+    """~60-char source-like lines, so a span's rendered size is predictable."""
+    return [
+        f"    value_{i:05d} = compute(alpha, beta, gamma)  # note {i:05d}"
+        for i in range(1, count + 1)
+    ]
+
+
+def _on_the_wire(result: ToolResult) -> str:
+    """``result`` as the model receives it: through the replay bound that
+    ``harness/loop.py`` applies to every request, the current turn included."""
+    row = Message(
+        role="tool",
+        content=[TextContent(text=result.text)],
+        tool_call_id="c1",
+        tool_name="read",
+    )
+    (sent,) = bound_replay_payloads([row])
+    block = sent.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def test_the_ranged_read_budget_fits_the_read_replay_bound() -> None:
+    # harness must not import tools, so the two literals are pinned here: a
+    # ranged result (body + clamp footer) larger than the read replay bound is
+    # middle-elided before the model sees it (PR #4566 round 1, M1).
+    assert (
+        builtin.READ_RANGE_OUTPUT_LIMIT_CHARS + REPLAY_RESULT_HEADROOM_CHARS
+        <= READ_REPLAY_BOUND_CHARS
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_explicit_range_returns_a_15k_span_whole(tools, context, tmp_path) -> None:
+    # An explicit range is an explicit request: a span over the 8 KiB whole-
+    # file clamp but under READ_RANGE_OUTPUT_LIMIT_CHARS comes back whole, with
+    # no continuation footer to page on, and reaches the model uncut.
+    lines = _source_lines(2000)
+    (tmp_path / "mod.txt").write_text("\n".join(lines))
+    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-230"}, context)
+    assert result.is_error is False
+    assert 14 * 1024 < len(result.text) < builtin.READ_RANGE_OUTPUT_LIMIT_CHARS
+    assert "truncated at" not in result.text
+    wire = _on_the_wire(result)
+    assert wire == result.text
+    assert "elided on replay" not in wire
+    assert wire.splitlines()[-1].endswith(lines[229])
+
+
+@pytest.mark.asyncio
+async def test_read_explicit_range_clamps_a_40k_span_consistently(tools, context, tmp_path) -> None:
+    # The ~40 KiB case was worse than base at 32 KiB: the replay bound cut a
+    # gap mid-body while the footer pointed past it. Now the tool clamp is the
+    # only cut, so the delivered lines run contiguously from the start and the
+    # footer resumes at exactly the next undelivered line.
+    lines = _source_lines(2000)
+    (tmp_path / "mod.txt").write_text("\n".join(lines))
+    result = await _call(tools, "read", {"path": "mod.txt", "range": "1-620"}, context)
+    assert result.is_error is False
+    wire = _on_the_wire(result)
+    assert wire == result.text
+    assert "elided on replay" not in wire
+    body, _, footer = wire.partition("\n\n[truncated at ")
+    assert footer.startswith(f"{builtin.READ_RANGE_OUTPUT_LIMIT_CHARS} chars;")
+    assert 8 * 1024 < len(body) <= builtin.READ_RANGE_OUTPUT_LIMIT_CHARS
+    numbers = [int(line.split("|", 1)[0]) for line in body.splitlines()]
+    assert numbers == list(range(1, len(numbers) + 1))
+    next_line = numbers[-1] + 1
+    assert f'range="{next_line}-{next_line + 200}"' in footer
+    assert f"{2000 - next_line + 1} of 2000 lines not shown" in footer
+
+
+@pytest.mark.asyncio
+async def test_read_without_range_keeps_the_8k_clamp(tools, context, tmp_path) -> None:
+    # The ranged budget is range-only; a whole-file read is still 8 KiB.
+    (tmp_path / "mod.txt").write_text("\n".join(_source_lines(2000)))
+    result = await _call(tools, "read", {"path": "mod.txt"}, context)
+    assert f"[truncated at {builtin.READ_OUTPUT_LIMIT_CHARS} chars;" in result.text
+    assert builtin.READ_OUTPUT_LIMIT_CHARS == builtin.BASH_OUTPUT_LIMIT_CHARS == 8 * 1024
 
 
 @pytest.mark.asyncio

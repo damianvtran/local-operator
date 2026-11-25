@@ -305,10 +305,23 @@ def snapshot_message(
                     "duration_s": duration,
                 }
             )
+    text = _text_head(message, min(ITEM_TEXT_MAX_CHARS, max(0, text_budget)))
+    if (
+        getattr(message, "role", "") == "assistant"
+        and getattr(message, "_inline_ui_source_version", None) == 1
+    ):
+        # File selection can consult answer prose, not model-only UI source.
+        # Strip before retaining the bounded supplement snapshot so a widget's
+        # data or incidental file-like labels cannot enter its ranking prompt.
+        from local_operator.session.inline_ui_text import project_inline_ui
+
+        text = project_inline_ui(text, streaming=False, source_version=1, capabilities=frozenset())[
+            "text"
+        ]
     return TurnItem(
         id=str(getattr(message, "id", "") or ""),
         role=str(getattr(message, "role", "") or ""),
-        text=_text_head(message, min(ITEM_TEXT_MAX_CHARS, max(0, text_budget))),
+        text=text,
         tool_calls=tuple(calls),
         tool_call_id=str(getattr(message, "tool_call_id", "") or ""),
         tool_name=str(getattr(message, "tool_name", "") or ""),

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "relay.approvals",
+  "history_sha256": "951443a745901bf1446799fd5f5016edd8b8ec91c1a289c1ac3116e10fef44fb",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "relay.approvals",
+      "source_sha256": "da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767",
+      "translator": {
+        "agent": "lopdev coder (PR #4558 commit 5a4e48f406ee); identity not recorded in the commit",
+        "model": "unrecorded",
+        "fallback": "unknown (not recorded in the commit)",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "independent i18n/copy auditor (lopdev reviewer role, session 0d81b1544956; not the translator)",
+        "session": "0d81b1544956",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "PR #4558 approval-mode delta, independent copy audit 2026-11-24 by reviewer session 0d81b1544956 (anthropic/claude-opus-5-5, no fallback): 4 new/changed keys audited (always_ask, guardrails_still_apply, set_auto_all, set_auto_session) against en, en/relay.approvals.context.json, i18n/glossary.md and i18n/style-guides/hi.md — meaning (auto scoped to approval prompts; guardrail refusals and dangerous-delete review stated as still enforced, not softened), tone, glossary/catalogue terminology. Auditor fixes applied at audit: C1 set_auto_* reworded to the catalogue verb form \"… में अपने-आप स्वीकृत करें\" (was \"… को स्वतः स्वीकृत करें\", which reads as approving the session itself); C2 guardrails_still_apply uses the catalogue guardrail term सुरक्षा नियम (wire.settings) and native हटाने instead of the loan डिलीट, verb agreement रहते हैं. Other keys byte-identical to base 7160d21268be, whose last row passed. Source da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767, target 9b6197803d5a1d4cf37e93bca78a521ee7fa396b93ba4cc18c7153e2711908ce. Evidence: i18n/audits/evidence/hi/relay.approvals/apprmode-r1-0d81b1544956/record.json"
+    }
+  ]
+}

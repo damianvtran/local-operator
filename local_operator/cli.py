@@ -2097,6 +2097,16 @@ def build_cli_parser() -> LocalizedArgumentParser:
         choices=("evidence", "source-of-truth", "operator"),
         default="operator",
     )
+    # `lop sessions orphan-sweep`: settle inbox rows and ask-index entries whose
+    # conversation is gone (``asks/orphans.py``) -- the same pass `lop serve`
+    # runs at startup and every 10 minutes, for an operator who wants it now or
+    # wants to SEE what it would settle (`--dry-run`) before a release reaches
+    # the daemon. Output is the report as JSON (machine output, no prose), and
+    # the subparser is hidden like `hold`/`holds` above for the same reason: its
+    # help text would be new copy awaiting a translation wave.
+    orphan_sweep_parser = sessions_subparsers.add_parser("orphan-sweep", parents=[parent_parser])
+    orphan_sweep_parser.add_argument("--dry-run", action="store_true")
+    orphan_sweep_parser.add_argument("--full", action="store_true")
     holds_parser = sessions_subparsers.add_parser("holds", parents=[parent_parser])
     holds_parser.add_argument("--json", action="store_true")
     unhold_parser = sessions_subparsers.add_parser("unhold", parents=[parent_parser])
@@ -8912,6 +8922,17 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "holds":
         return sessions_holds_command(args)
+
+    if getattr(args, "sessions_command", None) == "orphan-sweep":
+        from local_operator.asks import orphans
+
+        report = orphans.sweep_with_peers(
+            config_dir(),
+            dry_run=bool(args.dry_run),
+            incremental=not bool(args.full),
+        )
+        print(_json.dumps(report.as_dict(), indent=2))
+        return 0
 
     if getattr(args, "sessions_command", None) == "unhold":
         return sessions_unhold_command(args)

@@ -118,6 +118,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 #: Key namespaces of the two origin-side rows. ``remote-gate`` is the park's
@@ -1341,7 +1343,6 @@ def record_forwarding_origin(root: Path, device_id: str) -> None:
         return
     try:
         import json
-        import os
         import time
 
         with _origins_lock:
@@ -1350,16 +1351,11 @@ def record_forwarding_origin(root: Path, device_id: str) -> None:
             if device_id not in known:
                 known[device_id] = time.time()
                 path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
                 # 0600 like its siblings (``attention.db``, ``notifications.db``):
                 # it names the mesh devices this one serves (review round 2,
                 # R2-m3). Created with the mode rather than chmod-ed after, so
                 # no umask-wide window exists; ``os.replace`` keeps the mode.
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(json.dumps(known, sort_keys=True))
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, path)
+                atomic_write_text(path, json.dumps(known, sort_keys=True), mode=0o600, hidden=True)
             _recorded_origins.add(marker)
     except Exception:  # noqa: BLE001 — a marker is a hint for one sentence
         logger.debug("remote attention: could not record origin", exc_info=True)
@@ -1450,12 +1446,10 @@ def origin_baselines_ms(root: Path, device_ids: Iterable[str]) -> dict[str, int]
                     if missing:
                         for device_id in missing:
                             known[device_id] = now
-                        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
                         # 0600 like ``ORIGINS_FILE``: it names the mesh devices this one reads.
-                        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                            handle.write(json.dumps(known, sort_keys=True))
-                        os.replace(tmp, path)
+                        atomic_write_text(
+                            path, json.dumps(known, sort_keys=True), mode=0o600, hidden=True
+                        )
                     return {d: int(known[d]) for d in wanted}
                 finally:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)

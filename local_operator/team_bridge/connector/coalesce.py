@@ -195,6 +195,9 @@ def merge_metadata(items: list[Any]) -> Any:
         # The gap BEFORE the burst: the oldest message's own count. Later
         # messages in the group follow it directly, so they add nothing.
         since_last_delivery=int(getattr(items[0], "since_last_delivery", 0) or 0),
+        # Delayed delivery: the longest hold in the burst, so one late message
+        # keeps its line on the shared card (the agent reads every message).
+        held_for_s=max(int(getattr(item, "held_for_s", 0) or 0) for item in items),
     )
 
 

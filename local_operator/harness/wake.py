@@ -34,7 +34,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import Any, Awaitable, Callable, Literal, Sequence, TypedDict
+from typing import Any, Awaitable, Callable, Literal, NotRequired, Sequence, TypedDict
 
 # ``pydantic`` is deliberately NOT imported here any more: the only pydantic
 # types this module ever touched were the two DTOs, and they moved to
@@ -73,6 +73,77 @@ PAST_AT_GRACE_MS = 5_000
 MAX_ARM_MS = 60_000  # never arm further out than this; re-check on a tick
 MIN_ARM_MS = 25  # no zero-delay re-entry loop
 LOAD_GRACE_MS = 2_000  # an overdue wake adopted at resume fires shortly AFTER load
+
+#: How far AHEAD a runtime the wake supervisor started delivers this session's
+#: other wakes (see :meth:`WakeScheduler.load`'s ``pull_forward_ms``). A cold
+#: boot (median 11.4 s, then ~147 s resident) paid for one wake also delivers
+#: the session's wakes coming due within this window, each with its own id and
+#: original due time, instead of a second cold boot minutes later.
+#:
+#: PULLED FORWARD, NEVER HELD: no wake is delivered later than it would have
+#: been. Holding the earlier wake for its siblings was the first design; on the
+#: scout's 2026-11-21..24 fire timelines (3.57 days, 2,878 cold boots, only
+#: supervisor-started fires grouped) holding one-shots for 15 min removed 20
+#: boots (0.7%), pulling every row forward within 15 min removed 118 (4.1%)
+#: (5 min: 13, 0.5%; 30 min: 423, 14.7%). 15 min is the approved bound on how
+#: EARLY a wake may be delivered. INVARIANT: a pulled row is delivered at most
+#: this long before its own due time, exactly once, and a recurring one keeps
+#: its cadence: its next due is computed from its own original due time.
+WAKE_COALESCE_WINDOW_MS = 15 * 60 * 1000
+
+#: How overdue a wake can be at load and still be a cold-boot DELIVERY rather
+#: than a fire MISSED while the session was down: the supervisor's engage
+#: deadline (``WAKE_DEADLINE_S`` = 180 s) plus one re-read slice (``SLICE_S``
+#: = 10 s). A supervisor-raised runtime always loads its wake overdue (by the
+#: engage + boot latency, the supervisor log's ``took``: n = 2,878 cold boots
+#: 2026-11-21..24, median 11.4 s, p99 119.6 s, MAX 173.8 s — the bound sits
+#: 16.2 s above the observed max; the engage deadline caps ``took`` at 180 s
+#: and a sweep picks a due row up within one slice, so a PUNCTUAL supervisor
+#: delivery stays inside it), and labelling that "missed while the session was
+#: down" told the model a punctual fire had been missed (session 316765a40496:
+#: 85 such notices in 3.57 days, every one a distinct on-time wake). A test pins
+#: this sum against the supervisor's constants.
+#:
+#: APPLIES TO EVERY SESSION LOAD, not only supervisor-started runtimes (round 1,
+#: R1): an operator opening a session whose single wake came due < 190 s ago
+#: also reads "delivered at this start". That is deliberate — no runtime was
+#: running, the wake is delivered within the same latency a supervisor boot
+#: has, and nothing was skipped. Anything later, or a recurring row that
+#: skipped an occurrence, keeps the "missed while the session was down" text.
+COLD_BOOT_DELIVERY_MS = 180_000 + 10_000
+
+
+def _visible(schedule: WakeSchedule) -> bool:
+    """A row the visible catch-up may name: not an internal or hidden timer."""
+    from local_operator.wakes.store import is_internal_wake_row
+
+    return not (is_internal_wake_row(schedule) or getattr(schedule, "hidden", False))
+
+
+def _pullable(schedule: WakeSchedule) -> bool:
+    """Whether a row may be delivered ahead of its due time (see ``load``)."""
+    from local_operator.harness.wake_types import OPERATOR_WAKE_ORIGINS
+
+    if schedule.origin in OPERATOR_WAKE_ORIGINS or getattr(schedule, "notify", False):
+        return False
+    return _visible(schedule)
+
+
+def take_supervisor_started() -> bool:
+    """Whether the wake supervisor started this runtime — answered ONCE.
+
+    Reads and REMOVES ``owned_runtimes.SUPERVISOR_STARTED_ENV`` (stamped only
+    by the supervisor process into the runtimes it forks). Removing it is the
+    point: the first session in the runtime to load its wakes is the served
+    session, and nothing the runtime later starts (a subagent, a peer session,
+    a tool's subprocess) may inherit the claim and pull its own wakes forward.
+    """
+    import os
+
+    from local_operator.wakes.owned_runtimes import SUPERVISOR_STARTED_ENV
+
+    return os.environ.pop(SUPERVISOR_STARTED_ENV, "") == "1"
+
 
 WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
@@ -155,6 +226,9 @@ class MissedWakeOccurrence(TypedDict):
     schedule: WakeSchedule
     occurrences: int
     due: int
+    #: True for a row NOT yet due that a supervisor-started runtime pulled
+    #: forward into this delivery (see ``WakeScheduler.load``).
+    early: NotRequired[bool]
 
 
 #: Why a schedule stopped repeating. Only these three are ever produced:
@@ -888,6 +962,11 @@ class WakeScheduler:
         # the session aggregates them into ONE catch-up delivery instead of
         # letting each overdue wake fire its own turn seconds apart.
         self._missed: list[MissedWakeOccurrence] = []
+        #: id -> ORIGINAL due time of each row :meth:`load` pulled forward. The
+        #: row is re-armed to now + grace to fire with the catch-up, but its
+        #: advance must start from its own due time (see :meth:`pump`), or a
+        #: recurring row would re-phase to the early fire and drift.
+        self._pulled_from: dict[str, int] = {}
 
     @property
     def schedules(self) -> tuple[WakeSchedule, ...]:
@@ -1010,15 +1089,38 @@ class WakeScheduler:
     def disposed(self) -> bool:
         return self._disposed
 
-    def load(self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]) -> None:
+    def load(
+        self,
+        schedules: list[WakeSchedule] | tuple[WakeSchedule, ...],
+        *,
+        pull_forward_ms: int = 0,
+    ) -> None:
         """Adopt persisted schedules. NO persist (would duplicate per resume).
         Overdue schedules are pushed to ``now + LOAD_GRACE_MS`` so they fire
         shortly after load rather than inside it, and recorded via
         :meth:`take_missed` so the caller can aggregate them into a single
-        catch-up delivery that names the skipped occurrences."""
+        catch-up delivery that names the skipped occurrences.
+
+        ``pull_forward_ms`` (> 0 only in a runtime the wake supervisor started,
+        see :func:`take_supervisor_started`): when at least one visible row is
+        overdue, rows coming due within that window are folded into the same
+        catch-up too (``early`` set), so the boot already paid for delivers them
+        instead of a second cold boot minutes later. Each keeps its own id and
+        original due time in the delivered text, fires exactly once, and — if
+        recurring — advances from its OWN due time (``_pulled_from``), so its
+        cadence does not drift. Operator-set (cli/desktop/tui), ``notify`` and
+        internal/hidden rows are never pulled: a person's reminder, or one that
+        pings the desktop, is promised at its time, and internal timers are
+        mechanisms other code times against."""
         now = self._now()
         adopted: list[WakeSchedule] = []
         missed: list[MissedWakeOccurrence] = []
+        overdue_ids: set[str] = set()
+        #: id -> (original due, pre-re-arm row) of every overdue row: the
+        #: pull-forward trigger set and, in a pull-forward boot, each row's
+        #: cadence anchor (see below).
+        overdue: dict[str, tuple[int, WakeSchedule]] = {}
+        self._pulled_from = {}
         for schedule in schedules:
             # Persisted rows are untrusted input: a hand-edited or truncated
             # transcript can carry values the field constraints reject, and
@@ -1039,8 +1141,61 @@ class WakeScheduler:
                             "due": due_while_down(copy, now),
                         }
                     )
+                overdue[copy.id] = (copy.next_due_at, copy.model_copy(deep=True))
                 copy = copy.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
+                overdue_ids.add(copy.id)
             adopted.append(copy)
+        # Triggered by a VISIBLE OVERDUE row (the one the boot was paid for):
+        # a hidden timer alone opens no visible catch-up to fold into.
+        #
+        # OVERDUE, NOT "IN ``missed``" (round 1, Q1). A RECURRING row overdue by
+        # less than one period skips no occurrence (``due_while_down`` == 0), so
+        # it never enters ``missed`` — and that is exactly the common agent wake
+        # the supervisor cold-boots for (seconds overdue, every 30 min). Keying
+        # the trigger on ``missed`` made every recurring-triggered boot pull
+        # nothing, so its siblings paid their own boots minutes later.
+        if pull_forward_ms > 0 and any(_visible(row) for _due, row in overdue.values()):
+            horizon = now + pull_forward_ms
+            # Rows load() just re-armed to now + grace are OVERDUE ones, already
+            # folded above (or deliberately left out of the fold): never pull them.
+            rearmed = overdue_ids
+            for index, row in enumerate(adopted):
+                if row.id in rearmed:
+                    continue
+                if now < row.next_due_at <= horizon and _pullable(row):
+                    missed.append(
+                        {
+                            "schedule": row.model_copy(deep=True),
+                            "occurrences": 1,
+                            "due": 1,
+                            "early": True,
+                        }
+                    )
+                    self._pulled_from[row.id] = row.next_due_at
+                    adopted[index] = row.model_copy(update={"next_due_at": now + LOAD_GRACE_MS})
+            pulled_any = bool(self._pulled_from)
+            folded = {entry["schedule"].id for entry in missed}
+            for wake_id, (due, row) in overdue.items():
+                if not _visible(row):
+                    # Internal/hidden timers are mechanisms other code times
+                    # against: neither folded nor re-phased.
+                    continue
+                if pulled_any and wake_id not in folded:
+                    # ONE TURN: an overdue visible row that skipped nothing (a
+                    # recurring trigger, seconds late) joins the catch-up its
+                    # pulled siblings are folded into, instead of firing its own
+                    # turn beside it. ``due`` 0 is the honest count (nothing came
+                    # due strictly before now but this occurrence), which the
+                    # catch-up renders as a cold-boot delivery.
+                    missed.append({"schedule": row, "occurrences": 0, "due": 0})
+                # CADENCE ANCHOR for the overdue rows too, in every supervisor-
+                # started boot (round 1, Q1). The re-arm to now + grace phased a
+                # recurring row to LOAD time (next due = due + every + the boot
+                # latency, ~12 s more drift per cold boot; pre-existing on main).
+                # The supervisor delivered it punctually, so it advances from its
+                # own due time, like the rows pulled with it. Ordinary resumes
+                # keep the long-standing load-time phase: out of this scope.
+                self._pulled_from[wake_id] = due
         adopted.sort(key=lambda s: s.created_at)
         self._schedules = adopted
         # A RELOADED SNAPSHOT CARRIES NO HOLD, by construction: pending is a
@@ -1142,7 +1297,16 @@ class WakeScheduler:
                     planned_total: int | None = 1
                 else:
                     planned_total = schedule.limit
-                advanced = advance_wake_schedule(schedule, now)
+                anchor = self._pulled_from.pop(schedule.id, None)
+                if anchor is not None:
+                    # A row pulled forward fires early, so it advances as the
+                    # on-time fire it stands in for: from its own due time, as
+                    # if fired at that instant (one-shots retire either way).
+                    advanced = advance_wake_schedule(
+                        schedule.model_copy(update={"next_due_at": anchor}), max(now, anchor)
+                    )
+                else:
+                    advanced = advance_wake_schedule(schedule, now)
                 final = "retired" in advanced
                 due_wake = DueWake(
                     schedule=schedule,

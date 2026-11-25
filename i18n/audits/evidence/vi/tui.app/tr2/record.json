@@ -1,0 +1,53 @@
+{
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team, task audit-vi-r2)",
+    "session": "4fd509aa4aca",
+    "model": "anthropic/claude-opus-5-5 (no fallback observed)",
+    "date": "2026-11-23",
+    "independent_from_translator": true,
+    "independent_from_round1_auditor": true
+  },
+  "repo": {
+    "worktree": "~/local-operator/.worktrees/i18n-model-persist-notice",
+    "head": "c3ba6a516c6a317ad695f02bcac70a09adc1f774"
+  },
+  "audited_input": {
+    "path": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/vi.json",
+    "sha256": "c2bb94103ef8bd84ef1c10ba10f9fc0a67d57a51d622fe37245a09b16fb5dc79",
+    "round1_sha256": "85ac5ce9958feab01fd506d07191c0292452523193d6f1e21dd37415b0fc39ba",
+    "round1_record": "~/.local-operator/sessions/512639ecdf78/scratchpad/i18n-settings-residual/audit/vi/record.json"
+  },
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584"
+  },
+  "scope": "round 2 delta: tui.app.skills.team_no_description (VI-1 remediation); unchanged-value check for the rest of the file",
+  "per_namespace": {
+    "tui.app": {
+      "result": "clean",
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "findings": [],
+      "prior_findings": [
+        {
+          "id": "VI-1",
+          "status": "resolved",
+          "current": "chưa có mô tả",
+          "verification": "en 'no description' (no placeholders) -> 'chưa có mô tả', also no placeholders. Byte-identical to precedent vi/tui.library.detail_no_description (en 'no description') and vi/tui.projects.detail.no_description. Lowercase, no punctuation per sidecar. 13 cells <= maxCells 30; NFC; no wide/combining-width risk."
+        },
+        {
+          "id": "VI-2",
+          "status": "retained (nit, keep as is, translator kept)",
+          "note": "member_count value byte-identical to round 1"
+        }
+      ],
+      "notes": "Unchanged-value proof: substituting the changed value back to round-1 'không có mô tả' (1 occurrence) reproduces round-1 sha256 85ac5ce9...39ba exactly, so member_count, team_aliases, team_fallback_facts and tui.projects.start.team_detail are byte-identical to round 1. Valid JSON, key set unchanged. Repo validator not run by this auditor (values not applied to a catalogue; read-only brief)."
+    },
+    "tui.projects": {
+      "result": "clean (retained from round 1; value byte-identical)"
+    }
+  }
+}

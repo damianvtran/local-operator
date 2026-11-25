@@ -1,0 +1,7 @@
+{
+  "session.attachment.team_unrestored": "Team {team} is not attached: {reason} Only the operator can re-attach it, by running /team {team} in this session's composer (on this device or from another device driving it); do not try to attach it yourself.",
+  "session.attachment.reason_authority": "its recorded authority could not be verified on this device (the session predates the team-authority check or arrived without a team record).",
+  "session.attachment.reason_unavailable": "its definition or recorded authority is not available on this device.",
+  "session.attachment.agent_unrestored": "Profile {agent} is not attached: its definition is not available on this device. Only the operator can re-attach it, by running /agent {agent} in this session's composer.",
+  "session.attachment.refusal": "This session's team or profile could not be restored, so the message was not sent. Re-attach it by running /team <name> or /agent <name> in this session, or detach it with /team clear or /agent clear."
+}

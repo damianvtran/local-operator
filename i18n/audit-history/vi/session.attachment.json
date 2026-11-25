@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "session.attachment",
+  "history_sha256": "e5a083f02c341807645fadd5a6f20459b4d5802186d9c203ec5f66d6e3c28503",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "9bacccab3a4aa403754a1f6d4cbb67e84a940d6a693024d69df77a75c6e708a6",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #1; session a29a2e0a6911)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #1 of 2 (safety copy; a second independent audit follows — this row is not final sign-off). Read all 5 keys against en + context sidecar. Verified in bytes: key set/order, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format controls; NFC. Safety meaning preserved: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). NIT: 'quyền hạn' for authority vs existing 'Quyền của người vận hành'; fine. gắn/hồ sơ/khung soạn thảo/tách ra consistent.",
+      "head": "a404fc67087ce5c59f3f42cb6cc3878913a2b46e",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "9bacccab3a4aa403754a1f6d4cbb67e84a940d6a693024d69df77a75c6e708a6",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #2; session e93c9320acbc)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #2 of 2 (second independent audit for safety copy; formed own verdict before reading audit #1's notes). Read all 5 keys against en + context sidecar, glossary §2 and the locale style guide. Verified in bytes: key parity, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format (Cf) controls. Safety meaning unambiguous: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). Clean: bạn register; gắn/tách ra/hồ sơ/khung soạn thảo/người vận hành consistent.",
+      "head": "4fca7ff2e281ff8f6454ca8b861948aa34cdc126",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    }
+  ]
+}

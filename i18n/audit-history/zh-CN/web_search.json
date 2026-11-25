@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "web_search",
+  "history_sha256": "2d2ea0fc323e754ab75ed129f5f1cfe8260096d35c3a7e86b53bd5b759ba978b",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "070ada0f97bbc42518b9e2d34e38e21f18110a441fd2cbd3566bdef24229a50f",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "fail",
+        "findings": 4,
+        "unresolved_blocker_major": 1,
+        "finding_detail": "0 blocker, 1 major, 3 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "MAJOR: the four 'state.auto_*' words embed ' · ', the same delimiter state_legend() uses between legend entries and the TUI /search row uses between state and detail; real render under zh-CN printed 'auto free = … · 自动 · 先免费后密钥 = …', so '自动' reads as its own entry. Fix: '自动，…'. minor: spaces between CJK and Latin/digits against the zh-CN guide (corpus 3038 unspaced vs 195 spaced; 'API密钥' 19:0); missing 请 on the next-step clause of sign_in_again / not_signed_in; '0.01 美元' instead of verbatim '$0.01'."
+      },
+      "status": "failed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Not passing: 1 unresolved MAJOR. Needs the state-word fix plus an independent re-audit of the delta before a passed receipt; until then a carried zh-CN/web_search.json un-ships zh-CN in generate.py."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "web_search",
+      "source_sha256": "bf7ec689953956220f49def50f4a64e05d8870ca86a14c1279bd7fd2eda8b9ec",
+      "context_sha256": "d87e78144a7fb0824d9e0d574fa25495f403833dc888ee836e313d42375ec0b3",
+      "target_sha256": "108f7a89da3cf29579deb6663245604d887cba96c5e3bdab92424fa8282fb11c",
+      "translator": {
+        "agent": "coder (PR #4553 coder; round-1 corrections and new keys in commit 2bf8d18177b4)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4553-i18n-reaudit, independent of the translator)",
+        "session": "9019acb0dac3",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 1 nit",
+        "independent_from_translator": true,
+        "scope": "round 2: full namespace (22 keys) against current en + context sidecar, glossary, locale style guide and shipped corpus; round-1 corrections file verified byte-for-byte; legend, markers and signed-in detail rendered through providers.state_meaning()/tr() under the locale; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "Z1 resolved: no U+00B7 in any value; all state words use '，'. Round-1 corrections applied (auto_radient/meaning.auto_radient re-translated for the changed source). nit: state.enabled_then_key '已启用，之后用密钥' does not mirror its auto twin '自动，先免费后密钥' -> '已启用，先免费后密钥' (20 cells)."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4553 head 2bf8d18177b4d78caaac7f813c012f07d6b4b9df (scope b54c8d96aeca..2bf8d18177b4). Supersedes the round-1 receipt for the old source hash 9db6805bb0f3; minor/nit fixes applied later change target_sha256 without voiding this pass."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "web_search",
+      "source_sha256": "ebbcfc79868d250a58d0f560c5c38369e2d3b8b5614506ca5c2d346f0757924d",
+      "context_sha256": "3e17d0767419ec5a0b6ceb480f5b86804efc35929dcc05d842c4fc4617dee49d",
+      "target_sha256": "50d35e09de83f1dcee0ac121767130f5f9c1c63b4338e59966730f42652e79c7",
+      "round": "r1",
+      "keys_audited": 31,
+      "translator": {
+        "agent": "PR #4569 implementer (commits 523db30d3a5a, 8e0671d8b692, bc579643fd8c)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commits or the audit brief",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-audit, independent of the translator; did not write PR #4569)",
+        "session": "3312bdd83ac9",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 1 nit",
+        "independent_from_translator": true,
+        "scope": "full namespace (31 keys: 22 PR1 byte-unchanged vs 95055bbc785f, 9 new web_search.native.*) against en + context sidecar, i18n/glossary.md, the locale style guide and shipped corpus usage; placeholders rendered through i18n.runtime.render_message with real vendor/plan values; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "minor: all 9 native.* values insert spaces between CJK and Latin/placeholder runs, against the zh-CN guide and PR1 keys in this namespace (Radient额度, 模型API密钥); built-in -> 内置 vs PR1 自带的 (meaning.auto_native_*). nit: 你的 repeated in detail_plan_key.",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "web_search",
+      "source_sha256": "3d6b839020bdcaaee4cb6d2d4791f2623fd9276f33f7dfdd711c9736b372e204",
+      "context_sha256": "09d593a22e3e087ecda3188f2234ee73701e4b7cb7fcb3705d50e2ced0ccbf09",
+      "target_sha256": "62faa215417650cc7d6efce7c80ece59df36adcf3dd128718503acfd883b4fec",
+      "round": "r2",
+      "keys_audited": 10,
+      "translator": {
+        "agent": "PR #4569 implementer (remediation commit 5bfa50d8bf0a; applied r1 auditor corrections.json)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commit or the audit brief",
+        "date": "2026-11-25",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-r2, independent of the translator; did not write PR #4569)",
+        "session": "eb15f9c6eb35",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-25",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit",
+        "findings": 1,
+        "independent_from_translator": true,
+        "scope": "round 2 delta e91c217dff52..5bfa50d8bf0a: every changed value read against en + context sidecar, i18n/glossary.md, the locale style guide and namespace/corpus usage; r1 corrections.json checked byte-for-byte (28/37 verbatim, 9 superseded by the D1/D7 source changes); full-namespace placeholder and bidi/zero-width parity scan; widths by rich.cells.cell_len against the 29-cell label, 80-cell help and 24-cell access budgets",
+        "namespace_finding_detail": "minor: detail_claude_signin_off quotes the label with 收费 while the namespace state word is 付费 (state.auto_native_paid '自动，原生（付费）'); change together with the wire.settings label -> '…中开启“Claude登录搜索（付费）”'; r1 CJK/Latin spacing and 内置->自带 corrections applied verbatim across all 9 native.* keys; 'API密钥' consistent; spaces kept only around the /settings → path (corpus precedent)."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4569 head 5bfa50d8bf0a1db1739807b76b778163681929b7. Minor findings carry corrected strings above and in the PR comment; applying them changes target_sha256 without voiding this pass, but a changed source_sha256 does."
+    }
+  ]
+}

@@ -157,12 +157,28 @@ class VoiceText(BaseModel):
     without recounting. ``truncated`` says whether the cap actually cut this
     reply, so a client can show the cut (a speaker cannot see it) without
     comparing lengths against a cap the backend may have clamped.
+
+    ``full_text`` is the reply cleaned for DISPLAY and never capped: the same
+    markup removal as ``text`` (code blocks are the placeholder) but with its
+    lines kept, table rows joined by `` · `` and web addresses as written, so a
+    screen can show the whole reply while the audio stays capped. It excludes the
+    spoken closing sentence. Additive: a client must tolerate an older server
+    omitting it.
+
+    ``spoken_source`` says what ``text`` was taken from: ``"summary"`` is the
+    agent's own ``Spoken:`` paragraph, ``"reply"`` the whole reply (today's
+    behaviour, and the fallback when the agent wrote no usable paragraph). Then
+    ``truncated`` reports a cut of whichever it was. Additive: a client must
+    read an older server's missing field as ``"reply"``, which is why that is the
+    default here too.
     """
 
     text: str
     spoken_chars: int
     truncated: bool
     segments: list[str]
+    full_text: str
+    spoken_source: Literal["summary", "reply"] = "reply"
 
 
 class VoiceSpeechRequest(BaseModel):

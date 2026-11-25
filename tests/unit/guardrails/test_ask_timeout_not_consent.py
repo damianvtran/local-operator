@@ -206,6 +206,26 @@ async def test_timed_out_ask_naming_the_paths_is_refused_before_any_judge(home: 
     assert (home / "qa-3506").is_dir() and (home / "qa-bridge-home").is_dir()
 
 
+@pytest.mark.asyncio
+async def test_typed_operator_turn_after_a_timeout_still_reaches_the_judge(home: Path) -> None:
+    """PR #4493 kept guide://guardrails exception 2: a turn the operator typed
+    that names the action reaches the judge, which reads it. Only an ASK
+    answer is ordered against the refusing ask (it has a timestamp); a typed
+    turn here has none, so it keeps the pre-#4493 judge route."""
+    _ask_log(home, answer=None, expired=True)
+    command = "rm -rf ~/qa-3506 ~/qa-bridge-home"
+    ctx = _ctx(home, command)
+    ctx.operator.words.insert(
+        0, prov.OperatorWords("operator, direct", "Yes, rm -rf ~/qa-3506 ~/qa-bridge-home now")
+    )
+    judge = _Judge("BLOCK: control")
+    outcome = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
+    )
+    assert outcome is not None and outcome.blocked
+    assert len(judge.prompts) == 1  # the judge ran: the refusal was not deterministic
+
+
 def test_preview_names_the_timed_out_ask_as_not_consent(home: Path) -> None:
     _ask_log(home, answer=None, expired=True)
     report = preview_tool_call(
@@ -1009,6 +1029,394 @@ def _answered_ask(
             fh.write(json.dumps(row) + "\n")
 
 
+@pytest.mark.asyncio
+async def test_later_exact_approval_supersedes_only_the_earlier_timeout(deep: Path) -> None:
+    """Real store, two separate asks: timeout is silence, not a permanent veto."""
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(
+        deep,
+        "a-new",
+        "Delete ~/hyperplane-cpp/build?",
+        [{"label": "Approve"}, {"label": "Keep"}],
+        answer="Approve",
+    )
+    from local_operator.guardrails.check import _ask_block
+
+    path = str(deep / "hyperplane-cpp/build")
+    assert (
+        _ask_block(
+            prov.unanswered_asks(S),
+            path,
+            home=str(deep),
+            cwd=str(deep),
+            stop=(),
+            escalating=True,
+            session_id=S,
+            env=_env(deep),
+        )
+        is None
+    )
+    judge = _Judge("BLOCK")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is None or not result.blocked, result and result.text
+    assert not judge.prompts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "pick"),
+    [
+        ([{"label": "Remove all"}, {"label": "Remove none"}], "Remove none"),
+        ([{"label": "Delete everything"}, {"label": "Delete nothing"}], "Delete nothing"),
+        # The pick names another path; build is only in the option not picked.
+        (
+            [{"label": "Delete ~/hyperplane-cpp/build"}, {"label": "Delete ~/other/x"}],
+            "Delete ~/other/x",
+        ),
+        ([{"label": "Delete next week"}, {"label": "Keep"}], "Delete next week"),
+        # QA Q-R3-1: a pick that narrows the question to a glob or a path that
+        # does not exist still narrows it; the question's list is not chosen.
+        (
+            [{"label": "Approve removing only ~/hyperplane-cpp/*/cache"}, {"label": "Keep"}],
+            "Approve removing only ~/hyperplane-cpp/*/cache",
+        ),
+        (
+            [{"label": "Approve removing ~/no-such-dir"}, {"label": "Keep"}],
+            "Approve removing ~/no-such-dir",
+        ),
+        # Review SEC-R3-B2: the other path named without ``~``/``/``.
+        ([{"label": "Delete the second one"}, {"label": "Keep"}], "Delete the second one"),
+        ([{"label": "Delete x"}, {"label": "Keep"}], "Delete x"),
+        ([{"label": "Remove only x"}, {"label": "Keep"}], "Remove only x"),
+        ([{"label": "Delete other/x"}, {"label": "Keep"}], "Delete other/x"),
+        ([{"label": "Delete $HOME/other/x"}, {"label": "Keep"}], "Delete $HOME/other/x"),
+    ],
+    ids=[
+        "remove-none",
+        "delete-nothing",
+        "other-path-pick",
+        "next-week",
+        "narrowing-glob",
+        "narrowing-missing-path",
+        "second-one",
+        "bare-name",
+        "only-bare-name",
+        "relative",
+        "dollar-home",
+    ],
+)
+async def test_pick_that_approves_no_named_path_cannot_supersede_timeout(
+    deep: Path, options: list[dict[str, str]], pick: str
+) -> None:
+    """Review SEC-R2-B2/m1 (PR #4493): the question's paths are reached only
+    through a pick that names none and approves deletion unconditionally."""
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(
+        deep, "a-feed", "Delete ~/hyperplane-cpp/build or ~/other/x?", options, answer=pick
+    )
+    judge = _Judge("ALLOW ask=a-feed")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is not None and result.blocked
+    assert not judge.prompts
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "pick", "allowed"),
+    [
+        # Review SEC-R4-B1: a descriptor narrows "all" to a subset.
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all clean worktrees",
+            False,
+        ),
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete all caches", False),
+        # Review SEC-R4-M1: only a size in parentheses is dropped.
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete them (only x)", False),
+        # Review SEC-R5-M1: two numbers state a subset of the list.
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all clean worktrees (1 of 2)",
+            False,
+        ),
+        (
+            "Delete ~/hyperplane-cpp/build (dirty) or ~/other/x (clean)?",
+            "Delete all 1 clean worktree of the 2",
+            False,
+        ),
+        # Controls: a stated count covering the list, a plain plural, and
+        # (SEC-R4-m1) a single path ending in "?" counted once.
+        (
+            "Delete ~/hyperplane-cpp/build or ~/other/x?",
+            "Delete all 2 clean worktrees (~1.2 GiB)",
+            True,
+        ),
+        ("Delete ~/hyperplane-cpp/build or ~/other/x?", "Delete both", True),
+        ("Delete ~/hyperplane-cpp/build?", "Delete it", True),
+    ],
+    ids=[
+        "clean-subset",
+        "caches-subset",
+        "paren-only",
+        "one-of-two",
+        "one-of-the-two",
+        "counted",
+        "both",
+        "single-it",
+    ],
+)
+async def test_descriptor_and_parenthesis_picks_after_timeout(
+    deep: Path, question: str, pick: str, allowed: bool
+) -> None:
+    """PR #4493 round 4: which listed paths a path-less pick covers."""
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(deep, "a-feed", question, [{"label": pick}, {"label": "Keep"}], answer=pick)
+    judge = _Judge("ALLOW ask=a-feed")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    blocked = result is not None and result.blocked
+    assert blocked is (not allowed), result and result.text
+    assert not judge.prompts
+    if not allowed:
+        assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Keep ~/hyperplane-cpp/build instead of deleting it?",
+        "Back up ~/hyperplane-cpp/build before deleting?",
+        "Delete ~/hyperplane-cpp/build after backing it up?",
+    ],
+)
+async def test_preservation_yes_cannot_supersede_timeout_at_checkpoint_and_preview(
+    deep: Path, question: str
+) -> None:
+    from local_operator.guardrails.check import CallContext, GuardSettings
+    from local_operator.guardrails.preview import preview_tool_call
+
+    _deep_ask(deep, expired=True, age_ms=120_000)
+    _answered_ask(deep, "a-feed", question, [{"label": "Yes"}, {"label": "No"}], answer="Yes")
+    judge = _Judge("ALLOW ask=a-feed")
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = CallContext(cwd=str(deep), env=_env(deep), scratchpad=_pad(deep), session_id=S)
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    result = await _check(deep, command, judge)
+    assert result is not None and result.blocked
+    assert preview.builtin_effect != "pass"
+    assert not judge.prompts
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "earlier",
+        "same-ask-revision",
+        "glob",
+        "ancestor",
+        "typed",
+        "remote",
+        "declined",
+        "pending",
+        "expired-answer",
+        "sibling",
+        "brace",
+        "revision-veto",
+        "revision-approval",
+        "description",
+        "unpicked",
+        "keep-yes",
+        "backup-yes",
+        "conditional-yes",
+    ],
+)
+def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mode: str) -> None:
+    from local_operator.guardrails.check import _ask_block
+
+    _deep_ask(deep, expired=True, age_ms=300_000)
+    question = "Delete ~/hyperplane-cpp/build?"
+    if mode == "glob":
+        question = "Delete ~/hyperplane-cpp/bui*?"
+    elif mode == "ancestor":
+        question = "Delete ~/hyperplane-cpp?"
+    elif mode == "brace":
+        question = "Delete ~/hyperplane-cpp/{build,other}?"
+    elif mode == "keep-yes":
+        question = "Keep ~/hyperplane-cpp/build instead of deleting it?"
+    elif mode == "backup-yes":
+        question = "Back up ~/hyperplane-cpp/build before deleting?"
+    elif mode == "conditional-yes":
+        question = "Delete ~/hyperplane-cpp/build after backing it up?"
+    surface = "remote" if mode == "remote" else "desktop"
+    options = (
+        [{"label": "Yes"}, {"label": "No"}]
+        if mode.endswith("-yes")
+        else [{"label": "Approve"}, {"label": "Keep"}]
+    )
+    _answered_ask(
+        deep,
+        "a-feed",
+        question,
+        options,
+        answer=(
+            "Yes"
+            if mode.endswith("-yes")
+            else "All" if mode == "typed" else "Keep" if mode == "revision-approval" else "Approve"
+        ),
+        surface=surface,
+    )
+    log = deep / ".local-operator" / "sessions" / S / "asks.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    now = int(time.time() * 1000)
+    if mode == "earlier":
+        rows[-2]["at"] = now - 500_000
+        rows[-1]["at"] = now - 450_000
+    elif mode == "pending":
+        rows.append(
+            {
+                "v": 1,
+                "kind": "queued",
+                "ask_id": "a-1234",
+                "at": now - 500,
+                "expires_at": now + 60000,
+                "questions": rows[-2]["questions"],
+            }
+        )
+    elif mode == "declined":
+        rows[-1]["answers"] = {"q": ["Keep"]}
+    elif mode in ("description", "unpicked"):
+        q = rows[-2]["questions"][0]
+        q["question"] = "Which tree?"
+        q["options"] = [
+            {"label": "Delete ~/hyperplane-cpp/other", "description": "~/hyperplane-cpp/build"},
+            {"label": "Delete ~/hyperplane-cpp/build"},
+        ]
+        rows[-1]["answers"] = {"q": ["Delete ~/hyperplane-cpp/other"]}
+    elif mode == "expired-answer":
+        rows[0]["expires_at"] = now - 9 * 24 * 3600 * 1000
+        rows[0]["at"] = rows[0]["expires_at"] - 3600000
+        rows.insert(
+            1,
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": DEEP_ASK,
+                "at": now - 8 * 24 * 3600 * 1000,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": ["Keep everything"]},
+            },
+        )
+    elif mode in ("revision-veto", "revision-approval"):
+        rows.append(
+            {
+                "v": 1,
+                "kind": "revised",
+                "ask_id": "a-feed",
+                "at": now - 100,
+                "by": {"surface": "desktop"},
+                "answers": {"q": ["Keep" if mode == "revision-veto" else "Approve"]},
+            }
+        )
+    elif mode == "same-ask-revision":
+        rows = [
+            rows[0],
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": DEEP_ASK,
+                "at": now - 200_000,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": ["Keep everything"]},
+            },
+            {
+                "v": 1,
+                "kind": "revised",
+                "ask_id": DEEP_ASK,
+                "at": now - 100,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": [DEEP_LABEL]},
+            },
+        ]
+    if mode == "sibling":
+        other = "feed00000001"
+        prov.record_lineage(
+            S, origin="subagent", parent=PARENT, state_root=deep / ".local-operator"
+        )
+        prov.record_lineage(
+            other, origin="subagent", parent=PARENT, state_root=deep / ".local-operator"
+        )
+        other_log = deep / ".local-operator" / "sessions" / other / "asks.jsonl"
+        other_log.parent.mkdir(parents=True)
+        other_log.write_text("".join(json.dumps(row) + "\n" for row in rows[1:]))
+        rows = rows[:1]
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    path = str(deep / "hyperplane-cpp/build")
+    hit = _ask_block(
+        prov.unanswered_asks(S),
+        path,
+        home=str(deep),
+        cwd=str(deep),
+        stop=(),
+        escalating=False,
+        session_id=S,
+        env=_env(deep),
+    )
+    if mode in ("brace", "revision-approval", "same-ask-revision"):
+        assert hit is None
+    else:
+        assert hit is not None, mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newer", ["pending", "declined"])
+async def test_later_contrary_ask_beats_older_approval_in_check_and_preview(
+    deep: Path, newer: str
+) -> None:
+    _answered_ask(
+        deep,
+        "a-feed",
+        "Delete ~/hyperplane-cpp/build?",
+        [{"label": "Approve"}, {"label": "Keep"}],
+        answer="Approve",
+    )
+    log = deep / ".local-operator" / "sessions" / S / "asks.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    now = int(time.time() * 1000)
+    rows.append(
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": "a-1234",
+            "at": now,
+            "expires_at": now + 60000,
+            "questions": rows[0]["questions"],
+        }
+    )
+    if newer == "declined":
+        rows.append(
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": "a-1234",
+                "at": now + 1,
+                "by": {"surface": "desktop"},
+                "answers": {"q": ["Keep"]},
+            }
+        )
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    command = "rm -rf ~/hyperplane-cpp/build"
+    judge = _Judge("ALLOW ask=a-feed")
+    result = await _check(deep, command, judge)
+    assert result is not None and result.blocked
+    assert not judge.prompts
+    preview = preview_tool_call(
+        "bash", {"command": command}, _ctx(deep, command), settings=GuardSettings()
+    )
+    assert preview.builtin_effect == "refuse-lapsed-ask", preview.render()
+
+
 DESCR_OPTIONS = [
     {"label": "Yes, clear it", "description": "rm -rf ~/descr-only/tree"},
     {"label": "Keep it"},
@@ -1257,15 +1665,22 @@ async def test_a48e3_unverified_answer_is_refused_and_says_it_was_unproven(home:
     text = " ".join(outcome.text.split())
     assert "could not prove it is the operator's" in text
     assert "did not start this session's runtime" in text
-    # The recovery LEADS with the route that always works (R1-M1/Q1): a
-    # runtime the wake supervisor started has no surface that can prove the
-    # operator, so an unconditional "ask again" loops on the same card.
+    # The recovery names the routes that DO prove the operator (UI PR #2073
+    # UX U1 / QA Q2): a fresh ask confirmed on the desktop's native sheet is
+    # attested, so the old "background runtime has none" / "same desktop card
+    # is refused the same way" claims are gone. Re-ask stays capped at once
+    # (R1-M1/Q1) and the exact command stays the fallback.
     recovery = text.split("leave it in place.", 1)[1]
-    assert recovery.startswith(" To proceed, hand the exact command to the operator")
-    assert "helps only if the operator answers in the terminal or TUI process" in text
-    assert "a runtime started in the background has none" in text
-    assert "another answer on the same desktop card is refused the same way" in text
-    assert "ask again at most once, naming every exact full path" in text
+    assert recovery.startswith(" To proceed, ask again at most once, naming every exact full path")
+    assert 'answer with "Confirm and send…" in the desktop app' in text
+    assert "or in the terminal or TUI that started this runtime" in text
+    assert "A plain Send answer, an answer revised after a plain Send" in text
+    # The command fallback comes last, after the re-ask route.
+    assert recovery.index("ask again at most once") < recovery.index(
+        "Otherwise hand the exact command to the operator to run themselves"
+    )
+    assert "background has none" not in text and "has none" not in text
+    assert "refused the same way" not in text
     assert "peer, bridge or relayed message" in text
     # Never steer the proof source: no "restart the runtime" / "start it from".
     lowered = text.lower()
@@ -1314,10 +1729,15 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
     notes = " ".join(TOOL_NOTES["ask"].notes.split())
     assert "name every exact full path" in notes
     assert "a description approves nothing" in notes
-    assert "relayed by a peer or bridge message, never authorises" in notes
-    # Kept in sync with ``lapsed_refusal_reason`` (R1-M1/Q1): hand over the
-    # command first, re-ask at most once, never steer who starts the runtime.
-    first = notes.index("hand the operator the exact command")
-    assert first < notes.index("ask again at most once")
-    assert "background-started runtime has none" in notes
+    assert "relayed by a peer or bridge message never authorises" in notes
+    # Kept in sync with ``lapsed_refusal_reason`` (UI PR #2073 UX U1): name the
+    # attested desktop door, cap the re-ask at once, fall back to the command,
+    # never steer who starts the runtime.
+    assert '"Confirm and send…" in the desktop app' in notes
+    assert "terminal or TUI that started this runtime" in notes
+    assert "A plain Send answer, an answer revised after a plain Send" in notes
+    assert notes.index("ask again at most once") < notes.index(
+        "hand the operator the exact command"
+    )
+    assert "background-started runtime has none" not in notes
     assert "restart" not in notes.lower()

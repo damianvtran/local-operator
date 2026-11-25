@@ -162,6 +162,7 @@ _t = tr("tui.small")
 # lands. Every lookup resolves at RENDER time, so a live language change
 # repaints the next frame without a refresher.
 _t_tc = tr("tui.tool_card")
+_t_tc_record = tr_record("tui.tool_card")
 
 
 def _more_marker(msg) -> str:
@@ -225,12 +226,15 @@ class _HeaderRow(NamedTuple):
 
     ``signal`` is the sub-run of ``text`` painted in the signal ink (the attempt
     count on a ``rendered`` row), located by value because THIS module composed
-    it into the row in the same call.
+    it into the row in the same call. For fetched rows, ``url_spans`` records
+    character offsets from interpolation, since copy can touch either URL
+    without whitespace and metadata may contain URL-like text of its own.
     """
 
     kind: str
     text: str
     signal: str = ""
+    url_spans: tuple[tuple[int, int], ...] = ()
 
 
 def _send_mode_word(args: Mapping[str, object]) -> str:
@@ -767,6 +771,10 @@ _HARNESS_ADVISORY_LEADS = (
     "[scratch] The pad ",
     "[scratch] '",
     "[scratch] Your own scratch belongs in ",
+    # ``builtin.SELECTION_NOTE_LEAD``: a task/resume receipt's held-back
+    # tier/effort reason, whose remedy sat past the crop as the tail of the
+    # ``[selection: …]`` line (design review D1, measured at 100/150 columns).
+    "  selection not applied: ",
 )
 #: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
 #: a payload argument is unbounded by design — `write` carries a whole file in
@@ -1644,9 +1652,21 @@ def _fetch_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
         )
         if part
     )
-    fetched = _t_tc(_tc.fetch_fetched(url=url))
+    records = [_t_tc_record(_tc.fetch_fetched(url=url))]
     if final and final != url:
-        fetched += "  " + _t_tc(_tc.fetch_final(url=final))
+        records.append(_t_tc_record(_tc.fetch_final(url=final)))
+    fetched = "  ".join(record.text for record in records)
+    url_spans: list[tuple[int, int]] = []
+    offset = 0
+    for record in records:
+        start = offset
+        for part, owner in record.parts:
+            end = start + len(part)
+            if owner == "url" and part.startswith(("http://", "https://")):
+                url_spans.append((start, end))
+            start = end
+        # Advance by rendered text even for a fallback with no parts.
+        offset += len(record.text) + 2
     if meta:
         fetched += f"  ·  {meta}"
     rows: list[_HeaderRow] = []
@@ -1678,7 +1698,7 @@ def _fetch_result_rows(details: dict[str, Any] | None) -> list[_HeaderRow]:
             rows.append(
                 _HeaderRow("", _t(_x.tool_card_http_error_page(status=str(status), reason=reason)))
             )
-    rows.append(_HeaderRow("fetched", fetched))
+    rows.append(_HeaderRow("fetched", fetched, url_spans=tuple(url_spans)))
 
     # D1/D7: ``Rendered: markdownify · 2 attempts (default, browser-profile) ·
     # 800 lines · 51.8 KB``. The escalation that WON is the case a reader most
@@ -5524,7 +5544,7 @@ class ToolCard(ExpandableActionBlock):
                 # See `bindings.BY_ELEMENT["tool.fetch.signal"].note` (D3).
                 # Recognised by the row's recorded kind, not its `Fetched:` lead,
                 # so a translated row keeps the treatment.
-                self._append_fetched_row(row, line, line_width, indent, dim, signal)
+                self._append_fetched_row(row, mark, line_width, indent, dim, signal)
                 continue
             elif mark is not None and mark.kind == "rendered":
                 self._append_rendered_row(row, line, line_width, indent, dim, signal, mark.signal)
@@ -5596,34 +5616,33 @@ class ToolCard(ExpandableActionBlock):
     def _append_fetched_row(
         self,
         row: Text,
-        line: str,
+        mark: _HeaderRow,
         line_width: int,
         indent: str,
         dim: Style,
         signal: Style,
     ) -> None:
-        """Paint the ``Fetched:`` row with its URL(s) in ``signal``, rest dim (D3).
-
-        The row is ``Fetched: <url>[  (final: <url>)][  ·  <meta>]``. URLs are
-        lifted to the anchor colour; the ``Fetched:``/``(final: )`` labels and the
-        ``·``-joined status/ctype/cache metadata stay dim. Tokens are measured
-        against the shared ``line_width`` budget so this row obeys the same width
-        law as every other painted line — once the budget is spent the rest of the
-        row is dropped rather than wrapped, matching the card's one-pass model.
-        """
+        """Paint the two URL fields in signal ink and leave the rest dim (D3)."""
         row.append("\n" + indent, style=dim)
         remaining = line_width
-        # Split on spaces but keep them, so reconstructed spacing matches the
-        # source line exactly; a URL token is any run starting with a scheme.
-        for token in re.split(r"(\s+)", line):
+        offset = 0
+        # Keep the existing width/ellipsis rules, including when punctuation
+        # touches the URL. Whitespace bounds clipping, not which ink is used.
+        for token in re.split(r"(\s+)", mark.text):
             if remaining <= 0 or not token:
                 break
             painted = truncate_cells(token, remaining)
-            if not painted:
-                break
-            ink = signal if token.startswith(("http://", "https://")) else dim
-            row.append(painted, style=ink)
+            cursor = 0
+            for url_start, url_end in mark.url_spans:
+                start = max(0, url_start - offset)
+                end = min(len(painted), url_end - offset)
+                if start < end:
+                    row.append(painted[cursor:start], style=dim)
+                    row.append(painted[start:end], style=signal)
+                    cursor = end
+            row.append(painted[cursor:], style=dim)
             remaining -= cell_len(painted)
+            offset += len(token)
 
     def _append_rendered_row(
         self,

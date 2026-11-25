@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.app",
-  "history_sha256": "2d742b8a9f3f4649f432339e68403c3ec14e9156d9a092142b92e2807665fc32",
+  "history_sha256": "97fe5e85cc3e2ed4f1fd429a57a961d7d1f0a965bc0f863551838b8b812c5fb9",
   "entries": [
     {
       "locale": "fr",
@@ -73,6 +73,43 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e and target b1b7124fd7c7b05cd939c8e94f1c7d25485b4b2b76bde4f3f113c186be21f97f recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/fr/tui.app/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.app",
+      "source_sha256": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+      "context_sha256": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "target_sha256": "a178cf5c7198d8246aca9e1e5d977a7ef0d9450a0457d88a81f0c5702807522a",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "session": "17b81fee8ed1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "provenance": "translator's own files (translations/<locale>.json + notes.md in session 17b81fee8ed1 scratchpad, notes.md states no fallback); values applied byte-exact by the integrating coder"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, audit-fr), not the translator; did not edit values",
+        "session": "877b8e089118",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-23",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "finding_ids": [],
+        "fallback_used": false,
+        "independent_from_translator": true,
+        "actual_model_source": "auditor's own record (auditor.model field)"
+      },
+      "status": "passed",
+      "note": "tr1: independent i18n-auditor 877b8e089118 (anthropic/claude-opus-5-5, no fallback observed) of translator 17b81fee8ed1 input sha256 0593719b684d5b1c1b1174b5004d07ea9bf4e3e2b6e03488dab7e60af074483a: clean for tui.app (0 blocker, 0 major, 0 minor, 0 nit). Keys: settings team facts / start-picker team detail added at c3ba6a516c6a. Record i18n/audits/evidence/fr/tui.app/tr1/record.json. Native-speaker review and rendered-frame certification not claimed.",
+      "evidence": "i18n/audits/evidence/fr/tui.app/tr1/record.json",
+      "round": "tr1"
     }
   ]
 }

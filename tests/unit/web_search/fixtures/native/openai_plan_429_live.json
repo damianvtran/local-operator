@@ -1,0 +1,11 @@
+{
+ "error": {
+  "type": "usage_limit_reached",
+  "message": "The usage limit has been reached",
+  "plan_type": "pro",
+  "resets_at": 1795878439,
+  "eligible_promo": null,
+  "limit_window_minutes": 10080,
+  "resets_in_seconds": 304937
+ }
+}

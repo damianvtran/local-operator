@@ -579,6 +579,29 @@ def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
     assert json.dumps(pinned.model_dump()) != json.dumps(dump)
 
 
+def test_inline_ui_default_leaves_the_receipt_dump_as_before() -> None:
+    """``inline_ui`` is retry identity only when a viewer actually claims it.
+
+    The receipt journal hashes ``model_dump()``. A same-id retry recorded
+    before the inline UI capability flag existed must replay after an upgrade,
+    so the default ``False`` is omitted, exactly like an absent ``delivery``.
+    A ``True`` claim DOES ride: a capable and an incapable send under one id
+    are different requests. Removing the omission fails the pinned-bytes test
+    above; this one guards the other half, that ``True`` is not dropped too.
+    """
+    import json
+
+    base = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    assert "inline_ui" not in base.model_dump()
+    explicit_false = Prompt.model_validate(
+        {"request_id": "12345678-1234-4678-9234-567812345678", "text": "hi", "inline_ui": False}
+    )
+    assert json.dumps(explicit_false.model_dump()) == json.dumps(base.model_dump())
+    capable = base.model_copy(update={"inline_ui": True})
+    assert capable.model_dump()["inline_ui"] is True
+    assert json.dumps(capable.model_dump()) != json.dumps(base.model_dump())
+
+
 @pytest.mark.asyncio
 async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
     """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
@@ -621,6 +644,39 @@ async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path
         await replacement.run("s:id", {"argument": "two"}, op)
     assert len(calls) == 1
     assert first.path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original", [None, False, True])
+async def test_prompt_receipt_retry_keeps_first_presentation_authority(tmp_path, original):
+    body = {"text": "the user's send", "delivery": "queue"}
+    previous = body if original is None else {**body, "inline_ui": original}
+
+    async def lost_ack():
+        raise ConnectionError("ack lost after claim")
+
+    journal = DesktopReceipts(tmp_path)
+    with pytest.raises(ConnectionError):
+        await journal.run("s:id", previous, lost_ack, retry_safe=True)
+
+    behaviors = []
+
+    async def deliver(inline_ui: bool):
+        behaviors.append(inline_ui)
+        return {"status": "queued"}
+
+    restarted = DesktopReceipts(tmp_path)
+    retry = {**body, "inline_ui": original is not True}
+    assert await restarted.run_prompt("s:id", retry, deliver) == {"status": "queued"}
+    assert await journal.run_prompt("s:id", previous, deliver) == {
+        "status": "queued",
+        "replayed": True,
+    }
+    assert behaviors == [original is True]
+    with pytest.raises(ReceiptConflict):
+        await journal.run_prompt("s:id", {**retry, "text": "different send"}, deliver)
+    with pytest.raises(ReceiptConflict):
+        await journal.run_prompt("s:id", {**retry, "delivery": "both"}, deliver)
 
 
 @pytest.mark.asyncio
@@ -9045,6 +9101,61 @@ async def test_the_activity_sort_carries_the_just_used_conversation(draft_api) -
 
 
 @pytest.mark.asyncio
+async def test_an_unread_backlog_does_not_hold_page_one_against_todays_chats(draft_api) -> None:
+    """local-operator-ui#2069 Q3, at the route the sidebar actually reads.
+
+    The operator's shape: more unread completions than ``limit`` (here 60,
+    all stamped 45h+ ago) plus today's idle chats (20). The v2 key led with
+    every ``active`` row, so page 1 was 50 old unread rows and today's chats
+    arrived on page 2 -- drawn ABOVE rows already on screen. The v3 key leads
+    with running rows only, so page 1 is chronological: all 20 of today's
+    chats, then the newest 30 unread, and page 2 continues strictly older.
+    The capability advertises the narrowed order as ``session_catalogue_sort``
+    2 so a client can tell the two daemons apart.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    client, root = draft_api
+    now = time.time()
+    attention = AttentionStore(root / "attention.db")
+    for index in range(60):
+        row = _bound_session(root, f"unread{index:06d}", created=now - 200_000.0)
+        stamp = now - 45 * 3600.0 - index * 60.0
+        os.utime(row / "transcript.jsonl", (stamp, stamp))
+        attention.publish(
+            f"session/{row.name}", str(uuid.uuid4()), f"anchor-{row.name}", "complete"
+        )
+    for index in range(20):
+        row = _bound_session(root, f"today{index:07d}", created=now - 7_200.0)
+        stamp = now - index * 300.0
+        os.utime(row / "transcript.jsonl", (stamp, stamp))
+
+    first = await client.get("/v1/desktop/sessions?sort=activity&limit=50")
+    assert first.status_code == 200, first.text
+    first_result = first.json()["result"]
+    first_ids = _ids(first)
+    second = await client.get(
+        "/v1/desktop/sessions?sort=activity&limit=50&cursor=" + first_result["next_cursor"]
+    )
+    assert second.status_code == 200, second.text
+    second_ids = _ids(second)
+
+    # The precondition, read back from the wire: the backlog really is active.
+    by_id = {row["id"]: row for row in first_result["sessions"]}
+    # ``active`` is what led the v2 key; it is still True on every backlog row
+    # (the census and the row's own fact are unchanged), only the order moved.
+    assert all(by_id[f"unread{index:06d}"]["active"] is True for index in range(30))
+    assert all(by_id[f"today{index:07d}"]["active"] is False for index in range(20))
+    assert first_ids[:20] == [f"today{index:07d}" for index in range(20)]
+    assert first_ids[20:] == [f"unread{index:06d}" for index in range(30)]
+    assert second_ids == [f"unread{index:06d}" for index in range(30, 60)]
+    assert second.json()["result"]["cursor_missing"] is False
+
+    features = (await client.get("/v1/capabilities")).json()["result"]["features"]
+    assert features["session_catalogue_sort"] == 2
+
+
+@pytest.mark.asyncio
 async def test_a_scope_name_at_the_bound_is_accepted(draft_api) -> None:
     """64 characters is the bound the profile and team registries use."""
     client, root = draft_api
@@ -11578,3 +11689,105 @@ def test_validate_target_names_the_unresolved_member(tmp_path) -> None:
         "slot": "team",
         "member": "nope",
     }
+
+
+@pytest.mark.asyncio
+async def test_inline_widget_history_and_stream_negotiate_on_desktop_http(move_api, monkeypatch):
+    """The same journal prose serves both viewers; only the opting reader gets placements."""
+    from local_operator.harness.types import Message
+
+    client, app, root = move_api
+    work = root / "inline-work"
+    work.mkdir()
+    pool = app.state.desktop_sessions
+    sid = await pool.create(str(work))
+    journal = Transcript(root / "sessions" / sid)
+    await journal.append_message(Message.user("Summarize January."))
+    answer = Message.assistant(
+        'Revenue 📈\n\n```lop-ui\n{"type":"bar","title":"Revenue","data":[["Jan",6]]}\n```\n\nEnd.'
+    )
+    answer._inline_ui_source_version = 1
+    await journal.append_message(answer)
+
+    url = f"/v1/desktop/sessions/{sid}"
+    capability = await client.get("/v1/capabilities")
+    assert capability.json()["result"]["features"]["inline_ui"] == 1
+    old = await client.get(f"{url}/history")
+    modern = await client.get(f"{url}/history", params={"inline_ui": 1})
+    assert old.status_code == modern.status_code == 200
+    plain = old.json()["result"]
+    rich = modern.json()["result"]
+    sidecar = rich.pop("inline_ui")
+    assert rich == plain and "lop-ui" not in old.text
+    row = sidecar["messages"][answer.id]
+    assert row == {
+        "version": 1,
+        "text": "Revenue 📈\n\n\n\nEnd.",
+        "widgets": [
+            {
+                "offset": len("Revenue 📈\n\n".encode("utf-16-le")) // 2,
+                "payload": {"type": "bar", "title": "Revenue", "data": [["Jan", 6]]},
+            }
+        ],
+    }
+    snapshot = await client.get(url, params={"open_frame": 1, "inline_ui": 1})
+    assert snapshot.status_code == 200
+    assert snapshot.json()["result"]["payload"]["history"]["inline_ui"] == sidecar
+    invalid = await client.get(f"{url}/history", params={"inline_ui": 2})
+    invalid_send = await client.post(
+        f"{url}/messages",
+        json={
+            "text": "invalid",
+            "request_id": str(uuid.uuid4()),
+            "inline_ui": "true",
+        },
+    )
+    assert invalid.status_code == invalid_send.status_code == 422
+
+    # ASGITransport buffers until the generator ends; terminate after real
+    # SSE serialization of one already-fanned-out event and replacement seed.
+    live = {"type": "message_update", "delta": "", "inline_ui": sidecar}
+    replace = {
+        "type": "frontend.replace",
+        "payload": {"frontend": {"snapshot": {"live_events": [live]}}},
+    }
+
+    async def finite_frames(self, sub, **options):
+        yield {"type": "event", "payload": live}
+        yield replace
+
+    monkeypatch.setattr(DesktopSessionBridge, "events", finite_frames)
+    old_stream = await client.get(f"{url}/events")
+    rich_stream = await client.get(f"{url}/events", params={"inline_ui": 1})
+    assert old_stream.status_code == rich_stream.status_code == 200
+    assert "inline_ui" not in old_stream.text
+    frames = [
+        json.loads(line.removeprefix("data: "))
+        for line in rich_stream.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert frames[0]["payload"] == live
+    assert frames[1] == replace
+
+
+@pytest.mark.asyncio
+async def test_a_cold_snapshot_carries_the_stored_title(tmp_path):
+    """UI #2099 Q1C-F1: a cold session's snapshot names it from ``title.json``.
+
+    A session that is not running and was never on a loaded catalogue page has
+    no live runtime to supply ``conversation_title``, so the frame shipped
+    ``""`` while the catalogue row (``session_name`` -> ``stored_session_title``)
+    showed the stored title, and the desktop header read "Untitled chat".
+    """
+    from local_operator.resume import write_session_title
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    write_session_title(
+        tmp_path / "sessions" / sid, "Quarterly invoices", user_set=False, past_names=[]
+    )
+    async with pool.session(sid, read=True) as bridge:
+        snapshot = await bridge.snapshot()
+    frontend = snapshot["payload"]["frontend"]["snapshot"]
+    assert frontend["conversation_title"] == "Quarterly invoices"
+    await pool.close()

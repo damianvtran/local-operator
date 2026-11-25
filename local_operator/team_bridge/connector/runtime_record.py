@@ -61,6 +61,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 _SCHEMA = 1
@@ -116,17 +118,12 @@ def _own_facts(*, started_at: float, singleton: str) -> dict[str, Any]:
 
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_write_text(path, json.dumps(payload, sort_keys=True))
     except OSError as error:
+        # The writer has already removed its own temp.
         logger.warning("bridge connector runtime record not written: %s", type(error).__name__)
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def record_start(config_dir: Path | str, *, started_at: float) -> None:

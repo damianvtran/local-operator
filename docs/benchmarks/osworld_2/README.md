@@ -1332,6 +1332,16 @@ episode surfaces.
 Session-arm flags: `--session-route <provider>/<model>` (default: the episode
 route) and `--session-wall-s` (bounds the session's turn; past it the driver
 calls `abort()`, so the episode ends through the normal stop path).
+`--max-steps` bounds admitted and attempted decision groups, not total guest
+operations or provider requests. `--max-wall-s` still supplies the basis for
+the compute lease and frontend wait, not the session-turn timer.
+
+Session accepts `--max-usd`, `--max-usd-at`, and `--max-cycle-usd` without
+applying a provider spend or per-cycle cap; the price-basis calculation is for
+reference only. Observed request usage and charges are still recorded. The
+`session_budget` preflight line on stderr and matching event in `events.jsonl`
+name the active limits and the requested USD figures; a `null` limit means
+it is not enforced. Do not rely on the Session arm for a spend cutoff.
 
 ### Parameters
 
@@ -1346,15 +1356,16 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50. Stating it also takes the cost-rate ratio out of the picture for that episode: the step budget is the authority about how long the run lasts, so cycle prices are not judged as a rate (see `--max-cycle-usd`) |
 | `--max-usd` | 0.50 | hard provider spend cap; reaching it is a scored truncation (`budget-cap`), and it is the only COST authority a step-budgeted episode has. The figure is stated against a MODEL's prices — see `--max-usd-at` to scale it to the run's route |
 | `--max-usd-at` | none | the route whose prices the `--max-usd` figure is stated at (`<provider>/<model>`); the enforced cap is scaled to the run route's own prices by their ratio, never downward (the stated figure stays the floor), so a step budget sized on a cheap route is not cut short on an expensive one. Prices come from the provider's live public listing; an unpriceable basis refuses at preflight. The derivation is sealed into the manifest metadata (`usd_cap_configured_micros`, `usd_cap_effective_micros`, `usd_cap_price_factor_micros`, `usd_cap_at`), so a reader can tell which bound applied. Default: use the figure as stated |
-| `--max-wall-s` | 18000 | runaway guard only; the 500-step budget binds first. The TTL lease is derived from it (`_ensure_lease_outlasts_wall`), see BUDGETS_AND_LATENCY.md |
+| `--max-wall-s` | 18000 | Reply runaway guard; also the basis for the TTL lease and default managed frontend wait. Not the Session turn timer (see `--session-wall-s`) |
 | `--max-cycle-usd` | none | ADDS an absolute per-cycle cap, the operator's own number: it truncates (`cost-spike`) whatever the step budget says, and a series crossing it is worth reading. Unlike the prorated per-cycle ceiling this used to be paired with, it does not mistake context growth for waste |
 | `--keep-recent-frames` | 3 | frame retention |
 | `--benchmark-release` | `osworld-v2-2026.08.08` | |
 | `--run-root` | required | must be durable; `/tmp` and `$TMPDIR` are refused |
 | `--config-dir` | harness default | credential store location |
 
-Derived reservations: `guest_actions = max_steps * 8`,
-`model_cycles = max_steps * 2`.
+The spend and per-cycle caps in this table apply to Reply only. Reply also
+caps `guest_actions` at `max_steps * 8` and `model_cycles` at `max_steps * 2`;
+Session does not enforce those caps.
 
 `keep_recent_frames = 3` is a behavioural constant, not a benchmark tuning
 knob — it is what an interactive screen-driving session sets, on the reasoning

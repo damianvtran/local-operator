@@ -405,3 +405,26 @@ async def test_es_roster_spill_count_never_wraps_the_tab_row(shipped_fr) -> None
     assert pane[-1].strip() == "solo lectura", pane
     # The roster still says it is withholding entries rather than going silent.
     assert any("más" in line and "equipos" in line for line in pane), pane
+
+
+def test_zh_cn_editor_suggest_hint_uses_the_footer_term() -> None:
+    """zh-CN names the ↑↓ suggestion browse with ONE term on both surfaces.
+
+    The settings footer (``tui.settings_view.chrome.footer.suggestions``) and
+    the editor's widest hint (``editor.suggest_long``) label the same action —
+    the arrows move the highlight through the suggestion dropdown — and both
+    are on screen at once while a suggest key is edited. zh-CN shipped
+    浏览建议 in the footer but 选建议 in the editor hint, so one control read
+    as two. The zh-CN style guide ("Locale calls") now fixes the term as
+    浏览建议 (选 reads as choose/select, which 选择 owns); this pins the editor
+    hint to whatever the footer says so a future retranslation of either side
+    cannot split them again silently. ``suggest_medium`` is deliberately not
+    checked: its slot only has room for the bare verb 浏览.
+    """
+    zh = EN_ROOT / "zh-CN"
+    view = json.loads((zh / f"{NS}.json").read_text("utf-8"))
+    chrome = json.loads((zh / f"{NS}.chrome.json").read_text("utf-8"))
+    term = chrome["tui.settings_view.chrome.footer.suggestions"]
+    assert term == "浏览建议"
+    assert term in view["tui.settings_view.editor.suggest_long"]
+    assert "选建议" not in view["tui.settings_view.editor.suggest_long"]

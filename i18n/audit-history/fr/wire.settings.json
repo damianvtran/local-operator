@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "1e57ab4bfdb56ad0c7af9143eea2c7b20b2bf74d073b5b2b0316475647a9ce92",
+  "history_sha256": "df5600208be97aec4e80bbaf7dac6e8d6ae85cd39bbefec78aef24e8d30b38d1",
   "entries": [
     {
       "locale": "fr",
@@ -7374,6 +7374,228 @@
       },
       "status": "passed",
       "note": "MERGE-UNION receipt (NOT a new translation audit and NOT a new semantic audit): third fold of feat/tui-send-chords onto origin/main 404a21382a30; both sides added keys to wire.settings (origin/main: 30 keys added since the merge-base; branch: 10 keys added or changed). Reconciled 2026-11-23 by lopdev lane session 8cca634d2d29 with scripts/i18n/ledger.py append — origin/main's receipts first, then the branch's, in their own order; no row was hand-written or forged. Proof (scripted in that session): merged catalogue == origin/main's file + exactly the branch's 10 added/changed keys; origin/main's 895 key values byte-identical to origin/main, the branch's values byte-identical to the committed 421bdf986 catalogue; 0 removed, 0 changed. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "5f9c3e494c917839ecb90d073be10c7f57d9ec75b59f765aca801be916254e0a",
+      "keys_audited": 1,
+      "round": "i18n-wave-A",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 1fb9906db76e)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "2ffdcc0c944456cf05ca2ab628c529d452376146b1f2c5233768473a9b28e669",
+      "context_sha256": "db6a5052d8461517d9a154062fdd9bac2fca26a2764004c2cc585a0b3d2fcdbb",
+      "target_sha256": "5f9c3e494c917839ecb90d073be10c7f57d9ec75b59f765aca801be916254e0a",
+      "keys_audited": 1,
+      "round": "i18n-wave-B",
+      "translator": {
+        "agent": "coder (i18n-translator brief; subagent 6fbe1ba8be9c)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; subagent 400a5336a635)",
+        "model": "openai/gpt-6.1-terra",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Audit covers the one changed key; unchanged remaining namespace bytes are covered by prior audits. Auditor B shares the translator model but is a different agent session."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "7eaf3e95c31cf444f26de59ba8c5c253de0c6b770c48a0588aee1692861e33c8",
+      "context_sha256": "1946205a2ef39fdff2704ce40007a6325bdfe2349eca4e483e0d6ec8c55e57be",
+      "target_sha256": "48745bbc31b774657c31724a9cec34d88e15ba989ae5c61a0bad7775b3a13da0",
+      "keys_audited": 8,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4514 implementer, commit 3dc289d5a384)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session cd2d2ff84424 (independent of the translator; did not write PR #4514)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-23",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent semantic audit of PR #4514 (branch feat/mcp-result-normalization, head 3dc289d5a384 + this commit), 2026-11-23: the 8 NEW keys wire.settings.mcp_result_normalization.{label,help,choice.off.label,choice.off.description,choice.prose_links.label,choice.prose_links.description,choice.strip_links.label,choice.strip_links.description}, judged against en source + context sidecar, i18n/glossary.md and i18n/style-guides/fr.md (accuracy, glossary terms, neighbouring-key terminology, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; 'prose-links'/'strip-links' labels byte-identical to en per the sidecar; rich.cells.cell_len within every maxCells (label 29, help 188, descriptions 48, off label 12); key parity 8/8. Every other key in this namespace is byte-identical to merge-base 989351cd16c0's file, whose last receipt here passed against that base's en hash b3753dde0a01… (scripted diff: 8 added, 0 changed, 0 removed; context sidecar 8 added, 0 changed). 3 findings, fixed by the auditor in this commit (MINOR, register): the three choice descriptions used 3rd-person indicative ('envoie', 'garde … retire'); every verb-led neighbouring choice description in fr/wire.settings uses the infinitive ('garder à jour …', 'enregistrer automatiquement', 'limiter …', 'arrêter la requête'), as does the fr guide's action-label rule. Now 'envoyer les résultats tels quels', 'garder les liens web dans les phrases', 'garder le texte des liens, retirer chaque URL' (45/48 cells)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "4ce6048a2a6fdda1a7e6623d0ffef3202ca684628739a3877d200e48c917d756",
+      "context_sha256": "b0c1332306474a5293f2c69e438208e229f81501806321b15d5512d4558e0873",
+      "target_sha256": "84b44c3bc14d23eb74e8c1b3811a075f0b25529fbbd8d6eb8fe205773d289d8d",
+      "keys_audited": 9,
+      "round": "convergence-r1",
+      "translator": {
+        "agent": "not re-translated here: the 8 wire.settings.mcp_result_normalization.* keys from PR #4514 (row above, source 7eaf3e95c31c), wire.settings.tool_approval_mode.choice.auto.description from origin/main (rows above, source 2ffdcc0c9444)",
+        "model": "see the rows above",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 09b1208daf93 (independent of both translators; did not write PR #4514 or the origin/main change)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Convergence audit of PR #4514 merge commit 724de4b1dae8 (parents f246cbc6 PR head + 0fa001da origin/main; merge-base 989351cd16c0), 2026-11-24. Scripted merge proof (flattened JSON, every key): en and this locale's wire.settings.json == merge-base + origin/main's only change (wire.settings.tool_approval_mode.choice.auto.description) + the PR's 8 added mcp_result_normalization keys, values byte-identical to their audited sides; 913 keys, 0 overlap, 0 lost, 0 other changes; en context sidecar likewise (origin/main's note/role/tone for the auto description + the PR's 8 entries). Semantic re-read of the 9 changed keys against the en source, context sidecar, i18n/glossary.md and i18n/style-guides/fr.md: auto description keeps both the rule and both exempt gates (profile save, community post); 'prose-links'/'strip-links' byte-identical; rich.cells.cell_len within every maxCells; no ICU arguments. Audit-history merge: origin/main's rows are a byte-identical prefix and every PR row is present, 0 extra rows. 0 findings."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c6f8cc389af42fdfccfa5ad6cd2bdadbd06181d7d954d60cbede1a9f83483d",
+      "context_sha256": "83926b0cacb43c28cc1cba831e08651b374942b310ba9e581ba761305d3bb832",
+      "target_sha256": "6ee6c1597f2549e741526f51780393246f52db228b7336704cc396c9ab704d44",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4525 implementer, commit 903751aca151)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 22e1dfd5a736 (independent of the translator; did not write PR #4525)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4525 (branch feat/mcp-search-snippet-clip, stacked on #4514), 2026-11-24: the 2 NEW keys wire.settings.mcp_search_snippet_chars.{label,help}, judged against the en source + context sidecar (claims: per-snippet character cap for MCP search tools; titles and URLs never cut; 0 = whole), i18n/glossary.md, i18n/style-guides/fr.md and neighbouring wire.settings keys (accuracy, glossary terms, register, placeholders, width). Checks run by the auditor: no ICU arguments in source or target; rich.cells.cell_len label 25/29, help 157/188; key parity 2/2. Merge proof: this branch was merged with origin/feat/mcp-result-normalization 197d442a8214; scripted flattened-JSON diff shows this locale's file (and en, and the en context sidecar) == 197d442a's file + exactly the 2 new keys, 0 removed, 0 changed, new values byte-identical to PR head 903751aca151; 197d442a's file matches its last passed receipt (target and source hashes verified). 1 finding, MINOR, deferred in the PR thread (not fixed here; the auditor does not translate): the label 'Extraits de recherche MCP' drops the measured dimension (en '... snippet length'); on an integer row it reads as a count of extracts. Neighbouring length labels use 'Longueur ...' (conversation_length, detail_length). Suggested: 'Longueur des extraits MCP' (25 cells). Help is accurate, carries all three claims; ' ;' spacing matches the namespace."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "2a696ee73589202ce14053f538541cb2bd901c4e0b6646b772cd1da6bcf58974",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "3e20d4b63b1c6de6f7a94b73e9979ae70134d6e03b497005b00815ed48d991e3",
+      "keys_audited": 2,
+      "round": "r1",
+      "translator": {
+        "agent": "lopdev coder (PR #4540 implementer, commit 86d35a271ba3)",
+        "model": "unknown — not recorded in the commit or PR body",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "lopdev reviewer task subagent, session 867cc715eef1 (independent of the translator; did not write PR #4540)",
+        "model": "anthropic/claude-opus-5-5 (model the harness reported for this session)",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Independent audit of PR #4540 (branch feat/mcp-result-shaping, stacked on #4525), 2026-11-24, at head 7a06565cdbd7 against en wire.settings sha256 2a696ee73589: the 2 NEW keys wire.settings.mcp_result_text_rendering.{label,help}, judged against the en source + context sidecar (claims: MCP search results and fetched pages go to the agent as plain text instead of JSON; every field kept; off = stays JSON), i18n/glossary.md (agent), i18n/style-guides/<locale>.md and neighbouring wire.settings keys (off-state word, MCP/JSON kept Latin). Checks run by the auditor: no ICU arguments in source or target; key parity 2/2; scripted proof that this locale's file at the PR base fc780867 equals its last passed receipt's target_sha256 (and that receipt's source equals the base en hash), and that the head file = base + exactly the 2 new keys, 0 removed, 0 changed. rich.cells.cell_len label 22/29, help 176/188. Label/help accurate, all three claims carried; vous-free descriptive register as neighbours. 1 finding, MINOR, FIXED in the audit commit: the help used U+0020 before ';' and ':' where the fr guide requires U+202F (the namespace has 104 U+202F vs 5 ASCII before ';'); the two spaces were replaced with U+202F, no wording change. target_sha256 is the corrected file."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "1dd2cd29f99c4d4f3e4be4a39629ea4b9cca86bc2cebf2689f0702d609eed500",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "37cdcb5957fe9b1c255a8418d5e7a738fd43d1349fa49fed07d56fa88212d23c",
+      "round": "r1",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (commits 523db30d3a5a, 8e0671d8b692, bc579643fd8c)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commits or the audit brief",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-audit, independent of the translator; did not write PR #4569)",
+        "session": "3312bdd83ac9",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "the 2 new keys wire.settings.web_search_claude_subscription_search.{label,help} plus the web_search.* settings neighbours; all 917 PR1 keys byte-unchanged vs 95055bbc785f, placeholder/bidi parity scanned across all 919 against en + context sidecar, i18n/glossary.md, the locale style guide and shipped corpus usage; placeholders rendered through i18n.runtime.render_message with real vendor/plan values; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "minor: help uses a plain space before ';' and an ASCII apostrophe; 'l'usage supplémentaire' vs corpus 'l’utilisation supplémentaire' (the Anthropic cache-TTL help). Label clean.",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "c515e528ce6932243edaf407642cd3ff581189714410d7111f9adc8b4bd63add",
+      "context_sha256": "8ae319470f58210c1917333219389d1fd81e4fc6951d3db5fbccadc8ebc53c1b",
+      "target_sha256": "1326b8c04002cfbdc5fd5dc5e1b385c725eb506302f2eb45aa0b268207e1d523",
+      "round": "r2",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (remediation commit 5bfa50d8bf0a; applied r1 auditor corrections.json)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commit or the audit brief",
+        "date": "2026-11-25",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-r2, independent of the translator; did not write PR #4569)",
+        "session": "eb15f9c6eb35",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-25",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit",
+        "findings": 1,
+        "independent_from_translator": true,
+        "scope": "round 2 delta e91c217dff52..5bfa50d8bf0a: every changed value read against en + context sidecar, i18n/glossary.md, the locale style guide and namespace/corpus usage; r1 corrections.json checked byte-for-byte (28/37 verbatim, 9 superseded by the D1/D7 source changes); full-namespace placeholder and bidi/zero-width parity scan; widths by rich.cells.cell_len against the 29-cell label, 80-cell help and 24-cell access budgets",
+        "namespace_finding_detail": "minor: help drops 'per search' — current 'Facturé sur l’utilisation supplémentaire de Claude (prix API) ; après Radient.' -> 'Facturé par recherche à l’utilisation suppl. Claude (prix API) ; après Radient.' (79/80 cells); label 'Recherche Claude (payante)' 26/29, help 78/80; the cost reads as cost."
+      },
+      "status": "passed",
+      "note": "Round 2, PR #4569 head 5bfa50d8bf0a1db1739807b76b778163681929b7. Minor findings carry corrected strings above and in the PR comment; applying them changes target_sha256 without voiding this pass, but a changed source_sha256 does."
     }
   ]
 }

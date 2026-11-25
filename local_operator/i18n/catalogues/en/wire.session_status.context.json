@@ -173,5 +173,15 @@
     "role": "Compact duration unit inside a live row status label",
     "tone": "terse, technical",
     "note": "EN-only context sidecar. One arm of the compact elapsed-time value inserted as {duration} into wire.session_status.wedged_heartbeat (session/catalog.py status_duration); it is never shown on its own. Live sidebar/picker row status rendered verbatim in the desktop sidebar, status feed, mobile relay and TUI sidebar, so keep it as short as the English: a number plus a one- or two-letter unit abbreviation, no plural words, no trailing punctuation. Use the locale's conventional short unit abbreviation (or keep the ASCII letter if that is the norm). {days} is a whole number of days (1 or more, unbounded) passed as a pre-rendered ASCII digit string so it never gains a grouping separator (English `1000d`, not `1,000d`); insert it verbatim. {hours} is 0-23. English `2d 4h`."
+  },
+  "wire.session_status.booting": {
+    "role": "Session-listing state cell for a session on another device whose runtime is being started",
+    "tone": "terse, factual, lowercase like the neighbouring 'not running' and 'live' cells",
+    "note": "EN-only context sidecar. Shown in the STATE column of `lop network sessions` and in the sessions tool's row/info line for a session whose owning device accepted an engage and is constructing its runtime (a process holds the session's transcript lease, no runtime record yet). {duration} is how long it has been starting, an already-localized compact duration such as `12s` or `1m`, rendered from the wire.session_status.duration_* keys and inserted verbatim; translate those keys, not this placeholder. The middle dot separates state from age; keep it. Distinct from 'not running' (stopped on purpose): this session is expected to come up shortly. Short table cell; no final period."
+  },
+  "wire.session_status.booting_not_answering": {
+    "role": "Session-listing state cell for a session whose runtime start has run past the cold-boot budget",
+    "tone": "terse, cautious, factual, lowercase like the neighbouring 'not running' and 'live' cells",
+    "note": "EN-only context sidecar. Same surfaces as wire.session_status.booting. Shown once a session has been starting for longer than the cold-boot budget (30 s): the process holding the session is still alive but no runtime has come up. Say 'not answering' (what was observed), NOT 'not responding'/'frozen'/'dead', matching wire.session_status.wedged: it does not prove the process stopped. {duration} is the time since it started starting, an already-localized compact duration such as `45s` or `2m`, from the wire.session_status.duration_* keys, inserted verbatim. Keep the middle dot. Short table cell; no final period."
   }
 }

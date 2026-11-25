@@ -87,6 +87,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
 from local_operator.resume import TITLE_SIDECAR_NAME, read_title_names
 
 #: Characters of prose kept per session. Enough to hold the subject matter of a
@@ -343,12 +344,7 @@ def _save(path: Path, entries: dict[str, Any]) -> None:
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": INDEX_VERSION, "entries": entries}),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        atomic_write_text(path, json.dumps({"version": INDEX_VERSION, "entries": entries}))
     except OSError:
         return
 

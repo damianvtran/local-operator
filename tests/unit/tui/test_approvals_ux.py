@@ -21,6 +21,7 @@ directly would pass with the list wired to nothing.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -293,7 +294,8 @@ async def test_the_session_switch_stops_offering_a_save_the_file_already_has(
 
         receipt = _notices(app)[-1]
         assert receipt == (
-            "tool approvals: auto — every tool runs without asking (this session)"
+            "tool approvals: auto — every tool runs without asking, except account "
+            "profile saves and community posts (this session)"
         ), receipt
         assert app._approve_all is True
 
@@ -372,7 +374,7 @@ async def test_the_saved_default_is_in_force_in_the_next_session(config_dir: Pat
         # The band's trailing cell is the alarm. It no longer spells the mode out
         # — the session NAME owns that slot now — so `auto` and `always` are one
         # glyph here, and `/approvals` is what distinguishes them.
-        assert _band(relaunched).rstrip().endswith("!")
+        assert _band(relaunched).rstrip().endswith("! auto")
 
 
 @pytest.mark.asyncio
@@ -456,7 +458,7 @@ async def test_an_unwritable_config_still_switches_the_session(
         assert "could not save default" in _notices(app)[-1]
         # Still alarmed: the session got the mode, only the promise about the
         # NEXT session failed, and the band never claimed that part anyway.
-        assert _band(app).rstrip().endswith("!")
+        assert _band(app).rstrip().endswith("! auto")
 
 
 # -- the list: offered, not remembered ----------------------------------------
@@ -1020,7 +1022,7 @@ async def test_the_band_and_the_gate_agree_through_every_route(config_dir: Path)
             so both scopes look identical here on purpose: the band's promise is
             "no tool will ask", and "until when" is `/approvals`' answer.
             """
-            return _band(app).rstrip().endswith("!")
+            return _band(app).rstrip().endswith("! auto")
 
         assert await gate_runs_without_asking() is False
         assert band_is_alarmed() is False
@@ -1110,7 +1112,7 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
         # One glyph for both scopes: the band says "no tool will ask", and the
         # keystroke's session-only scope is proved by the config below staying
         # unwritten rather than by a word in the band.
-        assert _band(app).rstrip().endswith("!")
+        assert _band(app).rstrip().endswith("! auto")
         assert _saved_mode(config_dir) is None
 
 
@@ -1352,3 +1354,98 @@ async def test_default_ask_clears_this_conversations_record(config_dir: Path) ->
         assert app._approve_all is False
         assert app._approvals_default_auto is False
         assert "this conversation follows it" in _notices(app)[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_bands_auto_mark_switches_the_session_back_to_ask(
+    config_dir: Path,
+) -> None:
+    """The one-click way back (operator request, 2026-11-24).
+
+    The band's `!` is the standing statement that no tool will ask; clicking it
+    must run the same `/approvals ask` a typist would — session scope only, so
+    the saved default on disk is untouched.
+    """
+    from local_operator.tui.app import Band
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._approve_all is True
+        await pilot.pause()
+        band = app.query_one(Band)
+        strip = band.render_line(0)
+        x = 0
+        target = None
+        for segment in strip:
+            meta = segment.style.meta if segment.style else {}
+            if meta.get("@click") == "app.approvals_ask":
+                target = x
+                break
+            x += len(segment.text)
+        assert target is not None, "the band's `!` carries no click action"
+        # `render_line` is in CONTENT coordinates; the band carries a top inset
+        # row, so the click is offset by the content region's origin.
+        dx = band.content_region.x - band.region.x
+        dy = band.content_region.y - band.region.y
+        await pilot.click(Band, offset=(target + dx, dy))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app._approve_all is False
+        assert _saved_mode(config_dir) is None
+
+
+@pytest.mark.skipif(
+    bool(os.environ.get("NO_COLOR")),
+    reason="a colour assertion: NO_COLOR strips every ink to the terminal default",
+)
+@pytest.mark.asyncio
+async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> None:
+    """Design D1 (PR #4558 round 1): making `!` clickable greys it without this.
+
+    Textual applies its link style to any segment carrying ``@click``, so the
+    band's only alarm was repainted in ``$link-color`` — measured (225,121,113)
+    -> (212,212,210). The click must survive; the ink must too. Asserted on the
+    COMPOSITED strip, because the override happens at widget render, not on the
+    ``Text`` the StatusLine builds.
+    """
+    from rich.color import Color as RColor
+
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        await pilot.pause()
+        await pilot.pause()
+        from textual.widgets import Static
+
+        band = app.query_one("#status-band", Static)
+        y = band.region.y + band.region.height - 1
+        strips = list(app.screen._compositor.render_strips())
+        wanted = RColor.parse(theme_mod.semantic_color("danger")).get_truecolor().hex.lower()
+
+        def _hex(value):  # type: ignore[no-untyped-def]
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return RColor.parse(value).get_truecolor().hex.lower()
+            return value.get_truecolor().hex.lower()
+
+        seen: list[tuple[str, str | None]] = []
+        for segment in strips[y]._segments:
+            style = segment.style
+            ink = _hex(style.color) if style is not None else None
+            seen.append((segment.text, ink))
+        mark = [(text, ink) for text, ink in seen if "!" in text]
+        assert mark, ("the band painted no alarm", seen)
+        # EVERY alarm cell must be danger: one segment, one ink. An earlier
+        # version of this assertion took "any" segment and passed while the
+        # word rode the icon slot, which the band paints `dim` — so the real
+        # frame was grey with a green test.
+        assert [ink for _text, ink in mark] == [wanted] * len(
+            mark
+        ), f"the alarm lost its danger ink: {mark} vs {wanted}"

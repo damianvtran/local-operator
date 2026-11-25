@@ -72,6 +72,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.atomic_files import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 #: The uptime grace. See the module docstring; the value is the connector's own
@@ -198,18 +200,14 @@ def _read_marker(config_dir: Path | str) -> dict[str, Any] | None:
 
 def _write_marker(config_dir: Path | str, payload: dict[str, Any]) -> None:
     path = marker_path(config_dir)
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_write_text(path, json.dumps(payload, sort_keys=True))
     except OSError:
         # A marker that could not be written costs at most one extra kick on
-        # the next surface start; it must never fail the caller.
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # the next surface start; it must never fail the caller. The writer has
+        # already removed its own temp.
+        pass
 
 
 def _supervised_pid() -> int | None:

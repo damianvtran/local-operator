@@ -35,6 +35,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -73,6 +74,9 @@ FORCED_REMOVAL_REASON = (
 )
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
+#: ``team_bridge.responders.policy.policy_path`` relative to a state root. Spelled
+#: here rather than imported so the guard's import graph stays free of team_bridge.
+_RESPONDER_POLICY_PARTS = ("team_bridge", "responders.yaml")
 _LEDGER_FILENAME = "created.sqlite"
 
 
@@ -93,10 +97,11 @@ class RankedTarget:
     shown: str = ""
     cleanup_hold: bool = False
     #: Which preservation condition a ``cleanup_hold`` failed (``HOLD_*`` below);
-    #: empty = the general hold. Display only: ``cleanup_hold_text`` picks its
-    #: guidance from it so an ignored-files hold is never worded like the
-    #: unpushed-work one. Rank and branch never read it.
+    #: empty = the general hold. Only an exact verified ask can lift the
+    #: ignored-only condition; other preservation holds remain unconditional.
     hold_conditions: tuple[str, ...] = ()
+    #: A lifted ignored-only hold still needs the live-holder settlement check.
+    cleanup_consent: bool = False
 
     @property
     def path(self) -> str:
@@ -381,6 +386,12 @@ def _evidence_reason(path: str, target: Target, prot: _Protected) -> str | None:
     for state in prot.state_roots:
         if _under(path, os.path.join(state, _LEDGER_DIRNAME)):
             return "the guardrail's own records"
+        if _in_policy_region(path, state):
+            # Team Integrations RFC §7.1 (S-34/S-40): the owner's alert-responder policy
+            # is the ONLY thing that authorizes work from an inbound alert, so the agent
+            # it authorizes must never be able to write, move or delete it — by the file
+            # tools or by bash. Evidence class = CRITICAL for every op, no ask can lift it.
+            return RESPONDER_POLICY_REASON
         sessions = os.path.join(state, _SESSIONS_DIRNAME)
         if not _under(path, sessions) or path == sessions:
             continue
@@ -724,6 +735,158 @@ def _in_own_pad(path: str, prot: _Protected) -> bool:
     return any(_under_evidence(path, pad) for pad in prot.own_scratchpad)
 
 
+#: The reason every route onto the responder policy carries. A module constant
+#: so ``classify_targets`` can rank even an UNKNOWN program handed the policy
+#: (``python3 -c "open(P, 'w')"``) CRITICAL, where other evidence is only HIGH.
+RESPONDER_POLICY_REASON = "the owner's alert responder policy"
+
+
+def _in_policy_region(path: str, state: str) -> bool:
+    """Is ``path`` the responder policy, something under that name, or its
+    ``team_bridge`` directory itself?
+
+    Why the directory too (PR #4383 review M1/S-1): the loader reads
+    ``<state>/team_bridge/responders.yaml`` by name, so whoever can replace,
+    link, move or extract INTO the directory chooses the policy — ``ln -s
+    ~/forged team_bridge``, ``mv ~/forged team_bridge``, ``cp -R x/.
+    team_bridge/``, ``tar -C``/``unzip -d``/``git -C`` all name only the
+    directory. Only the directory ITSELF is fenced, not everything under it:
+    ``team_bridge/`` also holds the connector's locks and caches, which an
+    agent may legitimately repair (those stay at their ordinary HIGH).
+    Case-folded on a case-insensitive volume so ``RESPONDERS.yaml`` spelled
+    before the file exists still lands on it; ``..`` is already normalised
+    away by every caller (``_norm``/``realpath``).
+    """
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    candidates = [(path, directory, policy)]
+    if _case_insensitive(state):
+        candidates.append((path.casefold(), directory.casefold(), policy.casefold()))
+    return any(p == d or _under(p, pol) for p, d, pol in candidates)
+
+
+def _policy_by_pattern(pattern: str, state: str) -> bool:
+    """Could glob ``pattern`` name the policy or its directory (component-wise,
+    so ``*`` never crosses ``/``)? Fails closed on case like the paths do."""
+    directory = os.path.join(state, _RESPONDER_POLICY_PARTS[0])
+    policy = os.path.join(directory, _RESPONDER_POLICY_PARTS[1])
+    fold = _case_insensitive(state)
+    pat = [c for c in (pattern.casefold() if fold else pattern).split("/") if c]
+    for root in (directory, policy):
+        parts = [c for c in (root.casefold() if fold else root).split("/") if c]
+        if len(pat) == len(parts) and all(
+            fnmatch.fnmatchcase(r, q) for r, q in zip(parts, pat, strict=True)
+        ):
+            return True
+    return False
+
+
+def _policy_reason(target: Target, prot: _Protected) -> str | None:
+    """The responder-policy fence for one resolved word, on every spelling:
+    lexical, realpath (a link already pointing there) and the kernel's landing
+    for a ``..`` word, plus any glob that could match it."""
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path:
+        kernel = kernel_path(target.raw_path)
+        if kernel:
+            spellings.add(kernel)
+    for state in prot.state_roots:
+        if any(_in_policy_region(s, state) for s in spellings):
+            return RESPONDER_POLICY_REASON
+        if target.pattern is not None and _policy_by_pattern(_norm(target.pattern), state):
+            return RESPONDER_POLICY_REASON
+    return None
+
+
+#: The reason a bulk copy into a state root carries (``_bulk_reason``).
+BULK_INTO_STATE_REASON = (
+    "a bulk copy, sync, extract or checkout into the Local Operator state directory "
+    "(it can land the owner's alert responder policy or the guardrail's records)"
+)
+
+#: The reason a bulk write with an UNKNOWABLE landing into an ancestor of a state
+#: root carries (``_bulk_reason``, review S-16): HIGH, so the judge weighs it
+#: against the operator's typed request instead of refusing it outright.
+BULK_INTO_ANCESTOR_REASON = (
+    "extracts or copies an unknown set of files into a directory that contains the "
+    "Local Operator state directory (it could land the owner's alert responder policy "
+    "or the guardrail's records)"
+)
+
+
+def _bulk_reason(target: Target, prot: _Protected) -> tuple[str, Risk] | None:
+    """Does a tree-landing write (``Target.bulk``) reach into a state root?
+
+    WHY (PR #4383 security round 2, S-12). ``rsync -a ~/forged/ ~/.local-operator/``,
+    ``ditto``, ``cp -R x/``, ``cp --parents``, ``tar -x``/``unzip`` or a ``git
+    checkout`` there each plant ``team_bridge/responders.yaml`` (or the
+    ``guardrails/`` ledger) while naming only the state root, which is not itself
+    evidence, so they all ranked LOW. An agent has no routine reason to bulk-write
+    into the state root, so:
+
+    * destination == a state root → CRITICAL, whatever lands;
+    * destination == an ANCESTOR of a state root (``~``, ``/``) whose KNOWN
+      landing names the next component toward the state root (``rsync -a
+      ~/x/.local-operator ~``) → CRITICAL;
+    * destination == an ancestor whose landing is UNKNOWABLE (an archive
+      extract, a contents copy ``cp -R x/ ~``, a checkout, a pull, a stash pop)
+      → HIGH with :data:`BULK_INTO_ANCESTOR_REASON` (review S-16). A session's
+      cwd is home by default, so ``tar -xzf ~/Downloads/x.tgz`` or a dotfiles
+      ``git --work-tree=$HOME pull`` is routine; CRITICAL there was refused with
+      no lever but the global override. HIGH lets the judge read the operator's
+      typed request ("extract this into my home" passes, an injected one does
+      not). The residual — a judge-approved plant — is closed structurally by
+      GATE R3-HASH (``team_bridge.responders.runner``), not by this rank;
+    * a known landing that does not name that component (``cp -R ~/proj ~/``)
+      stays as it was.
+
+    Every spelling ``_policy_reason`` judges (lexical, realpath, the kernel's
+    ``..`` landing) is judged here too, case-folded on a case-insensitive volume.
+    """
+    if not target.bulk:
+        return None
+    unknown: tuple[str, Risk] | None = None
+    spellings: set[str] = set()
+    for word in (target.path, target.raw_path):
+        if not word:
+            continue
+        spellings.add(_norm(word))
+        try:
+            spellings.add(os.path.realpath(word))
+        except OSError:
+            pass
+    if target.raw_path and (kernel := kernel_path(target.raw_path)):
+        spellings.add(kernel)
+    for state in prot.state_roots:
+        fold = _case_insensitive(state)
+        root = state.casefold() if fold else state
+        names = None
+        if target.bulk_names is not None:
+            names = {n.casefold() if fold else n for n in target.bulk_names}
+        for spelling in spellings:
+            dest = (spelling.casefold() if fold else spelling).rstrip("/") or "/"
+            if dest == root:
+                return BULK_INTO_STATE_REASON, Risk.CRITICAL
+            if _under(root, dest):
+                step = os.path.relpath(root, dest).split(os.sep, 1)[0]
+                if names is None:
+                    unknown = (BULK_INTO_ANCESTOR_REASON, Risk.HIGH)
+                elif step in names:
+                    return BULK_INTO_STATE_REASON, Risk.CRITICAL
+    # A CRITICAL spelling (another state root, or a realpath landing on one)
+    # outranks an unknown-landing HIGH, so the HIGH is returned only after
+    # every spelling of every root has been judged.
+    return unknown
+
+
 def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -> str | None:
     """Does ``target`` land in the guard's evidence?
 
@@ -743,6 +906,9 @@ def _touch_reason(target: Target, prot: _Protected, *, globstar: bool = False) -
     path = target.path
     if path is None:
         return None
+    policy = _policy_reason(target, prot)
+    if policy is not None:
+        return policy
     lexical = {path, target.pattern or path}
     # Cheap prefilter: realpath/F_GETPATH only for words that could be there.
     # The raw (un-normalised) word's realpath resolves ``..`` physically, the
@@ -1131,7 +1297,11 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         if os.path.dirname(path) == home and not os.path.isfile(path):
             return "a top-level directory of the home directory"
     try:
-        if os.path.isdir(path) and os.path.exists(os.path.join(path, ".git")):
+        if (
+            os.path.isdir(path)
+            and os.path.exists(os.path.join(path, ".git"))
+            and not _removed_worktree_remnant(path)
+        ):
             return "a git repository root"
         # The repository's history itself: deleting ``<repo>/.git`` loses every
         # unpushed commit, stash and linked-worktree record just as deleting
@@ -1142,6 +1312,274 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
     except OSError:
         return "an unreadable path"
     return None
+
+
+#: Bound on the files a remnant check hashes; more holds (fail closed).
+_REMNANT_FILE_LIMIT = 50_000
+#: Finder/Explorer per-folder metadata: a regular file under one of these
+#: names is view state, never in the object store and never work. The very
+#: ``.DS_Store`` whose mid-delete write made ``git worktree remove`` fail.
+_REMNANT_OS_METADATA = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _tsbuildinfo_file(full: str) -> bool:
+    """A TypeScript ``--incremental`` state file, proven by CONTENT, not name.
+
+    Field case 2026-11-24 (disk recovery, guard 0.112.10): three UI worktree
+    leftovers held every tracked file as a committed blob plus one
+    ``.cache/typecheck/node.tsbuildinfo``, which ``tsc -b`` rewrites on every
+    build and Git never holds, so the remnant check refused them. The file
+    is JSON whose top-level object carries tsc's ``"version"`` and
+    ``"program"`` keys (TS 5.x writes ``{"fileNames":[...],..."version":...}``
+    or ``{"root":[...],"version":...}``). Anything else under the name, an
+    unreadable file, or one over 64 MiB stays held (fail closed).
+    """
+    import json
+
+    try:
+        if os.path.getsize(full) > 64 * 1024 * 1024:
+            return False
+        with open(full, "rb") as fh:
+            data = json.loads(fh.read())
+    except (OSError, ValueError, RecursionError, MemoryError):
+        # #4550 R1-m2: deeply nested JSON raises RecursionError; hold, quietly.
+        return False
+    return (
+        isinstance(data, dict)
+        and isinstance(data.get("version"), str)
+        and any(k in data for k in ("program", "root", "fileNames"))
+    )
+
+
+def _git_env() -> dict[str, str]:
+    """Environment for the guard's own read-only git calls: no inherited
+    repository overrides, no prompts, no optional locks (#4536 R1 m4)."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")
+    }
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+#: Reason for a LOW whose deletion loses nothing Git does not already hold
+#: (:func:`_removed_worktree_remnant`). ``check`` keys on this prefix: an
+#: ask about such a path that timed out, was withdrawn, or was answered from
+#: an unverified surface does not lift it out of LOW (field case 2026-11-24,
+#: disk recovery: a-58df timed out, so the very session that asked could not
+#: finish deleting two leftovers every other session could). An ask protects
+#: the operator's data; here there is none left to protect.
+REMNANT_REASON = "a dropped worktree's leftovers, every byte already in Git"
+
+
+def _former_worktree_repo(real: str) -> str | None:
+    """The repository a folder was a linked worktree of, if Git has DROPPED it.
+
+    Two shapes, both what a failed ``git worktree remove`` leaves (#4536):
+
+    - its ``.git`` pointer FILE survived: a one-line ``gitdir:`` resolving to
+      ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` a real directory, the
+      admin directory gone;
+    - Git already deleted the pointer (follow-up 2026-11-24, pass-3
+      leftovers ``guard-finder-metadata``/``quota-diagnostic``): no ``.git`` at
+      all, the folder sits at ``<repo>/.worktrees/<name>`` (this harness's
+      worktree layout), and ``git worktree list`` of ``<repo>`` does not list
+      it.
+
+    ``None`` for anything else, or on any read or git failure.
+    """
+    marker = os.path.join(real, ".git")
+    if not os.path.lexists(marker):
+        parent = os.path.dirname(real)
+        repo = os.path.dirname(parent)
+        common = os.path.join(repo, ".git")
+        if (
+            os.path.basename(parent) != ".worktrees"
+            or os.path.islink(common)
+            or not os.path.isdir(common)
+        ):
+            return None
+        try:
+            listed = subprocess.run(
+                ["git", "-C", repo, "worktree", "list", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=_git_env(),
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        if listed.returncode != 0:
+            return None
+        for row in listed.stdout.splitlines():
+            if row.startswith("worktree ") and os.path.realpath(row[9:]) == real:
+                return None
+        return repo
+    try:
+        if not stat.S_ISREG(os.lstat(marker).st_mode):
+            return None
+        with open(marker, encoding="utf-8") as fh:
+            text = fh.read(4097)
+    except (OSError, ValueError):
+        return None
+    lines = text.splitlines()
+    if len(text) > 4096 or len(lines) != 1 or not lines[0].startswith("gitdir: "):
+        return None
+    admin = lines[0][len("gitdir: ") :].strip()
+    if not os.path.isabs(admin):
+        admin = os.path.join(real, admin)
+    admin = os.path.normpath(admin)
+    worktrees = os.path.dirname(admin)
+    common = os.path.dirname(worktrees)
+    if (
+        os.path.basename(worktrees) != "worktrees"
+        or os.path.basename(common) != ".git"
+        or os.path.islink(common)
+        or not os.path.isdir(common)
+        or os.path.lexists(admin)
+    ):
+        return None
+    return os.path.dirname(common)
+
+
+#: Proven-lossless fingerprints, ``realpath -> (fingerprint, monotonic time)``
+#: (#4545 R1-m2, field case 2026-11-24): one guard checkpoint asks up to
+#: three times, and under load each ask hashed ~12k files for minutes, so
+#: the third timed out and held a lossless folder. The fingerprint is every
+#: remaining file's (path, size, mtime_ns, inode), read by the walk that runs
+#: on EVERY ask; only the slow hashing is skipped, and only when nothing
+#: changed since a TRUE answer within ``_REMNANT_MEMO_TTL_S``.
+_REMNANT_MEMO: dict[str, tuple[int, float]] = {}
+_REMNANT_MEMO_TTL_S = 120.0
+
+
+def _removed_worktree_remnant(path: str) -> bool:
+    """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
+    nothing when deleted?
+
+    Field case 2026-11-24 (disk recovery, guard 0.112.8): a guard-allowed
+    ``git worktree remove`` of a clean, merged tree failed "Directory not
+    empty" because Finder wrote a ``.DS_Store`` mid-delete. Git had already
+    unregistered the tree and deleted its admin directory, leaving tracked
+    files behind. With its ``.git`` pointer FILE still present the folder ranked
+    "a git repository root" (judge); without it, an ordinary path. The rank
+    depended only on Git's deletion order.
+
+    The decision rests on what deletion would LOSE, not on how the folder got
+    there (#4536 R1-B1: a hand-moved tree that ``git worktree prune`` then
+    unregistered looks the same from its pointer and admin dir, but can hold
+    uncommitted files). All of these must hold:
+
+    - ``.git`` is a regular one-line ``gitdir:`` FILE resolving (from the real
+      path) to ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` is a real
+      directory, and that admin directory is GONE, so Git no longer tracks
+      this folder;
+    - EVERY remaining regular file is either a Finder/Explorer metadata file
+      or byte-identical to a blob already in ``<repo>``'s object store
+      (``git hash-object --stdin-paths`` then ``git cat-file
+      --batch-check``). Deleting it then loses no content Git does not
+      already hold. A symlink, special file, unreadable directory, more than
+      :data:`_REMNANT_FILE_LIMIT` files, or any git failure holds.
+
+    Then the folder ranks as an ordinary path, the same as the remnant whose
+    pointer Git already deleted. Any doubt keeps the repository rank.
+    """
+    real = os.path.realpath(path)
+    repo = _former_worktree_repo(real)
+    if repo is None:
+        return False
+    files: list[str] = []
+
+    def _fail(err: OSError) -> None:
+        raise err
+
+    try:
+        for root, dirs, names in os.walk(real, onerror=_fail):
+            # ``--stdin-paths`` is line-based and Git strips a trailing CR, so
+            # ``kept.txt\r`` would hash as its committed sibling ``kept.txt``
+            # (#4536 R2-M1). Any name with a line break holds.
+            if any("\n" in n or "\r" in n for n in (*dirs, *names)):
+                return False
+            for name in dirs:
+                if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
+                    return False  # a symlinked directory
+            # Bytecode and tagged caches Git's aborted walk never reached are
+            # never committed: shed them by CONTENT (#4528's witness), never by
+            # name (follow-up 2026-11-24, pass-3 leftovers held only for
+            # ``__pycache__``).
+            from local_operator.guardrails.provenance import _verified_cache_dir
+
+            dirs[:] = [d for d in dirs if not _verified_cache_dir(root, d)]
+            for name in names:
+                full = os.path.join(root, name)
+                if root == real and name == ".git":
+                    continue
+                mode = os.lstat(full).st_mode
+                if not stat.S_ISREG(mode):
+                    return False
+                if name in _REMNANT_OS_METADATA:
+                    continue
+                if name.endswith(".tsbuildinfo") and _tsbuildinfo_file(full):
+                    continue
+                files.append(full)
+                if len(files) > _REMNANT_FILE_LIMIT:
+                    return False
+    except (OSError, ValueError, RecursionError, MemoryError):
+        return False
+    if not files:
+        return True
+    try:
+        stamps = []
+        for f in files:
+            st = os.lstat(f)
+            # ctime too (#4550 R1-m1): a rewrite can restore mtime, not ctime.
+            stamps.append((f, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino))
+    except OSError:
+        return False
+    fingerprint = hash(tuple(sorted(stamps)))
+    memo = _REMNANT_MEMO.get(real)
+    if (
+        memo is not None
+        and memo[0] == fingerprint
+        and time.monotonic() - memo[1] < _REMNANT_MEMO_TTL_S
+    ):
+        return True
+    _REMNANT_MEMO.pop(real, None)
+    env = _git_env()
+    # Field case 2026-11-24 (UI leftovers, load 33-54 during disk recovery):
+    # hashing 11,941 committed files took 28.8 s of I/O wait, so a flat 30 s
+    # timed out and three lossless leftovers stayed held. Scale with the file
+    # count (30 ms each over a 30 s floor, capped at 15 min); a timeout still
+    # holds the folder (fail closed).
+    budget = min(900.0, 30.0 + len(files) * 0.03)
+    try:
+        hashed = subprocess.run(
+            ["git", "-C", repo, "hash-object", "--no-filters", "--stdin-paths"],
+            input="\n".join(files) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=budget,
+            env=env,
+        )
+        oids = hashed.stdout.split()
+        if hashed.returncode != 0 or len(oids) != len(files):
+            return False
+        checked = subprocess.run(
+            ["git", "-C", repo, "cat-file", "--batch-check=%(objecttype)"],
+            input="\n".join(oids) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=budget,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    kinds = checked.stdout.split()
+    lossless = checked.returncode == 0 and len(kinds) == len(oids) and set(kinds) == {"blob"}
+    if lossless:
+        _REMNANT_MEMO[real] = (fingerprint, time.monotonic())
+    return lossless
 
 
 #: Programs that remove a symlink operand's ENTRY without following it. Not
@@ -1477,7 +1915,41 @@ def _rank(
                     cleanup_hold=True,
                 )
             if plain_payload is not None:
-                inventory = plain_cleanup_ignored_inventory(path)
+                # Own trees (this session, its descendants, or an ancestor that
+                # delegated the cleanup: ``owned_record``'s family) may shed
+                # regenerable build output; a sibling's ``kin`` tree may not.
+                inventory = plain_cleanup_ignored_inventory(
+                    path, own_regenerable=own is not None and relation != "kin"
+                )
+                if (
+                    inventory is not None
+                    and inventory.unverified_ignored
+                    and not inventory.changes
+                    and (own is None or relation == "kin")
+                ):
+                    # FINISHED tree, any creator (operator directive and fleet
+                    # census 2026-11-24): regenerable-named build output goes
+                    # with a tree proven clean, merged on origin, with no open
+                    # PR, running owner or live cwd. Anything off the list
+                    # (``.env*``, keys, logs) keeps the hold below.
+                    from local_operator.guardrails import provenance as prov
+
+                    merged = plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+                    if merged is not None and merged.unverified_ignored == 0:
+                        finished = prov.finished_foreign_worktree(
+                            path, session_id, activity=activity, ignored_verified=True
+                        )
+                        if finished.safe:
+                            inventory = merged
+                            # The legacy state above reads an off-list ignored
+                            # name (``out/``, ``_shared-*.mjs``) as ``dirty``;
+                            # the proof re-read it with the verified payload
+                            # allowance and found it clean (no change, lock,
+                            # live cwd or nested repo), so its state stands.
+                            state = finished.state
+                            state_text = state_phrase(
+                                path, state, session_id, hidden_blocks=target.forced
+                            )
                 if inventory is None:
                     return RankedTarget(
                         target,
@@ -1703,6 +2175,17 @@ def _rank(
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     foreign_reason = _foreign_reason(target, path, foreign)
+    if (
+        foreign_reason is not None
+        and foreign_reason.startswith("created by another session (")
+        and ", worktree, " in foreign_reason
+        and _removed_worktree_remnant(path)
+    ):
+        # The other session's row records a WORKTREE at exactly this path
+        # (no "inside"/"holds" prefix), and Git has already dropped it with
+        # every leftover byte in the object store (follow-up 2026-11-24):
+        # deleting the folder loses none of that session's work.
+        foreign_reason = None
     if foreign_reason is not None:
         # Every LOW below is "nothing here is known to matter"; another
         # session's ledger row says otherwise (``ForeignCreations``). Placed
@@ -1713,6 +2196,11 @@ def _rank(
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
+    if target.op in _DESTROYING_OPS and os.path.isdir(path) and _removed_worktree_remnant(path):
+        # Named, so ``check`` can tell a LOSSLESS LOW from an ordinary one:
+        # an unanswered ask about this path protects nothing (see
+        # ``REMNANT_REASON``).
+        return RankedTarget(target, Risk.LOW, REMNANT_REASON)
     return RankedTarget(target, Risk.LOW, "ordinary path")
 
 
@@ -2246,6 +2734,8 @@ def _exact_linked_cleanup(
     if activity.owners_running:
         return hold(f"another session still holds it; {activity.facts()}")
     if state == "dirty":
+        if merged := _merged_force_payload(target, path, session_id, foreign, activity, identity):
+            return merged
         return hold(
             "preservation check failed; stash or commit changes and preserve unverified "
             "files separately, including ignored output"
@@ -2313,6 +2803,92 @@ def _exact_linked_cleanup(
     ):
         return hold(changed)
     return RankedTarget(target, Risk.LOW, f"{reason}; verified removal payload ({state})")
+
+
+def _merged_force_payload(
+    target: Target,
+    path: str,
+    session_id: str,
+    foreign: ForeignCreations | None,
+    activity: WorktreeActivity,
+    identity: object,
+) -> RankedTarget | None:
+    """LOW for an exact ``git worktree remove --force`` of a MERGED tree whose
+    only "dirt" is ignored payload (#4565); ``None`` keeps the hold.
+
+    Why (Aida's live matrix, 2026-11-25): eight finished ``.worktrees/*``
+    checkouts, git-clean with HEAD an ancestor of origin/main, ranked LOW for
+    plain removal but HIGH ("preservation check failed") for the ``--force``
+    spelling agents actually type, because the interrupted-cleanup inventory
+    counts every ignored ``__pycache__``/``.DS_Store``/``node_modules`` as
+    unpreserved data. A merged tree's ignored payload is outside the work
+    the merge shipped, exactly as for plain removal.
+
+    Constraints — every condition the plain route needs, nothing less:
+    ``--force`` also deletes tracked and untracked changes, so the strict
+    inventory must report ZERO of them (``changes == 0``); every ignored
+    entry must pass :func:`provenance._merged_tree_sheds` (a nested
+    repository, an unwalkable entry, a non-regular ``next-env.d.ts`` hold);
+    and :func:`provenance.finished_foreign_worktree` (merged on origin, no
+    open PR, no running owner, no live cwd, not locked) must hold with the
+    verified-payload allowance, downgraded by any third-party ledger row
+    inside. The registration identity and the inventory are re-read after
+    the forge I/O so a tree changed in between is held. ``-f -f`` and locks
+    are not widened here.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    inventory = prov.plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+    if inventory is None or inventory.changes or inventory.unverified_ignored:
+        return None
+    ref = getattr(identity, "ref", None)
+    head = getattr(identity, "head", None)
+    if ref is None and head:
+        # Detached HEAD (five of Aida's nine: ``git worktree add --detach``
+        # review/QA trees). ``finished_foreign_worktree`` is branch-based and
+        # says "detached"; for no branch there is no PR to be open, so the
+        # proof is: HEAD is contained in origin's advertised default tip (live
+        # ``ls-remote``, never a stale local ref), no strictly-read running
+        # owner, and no third session's ledger row inside. Busy and locked
+        # were already excluded: ``worktree_state`` checks both before it
+        # reads the payload that made this tree "dirty".
+        try:
+            # Same Q-R2-1 waiver the branch route takes with
+            # ``ignored_verified`` (see ``finished_foreign_worktree``): a
+            # drifted ctime leaves no creator row, so the owner left to find
+            # is a live session, which the strict registry scan still finds.
+            # HEAD is on origin, so an absent creator loses at most a rebuild.
+            if prov._running_owners(path, session_id, strict=True, allow_unattributed=True):
+                return None
+            fresh = prov.ForeignCreations(session_id)
+            try:
+                if fresh.foreign_under(path, strict=True) is not None:
+                    return None
+            finally:
+                fresh.close()
+        except Exception:  # noqa: BLE001 — unknown owner facts hold, never pass
+            return None
+        if activity.pr_state != "none" or not prov.pushed_worktree_head(path, head, None):
+            return None
+    else:
+        proof = _no_ledger_inside(
+            foreign,
+            path,
+            prov.finished_foreign_worktree(
+                path, session_id, activity=activity, ignored_verified=True
+            ),
+        )
+        if not proof.safe:
+            return None
+    again = prov.plain_cleanup_ignored_inventory(path, merged_regenerable=True)
+    if again != inventory or prov.cleanup_identity(path) != identity:
+        return None
+    return RankedTarget(
+        target,
+        Risk.LOW,
+        "a finished, merged linked git worktree; verified removal payload "
+        "(ignored build output only)",
+    )
 
 
 def _finished_route_barred(root: str, prot: _Protected) -> bool:
@@ -2566,6 +3142,14 @@ def classify_targets(
         )
         pad_hits: set[str | None] = set()
         for t in writes:
+            bulk = _bulk_reason(t, prot)
+            if bulk is not None:
+                evidence_hits.append(RankedTarget(t, bulk[1], bulk[0]))
+                continue
+            if t.op == "bulk":
+                # A git work tree recorded only for the rule above: the rest of
+                # its ranking is the backstop's ordinary cwd touch.
+                continue
             reason = _touch_reason(t, prot, globstar=globstar)
             if reason == OTHER_SCRATCHPAD:
                 # Not evidence, but another session's files: every write there
@@ -2590,6 +3174,14 @@ def classify_targets(
             if reason is None:
                 continue
             shown = f"{reason}, handed to {t.program or 'a program'}"
+            if reason == RESPONDER_POLICY_REASON:
+                # An unknown program (an interpreter's ``-c``/``-e``) handed the
+                # policy or its directory may write it, and nothing here can
+                # tell; the policy authorizes the agent asking, so no judge or
+                # ask may lift it (review M1/S-1). Reads go through ``cat`` or
+                # the read tool, which stay LOW.
+                evidence_hits.append(RankedTarget(t, Risk.CRITICAL, shown))
+                continue
             if reason == OTHER_SCRATCHPAD:
                 tree = _tree_read(
                     t,

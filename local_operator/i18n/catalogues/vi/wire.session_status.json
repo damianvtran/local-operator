@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number} giây",
   "wire.session_status.duration_minutes": "{count, number} phút",
   "wire.session_status.duration_hours_minutes": "{hours, number} giờ {minutes, number} phút",
-  "wire.session_status.duration_days_hours": "{days} ngày {hours, number} giờ"
+  "wire.session_status.duration_days_hours": "{days} ngày {hours, number} giờ",
+  "wire.session_status.booting": "đang khởi động · {duration}",
+  "wire.session_status.booting_not_answering": "không phản hồi · đang khởi động được {duration}"
 }

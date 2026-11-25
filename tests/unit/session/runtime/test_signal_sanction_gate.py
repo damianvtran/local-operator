@@ -752,3 +752,61 @@ async def test_a_second_refused_signal_is_refused_and_recorded_unnamed(directory
     finally:
         siginfo.disarm(number)
         signal.signal(signal.SIGUSR2, previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_the_runtime_memory_guard_marker_sanctions_its_sigterm(
+    directory: Path, tmp_path: Path
+) -> None:
+    """The per-runtime memory guard's stop must get through the gate.
+
+    2026-11-24: a runaway runtime refused a bare SIGTERM (no marker), and only
+    SIGKILL could end it. The guard stages ``note_involuntary_stop`` with its own
+    mechanism before signalling; that marker must sanction a SIGTERM delivered to
+    a BUSY runtime (the incident's wake turn was open since boot). Negative
+    control, same directory and busy state: before the marker the SIGTERM is
+    refused — so this cell cannot pass on a gate that sanctions everything.
+    """
+    from local_operator.session.runtime import runtime_memory
+
+    session = _Session(directory, busy=True)
+    refused, _ = await _drive(session)
+    assert refused.refusals == 1 and refused.draining is None
+
+    assert control.note_involuntary_stop(
+        _record(),
+        tmp_path,
+        mechanism=runtime_memory.MECHANISM,
+        actor=runtime_memory.ACTOR,
+    )
+    state, receipt = await _drive(session)
+    assert state.refusals == 0
+    assert state.draining is not None, "the guard's sanctioned SIGTERM did not drain"
+    entry = (receipt or {})["signals"][-1]
+    assert entry["sanction"] == "marker"
+    assert entry["stop_marker"]["mechanism"] == runtime_memory.MECHANISM
+    assert session.cut_off_notes and session.cut_off_notes[0][0] == "runtime-killed"
+    await _settle(state)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal semantics")
+@pytest.mark.asyncio
+async def test_the_sessions_tool_force_marker_sanctions_its_sigterm(directory: Path) -> None:
+    """``sessions(op='stop', force=true)`` reaches the ladder's SIGTERM rung, which
+    stages a DELIBERATE marker naming ``sessions tool --force`` — that marker must
+    be obeyed by a busy runtime (negative control: refused before it is staged)."""
+    session = _Session(directory, busy=True)
+    refused, _ = await _drive(session)
+    assert refused.refusals == 1
+    registry.write_stop_marker(
+        directory,
+        control._stop_marker_payload(_record(), "sigterm", command="sessions tool --force"),
+    )
+    state, receipt = await _drive(session)
+    assert state.refusals == 0
+    assert state.draining is not None
+    entry = (receipt or {})["signals"][-1]
+    assert entry["sanction"] == "marker"
+    assert entry["stop_marker"]["deliberate"] is True
+    await _settle(state)

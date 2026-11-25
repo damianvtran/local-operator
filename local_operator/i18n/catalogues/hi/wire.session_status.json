@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number} सेकंड",
   "wire.session_status.duration_minutes": "{count, number} मि",
   "wire.session_status.duration_hours_minutes": "{hours, number} घं {minutes, number} मि",
-  "wire.session_status.duration_days_hours": "{days} दिन {hours, number} घं"
+  "wire.session_status.duration_days_hours": "{days} दिन {hours, number} घं",
+  "wire.session_status.booting": "शुरू हो रहा · {duration}",
+  "wire.session_status.booting_not_answering": "जवाब नहीं दे रहा · {duration} से शुरू हो रहा"
 }

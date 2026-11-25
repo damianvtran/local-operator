@@ -495,13 +495,15 @@ async def test_the_routed_receipt_discloses_the_dark_marker(tmp_path, monkeypatc
 
     receipt = getattr(handle._approvals_slash(session, "auto", SlashResult), "text", "")
     assert receipt == (
-        "tool approvals: auto — every tool runs without asking (this session); "
+        "tool approvals: auto — every tool runs without asking, except account profile "
+        "saves and community posts (this session); "
         "the band's ! will not follow this — /approvals re-reports the gate"
     ), receipt
 
     report = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
     assert report == (
-        "tool approvals: auto — every tool runs without asking; new sessions open the "
+        "tool approvals: auto — every tool runs without asking, except account profile "
+        "saves and community posts; new sessions open the "
         "same way; the band's ! will not follow this — /approvals re-reports the gate"
     ), report
 
@@ -1087,4 +1089,39 @@ async def test_the_phone_reads_a_successful_loosening_as_success(tmp_path) -> No
     # Legacy owner with no verdict keeps the old rule: a warning-shaped outcome
     # with no structured success is a refusal.
     assert _slash_receipt({"text": "x", "style": "warning"}, "approvals")[2] is True
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_live_gate_is_mirrored_onto_frontend_state(tmp_path) -> None:
+    """PR #4558 X1: the desktop picker/chip read ``approval_mode`` off the state.
+
+    The gate lives in this process, so the canonical state is the only way a
+    desktop ``command-entities?command=approvals`` can name the mode. Every
+    switch (both directions) must land there, and construction must state the
+    adopted mode before any switch.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        FrontendStateStore,
+        SlashResult,
+    )
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    handle, session, _watcher, _emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
+    store = FrontendStateStore(FrontendSessionState(session_id="sess-x1", epoch="t"))
+    session._frontend_state_store = store  # type: ignore[attr-defined]
+    assert store.state.approval_mode == "", "unknown until the gate states it"
+
+    handle._publish_approval_mode()
+    assert store.state.approval_mode == "ask"
+    handle._approvals_slash(session, "auto", SlashResult)
+    assert handle._auto_approve is True
+    assert store.state.approval_mode == "auto"
+    handle._approvals_slash(session, "ask", SlashResult)
+    assert handle._auto_approve is False
+    assert store.state.approval_mode == "ask"
     await handle.dispose()

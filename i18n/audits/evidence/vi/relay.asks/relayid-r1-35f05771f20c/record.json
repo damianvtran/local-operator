@@ -1,0 +1,72 @@
+{
+ "schema": 1,
+ "audit_id": "relayid-r1-35f05771f20c",
+ "audit_kind": "independent semantic audit of the relay ask-id foot and chip delta (14 new keys); the 87 unchanged keys carried by byte proof",
+ "locale": "vi",
+ "namespace": "relay.asks",
+ "status": "passed",
+ "verdict": "passed",
+ "pr": "feat/relay-ask-ids (local branch, commits 62d72e431..d03db9007 on origin/main 94ba2a018; PR number not yet assigned)",
+ "audited_revision": "d03db9007 plus this audit's catalogue edits",
+ "catalogue_state": "d03db9007 bytes with the edits listed in findings_note",
+ "scope": "the 14 new relay.asks.id.* and relay.asks.chip.* keys read against the en source, en/relay.asks.context.json, i18n/glossary.md, i18n/style-guides/vi.md, the shipped relay.asks.status.*, card.* and sheet.settled words of the same locale, and local-operator-mobile origin/main src/i18n/catalogues/vi/mobile.asks.json (chip.*); the whole namespace re-rendered through messages.render and mechanically checked; the other 87 keys are byte-identical in en and vi to origin/main 94ba2a018, whose last ledger row (askparity-r1-b7ef3c226fc6) was passed with source e19bac73afbfde9abac76d79c60bf7d1e2d8b2b621b49f2770a41d56749bc0ef and the target hash recorded in that evidence, recomputed from origin/main",
+ "keys_audited": [
+  "relay.asks.id.copy_label",
+  "relay.asks.id.copied",
+  "relay.asks.id.copied_named",
+  "relay.asks.id.copy_failed",
+  "relay.asks.chip.open",
+  "relay.asks.chip.answered",
+  "relay.asks.chip.declined",
+  "relay.asks.chip.timed_out",
+  "relay.asks.chip.late",
+  "relay.asks.chip.dismissed",
+  "relay.asks.chip.withdrawn",
+  "relay.asks.chip.expired",
+  "relay.asks.chip.label",
+  "relay.asks.chip.label_bare"
+ ],
+ "keys_total": 101,
+ "keys_edited_by_audit": [
+  "relay.asks.chip.timed_out",
+  "relay.asks.chip.dismissed"
+ ],
+ "mechanical_checks": [
+  "key set and order parity with en (101 keys)",
+  "ICU argument names parity (id, state, question)",
+  "NFC",
+  "no bidi/zero-width/control characters",
+  "no ASCII ellipsis",
+  "cell width via rich.cells.cell_len against context maxCells (id.copy_label is an aria-label, advisory)",
+  "every key rendered through local_operator.i18n.messages.render with id=a-745e, state=the locale's own timed_out word, question=sample",
+  "chip state words compared with the same locale's status.* words and card.dismiss/decline/skip",
+  "chip.* compared with the native app's mobile.asks.chip.* wording (read-only)",
+  "en 'Ask {id}, {state}: {question}.' yields '?.' when the question ends in '?': an English-source observation, not touched here"
+ ],
+ "translator": {
+  "agent": "radient/auto (translator of record for the PR commit 8077e80c9, ask-id foot and chip delta); not independently verified",
+  "model": "radient/auto",
+  "fallback": "none",
+  "date": "2026-11-23"
+ },
+ "auditor": {
+  "agent": "independent i18n auditor (lopdev i18n-auditor task, session 35f05771f20c; not the translator, did not write or edit the English)",
+  "session": "35f05771f20c",
+  "model": "anthropic/claude-sonnet-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-23",
+  "result": "passed",
+  "findings": 2,
+  "unresolved_blocker_major": 0,
+  "minor": 2,
+  "nit": 0
+ },
+ "findings_note": "F1 MINOR fixed: chip.dismissed 'đã bỏ qua' is the shipped card.skip label 'Bỏ qua' (a different action: send no answer); the shipped dismiss word is 'Đóng' / status 'Đã đóng'; now 'đã đóng'. F2 MINOR fixed: chip.timed_out 'quá hạn' against shipped status.timed_out and card.timed_out_badge 'Hết thời gian'; now 'hết thời gian'.",
+ "report": "lopdev i18n-auditor report to the manager (not posted to GitHub)",
+ "source_sha256": "d417c862f4b4af8f52dec92942b50c2d6e9f872d332d8d0b6b0ea89402b8ba5b",
+ "target_sha256": "6b0a4233bd997740c467f98d4c961b7837ff11f8f29f1f5b80c31bd99f447678",
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/relay.asks.json",
+  "target": "local_operator/i18n/catalogues/vi/relay.asks.json"
+ }
+}

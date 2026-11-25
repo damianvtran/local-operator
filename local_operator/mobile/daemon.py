@@ -49,6 +49,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from starlette.responses import JSONResponse, Response
 
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.projection import LiveInlineUiEnvelope
     from local_operator.mobile.push_transport import PushLane
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.providers.auth_store import StoredCredential
@@ -120,6 +122,7 @@ from local_operator.mobile.transfer_receipts import (
     Unclaimed,
 )
 from local_operator.mobile.types import (
+    PROJECTION_TRANSCRIPT_LIMIT,
     PROTOCOL_VERSION,
     SessionProjection,
     SessionRecord,
@@ -127,6 +130,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.network.types import MeshRefusal
 from local_operator.session.creation import session_created_at
+from local_operator.session.inline_ui_text import INLINE_UI_V1
 from local_operator.session.media import SUPPLEMENT_FILE_TYPES as _SUPPLEMENT_FILE_TYPES
 from local_operator.session.media import SUPPLEMENT_JOB as _SUPPLEMENT_JOB
 from local_operator.session.runtime import registry
@@ -246,6 +250,27 @@ SSE_KEEPALIVE_S = 15.0
 # it is NOT a session deadline. A real SSE subscriber holds its own viewer.
 SESSION_START_TIMEOUT_S = 30.0
 PHONE_HANDOFF_S = 60.0
+
+#: How long a phone PROMPT WAKE may take to reach a runtime before it counts as
+#: a real failure. Measured, not guessed: the wake supervisor's engagements
+#: (the same ``engage_runtime`` path, its "took" log lines, Nov 21-23 2026) gave
+#: n=2845, p50 10.1 s, p90 39.1 s, p99 106.8 s, max 169.6 s, and 34% exceeded
+#: the 15 s ``ACK_TIMEOUT_S`` this path used to share with the ack. 180 s sits
+#: above that observed max and matches ``wakes.supervisor.WAKE_DEADLINE_S``, the
+#: bound already in production for the same boot.
+PROMPT_WAKE_DEADLINE_S = 180.0
+
+#: How long ``/command`` holds a cold prompt open before answering "waking" when
+#: it has seen neither an outcome nor a construction. Equal to the pre-change
+#: ``ACK_TIMEOUT_S`` so no request waits longer than it did before; the common
+#: cold case answers far sooner, the moment ``engage_runtime`` reports a runtime
+#: constructing (``on_constructing``).
+PROMPT_WAKE_ACK_WINDOW_S = 15.0
+
+#: The ``detail`` of a "waking" acknowledgement. Not "prompt admitted": the
+#: prompt is not admitted yet, and the receipt must not claim otherwise (see
+#: ``engage_session_client``'s note on receipts). Clients key on ``waking``.
+PROMPT_WAKE_DETAIL = "session is waking"
 
 #: How long a conversation stays VIEWED after its last phone stream closes.
 #:
@@ -598,6 +623,11 @@ class SessionEntry:
     def __init__(self, record: SessionRecord) -> None:
         self.record = record
         self.projection: SessionProjection | None = None
+        # Runtime frames carry row deltas, not replacement snapshots. Keep
+        # them beside the projection: a row and its sidecar can arrive in either
+        # order, and neither changes the installed-client transcript shape.
+        self._live_inline_ui: dict[str, LiveInlineUiEnvelope | None] = {}
+        self._inline_ui_seeded = False
         self.writer: asyncio.StreamWriter | None = None
         #: The operator handshake's state for THIS connection (issue #1310). The
         #: relay is a legitimate console exactly when it spawned the runtime —
@@ -623,6 +653,72 @@ class SessionEntry:
         self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         # Monotonic request id for control frames we originate.
         self._req_seq = 0
+
+    def live_inline_ui(self) -> dict[str, LiveInlineUiEnvelope]:
+        from local_operator.mobile.projection import project_live_inline_ui
+
+        projection = self.projection
+        if projection is None or projection.session_id != self.record.session_id:
+            return {}
+        return project_live_inline_ui(projection, self._live_inline_ui)
+
+    def remember_inline_ui(self, messages: dict[str, LiveInlineUiEnvelope | None]) -> bool:
+        overlay = self._live_inline_ui
+        changed = False
+        for row_id, envelope in messages.items():
+            if row_id in overlay and overlay[row_id] == envelope:
+                continue
+            overlay.pop(row_id, None)
+            overlay[row_id] = envelope
+            changed = True
+        # Keep the display window plus one unpublished row (a sidecar may
+        # win the race with the projection which first adds that row).
+        while len(overlay) > PROJECTION_TRANSCRIPT_LIMIT + 1:
+            overlay.pop(next(iter(overlay)))
+        return changed
+
+    async def seed_inline_ui(self) -> None:
+        """Restore completed overlays when a rich viewer joins an existing dial."""
+        from local_operator.mobile.projection import (
+            durable_inline_ui,
+            read_live_inline_ui,
+        )
+
+        projection = self.projection
+        if self._inline_ui_seeded or projection is None:
+            return
+        needed = {
+            row.id
+            for row in projection.transcript
+            if row.kind == "assistant" and row.final and row.id not in self._live_inline_ui
+        }
+        if not needed:
+            return
+        writer = self.writer
+
+        def recover() -> dict[str, LiveInlineUiEnvelope | None]:
+            durable = _durable_projection(self.record.session_id)
+            if durable is None:
+                return {}
+            return read_live_inline_ui(
+                durable_inline_ui(row for row in durable.transcript if row.id in needed).get(
+                    "inline_ui"
+                )
+            )
+
+        messages = await asyncio.to_thread(recover)
+        if self.writer is not writer or self.ended:
+            return
+        # This fold ran off-loop. A newer live event (including a tombstone)
+        # beats the journal snapshot, so only fill still-unknown ids.
+        self._inline_ui_seeded = True
+        self.remember_inline_ui(
+            {
+                row_id: envelope
+                for row_id, envelope in messages.items()
+                if row_id not in self._live_inline_ui
+            }
+        )
 
     def next_req(self) -> int:
         self._req_seq += 1
@@ -1967,6 +2063,69 @@ class SessionTable:
         return bool(self._attention_states.get(f"session/{session_id}", {}).get("unseen", False))
 
 
+class _OutcomeReader:
+    """``bootstrap_transcript``'s reads, without a writer-locked ``Transcript``.
+
+    WHY. Both relay callers of ``bootstrap_transcript`` (the restart sweep and
+    the discovered-death classification) used to construct a full
+    ``Transcript`` per session: that takes the session's WRITER lock (waiting up
+    to 5 s when it is held) and JSON-decodes the whole journal into memory --
+    to answer two one-row questions (``latest_custom`` and
+    ``latest_custom_entry``) plus ``.directory``. Under load that is the lock a
+    booting runtime waits on, and the operator's ``mobile.log`` carried 165
+    "stayed locked for 5.0s" lines from exactly these opens, clustered right
+    after relay restarts. ``read_latest_custom_entry`` answers the same
+    questions by a backward walk over complete lines, with no lock and no
+    resident journal, and its docstring pins row-for-row agreement with the
+    resident object for well-formed journals.
+
+    The readable path is resolved EAGERLY (``read_only``, so a pure reader
+    never restores an archive in place): an archive this build cannot read
+    raises here, at construction, exactly where ``Transcript(...)`` raised, so
+    the sweep's per-session skip-and-log contract is unchanged.
+
+    THE LEGACY-BASELINE BRANCH needs the whole history. A conversation with no
+    eligible marker and no ``completion_token`` makes ``bootstrap_transcript``
+    call ``build_llm_history()`` and ``entries()`` to find its final assistant
+    turn (``attention._import_transcript_outcome``). Those cannot be answered
+    by a one-row backward walk, so ONLY that branch opens a full transcript --
+    ``read_only``, so still no writer lock and no archive restore -- once, on
+    first use. Without them the branch raised ``AttributeError``, which the
+    bootstrap's broad guard logged as a traceback warning and the ``complete``
+    baseline was never published (agent review round 1, R1-2).
+    """
+
+    def __init__(self, directory: Path) -> None:
+        from local_operator.session.compression import transcript_for_read
+
+        self.directory = directory
+        transcript_for_read(directory, read_only=True)
+        self._full: Any = None
+
+    def _transcript(self) -> Any:
+        if self._full is None:
+            from local_operator.session.transcript import Transcript
+
+            self._full = Transcript(self.directory, read_only=True)
+        return self._full
+
+    def build_llm_history(self) -> Any:
+        return self._transcript().build_llm_history()
+
+    def entries(self) -> Any:
+        return self._transcript().entries()
+
+    def latest_custom_entry(self, custom_type: str) -> Any:
+        from local_operator.session.transcript import read_latest_custom_entry
+
+        return read_latest_custom_entry(self.directory, custom_type, read_only=True)
+
+    def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
+        # The same expression ``Transcript.latest_custom`` uses.
+        entry = self.latest_custom_entry(custom_type)
+        return dict(entry.payload.get("details", {})) if entry is not None else None
+
+
 def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = None) -> None:
     """Publish the durable outcome for a runtime the scan just found dead.
 
@@ -2000,15 +2159,12 @@ def _classify_discovered_death(session_id: str, *, reaped_owner: Any | None = No
     death it just discovered (review round 2, MINOR-1).
     """
     from local_operator.session.attention import bootstrap_transcript
-    from local_operator.session.transcript import Transcript
 
     directory = _durable_user_session_dir(session_id)
     if directory is None:
         return
     try:
-        bootstrap_transcript(
-            Transcript(directory, defer_materialise=True), reaped_owner=reaped_owner
-        )
+        bootstrap_transcript(_OutcomeReader(directory), reaped_owner=reaped_owner)
     except Exception:  # noqa: BLE001 — a listing must survive an unparsable transcript
         logger.debug("classifying a discovered death failed", exc_info=True)
 
@@ -2017,7 +2173,6 @@ def _bootstrap_mobile_attention() -> None:
     """Migrate the retained list once on daemon startup, not on passive reads."""
     from local_operator.paths import config_dir
     from local_operator.session.attention import bootstrap_transcript
-    from local_operator.session.transcript import Transcript
 
     root = config_dir() / "sessions"
     if not root.is_dir():
@@ -2053,7 +2208,7 @@ def _bootstrap_mobile_attention() -> None:
         # skipped session, bounded by the 100-directory window above.
         try:
             if _durable_user_session_dir(directory.name) is not None:
-                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+                bootstrap_transcript(_OutcomeReader(directory))
         except Exception as exc:  # noqa: BLE001 — see the comment above
             skipped += 1
             logger.warning(
@@ -3200,7 +3355,10 @@ def _strip_unsupported_annotation(record: _CapabilityCarrier, frame: dict[str, A
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
+    from local_operator.mobile.projection import read_live_inline_ui
+
     record = entry.record
+    inline_ui = INLINE_UI_V1 in record.capabilities
     try:
         # Match the registrant's 1 MB line limit. The default 64 KB
         # StreamReader cap is what made a transcript push raise
@@ -3258,6 +3416,9 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             "locality": "remote",
             "origin": "mobile",
         }
+        if inline_ui:
+            # This is a local viewer declaration, not phone/HTTP negotiation.
+            auth["inline_ui"] = True
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
@@ -3348,6 +3509,22 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                     daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
                 _fan_out(entry, daemon)
+            elif op == "inline_ui" and inline_ui and entry.ready.is_set():
+                data = frame.get("data")
+                reset = (
+                    isinstance(data, dict)
+                    and data.get("version") == 1
+                    and data.get("reset") is True
+                )
+                changed = False
+                if reset:
+                    changed = bool(entry._live_inline_ui)
+                    entry._live_inline_ui.clear()
+                    entry._inline_ui_seeded = False
+                if entry.remember_inline_ui(read_live_inline_ui(data)) or changed:
+                    # The row may already be on the phone; no repaint is owed
+                    # to a legacy viewer when only its optional overlay changed.
+                    _fan_out(entry, daemon, inline_ui_only=True)
             # acks/errors are matched by req id in _request's future map.
             pending = daemon._pending_reqs.pop((record.pid, frame.get("req")), None)
             if pending is not None and not pending.done():
@@ -3358,6 +3535,8 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         if entry.writer is writer:
             entry.writer = None
             entry.ready.clear()
+            entry._live_inline_ui.clear()
+            entry._inline_ui_seeded = False
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         entry.degraded = not entry.ended
         _mirror_dial_health(entry)
@@ -3923,6 +4102,241 @@ async def _engage_and_publish(
     return detail
 
 
+@dataclass
+class _PromptWake:
+    """One in-flight phone prompt wake, keyed by ``(session_id, command_id)``."""
+
+    constructing: asyncio.Event
+    #: Assigned by ``create_task`` AFTER the record is registered in
+    #: ``_prompt_wakes``, so a ``run`` that finishes inside ``create_task``
+    #: (an eager task factory) still finds and pops its own entry rather than
+    #: leaving a finished one behind for a later retry to join.
+    # ``dataclass_field``: this module uses ``field`` as a loop variable.
+    task: "asyncio.Task[str]" = dataclass_field(init=False)
+    #: Set once a request returned WITHOUT this wake's outcome -- a "waking"
+    #: answer, a legacy 504 at the ack window, or a phone that hung up. From
+    #: then on nobody is awaiting the outcome, so a failure owes the stream its
+    #: terminal frame (a failure inside the window is answered on the request
+    #: itself, as before).
+    acknowledged: bool = False
+
+
+async def _prompt_wake(
+    daemon: "MobileDaemon",
+    session_id: str,
+    command_id: str,
+    deliver: "Callable[[Callable[[], None]], Awaitable[str]]",
+    *,
+    accept_waking: bool = False,
+) -> tuple[str, bool]:
+    """Run (or join) a cold prompt wake; answer ``(detail, waking)``.
+
+    WHY THE WAKE OUTLIVES THE REQUEST. A cold boot under load takes longer
+    than any HTTP ack should be held (see ``PROMPT_WAKE_DEADLINE_S``): with the
+    wake inside the request, 34% of phone wakes answered 504 "session did not
+    answer" while the runtime kept booting, the provisional active mark was
+    dropped, and the prompt only landed if the phone retried. Now the delivery
+    runs as a daemon-owned task, and the request returns as soon as EITHER the
+    delivery finished (same answer as before, error or detail) OR -- for a
+    client that opted in -- a runtime is known to be constructing
+    (``waking=True``, a 2xx).
+
+    "WAKING" IS OPT-IN (``accept_waking``, the body flag ``accept_waking:
+    true``). Until the runtime admits it, the prompt exists only in this
+    task's memory: a relay restart or a boot failure after the answer loses
+    it. A 2xx is only safe to a client that keeps its own retry copy until the
+    session's stream shows the message (or ``ended``), so only a client that
+    SAYS it does gets one (agent review round 1, R1-1; the repo's rule in
+    ``command_reservation.py``: an "admitted" answer for a message in no
+    transcript and no queue is a silent drop). Every other client gets exactly
+    the old answer: the outcome if it lands inside ``PROMPT_WAKE_ACK_WINDOW_S``,
+    else ``TimeoutError`` (the route's 504 "session did not answer", which
+    those clients already treat as ambiguous and retry under the same id). The
+    one difference for them is the better one: the wake keeps running instead
+    of dying with the request, and their retry joins it. An opted-in client
+    whose window passes with nothing constructing gets that same 504 too: a
+    2xx promises a boot that is underway, and none is (R1-4).
+
+    EXACTLY ONCE. A retry carrying the same ``command_id`` while the wake is in
+    flight JOINS this task instead of starting a second engage, so a phone that
+    resends after a dropped connection cannot double-deliver. After the task
+    finishes the runtime's own ``command_id`` dedupe answers any later retry.
+
+    A FAILURE AFTER "WAKING" is still reported: ``_engage_and_publish`` retracts
+    the active claim (the list moves the row back), and the session's stream
+    subscribers get the terminal ``ended`` frame the scan's settle path sends,
+    so the phone shows the conversation as not running with its resume
+    affordance rather than waiting on a reply nobody will produce.
+
+    ``deliver`` receives the ``on_constructing`` callback to hand to the engage.
+    """
+    key = (session_id, command_id)
+    wake = daemon._prompt_wakes.get(key)
+    if wake is None:
+        constructing = asyncio.Event()
+        started = time.monotonic()
+
+        async def run() -> str:
+            try:
+                detail = await _engage_and_publish(
+                    daemon, session_id, lambda: deliver(constructing.set)
+                )
+            except BaseException as exc:
+                # INFO, not DEBUG: phone wake latency was unmeasurable before
+                # (mobile.log carried only warnings), and these two lines are
+                # what settles it next time.
+                logger.info(
+                    "phone wake %s: failed after %.1fs (%s)",
+                    session_id,
+                    time.monotonic() - started,
+                    type(exc).__name__,
+                )
+                if this.acknowledged and not isinstance(exc, asyncio.CancelledError):
+                    await _publish_failed_wake(daemon, session_id, command_id=command_id)
+                raise
+            finally:
+                if daemon._prompt_wakes.get(key) is this:
+                    daemon._prompt_wakes.pop(key, None)
+            logger.info(
+                "phone wake %s: admitted after %.1fs", session_id, time.monotonic() - started
+            )
+            return detail
+
+        this = _PromptWake(constructing=constructing)
+        # Registered BEFORE the task exists (R1-6): see ``_PromptWake.task``.
+        daemon._prompt_wakes[key] = this
+        this.task = asyncio.create_task(run())
+        # A failure nobody awaits (the request already answered) must not
+        # surface as "Task exception was never retrieved"; it was logged.
+        this.task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        wake = this
+    # A legacy request waits for the outcome only; ``constructing`` is not a
+    # reason to answer it early, because its only early answer is the 504.
+    waiter = asyncio.create_task(wake.constructing.wait()) if accept_waking else None
+    try:
+        await asyncio.wait(
+            {wake.task} if waiter is None else {wake.task, waiter},
+            timeout=PROMPT_WAKE_ACK_WINDOW_S,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        # The phone hung up mid-wait: the wake carries on (that is the point)
+        # and its outcome is now owed to the stream, not to this request.
+        wake.acknowledged = True
+        raise
+    finally:
+        if waiter is not None:
+            waiter.cancel()
+    if wake.task.done():
+        # The engage's own answer, success or error, exactly as before.
+        return wake.task.result(), False
+    wake.acknowledged = True
+    if accept_waking and wake.constructing.is_set():
+        return PROMPT_WAKE_DETAIL, True
+    # The pre-change answer at the pre-change moment; the wake runs on and a
+    # same-``command_id`` retry joins it above.
+    raise TimeoutError(f"phone wake {session_id}: no outcome within the ack window")
+
+
+async def _publish_failed_wake(
+    daemon: "MobileDaemon", session_id: str, *, command_id: str | None = None
+) -> None:
+    """Tell a session's stream that an acknowledged wake did not produce a runtime.
+
+    ``command_id`` (a prompt wake; the resume route has none) rides the frame
+    as ``wake_failed``. WHY A MARKER (agent review round 2, R2-1): the phone
+    cannot read this failure off the frame's health. A cold conversation is
+    served as a disk rebuild with ``pid=0``, which the web app's health reads
+    as ``ended`` before, during and after the wake, so "ended" alone could not
+    tell a failed boot from the seed it started on, and a reconnect's pid-0
+    seed mid-wake looked like a failure. The marker names the one pending send
+    this frame fails. Additive: it is set on this frame only (never stored on
+    the projection, so no later frame repeats it), and a client that does not
+    know the key ignores it.
+    """
+    if _entry_for_session(daemon, session_id) is not None:
+        # A runtime is registered after all (another surface woke it); its live
+        # frames are the truth, and an ended frame would contradict them.
+        return
+    try:
+        projection = await daemon._capture_durable_projection(session_id, terminal=True, ended=True)
+    except Exception:  # noqa: BLE001 - best effort; the list retraction already landed
+        logger.debug("phone wake %s: failure frame unavailable", session_id, exc_info=True)
+        return
+    if projection is None:
+        return
+    frame = _projection_frame(projection)
+    if command_id is not None:
+        frame["wake_failed"] = command_id
+    for queue in daemon.table.session_subscribers.get(session_id, set()):
+        try:
+            queue.put_nowait(frame)
+        except asyncio.QueueFull:
+            pass
+
+
+async def _resume_answering_on_spawn(
+    daemon: "MobileDaemon", cwd: str, session_id: str
+) -> tuple[int, bool]:
+    """Resume ``session_id``, answering as soon as its runtime is SPAWNED.
+
+    Returns ``(pid, starting)``. ``starting`` is True when the child exists but
+    has not finished booting: the phone may open the session's stream at once,
+    because the stream serves the durable seed with no runtime
+    (``api_session_events``' payload-less live-entry branch) and the live
+    frames follow once discovery adopts the record.
+
+    WHY. The resume route held the request through boot AND the relay's
+    handshake under ``SESSION_START_TIMEOUT_S`` (30 s), and a cold boot under
+    load routinely exceeds that (wake supervisor, Nov 21-23 2026: p90 39.1 s,
+    p99 106.8 s; 15% of boots over 30 s), so the Past screen's resume answered
+    500 with an empty message while the runtime was still constructing -- and
+    the 30 s bound then asked the still-booting child to retire. Here the
+    readiness wait runs under ``PROMPT_WAKE_DEADLINE_S`` (180 s, above the
+    observed max) in the daemon-owned start task (``spawn_session`` shields it
+    from this request), and a failure after the early answer sends the stream
+    its terminal ``ended`` frame, as a failed prompt wake does.
+
+    An owner that already exists answers exactly as before: the handshake with
+    a live record is not a boot, so ``spawned`` never fires and the request
+    waits for the (short) ready.
+    """
+    loop = asyncio.get_running_loop()
+    spawned: asyncio.Future[int] = loop.create_future()
+
+    def child_spawned(pid: int) -> None:
+        if not spawned.done():
+            spawned.set_result(pid)
+
+    start = asyncio.ensure_future(
+        daemon.spawn_session(
+            cwd,
+            resume=session_id,
+            on_spawned=child_spawned,
+            ready_timeout_s=PROMPT_WAKE_DEADLINE_S,
+        )
+    )
+    await asyncio.wait({start, spawned}, return_when=asyncio.FIRST_COMPLETED)
+    if start.done():
+        spawned.cancel()
+        return start.result(), False
+
+    daemon._early_resumes.add(start)
+
+    def settled(done: "asyncio.Future[int]") -> None:
+        daemon._early_resumes.discard(done)
+        if done.cancelled() or done.exception() is None:
+            return
+        # The phone was told "starting"; the stream is where it learns the
+        # start did not finish. Held in the same set until it has run.
+        notice = loop.create_task(_publish_failed_wake(daemon, session_id))
+        daemon._early_resumes.add(notice)
+        notice.add_done_callback(daemon._early_resumes.discard)
+
+    start.add_done_callback(settled)
+    return spawned.result(), True
+
+
 def _journal_page(
     directory: Path,
     state: Any,
@@ -3972,7 +4386,9 @@ class _UnavailablePage(list[Any]):
         self.unavailable = reason
 
 
-def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
+def _history_response(
+    page: list[Any], has_more: bool, *, inline_ui: bool = False
+) -> dict[str, Any]:
     """The wire body for one history page, with the honest emptiness beside it.
 
     ``unavailable`` is ADDITIVE and present only when the page is empty for a
@@ -3986,6 +4402,10 @@ def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
     reason = getattr(page, "unavailable", "")
     if reason:
         body["unavailable"] = reason
+    if inline_ui:
+        from local_operator.mobile.projection import durable_inline_ui
+
+        body.update(durable_inline_ui(page))
     return body
 
 
@@ -4014,12 +4434,14 @@ def _forward_page(state: Any, after: str, limit: int) -> tuple[list[Any], bool] 
     cursor is the newest row a phone holds, so the rows newer than it are the
     conversation's TAIL — exactly the stretch the render replays in journal
     order (the kept window after the newest compaction). The render's only
-    out-of-journal-order stretch is its HEAD: the compaction marker, the
-    preserved user turns re-injected under their original ids, and the carried
-    tier (``DurableFoldState.prefix_ids``). A cursor naming one of those means a
-    compaction landed after the phone's newest row; slicing after it would hand
-    back older kept-window rows as "newer", so it answers ``None`` (reset)
-    instead, and so does an id the render does not hold at all. ``None`` is
+    out-of-journal-order row is its HEAD, the compaction marker: the prefix's
+    preserved user turns and carried tier (``DurableFoldState.prefix_ids``) are
+    in ``history`` for the model but the fold paints neither (PR #4521). A
+    cursor naming the marker means a compaction landed after the phone's newest
+    row; slicing after it would hand back older kept-window rows as "newer", so
+    it answers ``None`` (reset) instead, and so does an id the render does not
+    hold at all — which now includes a preserved turn's id an older render
+    painted, so that cursor resets too. ``None`` is
     always safe: it costs the client one full read, never a lost row.
 
     ``has_more`` is true when rows beyond this page remain; the client pages on
@@ -4173,14 +4595,16 @@ def _history_page(
     reader at the last compaction — measured on the S6 fixture, 640 of 3,348
     journal rows were reachable and the rest were evidence of a conversation the
     phone could not show — and it also served rows twice. The render's order is
-    not the journal's: it opens with the compaction marker and re-injects the
-    latest compaction's ``preserved_user_turns`` UNDER THEIR ORIGINAL ROW IDS,
-    and those same rows sit in the journal below the cut. A cursor that lands on
-    one of them therefore answers a page around the render's head plus a refill
+    not the journal's: it opens with the compaction marker, and it used to
+    re-inject the latest compaction's ``preserved_user_turns`` UNDER THEIR
+    ORIGINAL ROW IDS, while those same rows sit in the journal below the cut. A
+    cursor on one of them answered a page around the render's head plus a refill
     from the compaction boundary — rows the client already holds — so
-    ``has_more`` stays true and the walk cycles (measured: 117,020 mounted rows
-    holding 408 distinct ids). 60 of the 60 largest journals on this host carry
-    preserved turns, so that is the ordinary shape, not a corner.
+    ``has_more`` stayed true and the walk cycled (measured: 117,020 mounted rows
+    holding 408 distinct ids; 60 of the 60 largest journals on this host carry
+    preserved turns). The fold no longer paints those copies (PR #4521), so the
+    render is now the marker plus the kept window; the journal is still the
+    only source that reaches below it.
 
     The desktop has always answered this question from the journal, and the rows
     agree because both surfaces fold them with the same fold
@@ -4416,7 +4840,36 @@ def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisf
     return (size - length, size - 1)
 
 
-def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
+def _inline_ui_frame(frame: dict[str, Any], entry: SessionEntry) -> dict[str, Any]:
+    from local_operator.session.runtime.inline_ui_egress import _MAX_SIDECAR_BYTES
+
+    messages = entry.live_inline_ui()
+    if not messages:
+        return frame
+    # As with the durable page, bound the optional data without clipping its
+    # exact text or widget offsets. Prefer the visible tail when both won't fit.
+    visible: dict[str, LiveInlineUiEnvelope] = {}
+    envelope = {"version": 1, "messages": visible}
+    used = len(json.dumps(envelope, separators=(",", ":")))
+    for row in reversed(frame["transcript"]):
+        row_id = row["id"]
+        if row["kind"] != "assistant" or row_id not in messages:
+            continue
+        # The subscriber may still hold an older queued projection. Don't
+        # join an overlay to a different revision of the same prose row.
+        if row["text"].strip() != messages[row_id]["text"].strip():
+            continue
+        size = len(json.dumps({row_id: messages[row_id]}, separators=(",", ":"))) - 2
+        size += bool(visible)  # comma between entries
+        if used + size <= _MAX_SIDECAR_BYTES:
+            visible[row_id] = messages[row_id]
+            used += size
+    return {**frame, "inline_ui": envelope} if visible else frame
+
+
+def _fan_out(
+    entry: SessionEntry, daemon: "MobileDaemon | None" = None, *, inline_ui_only: bool = False
+) -> None:
     """Push a repaint to durable session viewers, never one pid generation."""
     if entry.projection is None:
         return
@@ -4432,6 +4885,10 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
         # ``_projection_frame`` is recomputed from its reference at the next
         # serialization, so skipping it here loses nothing.
         return
+    if inline_ui_only:
+        queues = {queue for queue in queues if isinstance(queue, _InlineUiProjectionQueue)}
+        if not queues:
+            return
     frame = _projection_frame(entry.projection)
     for queue in queues:
         while True:
@@ -4462,6 +4919,10 @@ class _LatestProjectionQueue(asyncio.Queue[dict[str, Any]]):
             if previous.get("version", 0) > item.get("version", 0):
                 item = previous
         super().put_nowait(item)
+
+
+class _InlineUiProjectionQueue(_LatestProjectionQueue):
+    """A phone viewer that opted in to an overlay on its projection snapshots."""
 
 
 def _latest_projection_frame(
@@ -4696,6 +5157,21 @@ class MobileDaemon:
         # and subscriber ownership are all gone.
         self._projection_generations: dict[str, _ProjectionGeneration] = {}
         self._wake_settle_tasks: dict[str, asyncio.Task[None]] = {}
+        # In-flight phone prompt wakes by (session_id, command_id): the strong
+        # reference that keeps each delivery alive past its HTTP request, and
+        # the join point that makes a same-id retry wait on it instead of
+        # engaging twice (see ``_prompt_wake``).
+        self._prompt_wakes: dict[tuple[str, str], _PromptWake] = {}
+        # Durable bookkeeping the scan loop starts but must not wait for (the
+        # restart attention sweep, discovered-death classification): strong
+        # references until each finishes, since the loop holds tasks weakly.
+        self._scan_side_tasks: set[asyncio.Future[Any]] = set()
+        # Per session id: the start task's "child spawned" signal (see
+        # ``spawn_session``'s ``on_spawned``).
+        self._session_spawned: dict[str, asyncio.Future[int]] = {}
+        # Strong references to resumes answered before readiness, until their
+        # start settles (``_resume_answering_on_spawn``).
+        self._early_resumes: set[asyncio.Future[Any]] = set()
         #: The tag marker this daemon last PUBLISHED to the list stream (or
         #: adopted on its first scan pass). Deliberately separate from the
         #: table's ``_tags_token``, which any read path may advance by
@@ -5310,8 +5786,17 @@ class MobileDaemon:
 
     async def _scan_once(self) -> None:
         if not getattr(self, "_attention_bootstrapped", False):
-            await asyncio.to_thread(_bootstrap_mobile_attention)
+            # DETACHED, not awaited: this sweep visits up to 100 conversations
+            # and used to sit in front of ``registry.scan`` on the first pass
+            # after every relay restart, so a phone waking a session right then
+            # waited for the sweep before its new runtime was even looked for.
+            # Its writes land in the attention store, whose revision check
+            # below repaints the list and watched streams on a later pass.
             self._attention_bootstrapped = True
+            self._detach_scan_work(
+                asyncio.to_thread(_bootstrap_mobile_attention),
+                on_failure=self._attention_bootstrap_failed,
+            )
         from local_operator.session.attention import AttentionStore
 
         await self._refresh_pins_if_changed()
@@ -5404,6 +5889,13 @@ class MobileDaemon:
                     # the phone by the design round, D6). Passing the record in
                     # is the evidence, and it is exactly as trustworthy as the
                     # scan that produced it.
+                    #
+                    # STILL AWAITED, unlike the restart sweep: the ended frame
+                    # below must carry this outcome (D6), and the read is now a
+                    # lock-free backward walk (``_OutcomeReader``) rather than a
+                    # locked whole-journal open, so it no longer waits on a
+                    # booting runtime's writer lock. It runs only on a death's
+                    # first sighting.
                     await asyncio.to_thread(
                         _classify_discovered_death, record.session_id, reaped_owner=record
                     )
@@ -5841,6 +6333,41 @@ class MobileDaemon:
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
         table.notify_list_changed()
 
+    def _detach_scan_work(
+        self,
+        work: "Awaitable[None]",
+        *,
+        on_failure: "Callable[[], None] | None" = None,
+    ) -> None:
+        """Run ``work`` beside the scan loop, holding a reference until it ends.
+
+        A detached failure has no awaiter, so it is RETRIEVED and logged here
+        (otherwise asyncio reports "Task exception was never retrieved" at
+        garbage collection, with no context) and ``on_failure`` runs so the
+        caller can re-arm work that used to be retried by the scan loop's own
+        ``except`` when it was awaited inline (agent review round 1, R1-3).
+        """
+        task = asyncio.ensure_future(work)
+        self._scan_side_tasks.add(task)
+
+        def settled(done: "asyncio.Future[None]") -> None:
+            self._scan_side_tasks.discard(done)
+            if done.cancelled() or done.exception() is None:
+                return
+            logger.warning("mobile daemon detached scan work failed", exc_info=done.exception())
+            if on_failure is not None:
+                on_failure()
+
+        task.add_done_callback(settled)
+
+    def _attention_bootstrap_failed(self) -> None:
+        # Re-arm: the NEXT scan pass runs the sweep again, which is what the
+        # inline ``await`` did before the sweep was detached (the flag was set
+        # only after it returned). Per-session failures never reach here --
+        # ``_bootstrap_mobile_attention`` skips and logs those itself -- so this
+        # only retries a sweep-wide failure (the sessions root, the registry).
+        self._attention_bootstrapped = False
+
     def retain_provisional_active(self, session_id: str) -> None:
         """Hold a wake transition until discovery or one scan interval wins."""
         previous = self._wake_settle_tasks.pop(session_id, None)
@@ -5982,6 +6509,15 @@ class MobileDaemon:
             # — the same seam, because this is the one place a phone-shaped frame
             # becomes a control frame.
             _strip_unsupported_annotation(entry.record, frame)
+        # The declaration is per send and is not authority. Only the selected
+        # owner can accept it, on a connection that negotiated this capability.
+        # A busy prompt and its same-id steer fallback keep the same declaration.
+        if (
+            op not in ("prompt", "steer")
+            or frame.get("inline_ui") is not True
+            or INLINE_UI_V1 not in entry.record.capabilities
+        ):
+            frame.pop("inline_ui", None)
         proof = _operator_request_proof(entry, op, fields)
         if proof is not None:
             frame["operator_cap"] = proof
@@ -6357,22 +6893,60 @@ class MobileDaemon:
         model_id: str | None = None,
         resume: str | None = None,
         effort: str | None = None,
+        *,
+        on_spawned: Callable[[int], None] | None = None,
+        ready_timeout_s: float | None = None,
     ) -> int:
+        """Start (or join the start of) a session's runtime; its pid once READY.
+
+        ``on_spawned`` is told the child's pid as soon as the child process
+        exists, before it has booted -- including for a caller that JOINS a
+        start already in flight. ``ready_timeout_s`` bounds the wait for the
+        record and the relay's handshake (``None``: ``SESSION_START_TIMEOUT_S``,
+        resolved in ``_spawn_session``); concurrent starts of one id share the
+        first caller's task and therefore its bound. See
+        ``_resume_answering_on_spawn`` for the caller that uses both.
+        """
         session_id = resume or uuid.uuid4().hex[:12]
         task = self._session_starts.get(session_id)
         if task is None:
+            spawned: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+            def child_spawned(pid: int) -> None:
+                if not spawned.done():
+                    spawned.set_result(pid)
+
             task = asyncio.create_task(
-                self._spawn_session(cwd, provider, model_id, session_id, effort)
+                self._spawn_session(
+                    cwd,
+                    provider,
+                    model_id,
+                    session_id,
+                    effort,
+                    on_spawned=child_spawned,
+                    ready_timeout_s=ready_timeout_s,
+                )
             )
             self._session_starts[session_id] = task
+            self._session_spawned[session_id] = spawned
 
             def finished(done: asyncio.Task[int]) -> None:
                 if self._session_starts.get(session_id) is done:
                     self._session_starts.pop(session_id, None)
+                    self._session_spawned.pop(session_id, None)
+                if not spawned.done():
+                    # Ended without spawning (an existing owner, a refusal).
+                    spawned.cancel()
                 if not done.cancelled():
                     done.exception()  # retrieve failure even if the HTTP client left
 
             task.add_done_callback(finished)
+        if on_spawned is not None:
+            notify = on_spawned
+            # Registered with the task above; never one without the other.
+            self._session_spawned[session_id].add_done_callback(
+                lambda signal: None if signal.cancelled() else notify(signal.result())
+            )
         # Two resume requests share one constructor. A disconnected caller must
         # not cancel the other caller's operation; the startup deadline and
         # handoff lease still bound an abandoned request.
@@ -6385,9 +6959,16 @@ class MobileDaemon:
         model_id: str | None,
         session_id: str,
         effort: str | None = None,
+        *,
+        on_spawned: Callable[[int], None] | None = None,
+        ready_timeout_s: float | None = None,
     ) -> int:
         """Spawn a daemon-owned session in a supervised CHILD process and let
         discovery adopt it.
+
+        ``on_spawned`` is told the child's pid right after the spawn succeeds,
+        and ``ready_timeout_s`` bounds the wait for its record and handshake
+        (see ``_resume_answering_on_spawn`` for the caller that needs both).
 
         A child process, not an in-process session: the daemon is supervisable
         state (launchd restarts it), and a session living inside it would die
@@ -6571,8 +7152,17 @@ class MobileDaemon:
                 await asyncio.sleep(0.05)
 
         readiness = asyncio.create_task(ready())
+        started = time.monotonic()
+        if on_spawned is not None:
+            on_spawned(process.pid)
+        # Resolved here, at call time, not as a ``= SESSION_START_TIMEOUT_S``
+        # default: a default binds the constant's value when the method is
+        # defined, so the module constant would stop being the single knob for
+        # the start deadline (tests and operators patch it on the module).
+        if ready_timeout_s is None:
+            ready_timeout_s = SESSION_START_TIMEOUT_S
         try:
-            async with asyncio.timeout(SESSION_START_TIMEOUT_S):
+            async with asyncio.timeout(ready_timeout_s):
                 done, _ = await asyncio.wait(
                     {readiness, exited}, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -6580,8 +7170,19 @@ class MobileDaemon:
                     raise RuntimeError("session exited before becoming ready; check mobile logs")
                 await readiness
                 self._arm_phone_handoff(session_id)
+                # INFO so phone start/resume latency is measurable from
+                # mobile.log, which otherwise carries only warnings.
+                logger.info(
+                    "phone start %s: ready after %.1fs", session_id, time.monotonic() - started
+                )
                 return process.pid
-        except BaseException:
+        except BaseException as exc:
+            logger.info(
+                "phone start %s: failed after %.1fs (%s)",
+                session_id,
+                time.monotonic() - started,
+                type(exc).__name__,
+            )
             self.release_phone_view(session_id)
             # ``poll`` rather than ``returncode``: a sync process object only
             # learns its status when someone asks, and the watcher thread may not
@@ -7463,6 +8064,28 @@ def build_app(daemon: MobileDaemon):
                 # RELAY capability like ``session_tags``: an older daemon lacks
                 # the key, and the phone then stays on its bundled built-ins.
                 "notification_sounds": {"available": True},
+                # BACKGROUND PROMPT WAKE. A cold ``prompt`` keeps booting past
+                # the 15 s ack window instead of dying with the request, and a
+                # resend with the same ``command_id`` joins the in-flight wake
+                # rather than delivering twice -- for EVERY client. A client
+                # that sends ``"accept_waking": true`` in the command body
+                # (``request_flag``) may additionally get 2xx ``waking: true``
+                # as soon as a runtime is constructing; it MUST then keep its
+                # retry copy until the session stream carries the message id
+                # (= ``command_id``), and treat the frame naming it in
+                # ``wake_failed`` as a failed send (not health ``ended``: a cold
+                # session's pid-0 frames read as ended throughout the wake). A
+                # failure after that answer retracts the active claim and sends
+                # the stream its ``ended`` frame carrying ``wake_failed:
+                # <command_id>``. A client that does
+                # not opt in gets the old answers: the outcome within 15 s, else
+                # 504 "session did not answer" (retry under the same id).
+                "prompt_wake": {
+                    "available": True,
+                    "background": True,
+                    "request_flag": "accept_waking",
+                    "version": 1,
+                },
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -7806,7 +8429,8 @@ def build_app(daemon: MobileDaemon):
         # pull — while the RELEASE is owned by both callers below, because a
         # cancellation parked on ``http.response.start`` never starts the
         # iterator and so never runs its ``finally``.
-        queue: asyncio.Queue[dict[str, Any]] = _LatestProjectionQueue()
+        inline_ui = request.query_params.get("inline_ui") == "1"
+        queue = _InlineUiProjectionQueue() if inline_ui else _LatestProjectionQueue()
 
         def release() -> None:
             """Detach this stream's queue, from whichever close arrives first.
@@ -7860,6 +8484,10 @@ def build_app(daemon: MobileDaemon):
                     # Notification routing is distinct from idle readiness;
                     # mixed-version registrants may reject this optional op.
                     daemon.notify_watch_transition(live.record.pid, watching=True)
+                if inline_ui and live is not None:
+                    await live.seed_inline_ui()
+                    # The off-loop journal read may have overlapped a handoff.
+                    live = _entry_for_session(daemon, session_id)
                 projection = live.projection if live is not None else None
                 if projection is None:
                     # Stamped fold: a clear that lands while the fold is in
@@ -7893,9 +8521,22 @@ def build_app(daemon: MobileDaemon):
                     # (``marked_at``/``deletes_at``), not a countdown, so it is
                     # stable between repaints; a mark, Keep or activity that
                     # moves it is a real change the phone must receive in full.
-                    yield _projection_seed_event(
-                        client_frame(stamp_temporary(_projection_frame(projection))), have
-                    )
+                    frame = _projection_frame(projection)
+                    if inline_ui:
+                        if live is not None and live.projection is projection:
+                            frame = _inline_ui_frame(frame, live)
+                        else:
+                            from local_operator.mobile.projection import (
+                                durable_inline_ui,
+                            )
+
+                            visible = {row["id"] for row in frame["transcript"]}
+                            frame.update(
+                                durable_inline_ui(
+                                    row for row in projection.transcript if row.id in visible
+                                )
+                            )
+                    yield _projection_seed_event(client_frame(stamp_temporary(frame)), have)
                     sent_at = loop.time()
                 while True:
                     try:
@@ -7912,10 +8553,15 @@ def build_app(daemon: MobileDaemon):
                         wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
                         if wait > 0:
                             await asyncio.sleep(wait)
-                    yield _projection_live_event(
-                        client_frame(stamp_temporary(_latest_projection_frame(queue, frame))),
-                        have,
-                    )
+                    frame = _latest_projection_frame(queue, frame)
+                    if inline_ui:
+                        # Enrich at the last hop so queued ordinary repaints
+                        # can't erase freshly seeded or newer row deltas.
+                        pid = frame.get("pid")
+                        owner = daemon.table.entries.get(pid) if isinstance(pid, int) else None
+                        if owner is not None and owner.record.session_id == session_id:
+                            frame = _inline_ui_frame(frame, owner)
+                    yield _projection_live_event(client_frame(stamp_temporary(frame)), have)
                     sent_at = loop.time()
             finally:
                 await _cleanup_stream(release)
@@ -9052,7 +9698,11 @@ def build_app(daemon: MobileDaemon):
                 {"error": "history cursor not found", "reset": True, "reason": reset},
                 status_code=409,
             )
-        return JSONResponse(_history_response(page, has_more))
+        return JSONResponse(
+            _history_response(
+                page, has_more, inline_ui=request.query_params.get("inline_ui") == "1"
+            )
+        )
 
     async def api_session_checkpoints(request: Request) -> Response:
         """The checkpoint manifest for one conversation: the rail's ticks.
@@ -9716,6 +10366,8 @@ def build_app(daemon: MobileDaemon):
             owner_row = await remote_row(session_id)
             if owner_row is not None:
                 remote_op = body.pop("op", None)
+                # Mesh has not negotiated the phone's widget egress contract.
+                body.pop("inline_ui", None)
                 if not isinstance(remote_op, str) or not remote_op:
                     return JSONResponse({"error": "invalid_op"}, status_code=422)
                 denied = _device_refusal(body.get("operator_cert"))
@@ -9723,6 +10375,12 @@ def build_app(daemon: MobileDaemon):
                     return denied
                 if body.pop("expand_skills", False):
                     return remote_failure(RemoteSessionError("remote_unsupported", 409))
+                # The prompt-wake opt-in is a transport flag between the phone and
+                # THIS relay (see the local path below); a remote owner answers
+                # from its own admission, never ``waking``, so the flag is dropped
+                # here too rather than forwarded to a peer that does not know it
+                # (agent review round 2, R2-3).
+                body.pop("accept_waking", None)
                 try:
                     answer = await admit_remote_command(relay_root, owner_row, remote_op, body)
                 except ValueError:
@@ -9768,6 +10426,13 @@ def build_app(daemon: MobileDaemon):
         # additive-input treatment (ignore what you do not understand), which is
         # the same behaviour an older relay gives the whole flag.
         expand_skills = body.pop("expand_skills", False) is True
+        # THE PROMPT-WAKE OPT-IN IS THE RELAY'S OWN TOO (capability
+        # ``prompt_wake``), popped here for the same reason. A literal ``true``
+        # says "I keep my retry copy until the stream shows this message or
+        # ``ended``", which is the only condition under which a cold prompt may
+        # be answered ``waking`` before the runtime admits it (see
+        # ``_prompt_wake``). Anything else is the legacy client.
+        accept_waking = body.pop("accept_waking", False) is True
         denied = _device_refusal(body.get("operator_cert"))
         if denied is not None:
             return denied
@@ -9872,18 +10537,41 @@ def build_app(daemon: MobileDaemon):
                     {**body, "session_id": session_id, "images": body.get("images", [])}
                 )
 
-                async def _deliver_prompt() -> str:
+                async def _deliver_prompt(on_constructing: Callable[[], None]) -> str:
                     # ADR 0009: a phone prompt that wakes a cold conversation
                     # keeps the phone's origin (``PromptErrand.origin``).
-                    client, detail = await continue_command(config_dir(), command, origin="mobile")
+                    client, detail = await continue_command(
+                        config_dir(),
+                        command,
+                        origin="mobile",
+                        # The BOOT deadline, decoupled from the 15 s ack: the
+                        # request no longer waits on it (see ``_prompt_wake``).
+                        deadline_s=PROMPT_WAKE_DEADLINE_S,
+                        on_constructing=on_constructing,
+                    )
                     client.close()
                     return detail
 
                 # Publish the accepted wake intent before process discovery (see
-                # ``_engage_and_publish``), so even a 50 ms worker is observable
-                # in list SSE and a failed engage retracts the claim.
-                detail = await _engage_and_publish(daemon, session_id, _deliver_prompt)
-                return JSONResponse(receipt(detail))
+                # ``_engage_and_publish``, which ``_prompt_wake`` runs), so even
+                # a 50 ms worker is observable in list SSE and a failed engage
+                # retracts the claim.
+                detail, waking = await _prompt_wake(
+                    daemon,
+                    session_id,
+                    command.command_id,
+                    _deliver_prompt,
+                    accept_waking=accept_waking,
+                )
+                answer = receipt(detail)
+                if waking:
+                    # Only ever reached by a request that sent
+                    # ``accept_waking: true`` (capability ``prompt_wake``): a
+                    # 2xx meaning "a runtime is booting, the prompt is NOT yet
+                    # admitted; the reply streams". A client that did not opt
+                    # in never sees it -- it gets the old 504 instead.
+                    answer["waking"] = True
+                return JSONResponse(answer)
             if op in _ASK_ANSWER_OPS and not _session_is_live(daemon, session_id):
                 # THE COLD ANSWER (design §2.4). A queued ask is
                 # durable precisely so the agent can move on, so answering one
@@ -11047,11 +11735,24 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": refused.message[:300]}, status_code=409)
         replay_cwd = replay_cwd or str(Path.home())
         try:
-            pid = await daemon.spawn_session(replay_cwd, resume=session_id)
+            pid, starting = await _resume_answering_on_spawn(daemon, replay_cwd, session_id)
+        except TimeoutError:
+            # ``str(TimeoutError())`` is empty: this used to answer 500 with
+            # ``{"error": ""}``, which a phone can only render as a blank toast.
+            logger.warning("mobile resume timed out", exc_info=True)
+            return JSONResponse(
+                {"error": "The session took too long to start. Try again."}, status_code=504
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile resume spawn failed", exc_info=True)
-            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
-        return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
+            return JSONResponse({"error": (str(exc) or type(exc).__name__)[:300]}, status_code=500)
+        answer: dict[str, Any] = {"ok": True, "pid": pid, "session_id": session_id}
+        if starting:
+            # ADDITIVE: the runtime was spawned and is still booting; the
+            # stream seeds from disk now and goes live when it publishes. An
+            # older app reads the same ``ok``/``pid`` it always did.
+            answer["starting"] = True
+        return JSONResponse(answer)
 
     async def api_search_sessions(request: Request) -> Response:
         """Search past sessions by name, id, OR what was said in them.

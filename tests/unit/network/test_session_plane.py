@@ -4385,6 +4385,14 @@ def test_the_owner_answers_for_a_session_it_holds_and_refuses_one_it_does_not(
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, SESSION)
     _dial_to(server_a, record, host_b, port_b)
+
+    def _no_fan_out() -> Any:
+        # A NAMED peer is asked alone over the real, negotiated link
+        # (``remote-catalog-session-id-v1``): the mesh-wide listing that made a
+        # live session read as unowned on a 232-row mesh (2026-11-25) never runs.
+        raise AssertionError("peer_session_facts for a named peer ran the full fan-out")
+
+    monkeypatch.setattr(server_a, "_fan_out_catalog", _no_fan_out)
     cold = _call(
         server_a.root,
         "peer_session_facts",

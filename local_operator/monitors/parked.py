@@ -1,4 +1,11 @@
-"""Check a PARKED session's monitors without reopening it.
+"""Check a runtime-less session's monitors without booting it.
+
+SCOPE (wake boot economy, 2026-11-24): this began as the PARKED-session probe
+and still carries that name, but the supervisor now runs it for every due
+monitor of a session with NO live runtime — parked or simply idle-exited (see
+:func:`runtime_absent`). Measured motivation: over 3.57 days, 1,039 of 2,878
+supervisor cold boots (36.1%) only ran a monitor check that found nothing.
+Everything below about "a parked session" holds for any runtime-less one.
 
 WHY THIS EXISTS. A parked session (``control.park_session``: runtime ended to
 free memory, ``parked_at`` stamped, nothing held) keeps its monitors armed, and
@@ -109,6 +116,36 @@ def is_parked(entry: Mapping[str, Any] | None) -> bool:
     return (
         isinstance(entry, Mapping) and bool(entry.get("parked_at")) and not entry.get("stopped_at")
     )
+
+
+def runtime_absent(config_dir: Path, session_id: str, entry: Mapping[str, Any] | None) -> bool:
+    """Whether this probe may own the session's checks: nobody else is running them.
+
+    WIDENED FROM "PARKED" (wake boot economy, 2026-11-24). Parking was only a
+    proxy for "no runtime is hosting this session"; the supervisor cold-booted
+    every OTHER runtime-less session just to run its check, and 1,039 of 2,878
+    cold boots in 3.57 days (36.1%) were such checks that found nothing. The
+    real precondition for running a check out of process is the one the
+    supervisor already reads before engaging: no live runtime record
+    (``mobile.attach_client.find_runtime_record``, birth-verified). A held
+    entry (``stopped_at`` — the kill switch) is never probed: its monitors do
+    not fire at all.
+
+    Re-asked at COMMIT time (:func:`_unchanged_since`), not only at start: a
+    runtime that came up mid-check owns the tick from then on, so the probe
+    drops its write rather than race the runtime's own scheduler.
+    """
+    if not isinstance(entry, Mapping) or entry.get("stopped_at"):
+        return False
+    if is_parked(entry):
+        return True
+    try:
+        from local_operator.mobile.attach_client import find_runtime_record
+
+        record, _owner = find_runtime_record(config_dir, session_id)
+    except Exception:  # noqa: BLE001 — unanswerable liveness: let the session decide
+        return False
+    return record is None
 
 
 def probeable(
@@ -486,18 +523,26 @@ async def _check_one(
     settings: Any,
     now: int,
     env: _ProbeEnv | None = None,
+    uniform: Any = None,
 ) -> tuple[str, str]:
-    """``(verdict, why)`` for one due monitor row; commits only a quiet or unavailable tick."""
+    """``(verdict, why)`` for one due monitor row; commits only a quiet or unavailable tick.
+
+    ``uniform`` is the jitter source for the next due time (``random.uniform``
+    when None) — injectable only so a parity test can pin both paths to one.
+    """
+    import random
+
     from local_operator.harness.types import AbortSignal
     from local_operator.monitors import state as monitor_state
-    from local_operator.monitors.diff import content_hash
     from local_operator.monitors.readonly import (
         monitor_call_arguments,
         monitor_call_verdict,
     )
-    from local_operator.monitors.scheduler import advance_due, normalize_result
+    from local_operator.monitors.scheduler import check_hash, commit_quiet_tick
     from local_operator.monitors.spec import MonitorSpec
 
+    if uniform is None:
+        uniform = random.uniform
     if env is None:
         env = _ProbeEnv(config_dir, session_id, str(row.get("cwd") or "."))
     try:
@@ -582,17 +627,26 @@ async def _check_one(
     comparable, blind, handle = _monitor_comparable_text(getattr(result, "text", "") or "", details)
     if blind is not None or not str(comparable or "").strip():
         return ENGAGE, "no comparable output"
-    new_hash = content_hash(normalize_result(str(comparable), spec, settings))
+    # THE SAME EVALUATION AND COMMIT the session's scheduler runs
+    # (``scheduler.check_hash`` / ``scheduler.commit_quiet_tick``), so a quiet
+    # tick written here is byte-identical to one written in-session, and a
+    # change is decided by the same hash. NOTHING is written on a change: the
+    # engaged session re-runs the check against this UNCHANGED baseline and
+    # delivers the delta exactly once, then commits the new baseline itself, so
+    # the next probe compares against that and is quiet.
+    _normalized, new_hash = check_hash(str(comparable), spec, settings)
     if new_hash != str(counters.get("content_hash") or ""):
         return ENGAGE, "changed"
-    # THE QUIET TICK, as ``MonitorScheduler._apply_success`` commits it.
-    counters["checks"] = int(counters.get("checks") or 0) + 1
-    counters["last_check_at"] = now
-    counters["consecutive_failures"] = 0
-    counters["last_error"] = ""
-    if handle:
-        counters["last_handle"] = handle
-    counters["next_due_at"] = advance_due(spec, now)
+    if not monitor_state.snapshot_exists(config_dir, session_id, spec.id):
+        # BLOB HEAL PARITY (round 1, R3). On a quiet tick the in-session
+        # scheduler re-writes a lost snapshot blob (§7.2, blob-only loss) via
+        # ``MonitorScheduler._write_snapshot``, which owns the size cap and the
+        # write-failure rule. Rather than fork that logic here, a quiet tick
+        # with no blob boots the session: its scheduler re-runs this check,
+        # finds it quiet and heals the blob, so the pair (hash, blob) is never
+        # left half-written by the probe. Rare (a lost file), so the boot is cheap.
+        return ENGAGE, "snapshot missing; the session heals it"
+    commit_quiet_tick(counters, spec, now, handle=handle or None, uniform=uniform)
     # COMPARE BEFORE COMMIT (review round 1, R1-2). ``counters`` was read before
     # ``tool.execute``, which can take up to ``run_timeout_ms``. If the session
     # was opened meanwhile (an operator, a ``send``, a wake from another path),
@@ -617,11 +671,11 @@ _CAS_KEYS = ("content_hash", "last_check_at", "checks", "next_due_at")
 def _unchanged_since(
     config_dir: Path, session_id: str, monitor_id: str, snapshot: Mapping[str, Any]
 ) -> bool:
-    """Whether the entry is still parked and the counters still match ``snapshot``."""
+    """Whether no runtime has taken the session and the counters still match ``snapshot``."""
     from local_operator.monitors import state as monitor_state
     from local_operator.monitors import store as monitor_store
 
-    if not is_parked(monitor_store.read_entry(config_dir, session_id)):
+    if not runtime_absent(config_dir, session_id, monitor_store.read_entry(config_dir, session_id)):
         return False
     fresh = monitor_state.read_counters(config_dir, session_id, monitor_id) or {}
     return all(fresh.get(key) == snapshot.get(key) for key in _CAS_KEYS)
@@ -636,7 +690,12 @@ async def probe_session(
     budget_s: float = DEFAULT_BUDGET_S,
     tier: str | None = None,
 ) -> dict[str, Any]:
-    """Check every DUE monitor of a parked session; ``verdict`` quiet/engage.
+    """Check every DUE monitor of a runtime-less session; ``verdict`` quiet/engage.
+
+    Runs for a parked session AND for any other session with no live runtime
+    (see :func:`runtime_absent`); a session a runtime is hosting answers
+    ``engage`` so the supervisor's own live check decides (it skips: that
+    runtime fires its own monitors).
 
     ``engage`` as soon as one row needs the session (the rest stay due and the
     engaged session checks them itself). Checks run sequentially: the
@@ -655,8 +714,8 @@ async def probe_session(
 
     now = int(time.time() * 1000) if now_ms is None else now_ms
     entry = monitor_store.read_entry(config_dir, session_id)
-    if not is_parked(entry):
-        return {"verdict": ENGAGE, "why": "not parked", "checked": 0}
+    if not runtime_absent(config_dir, session_id, entry):
+        return {"verdict": ENGAGE, "why": "a runtime hosts it (or it is held)", "checked": 0}
     assert entry is not None
     settings = read_monitor_settings()
     entry_cwd = entry.get("cwd")

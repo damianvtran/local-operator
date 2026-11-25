@@ -53,12 +53,28 @@ def card_other() -> Msg:
     return Msg("relay.asks.card.other", {})
 
 
+def card_other_kept() -> Msg:
+    return Msg("relay.asks.card.other_kept", {})
+
+
 def card_placeholder_answer() -> Msg:
     return Msg("relay.asks.card.placeholder_answer", {})
 
 
 def card_placeholder_secret() -> Msg:
     return Msg("relay.asks.card.placeholder_secret", {})
+
+
+def card_progress_pick_or_type() -> Msg:
+    return Msg("relay.asks.card.progress_pick_or_type", {})
+
+
+def card_progress_tally(*, answered: str, total: str) -> Msg:
+    return Msg("relay.asks.card.progress_tally", {"answered": answered, "total": total})
+
+
+def card_progress_type() -> Msg:
+    return Msg("relay.asks.card.progress_type", {})
 
 
 def card_recommended() -> Msg:
@@ -95,6 +111,46 @@ def card_unskip() -> Msg:
 
 def card_urgent() -> Msg:
     return Msg("relay.asks.card.urgent", {})
+
+
+def chip_answered() -> Msg:
+    return Msg("relay.asks.chip.answered", {})
+
+
+def chip_declined() -> Msg:
+    return Msg("relay.asks.chip.declined", {})
+
+
+def chip_dismissed() -> Msg:
+    return Msg("relay.asks.chip.dismissed", {})
+
+
+def chip_expired() -> Msg:
+    return Msg("relay.asks.chip.expired", {})
+
+
+def chip_label(*, id: str, state: str, question: str) -> Msg:
+    return Msg("relay.asks.chip.label", {"id": id, "state": state, "question": question})
+
+
+def chip_label_bare(*, id: str, state: str) -> Msg:
+    return Msg("relay.asks.chip.label_bare", {"id": id, "state": state})
+
+
+def chip_late() -> Msg:
+    return Msg("relay.asks.chip.late", {})
+
+
+def chip_open() -> Msg:
+    return Msg("relay.asks.chip.open", {})
+
+
+def chip_timed_out() -> Msg:
+    return Msg("relay.asks.chip.timed_out", {})
+
+
+def chip_withdrawn() -> Msg:
+    return Msg("relay.asks.chip.withdrawn", {})
 
 
 def disclosure_answer_first() -> Msg:
@@ -217,6 +273,22 @@ def gate_unpaired_run_label() -> Msg:
     return Msg("relay.asks.gate.unpaired_run_label", {})
 
 
+def id_copied() -> Msg:
+    return Msg("relay.asks.id.copied", {})
+
+
+def id_copied_named(*, id: str) -> Msg:
+    return Msg("relay.asks.id.copied_named", {"id": id})
+
+
+def id_copy_failed() -> Msg:
+    return Msg("relay.asks.id.copy_failed", {})
+
+
+def id_copy_label(*, id: str) -> Msg:
+    return Msg("relay.asks.id.copy_label", {"id": id})
+
+
 def pending_approve() -> Msg:
     return Msg("relay.asks.pending.approve", {})
 
@@ -279,6 +351,10 @@ def sheet_not_running_wait() -> Msg:
 
 def sheet_retry() -> Msg:
     return Msg("relay.asks.sheet.retry", {})
+
+
+def sheet_settled() -> Msg:
+    return Msg("relay.asks.sheet.settled", {})
 
 
 def sheet_title_lapsed(*, count: int | float) -> Msg:

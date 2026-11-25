@@ -1,0 +1,7 @@
+{
+  "session.attachment.team_unrestored": "El equipo {team} no está vinculado: {reason} Solo el operador puede volver a vincularlo, ejecutando /team {team} en el campo de texto de esta sesión (en este dispositivo o desde otro dispositivo que la controle); no intentes vincularlo tú mismo.",
+  "session.attachment.reason_authority": "no se pudo verificar en este dispositivo su autorización registrada (la sesión es anterior a la comprobación de autorización de equipos o llegó sin un registro del equipo).",
+  "session.attachment.reason_unavailable": "su definición o su autorización registrada no están disponibles en este dispositivo.",
+  "session.attachment.agent_unrestored": "El perfil {agent} no está vinculado: su definición no está disponible en este dispositivo. Solo el operador puede volver a vincularlo, ejecutando /agent {agent} en el campo de texto de esta sesión.",
+  "session.attachment.refusal": "No se pudo restaurar el equipo o el perfil de esta sesión, así que el mensaje no se envió. Vuelve a vincularlo ejecutando /team <name> o /agent <name> en esta sesión, o desvincúlalo con /team clear o /agent clear."
+}

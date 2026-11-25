@@ -1,0 +1,7 @@
+{
+  "session.attachment.team_unrestored": "团队{team}未附加：{reason}只有操作者才能重新附加，方法是在本会话的输入框中运行/team {team}（在本设备上，或从另一台操控本会话的设备上）；不要自行尝试附加该团队。",
+  "session.attachment.reason_authority": "无法在本设备上验证其授权记录（该会话早于团队授权检查，或到达时未附带团队记录）。",
+  "session.attachment.reason_unavailable": "其定义或授权记录在本设备上不可用。",
+  "session.attachment.agent_unrestored": "配置档{agent}未附加：其定义在本设备上不可用。只有操作者才能重新附加，方法是在本会话的输入框中运行/agent {agent}。",
+  "session.attachment.refusal": "本会话的团队或配置档无法恢复，因此消息未发送。请在本会话中运行/team <name>或/agent <name>重新附加，或用/team clear或/agent clear解除。"
+}

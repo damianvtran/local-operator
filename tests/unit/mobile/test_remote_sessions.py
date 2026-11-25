@@ -407,3 +407,35 @@ def test_remote_capability_and_unsupported_actions_are_explicit(
         assert refused.status_code == 409
         assert refused.json()["code"] == "remote_unsupported" and refused.json()["remote"] is True
     assert not (tmp_path / "sessions" / "remote-chat").exists()
+
+
+def test_remote_command_drops_the_prompt_wake_opt_in(tmp_path: Path, monkeypatch: Any) -> None:
+    """``accept_waking`` is a phone-to-THIS-relay transport flag (agent review
+    round 2, R2-3): the remote branch drops it like the local path does, so the
+    owner's admission never receives a key it does not define."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    row = SessionRow(id="remote-chat", mtime=0.0, name="synthetic", owner_device="peer-b")
+    monkeypatch.setattr(remote, "resolve_owner", lambda *_args: row)
+    seen: list[dict[str, Any]] = []
+
+    async def admit(_root: Path, _row: SessionRow, op: str, body: dict[str, Any]) -> dict[str, Any]:
+        seen.append({"op": op, **body})
+        return {"ok": True, "detail": "admitted"}
+
+    # Patched BEFORE ``build_app``, which binds the name when it builds routes.
+    monkeypatch.setattr(remote, "admit_command", admit)
+    client = TestClient(build_app(MobileDaemon(port=0, password="test-only")))
+    client.post("/login", data={"password": "test-only"})
+    response = client.post(
+        "/api/sessions/remote-chat/command",
+        json={
+            "op": "prompt",
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "text": "hello",
+            "accept_waking": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert len(seen) == 1
+    assert seen[0]["op"] == "prompt" and seen[0]["text"] == "hello"
+    assert "accept_waking" not in seen[0]

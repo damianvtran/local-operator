@@ -24,6 +24,7 @@ is executed: the guard is only evaluated.
 from __future__ import annotations
 
 import types
+from asyncio import StreamWriter
 from pathlib import Path
 from typing import Any, cast
 
@@ -47,7 +48,11 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
-from local_operator.session.runtime.server import RuntimeServer, _ConnectionAuthority
+from local_operator.session.runtime.server import (
+    RuntimeServer,
+    _ClientConn,
+    _ConnectionAuthority,
+)
 from local_operator.session.runtime.serving import ServingSessionHandle
 
 
@@ -410,17 +415,14 @@ def _bare_server(cap: bytes | None) -> RuntimeServer:
     return server
 
 
-def _conn(*, surface: str = "desktop", kind: str = "attach") -> Any:
-    return types.SimpleNamespace(
-        locality="local",
-        capabilities=frozenset(),
-        peer={},
-        surface=surface,
-        kind=kind,
+def _conn() -> _ClientConn:
+    # The reader seam uses the authenticated connection's defaults but never writes to it.
+    return _ClientConn(
+        writer=cast(StreamWriter, object()),
+        kind="attach",
+        surface="desktop",
         operator_nonce=operator_nonce(),
         operator_salt=operator_nonce(),
-        # ADR 0009: ``_ClientConn.origin``, the auth-time declared origin.
-        origin="",
     )
 
 
@@ -453,6 +455,7 @@ async def test_the_reader_seam_proves_only_a_valid_capability_proof() -> None:
     await server._dispatch_with_authority("ping", {"op": "ping", "operator_cap": good}, conn)
     assert [a.operator_proved for a in seen] == [True, False, False, False, False]
     assert seen[0].surface == "desktop" and seen[0].kind == "attach"
+    assert all(not authority.inline_ui for authority in seen)
     # A runtime holding no capability proves nobody.
     unheld = _bare_server(None)
     unheld._dispatch = capture  # type: ignore[method-assign]

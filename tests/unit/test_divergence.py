@@ -2638,7 +2638,15 @@ async def test_a_resume_catchup_attributes_its_fold_only_when_every_row_agrees(
             {"message": f"check {root}/src and report", "in": "2s"},
             origin="tool" if origin is None else origin,
         )
-    overdue = int(time.time() * 1000) - 60_000
+    # PAST ``COLD_BOOT_DELIVERY_MS`` (190 s), not 60 s (merge-gate fix 2, #4552).
+    # A load whose rows are all at most that overdue is labelled a cold-boot
+    # delivery ("(alarm) Scheduled wake(s) delivered at this start"), on every
+    # load by design (``harness/wake.py``, round 1 R1). This test is about the
+    # RESUME catch-up and keys its woken turn on "(alarm) The session resumed",
+    # so its rows must be genuinely missed while the session was down: at 60 s
+    # the fold was still delivered, under the other header, and the marker
+    # never matched.
+    overdue = int(time.time() * 1000) - 600_000
     legacy = [index for index, origin in enumerate(authors) if origin is None]
 
     def make_overdue(rows: list[dict[str, Any]]) -> None:

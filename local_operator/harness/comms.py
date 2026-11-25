@@ -3740,6 +3740,7 @@ class SubagentComms:
         # so a missing resolver degrades instead of raising.
         model_spec: ModelSpec | None = None
         selection_source: str | None = None
+        held_back: list[str] = []
         # Prefer the SELECTION entry point, which also says which layer chose the
         # model: the receipt an operator reads must not call a roster override
         # "role" on a resume while a fresh launch of the same child says "team".
@@ -3772,6 +3773,14 @@ class SubagentComms:
                     strict=True,
                     **self._target_kwargs(target, agent),
                     **({"model": selector} if selector is not None else {}),
+                    # Only the SELECTION entry point takes these: the launch
+                    # parent's binding (the role-tag provider ceiling) and the
+                    # list a held-back edit's reason lands in for the receipt.
+                    **(
+                        {"authority": target.authority, "notes": held_back}
+                        if callable(selection)
+                        else {}
+                    ),
                 )
             except (SubagentModelUnavailable, ValueError) as exc:
                 return None, f"cannot resume {record.label}: {exc}"
@@ -3807,6 +3816,7 @@ class SubagentComms:
             effort=effort,
             model_selector=selector,
             selection_source=selection_source,
+            selection_notes=held_back,
             restricted=record.restricted,
             inherited_model=inherited,
             target=target,

@@ -1305,6 +1305,14 @@ class StatusLine:
     event they are handling actually knows.
     """
 
+    #: Whether the approvals alarm paints its mode word (``! auto``) or the bare
+    #: glyph. Declared on the class, not only in ``__init__``, because the render
+    #: path reads it and some callers build a band without running the
+    #: constructor (``StatusLine.__new__`` in the fork-band tests, which render
+    #: a band with just the fields they need). A per-instance flip in
+    #: ``_render`` shadows this default; it never mutates the class.
+    _alarm_with_word: bool = True
+
     def __init__(self, dock: Static, *, clock: Callable[[], float] = time.monotonic) -> None:
         # A `Static`, not a bare `Widget`: the band is repainted by handing
         # it a rich renderable, which only content widgets accept.
@@ -1391,6 +1399,9 @@ class StatusLine:
         # session-wide mode with no persistent indicator is how a disarmed gate
         # gets forgotten about.
         self._approvals_auto: bool = False
+        # Flipped per render when the wider alarm costs the name its floor (see
+        # ``_render``); the class default above covers constructor-less bands.
+        self._alarm_with_word = True
         # True while the turn is parked on something the USER owes (currently
         # the tool-approval prompt). Only the terminal title reads it; see
         # :meth:`set_attention` for why it is not inferred from `_streaming`.
@@ -2211,6 +2222,39 @@ class StatusLine:
         # ladder row.
         hidden = _composer_hidden_segments()
         fitted = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+        if (
+            fitted is not None
+            and self._alarm_with_word
+            and self._conversation_name
+            and "name" in fitted[0]
+        ):
+            # The wider mark pushed the NAME off the row (measured: 96-100
+            # columns with mcp, context, rate and cost all up). Retry with the
+            # bare glyph and keep that row if it buys the name back — the name
+            # is the segment the band's corner is reserved for, and an alarm
+            # that spends it is the inversion the ladder exists to prevent.
+            self._alarm_with_word = False
+            try:
+                narrower = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+            finally:
+                self._alarm_with_word = True
+            if narrower is not None and "name" not in narrower[0]:
+                fitted = narrower
+        if fitted is None and self._alarm_with_word:
+            # THE MODE WORD YIELDS BEFORE THE NAME DOES (PR #4558 D3, round 1).
+            # `! auto` is five cells wider than the bare alarm, and the alarm is
+            # authored LAST in every ladder — so at the one width where the row
+            # is fully subscribed (measured: 100 columns with mcp, context, rate
+            # and cost all up) the extra cells pushed the walk past its last
+            # rung and the irreducible tail cut the session name to six cells.
+            # The band degrades to the bare glyph, which is still clickable and
+            # still the alarm, rather than taking the cells from the name: the
+            # one thing the band must not do is spend a title to say its mode.
+            self._alarm_with_word = False
+            try:
+                fitted = self._fit(width, dim, muted, seam, accent, hidden=hidden)
+            finally:
+                self._alarm_with_word = True
         if fitted is not None:
             dropped, left, right = fitted
             # Recorded so a caller can ask whether the band actually SAID
@@ -2976,9 +3020,25 @@ class StatusLine:
             # 9.4:1 in the transcript).
             parts.append(
                 (
+                    # `! auto`, not a bare `!` (design D3): a clickable mark must
+                    # say what it is, and the word is the one the banner and
+                    # `/approvals` use. IN THE TEXT SLOT, not the icon slot: the
+                    # icon is painted `dim` (see the loop below), which rendered
+                    # the alarm grey (#979797) instead of danger — the exact
+                    # regression D1 is about, reintroduced from the other side.
                     "",
-                    ICON_APPROVALS,
-                    Style(color=theme_mod.semantic_color("danger"), bold=True),
+                    f"{ICON_APPROVALS} auto" if self._alarm_with_word else ICON_APPROVALS,
+                    # CLICKABLE: the one-click way back to "ask" (operator
+                    # request, 2026-11-24 — "the mode should show somewhere
+                    # visible with a one-click way back"). The `!` is already
+                    # the band's only standing statement that the gate is
+                    # disarmed, so the route back lives on the thing that says
+                    # so rather than in a second segment the ladder would have
+                    # to budget. Tightening needs no authority (it is never
+                    # refused), so a stray click can only make the gate SAFER;
+                    # the action runs the same `/approvals ask` a typist would.
+                    Style(color=theme_mod.semantic_color("danger"), bold=True)
+                    + Style.from_meta({"@click": "app.approvals_ask"}),
                 )
             )
         if self._conversation_name and name_cells:

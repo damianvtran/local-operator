@@ -90,10 +90,11 @@ Measured against a real skill library, mostly on the OpenRouter leg:
 
 None of that is the turn's latency: a turn waits at most `waitMs` (50 ms) and then stops
 waiting. The call keeps running, and an answer that arrives while that turn is still
-going is added to the turn's NEXT model step, so the model can still use it for the
-same question; an answer whose turn has already ended rides the next message. A slow
-or dead leg therefore cannot delay a turn — our own added wall-clock is that wait,
-plus tens of milliseconds once on a first message.
+going can be added to the NEXT model step of the same task, including a harness
+continuation. A new user message or steer supersedes that task: its late answer
+won't be shown on the new task, though a repeat query can still reuse the cached
+answer. A slow or dead leg therefore adds no delay beyond the wait, plus tens of
+milliseconds once on a first message.
 
 ## Which leg served the call
 
@@ -112,8 +113,8 @@ leg's default. A cache hit keeps the vendor and reports `-` for the tokens and t
 because it spent nothing.
 
 Two other lines answer the rest. `classification: no recommendation within 50 ms; the
-turn continues without one (an answer that arrives later is delivered to this turn's
-next step, or — if the turn ends first — to the next user message)` (INFO) is the
+turn continues without one (a late answer is only useful on a later step of the same
+task)` (INFO) is the
 ordinary result whenever the vendor outruns the budget. `classification: no
 recommendation (skipped=…)` (DEBUG) names why: `no-vendor` (no leg held a credential),
 `circuit-open`, `timeout`, `error`, `empty-roster` (nothing installed) or `disabled`

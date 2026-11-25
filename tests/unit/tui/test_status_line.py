@@ -1458,7 +1458,7 @@ def test_an_armed_alarm_outlives_a_path_that_would_not_have_fitted() -> None:
         approvals_auto=True,
         mcp=McpStatus(configured=2, connected=2),
     )
-    armed = [w for w in range(36, 52) if status.render_text(w).plain.rstrip().endswith("!")]
+    armed = [w for w in range(36, 52) if status.render_text(w).plain.rstrip().endswith("! auto")]
     assert armed, "the disarmed-gate alarm vanished at every narrow width"
     for width in armed:
         assert ICON_CWD not in status.render_text(width).plain
@@ -1503,7 +1503,7 @@ def test_the_alarm_sits_beside_the_name_rather_than_replacing_it() -> None:
     assert "auto-approve" not in row, "the alarm's prose was crowding out the name"
     assert "always" not in row
     # The glyph, immediately before the name and after its seam.
-    assert re.search(r"! +‹ Add todo guardrails$", row)
+    assert re.search(r"! auto +‹ Add todo guardrails$", row)
 
 
 def test_an_unnamed_session_leaves_the_trailing_slot_to_whatever_is_left() -> None:
@@ -1521,7 +1521,7 @@ def test_an_unnamed_session_leaves_the_trailing_slot_to_whatever_is_left() -> No
     """
     status, _clock = _full_band()
     status.update(conversation_name="", approvals_auto=True)
-    assert status.render_text(200).plain.rstrip().endswith("!")
+    assert status.render_text(200).plain.rstrip().endswith("! auto")
     status.update(approvals_auto=False)
     assert status.render_text(200).plain.rstrip().endswith("41m1s")
 
@@ -1991,7 +1991,7 @@ def test_the_alarm_is_not_the_same_ink_as_the_cost_figure() -> None:
                 rendered.plain[span.start : span.end].strip(): getattr(span.style, "color", None)
                 for span in rendered.spans
             }
-            alarm, cost = inks[ICON_APPROVALS], inks["$12.40"]
+            alarm, cost = inks[f"{ICON_APPROVALS} auto"], inks["$12.40"]
             assert alarm is not None and cost is not None
             assert alarm.name == theme_mod.semantic_color("danger"), ramp
             assert cost.name == theme_mod.semantic_color("warning"), ramp

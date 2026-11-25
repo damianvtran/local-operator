@@ -111,6 +111,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.console",
         "wire.memory",
         "wire.host_speed",
+        "wire.runtime_memory",
         "wire.guardrails",
         "wire.radient_saver",
         "wire.aida_cadence",

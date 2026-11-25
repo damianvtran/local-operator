@@ -184,6 +184,22 @@ REQUEST_BUDGET_REFUSAL = (
     "ending with the VERDICT line."
 )
 
+#: ``ToolResult.details`` key a host tool sets (to ``True``) on a result for a
+#: call whose COMMAND ITSELF never reached the host: invalid arguments, a
+#: write-pattern refusal, no time left. Not "nothing reached the host": the
+#: evaluation inspector's once-per-episode sandbox probe and audit mode's
+#: per-round date stamp may run before such a refusal -- harness overhead with
+#: its own fixed bound, not a command the child chose.
+#: :func:`counted_host_tools` does not charge such a call. WHY: the command
+#: budget bounds what the check may do to the host, and nine recorded checks
+#: all ran out of it -- two of them partly on calls the inspector had refused,
+#: which bought the child nothing and cost it a command it then could not
+#: spend reading the deliverable. ``details``
+#: is never serialized to the provider, so the child cannot set this itself;
+#: only launcher-supplied tool code can. An uncharged call is still bounded:
+#: every one costs a request, and the request cap and the wall still apply.
+NOT_DISPATCHED_DETAIL = "verifier_not_dispatched"
+
 #: The verdict line, tolerant of the decorations models add to a last line:
 #: markdown emphasis/heading/quote/bullet/backtick prefixes and an optional
 #: "final" (``> **Final VERDICT:** `PASS` ``). Anything else stays
@@ -309,6 +325,33 @@ class VerifierLimits:
         assert self.max_requests is not None
         return self.max_requests
 
+    def command_budget_notice(self, tool_names: Sequence[str]) -> str | None:
+        """The prompt's statement of the host-command budget, or ``None``.
+
+        WHY THE CHILD IS TOLD. The cap was enforced but never disclosed: on
+        nine of nine recorded checks the child learned it had a limit only
+        from the refusal, after spending every command (some on probing the
+        host for tools) while its request and wall budgets were half unused.
+        A budget a model cannot see is one it cannot plan for.
+
+        Built HERE, from the object ``counted_host_tools`` is given its
+        ``limit`` from, so the number stated and the number enforced cannot
+        drift apart. ``None`` when there are no host tools: nothing counts
+        against ``max_commands`` then (the child's own tools are bounded by
+        requests), and stating a command budget would describe a limit that
+        does not exist on that path.
+        """
+
+        if not tool_names:
+            return None
+        names = ", ".join(sorted(tool_names))
+        return (
+            f"BUDGET: at most {self.max_commands} commands through {names} in this "
+            "check. Each result ends with how many are used; a call refused before it "
+            "runs is not counted. Once they are used further calls are refused and "
+            "you answer from what you have already seen."
+        )
+
     def as_record(self) -> dict[str, Any]:
         return {
             "max_requests": self.request_budget,
@@ -375,6 +418,7 @@ def build_verifier_prompt(
     observation: str | None = None,
     evidence: str | None = None,
     target_tools: Sequence[str] = (),
+    limits: VerifierLimits | None = None,
 ) -> str:
     """The verifier's task message: the request, the claim, the worker's
     recorded tool evidence, the last observation, and where the work lives.
@@ -386,7 +430,11 @@ def build_verifier_prompt(
     tool record (:func:`recent_tool_evidence`) -- what it saw, not grading
     data. ``target_tools`` names the channel to a remote deliverable (see
     :func:`verifier_ceiling`); empty means the work is on this machine and
-    the prompt says nothing about it, exactly as before.
+    the prompt says nothing about it, exactly as before. ``limits`` is the
+    budget object the launcher ENFORCES: given with ``target_tools`` it adds
+    the command budget those tools count against
+    (:meth:`VerifierLimits.command_budget_notice`); without either the text is
+    unchanged.
     """
 
     parts: list[str] = []
@@ -398,6 +446,9 @@ def build_verifier_prompt(
             f"for it; check every requirement through {names}.",
             "",
         ]
+        notice = limits.command_budget_notice(target_tools) if limits is not None else None
+        if notice is not None:
+            parts += [notice, ""]
     parts += [
         "REQUEST (verbatim, as the worker received it):",
         _bounded(request, MAX_REQUEST_CHARS) or "(empty)",
@@ -586,7 +637,7 @@ def counted_host_tools(
     on_result: Callable[[Any], Any] | None = None,
     command_refusal: str = COMMAND_BUDGET_REFUSAL,
 ) -> tuple[tuple["AgentTool", ...], Callable[[], int]]:
-    """Wrap host tools so every call counts against ``limit``.
+    """Wrap host tools so every call that reaches the host counts against ``limit``.
 
     Call ``limit + 1`` is refused (it never reaches the host) and fires
     ``on_exhausted`` so the launcher can record the cap. The refusal is the
@@ -598,11 +649,46 @@ def counted_host_tools(
     the cue's text (``{limit}`` is filled in): a caller whose answer is not
     the VERDICT line must not have its child told to end with one. Returns
     the wrapped tools and a reader for the count.
+
+    WHAT IS CHARGED. A slot is RESERVED before the tool runs and returned if
+    the tool's result says the call never reached the host
+    (:data:`NOT_DISPATCHED_DETAIL`: invalid arguments, a refused write). The
+    count used to be taken before the tool ran and never revisited, so a call
+    the inspector turned away still cost a command. Reserve-then-refund rather
+    than count-afterwards on purpose: calls of one request may run
+    concurrently, and counting only on return would let more than ``limit``
+    of them be in flight at once. A call that RAISES keeps its charge -- it
+    may have reached the host. ``on_call`` fires at the reservation, so it
+    sees every admitted call including one later refunded; the reader returns
+    the settled count. (A sibling refused while a later-refunded call held the
+    last slot has already fired ``on_exhausted``: the cap is recorded as hit
+    though one command remains, which errs on the reported side.)
+
+    EVERY RESULT SAYS WHERE THE BUDGET STANDS. Each wrapped result ends with
+    ``[n of N commands used]`` (``[not counted: ...]`` for a refunded call).
+    Appended after ``on_result`` so the line is never registered as evidence,
+    and as its own block so the tool's text is untouched. ``N`` is ``limit``,
+    the same number the refusal enforces.
     """
 
     from local_operator.harness.types import TextContent, ToolResult
 
     count = 0
+
+    def _with_usage(result: Any, charged: bool) -> Any:
+        if not isinstance(result, ToolResult):
+            return result  # nothing to append to; never invent a result shape
+        if not charged:
+            usage = f"[not counted: {count} of {limit} commands used]"
+        elif count >= limit:
+            usage = f"[{count} of {limit} commands used; that was the last one]"
+        else:
+            usage = f"[{count} of {limit} commands used]"
+        # Leading newline: blocks are joined without a separator wherever a
+        # result is read as one string (``ToolResult.text``).
+        return result.model_copy(
+            update={"content": [*result.content, TextContent(text="\n" + usage)]}
+        )
 
     def _wrap(tool: "AgentTool") -> "AgentTool":
         inner = tool.execute
@@ -627,7 +713,13 @@ def counted_host_tools(
             count += 1
             on_call(count)
             result = await inner(tool_call_id, args, signal, on_update, context)
-            return on_result(result) if on_result is not None else result
+            details = result.details if isinstance(result, ToolResult) else None
+            charged = not (details and details.get(NOT_DISPATCHED_DETAIL) is True)
+            if not charged:
+                count -= 1
+            if on_result is not None:
+                result = on_result(result)
+            return _with_usage(result, charged)
 
         return tool.model_copy(update={"execute": execute})
 

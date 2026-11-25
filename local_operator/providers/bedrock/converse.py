@@ -118,6 +118,10 @@ def project_conversation(
     without positive native support use the existing retained-byte extraction
     policy; the original filesystem path is never consulted here.
     """
+    # Never encode request.inline_ui_hint on this wire. Converse signatures
+    # bind the whole prior conversation: adding an ephemeral suffix here would
+    # make the next tool request unable to replay the signed reply without
+    # retaining that suffix. The Converse start event carries no widget receipt.
     system = [{"text": text} for text in request.system_blocks if text]
     rows: list[dict[str, Any]] = []
     selected: list[Any] = []

@@ -72,6 +72,7 @@ from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
 from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
+from local_operator.i18n.keys import wire_runtime_memory as _rm
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
@@ -106,6 +107,7 @@ from local_operator.ui_console.policy import (
     DEFAULT_OWNER_LIMIT,
     DEFAULT_USER_RESERVED,
 )
+from local_operator.web_defaults import WEB_SEARCH_PROVIDER_IDS
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.config import ConfigManager
@@ -146,6 +148,9 @@ _CHILD_SETTINGS_NAMESPACES = (
     # now fails for any child namespace left out of this tuple.
     "wire.phone_access",
     "wire.voice",
+    # The per-runtime memory guard (``session.runtime_memory.*``): its own child
+    # namespace so its rows never move the audited ``wire.settings`` hash.
+    "wire.runtime_memory",
 )
 
 
@@ -938,6 +943,17 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.heavy_jobs_title()),
         Scope.LIVE,
         _t(_ws.heavy_jobs_description()),
+    ),
+    # The PER-RUNTIME ceiling (``session/runtime/runtime_memory.py``), run by the
+    # wake supervisor every minute. Its own section, not ``memory_guard``: that
+    # one bounds a COMMAND and kills only its group; this one ends a whole
+    # session runtime. LIVE: the supervisor reads a fresh ``ConfigManager`` on
+    # every pass.
+    Section(
+        "runtime_memory_guard",
+        _t(_rm.section_title()),
+        Scope.LIVE,
+        _t(_rm.section_description()),
     ),
     # Its own section for the reason ``memory_guard`` has one, and LIVE for the
     # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
@@ -4834,17 +4850,9 @@ SETTINGS: tuple[Setting, ...] = (
         # "exactly these" would be surprised by the chain -- and that surprise is
         # the documented cost of not writing a freezing migration.
         help=_t(_ws.web_search_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.excluded_providers",
@@ -4859,17 +4867,9 @@ SETTINGS: tuple[Setting, ...] = (
         # empty priority list does.
         empty_unsets=True,
         help=_t(_ws.web_search_excluded_providers_help()),
-        members=(
-            "duckduckgo",
-            "tavily",
-            "deepseek",
-            "perplexity",
-            "brave",
-            "exa",
-            "parallel",
-            "serpapi",
-            "searxng",
-        ),
+        # From the one provider-id list, so a new provider is settable here the
+        # moment it exists (the hand-copied tuple silently omitted new ids).
+        members=WEB_SEARCH_PROVIDER_IDS,
     ),
     Setting(
         key="web_search.timeout_seconds",
@@ -4903,6 +4903,20 @@ SETTINGS: tuple[Setting, ...] = (
         # for the "which page do I fetch next" decision. Only the deepseek
         # provider consumes it; every other provider already returns snippets.
         help=_t(_ws.web_search_deepseek_evidence_help()),
+    ),
+    Setting(
+        key="web_search.claude_subscription_search",
+        path=("web_search", "claude_subscription_search"),
+        section="web_search",
+        label=_t(_ws.web_search_claude_subscription_search_label()),
+        kind=Kind.BOOL,
+        default=False,
+        # Off by default (operator decision 2026-11-24): Anthropic draws a
+        # third-party harness's use of a Claude plan from EXTRA USAGE, so letting
+        # the sign-in serve search spends money the user never chose to spend on
+        # it. Even when on, the leg is ordered with the paid legs (after Radient).
+        # The Anthropic API-key leg is unaffected by this key.
+        help=_t(_ws.web_search_claude_subscription_search_help()),
     ),
     Setting(
         key="web_search.read_enabled",
@@ -5214,6 +5228,75 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help=(_t(_ws.tools_defer_help())),
     ),
+    # LIVE: ``mcp.manager.read_result_normalization_mode`` reads a fresh
+    # ConfigManager per MCP result. Path and default mirror
+    # ``tools.result_normalize.RESULT_NORMALIZATION_{PATH,DEFAULT}`` (not
+    # imported, to keep this module cheap; pinned by the consumer-defaults
+    # test). ``off`` is the byte-identical escape hatch for a server whose
+    # exact markup matters, and the A/B switch for cost benchmarks.
+    Setting(
+        key="mcp.result_normalization",
+        path=("mcp", "result_normalization"),
+        section="tools",
+        label=_t(_ws.mcp_result_normalization_label()),
+        kind=Kind.ENUM,
+        default="prose-links",
+        help=_t(_ws.mcp_result_normalization_help()),
+        choices=(
+            Choice(
+                "prose-links",
+                _t(_ws.mcp_result_normalization_choice_prose_links_label()),
+                _t(_ws.mcp_result_normalization_choice_prose_links_description()),
+            ),
+            Choice(
+                "strip-links",
+                _t(_ws.mcp_result_normalization_choice_strip_links_label()),
+                _t(_ws.mcp_result_normalization_choice_strip_links_description()),
+            ),
+            Choice(
+                "off",
+                _t(_ws.mcp_result_normalization_choice_off_label()),
+                _t(_ws.mcp_result_normalization_choice_off_description()),
+            ),
+        ),
+    ),
+    # LIVE: ``mcp.manager.read_result_text_rendering`` reads it per MCP
+    # result. Path and default mirror
+    # ``tools.result_normalize.RESULT_TEXT_RENDERING_{PATH,DEFAULT}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). Renders exactly two JSON shapes -- a search hit list and a single
+    # ``{url, content, ...}`` fetched page -- as lossless text (every field
+    # kept), only while ``mcp.result_normalization`` is not ``off``. A bool so
+    # a cost benchmark can A/B it, and an escape hatch for a consumer that
+    # wants the JSON.
+    Setting(
+        key="mcp.result_text_rendering",
+        path=("mcp", "result_text_rendering"),
+        section="tools",
+        label=_t(_ws.mcp_result_text_rendering_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.mcp_result_text_rendering_help()),
+    ),
+    # LIVE: ``mcp.manager.read_search_snippet_chars`` reads it per MCP search
+    # result. Path, default and maximum mirror
+    # ``tools.result_normalize.SEARCH_SNIPPET_CHARS_{PATH,DEFAULT,MAX}`` (not
+    # imported, same reason as the row above; pinned by the consumer-defaults
+    # test). It clips only the snippet fields of a search tool's JSON hit list
+    # (titles and URLs never), and only while ``mcp.result_normalization`` is
+    # not ``off``. 0 keeps snippets whole. 400, not web_search's 320: 320 hid
+    # the subject of one of 43 cited search discoveries on the replayed run.
+    Setting(
+        key="mcp.search_snippet_chars",
+        path=("mcp", "search_snippet_chars"),
+        section="tools",
+        label=_t(_ws.mcp_search_snippet_chars_label()),
+        kind=Kind.INT,
+        default=400,
+        help=_t(_ws.mcp_search_snippet_chars_help()),
+        minimum=0,
+        maximum=100_000,
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than
@@ -5271,6 +5354,32 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.FLOAT,
         default=0.8,
         help=(_t(_ws.bash_memory_soft_fraction_help())),
+    ),
+    # -- runtime_memory_guard -------------------------------------------------
+    # ``path`` mirrors ``runtime_memory.RUNTIME_MEMORY_*_PATH``; the defaults are
+    # pinned against that module by ``tests/unit/test_settings_io.py`` rather than
+    # imported, for the cheap-CLI reason the ``memory_guard`` rows give.
+    Setting(
+        key="session.runtime_memory.enabled",
+        path=("session", "runtime_memory", "enabled"),
+        section="runtime_memory_guard",
+        label=_t(_rm.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_rm.enabled_help()),
+        choices=_bool_choices(
+            _t(_rm.enabled_choice_true_description()),
+            _t(_rm.enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="session.runtime_memory.limit_mb",
+        path=("session", "runtime_memory", "limit_mb"),
+        section="runtime_memory_guard",
+        label=_t(_rm.limit_mb_label()),
+        kind=Kind.INT,
+        default=8192,
+        help=_t(_rm.limit_mb_help()),
     ),
     # -- heavy_jobs ---------------------------------------------------------
     # ``path`` mirrors ``heavy_lease.HEAVY_JOBS_ENABLED_PATH``; pinned by

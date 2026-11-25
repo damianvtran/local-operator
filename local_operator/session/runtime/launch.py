@@ -65,6 +65,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
@@ -77,6 +78,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.macos_disclaim import spawn_disclaimed
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,9 @@ class PromptErrand:
     #: as a local terminal, and the completion of a conversation woken from the
     #: phone must route back to the phone. Empty keeps every other producer.
     origin: str = ""
+    # Preserve viewer intent until the authenticated winner is known; its
+    # advertised capability controls whether the client can send the field.
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +176,7 @@ class SteerErrand:
     command_id: str = ""
     input_mode: str = ""
     input_path: str = ""
+    inline_ui: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +366,38 @@ def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = Tru
     if _pid_state(claim.pid, check_zombie=check_zombie, expected_birth=claim.birth) != "live":
         return None
     return claim.pid
+
+
+def lease_claimed_at(config_dir: Path, session_id: str) -> float | None:
+    """Epoch time the session's transcript lease was acquired, while a verified holder lives.
+
+    ``None`` when ``_lease_holder`` reports no live, identity-verified holder
+    (no claim, a dead pid, a recycled pid). Read-only, like ``_lease_holder``:
+    it never acquires, so probing cannot take the lease a booting runtime needs.
+
+    WHY IT LIVES HERE AND NOT IN THE RELAY. The relay's cold-row boot claim
+    (``RelayServer._boot_row_state``, PR #4572 QA Q6) needs the claim's age,
+    but the relay is structurally barred from importing ``session_lease``
+    beyond ``lease_holder`` (``test_the_relay_never_becomes_a_session_owner``:
+    a relay must never own a session). Asking launch, which already reads the
+    lease for the engage loop, keeps the claim's on-disk name out of the relay
+    and makes the listing and ``engage_runtime`` read "a boot is under way"
+    through the same probe, so they cannot disagree.
+
+    THE AGE IS THE CLAIM FILE'S MTIME. ``acquire_session_lease`` writes the
+    claim once, at ``O_EXCL`` creation, and nothing rewrites or touches it
+    afterwards (release unlinks it; stale recovery replaces it with a NEW file,
+    i.e. a new acquisition), so its mtime is the acquisition time.
+
+    An ``OSError`` from the stat (the claim released between the holder check
+    and the stat) propagates: the caller decides what a failed probe means.
+    The import stays lazy for the same reason ``_lease_holder``'s does.
+    """
+    from local_operator.session_lease import LEASE_NAME
+
+    if _lease_holder(config_dir, session_id) is None:
+        return None
+    return (_session_dir(config_dir, session_id) / LEASE_NAME).stat().st_mtime
 
 
 def _spawn_interpreter() -> str:
@@ -1262,6 +1300,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         lambda _reason: None,
         # ADR 0009: the cold-wake prompt keeps the phone's origin.
         origin=work.origin if isinstance(work, PromptErrand) else "",
+        **inline_ui_opt_in(work.inline_ui),
     )
     try:
         await client.connect(record, session_id)
@@ -1295,6 +1334,7 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             images=work.images,
             command_id=work.command_id,
             **annotation,
+            **inline_ui_opt_in(work.inline_ui),
         )
     finally:
         client.close()
@@ -1407,6 +1447,7 @@ async def engage_runtime(
     deadline_s: float = DEFAULT_DEADLINE_S,
     preempt: asyncio.Event | None = None,
     preempt_budget_s: float = 0.0,
+    on_constructing: Callable[[], None] | None = None,
 ) -> EngageOutcome:
     """Ensure a runtime exists for ``session_id`` and give it ``work``.
 
@@ -1432,6 +1473,16 @@ async def engage_runtime(
     only shorten the wait and never extend it. The cut is latched on first
     observation rather than recomputed per pass, so repeated passes cannot
     keep pushing the shortened deadline forward while the event stays set.
+
+    ``on_constructing`` is called ONCE, the first time this loop observes a
+    construction in flight (no record yet, and either the candidate it spawned
+    is alive or a contender holds the lease). It exists for callers that must
+    answer someone before the runtime is reachable: the phone relay's prompt
+    wake acknowledges "waking" at this moment instead of holding an HTTP request
+    open for a cold boot measured at p50 10.1 s / p99 106.8 s (wake supervisor,
+    Nov 21-23 2026). It is a notification only: it never changes arbitration,
+    and an exception it raises is logged and swallowed so a buggy observer
+    cannot fail the engage it is observing.
 
     Giving up this way is not the same as discarding the work. A candidate
     this engage spawned keeps constructing and publishes its record as usual;
@@ -1783,6 +1834,12 @@ async def engage_runtime(
         if constructing:
             if constructing_since is None:
                 constructing_since = now
+            if on_constructing is not None:
+                notify, on_constructing = on_constructing, None
+                try:
+                    notify()
+                except Exception:  # noqa: BLE001 - an observer must not fail the engage
+                    logger.exception("engage: on_constructing observer raised")
         else:
             constructing_since = None
 

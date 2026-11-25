@@ -1,0 +1,177 @@
+{
+  "web_search.radient.access": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for the Radient search provider; 'Radient' is a product name, never translated",
+    "maxCells": 24
+  },
+  "web_search.radient.detail": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of the Radient search provider row. Keep 'Tavily', 'Radient', '$0.01' and the backticked command verbatim."
+  },
+  "web_search.radient.detail_signed_in": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "the Radient row's description once the user IS signed in (the sign-in clause of web_search.radient.detail is dropped). Keep 'Tavily', 'Radient' and '$0.01' verbatim."
+  },
+  "web_search.radient.credits_low": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.radient.sign_in_again": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.radient.not_signed_in": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "Keep 'Radient', 'Radient Console' and the backticked command verbatim."
+  },
+  "web_search.state.auto_radient": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search. 'auto credits' = joined the chain automatically and billed to Radient credits; the column beside it already says 'Radient credits', so the word stays short.",
+    "maxCells": 24
+  },
+  "web_search.state.radient_refused": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_native_plan": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_native_paid": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.auto_free_then_key": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search.",
+    "maxCells": 24
+  },
+  "web_search.state.enabled_then_key": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search. Listed twin of 'auto free, then key': the user put this provider in their priority order; its free tier is tried there and their API key later.",
+    "maxCells": 24
+  },
+  "web_search.state.enabled_credits": {
+    "role": "provider state word in `lop search list` and `/search`",
+    "tone": "terse lowercase status word, matches existing words like 'auto free' / 'auto paid'",
+    "note": "a short state word, shown in a column sized to the widest word (16 cells in English); 'Radient' is a product name. 'native' means the model vendor's own built-in web search. A LISTED Radient provider: in the priority order, billed to Radient credits. '(credits)' must match web_search.marker.credits.",
+    "maxCells": 24
+  },
+  "web_search.meaning.auto_radient": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.radient_refused": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_native_plan": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_native_paid": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.auto_free_then_key": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.meaning.enabled_then_key": {
+    "role": "legend explaining a state word in `lop search list` and `/search`",
+    "tone": "terse lowercase clause, no final period",
+    "note": "explains what the state word means for the user's next search; 'Radient' is a product name; 'legs' are steps of the search fallback chain."
+  },
+  "web_search.marker.plan": {
+    "role": "marker after a provider name in the `chain:` line",
+    "tone": "terse parenthetical",
+    "note": "'(plan)' = included in a subscription the user already pays for; '(credits)' = billed to Radient credits. Keep the parentheses.",
+    "maxCells": 12
+  },
+  "web_search.marker.credits": {
+    "role": "marker after a provider name in the `chain:` line",
+    "tone": "terse parenthetical",
+    "note": "'(plan)' = included in a subscription the user already pays for; '(credits)' = billed to Radient credits. Keep the parentheses.",
+    "maxCells": 12
+  },
+  "web_search.marker.no_credits": {
+    "role": "marker after a provider name in the `chain:` line",
+    "tone": "terse parenthetical",
+    "note": "'(no credits)' = the Radient leg is skipped because the account is out of credits. Keep the parentheses.",
+    "maxCells": 14
+  },
+  "web_search.native.access_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a model vendor's native search that bills a pay-as-you-go model API key",
+    "maxCells": 24
+  },
+  "web_search.native.access_plan_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search that serves through a subscription sign-in (plan) or an API key",
+    "maxCells": 24
+  },
+  "web_search.native.access_key_signin": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search that accepts an API key or an OAuth sign-in, both billed",
+    "maxCells": 24
+  },
+  "web_search.native.detail_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search provider row. {vendor} is a brand name (OpenAI, Anthropic, xAI, Alibaba Cloud...), never translated."
+  },
+  "web_search.native.detail_claude_signin_off": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "Anthropic row detail shown when a Claude sign-in is stored but the opt-in setting is off, so the row cannot serve. It must name the setting by its exact label (wire.settings.web_search_claude_subscription_search.label) and where it lives (/settings → the Web search section title). {vendor} is a brand name, never translated."
+  },
+  "web_search.native.detail_plan_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search row with a plan leg and a key leg. {vendor} is a brand name; {plan} is a product plan name (ChatGPT), never translated."
+  },
+  "web_search.native.no_credential": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "{vendor} is a brand name, never translated."
+  },
+  "web_search.native.access_plan": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search served only by a subscription plan's credential (sign-in or the plan's own key); no pay-as-you-go billing",
+    "maxCells": 24
+  },
+  "web_search.native.detail_plan": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search row funded by a subscription plan. {vendor} is a brand name; {plan} is a product plan name (GLM Coding Plan, Kimi Code plan), never translated."
+  },
+  "web_search.native.detail_search_api": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a vendor's standalone search API (returns results directly, no model answer). {vendor} is a brand name, never translated."
+  }
+}

@@ -678,7 +678,7 @@ async def retry_due_holds(
                 owner,
                 message_id,
                 new_code or "hold",
-                due=_hold_due(outcome.get("retry_at"), now + gap),
+                due=_hold_due(outcome.get("retry_at"), now + gap, code=new_code, now=now),
                 attempts=attempts,
                 now=now,
                 # A conversation handler stamps its own tier; the pair
@@ -883,7 +883,9 @@ def _persist_hold_backoff(
 
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
     now = _time.time()
-    due = _hold_due(retry_at, now + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
+    due = _hold_due(
+        retry_at, now + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S), code=code, now=now
+    )
     _write_hold(
         store,
         owner,
@@ -898,7 +900,9 @@ def _persist_hold_backoff(
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
 
 
-def _hold_due(retry_at: Any, backoff_at: float) -> float:
+def _hold_due(
+    retry_at: Any, backoff_at: float, *, code: Any = None, now: float | None = None
+) -> float:
     """The retry instant for a hold: the hold's OWN time when it names one.
 
     A ``budget_exhausted`` hold knows exactly when the budget refills (the
@@ -906,10 +910,25 @@ def _hold_due(retry_at: Any, backoff_at: float) -> float:
     backoff instead either re-spends a pass on a budget that is still empty
     or waits up to an hour past the refill. Bounded to the backoff ceiling so
     a bad clock can never park a message for longer than any other hold.
+
+    ``write_once_conflict`` is the one code scheduled by its NAME, a fixed day
+    out (``screening.WRITE_ONCE_CONFLICT_RETRY_S``; the 2026-11-24 diagnosis is
+    there). Fixed rather than doubling because the doubling counter lives in
+    this process: a restart re-based it at 60 s and pulled a day-long schedule
+    back to a minute, a burst across every such hold. The code alone decides,
+    so a restarted connector writes the same day-long gap the screening side
+    already persisted. Schedule only — the row stays a hold.
     """
 
     import time as _time
 
+    from local_operator.team_bridge.screening import (
+        WRITE_ONCE_CONFLICT_HOLD,
+        WRITE_ONCE_CONFLICT_RETRY_S,
+    )
+
+    if code == WRITE_ONCE_CONFLICT_HOLD:
+        return (_time.time() if now is None else now) + WRITE_ONCE_CONFLICT_RETRY_S
     if isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool):
         return min(float(retry_at), _time.time() + RETRY_MAX_S)
     return backoff_at

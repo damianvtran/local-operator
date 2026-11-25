@@ -604,12 +604,6 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "an older node's custom-instructions conflict sentence, quoted when it sent no code",
     ),
-    # The move notice quotes the instructions report's own sentence (a withheld or
-    # refused revision) when only the instructions failed to refresh (R1-4).
-    ("local_operator/network/mobility.py", "_push_move_definitions", "reason"): (
-        1,
-        "the push report's custom-instructions sentence, relayed onto the move receipt",
-    ),
     # The mobility slice's wire transport reads the ACK'S ``detail`` key - the
     # envelope field itself, never rendered to anyone: what a surface renders is the
     # ``message`` INSIDE it, and the codes beside it are what a front end branches on.
@@ -900,6 +894,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # prefixed ``refused:`` into the ``why`` of a COMPACTION_IDLE_DECLINED_TYPE
     # transcript record. That record is anti-thrash bookkeeping no surface reads
     # back or renders, and the token never came from a peer.
+    # Lost-owner recovery's "was this a build refresh?" test: ``record.reason`` is
+    # this device's OWN ``runtime-exit.json`` reason (``journal.write_exit_record``,
+    # written by the refresh exits in ``process.py``), read only for local
+    # placements. The ``str()`` coercion feeds ``.startswith("retiring")`` and the
+    # function returns a bool; the raw value never reaches text or a peer.
+    (
+        "local_operator/session/attached.py",
+        "AttachedSession._lost_owner_retired_for_refresh",
+        "reason",
+    ): (
+        1,
+        "the local exit record's own reason, prefix-tested into a bool, never rendered",
+    ),
     ("local_operator/session/session.py", "Session._run_idle_compaction", "reason"): (
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",

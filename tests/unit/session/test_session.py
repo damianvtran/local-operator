@@ -60,6 +60,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.providers.failover import ProviderError
 from local_operator.session.attachments import AttachmentStore
+from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.session import (
     _PRE_ABORT_DROP_NOTICE_AT,
     BUSY_QUEUE_ESCALATE_AFTER_S,
@@ -400,6 +401,7 @@ async def test_prompt_full_turn_events_and_persistence(tmp_path):
 
     # System blocks reached the provider.
     assert stream.requests[0].system_blocks == ["stable", "env"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1419,6 +1421,7 @@ async def test_async_system_blocks_provider(tmp_path):
     session = make_session(tmp_path, stream, system_blocks_provider=provider)
     await session.prompt("hi")
     assert stream.requests[0].system_blocks == ["block-a", "block-b"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1460,6 +1463,7 @@ async def test_live_model_label_reaches_a_label_aware_provider(tmp_path):
     await session.prompt("hi")
     assert seen[-1] == "test/m"
     assert stream.requests[0].system_blocks == ["Model: test/m"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -1472,6 +1476,7 @@ async def test_zero_arg_provider_still_works_after_the_label_addition(tmp_path):
     assert session._blocks_provider_takes_label is False
     await session.prompt("hi")
     assert stream.requests[0].system_blocks == ["stable", "env"]
+    assert stream.requests[0].inline_ui_hint == INSTRUCTIONS
     await session.dispose()
 
 
@@ -4843,6 +4848,7 @@ class TestAChangedGoalTakesEffectAtTheNextCall:
             ["stable", "goal: old goal"],
             ["stable", "goal: new goal"],
         ]
+        assert [request.inline_ui_hint for request in stream.requests] == [INSTRUCTIONS] * 2
 
 
 class TestASwitchedModelTakesEffectAtTheNextCall:
@@ -4939,6 +4945,7 @@ class TestASwitchedModelTakesEffectAtTheNextCall:
             ["Model: test/m"],
             ["Model: test/other"],
         ]
+        assert [request.inline_ui_hint for request in stream.requests] == [INSTRUCTIONS] * 3
 
     @pytest.mark.asyncio
     async def test_a_switch_mid_stream_never_re_targets_the_call_in_flight(self, tmp_path):

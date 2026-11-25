@@ -6,8 +6,9 @@
  * SSE discipline: fetch-streamed snapshots with invisible lease rotation,
  * a byte-silence watchdog, bounded retries and delayed outage reporting.
  */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { handleUnauthorized } from "./api";
+import { readInlineUiMessages } from "./inline-ui-parts";
 import { SESSION_TEMPORARY_DELETED_CODE, temporaryChatsEnabled } from "./lib/temporary";
 import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
@@ -17,6 +18,7 @@ import { createLocaleBundleLoader } from "./i18n/locale-bundles";
 import type {
 	Capabilities,
 	NotificationsBlock,
+	PendingAsk,
 	SessionProjection,
 	SubagentRow,
 	TodoPhase,
@@ -48,9 +50,12 @@ function normalizeSubagent(row: SubagentRow): SubagentRow {
 	};
 }
 
-export function normalizeProjection(incoming: SessionProjection): SessionProjection {
+type WireProjection = Omit<SessionProjection, "inline_ui"> & { inline_ui?: unknown };
+
+export function normalizeProjection(incoming: WireProjection): SessionProjection {
+	const { inline_ui, ...rest } = incoming;
 	const projection: SessionProjection = {
-		...incoming,
+		...rest,
 		transcript: list(incoming.transcript),
 		todos: list(incoming.todos).map(normalizeTodoPhase),
 		subagents: list(incoming.subagents).map(normalizeSubagent),
@@ -63,6 +68,12 @@ export function normalizeProjection(incoming: SessionProjection): SessionProject
 	   the same way (the distinction is deliberately not laundered here). */
 	if (incoming.supplements !== undefined) {
 		projection.supplements = supplementsFromWire(incoming.supplements);
+	}
+	// Each accepted projection is complete. Never retain a sidecar from an
+	// earlier snapshot when this frame omits it or supplies no valid messages.
+	if (inline_ui !== undefined) {
+		const messages = readInlineUiMessages(inline_ui, projection.transcript);
+		if (messages) projection.inline_ui = messages;
 	}
 	return projection;
 }
@@ -398,6 +409,50 @@ export function useProjection(sessionId: string): ProjectionSlot {
     refresh — and without re-reading on every unrelated repaint. */
 export function useAsksRevision(): number {
 	return useSyncExternalStore(subscribe, () => asksRevision);
+}
+
+/* THE ASKS SHEET'S LAST SUCCESSFUL READ, as MODULE state.
+
+   WHY IT LIVES HERE. A chip in the agent's prose must say `withdrawn` for an
+   ask that has left the live frame — the one settled state with no transcript
+   receipt — and the only source that still knows it is the aggregate the asks
+   sheet reads. The sheet owns that read; the transcript owns the chip. Lifting
+   the rows into the store is what lets the two agree without the transcript
+   issuing a second read of the same index on every session view.
+
+   IT IS A CACHE, NOT A TRUTH: `null`/absent before the sheet has ever been
+   opened means "not read yet", which draws an id as plain rather than guessed.
+   The chip reads it filtered to its own session (ids repeat across sessions). */
+let askChipSettled: PendingAsk[] = [];
+let askChipSettledSignature = "";
+
+/** Order-insensitive, and per-ask: a re-rank is not new information, a state or
+    question change is. `askRowsSignature` is the same rule the sheet uses for
+    its own re-reads, extended with the head question the chip's label carries. */
+function askChipSettledSignatureOf(rows: readonly PendingAsk[]): string {
+	return rows
+		.map((row) =>
+			`${row?.session_id ?? ""}:${row?.ask_id ?? ""}:${row?.status ?? ""}:${
+				String(row?.questions?.[0]?.question ?? "")
+			}`,
+		)
+		.sort()
+		.join("|");
+}
+
+/** Remember the asks sheet's successful aggregate read for the chips. */
+export function rememberAskChipSettled(rows: PendingAsk[] | null | undefined): void {
+	const next = Array.isArray(rows) ? rows : [];
+	const signature = askChipSettledSignatureOf(next);
+	if (signature === askChipSettledSignature) return;
+	askChipSettledSignature = signature;
+	askChipSettled = next;
+	emit();
+}
+
+/** The last aggregate read, for chips that must name a settled ask. */
+export function useAskChipSettled(): PendingAsk[] {
+	return useSyncExternalStore(subscribe, () => askChipSettled);
 }
 
 /** Fold one list frame's per-session ask counts into a signature.
@@ -1030,12 +1085,12 @@ export function retainProjectionStream(sessionId: string): () => void {
 			   transcript's held list upserts by `rowKey` (the id), so a held row
 			   keeps the slot it already has, and a fresh mount takes the frame's
 			   (journal) order (`transcript.steer-journal-order.test.tsx`). */
-			`/api/sessions/${encodeURIComponent(sessionId)}/events?steer_journal_order=1`,
+			`/api/sessions/${encodeURIComponent(sessionId)}/events?steer_journal_order=1&inline_ui=1`,
 			"projection",
 			(data, connected) => {
 				let incoming: SessionProjection;
 				try {
-					incoming = normalizeProjection(JSON.parse(data) as SessionProjection);
+					incoming = normalizeProjection(JSON.parse(data) as WireProjection);
 				} catch {
 					return false;
 				}
@@ -1251,15 +1306,37 @@ export interface AskDraft {
 
 const EMPTY_ASK_DRAFT: AskDraft = { answers: {}, skipped: [] };
 
-function readAskDraft(askId: string): AskDraft {
+/** The draft with every SECRET question's value removed.
+ *
+ *  A secret is a credential the agent asked for by name. The draft cell lives in
+ *  `localStorage` (plaintext, readable by anything on the origin, surviving a
+ *  reload), so it must never hold one: the value is kept in the component's
+ *  memory while the card is mounted and is gone with it, as on the native app
+ *  (ADR 0005). `skipped` carries no value and is kept. Returns the SAME object
+ *  when nothing was stripped, so a caller can tell. */
+function withoutSecrets(draft: AskDraft, secretIds: readonly string[]): AskDraft {
+	if (!secretIds.some((id) => Object.hasOwn(draft.answers, id))) return draft;
+	const answers = { ...draft.answers };
+	for (const id of secretIds) delete answers[id];
+	return { ...draft, answers };
+}
+
+function readAskDraft(askId: string, secretIds: readonly string[] = []): AskDraft {
 	const raw = localStorage.getItem(ASK_DRAFT_PREFIX + askId);
 	if (!raw) return EMPTY_ASK_DRAFT;
 	try {
 		const parsed = JSON.parse(raw) as Partial<AskDraft>;
-		return {
+		const read: AskDraft = {
 			answers: parsed.answers && typeof parsed.answers === "object" ? parsed.answers : {},
 			skipped: Array.isArray(parsed.skipped) ? parsed.skipped.map(String) : [],
 		};
+		/* A CELL WRITTEN BY AN OLDER BUILD MAY STILL HOLD A SECRET (this hook used to
+		   persist every answer). Strip it and REWRITE the cell, so reading it once is
+		   enough to take the credential off disk rather than leaving it there until
+		   the ask settles. */
+		const clean = withoutSecrets(read, secretIds);
+		if (clean !== read) persistAskDraft(askId, clean, secretIds);
+		return clean;
 	} catch {
 		/* Unreadable is the same as absent: a half-written value must not take
 		   the card down, and the user's next gesture overwrites it. */
@@ -1280,11 +1357,12 @@ export function clearAskDraft(askId: string): void {
 /** A value, or an updater over the current one — React's own two spellings. */
 export type AskDraftSetter = (next: AskDraft | ((current: AskDraft) => AskDraft)) => void;
 
-function persistAskDraft(askId: string, next: AskDraft): void {
-	if (Object.keys(next.answers).length === 0 && next.skipped.length === 0) {
+function persistAskDraft(askId: string, next: AskDraft, secretIds: readonly string[] = []): void {
+	const kept = withoutSecrets(next, secretIds);
+	if (Object.keys(kept.answers).length === 0 && kept.skipped.length === 0) {
 		clearAskDraft(askId);
 	} else {
-		localStorage.setItem(ASK_DRAFT_PREFIX + askId, JSON.stringify(next));
+		localStorage.setItem(ASK_DRAFT_PREFIX + askId, JSON.stringify(kept));
 	}
 }
 
@@ -1302,17 +1380,26 @@ function persistAskDraft(askId: string, next: AskDraft): void {
  * both of the head ask's options in one evaluate, and its log said "send
  * disabled — the form is incomplete" while the frame showed one option pressed.
  */
-export function useAskDraft(askId: string): [AskDraft, AskDraftSetter] {
-	const [draft, setDraftState] = useState<AskDraft>(() => readAskDraft(askId));
+export function useAskDraft(
+	askId: string,
+	secretIds: readonly string[] = [],
+): [AskDraft, AskDraftSetter] {
+	/* THE SECRET QUESTIONS' IDS ARE KEPT OUT OF STORAGE, never out of state: the
+	   card still holds what the reader typed while it is mounted (see
+	   `withoutSecrets`). Held in a ref so the setter below reads the latest list
+	   without becoming a new function (and re-running the read) per render. */
+	const secrets = useRef(secretIds);
+	secrets.current = secretIds;
+	const [draft, setDraftState] = useState<AskDraft>(() => readAskDraft(askId, secretIds));
 	useEffect(() => {
-		setDraftState(readAskDraft(askId));
+		setDraftState(readAskDraft(askId, secrets.current));
 	}, [askId]);
 	const setDraft: AskDraftSetter = (next) =>
 		setDraftState((current) => {
 			const value = typeof next === "function" ? next(current) : next;
 			/* Written from inside the updater so the stored copy cannot lag the
 			   rendered one. Idempotent, so a double-invoked updater is harmless. */
-			persistAskDraft(askId, value);
+			persistAskDraft(askId, value, secrets.current);
 			return value;
 		});
 	return [draft, setDraft];

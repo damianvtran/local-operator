@@ -18,6 +18,8 @@ Nothing here waits on the clock: ``poll_now()`` is the tick.
 from __future__ import annotations
 
 import inspect
+import json
+import re
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -390,6 +392,112 @@ def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
     from local_operator.tools.builtin import _search_interception_config
 
     return _search_interception_config()
+
+
+def _mcp_result_normalization_applied(_watcher: ConfigWatcher) -> str:
+    """The ``mcp.result_normalization`` mode an MCP tool result is formatted under.
+
+    Observed through ``_format_with_normalization_setting`` -- the function every
+    model-facing MCP call runs its result through, which reads the setting via
+    ``read_result_normalization_mode`` (a fresh ``ConfigManager`` on
+    ``paths.config_dir()``) per result. Rather than echo the reader, the probe
+    formats a real ``CallToolResult`` and names the mode whose transform the
+    output matches, so it fails if the read is live but the transform ignores it.
+    The sample is chosen so all three modes render differently (asserted, so a
+    future normalizer change cannot make the probe silently unable to tell them
+    apart).
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+    from local_operator.tools.result_normalize import (
+        RESULT_NORMALIZATION_MODES,
+        normalize_tool_text,
+    )
+
+    raw = (
+        "Release notes ![](https://px.example/1.gif) are in the "
+        "[changelog](https://example.com/changelog) for this version."
+    )
+    rendered = {mode: normalize_tool_text(raw, mode) for mode in RESULT_NORMALIZATION_MODES}
+    assert len(set(rendered.values())) == len(rendered), rendered
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe__read",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+    )
+    matches = [mode for mode, text in rendered.items() if text == result.text]
+    assert len(matches) == 1, (result.text, rendered)
+    return matches[0]
+
+
+def _mcp_search_snippet_chars_applied(_watcher: ConfigWatcher) -> int:
+    """The length a search hit's snippet is clipped to on a model-facing MCP call.
+
+    Observed through ``_format_with_normalization_setting`` -- the formatter every
+    model-facing MCP call runs through, which reads ``mcp.search_snippet_chars``
+    via ``read_search_snippet_chars`` (a fresh ``ConfigManager`` on
+    ``paths.config_dir()``) per search result. The probe formats a real Tavily-shaped
+    ``CallToolResult`` from the bare tool name ``search`` under the default
+    ``prose-links`` normalization (the clip is off under ``off``) and returns the
+    clipped snippet's length, so it fails if the read is live but the clip ignores
+    it. The snippet has no whitespace, so ``clip_snippet`` cuts it to exactly the
+    limit (no trailing ``rstrip`` shortening) and is far longer than either value.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+
+    hit = {"title": "Probe", "url": "https://example.com/probe", "snippet": "x" * 5000}
+    raw = json.dumps({"query": "probe", "results": [hit]})
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe_search",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+        mcp_tool_name="search",
+    )
+    # The longest ``x…`` run is the clipped snippet whichever form carries it:
+    # JSON, or the text ``mcp.result_text_rendering`` (default on) renders.
+    return max(len(run) for run in re.findall("x+…", result.text))
+
+
+def _mcp_result_text_rendering_applied(_watcher: ConfigWatcher) -> bool:
+    """Whether a model-facing MCP fetch result reaches the model as rendered text.
+
+    Observed through ``_format_with_normalization_setting``, which reads
+    ``mcp.result_text_rendering`` via ``read_result_text_rendering`` (a fresh
+    ``ConfigManager`` on ``paths.config_dir()``) per result. The probe formats a
+    real ``{url, content}`` page payload and reports whether the text the model
+    gets is the rendered ``url: ...`` header form (True) or still JSON (False),
+    so it fails if the read is live but the renderer ignores it.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.mcp.manager import _format_with_normalization_setting
+
+    raw = json.dumps({"url": "https://example.com/probe", "content": "Probe page body."})
+    result = _format_with_normalization_setting(
+        CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False),
+        "probe-call",
+        "mcp__probe_fetch",
+        ToolContext(),
+        producer_scope=None,
+        machine_read=False,
+        mcp_tool_name="fetch",
+    )
+    if result.text == raw:
+        return False
+    assert result.text == "url: https://example.com/probe\n\nProbe page body.", result.text
+    return True
 
 
 def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
@@ -865,6 +973,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # Defaults to True, so the probe disables it -- the tuple is (value written,
     # reader), and a reader that negated would report the BASELINE as the change.
     "web_search.read_enabled": (False, lambda s, w: _search_settings(w).read_enabled),
+    # The Claude-subscription opt-in defaults to False and gates the Anthropic
+    # native leg's subscription mode; `execute_web_search` rebuilds settings per
+    # call, so a toggle from another process reaches the very next search.
+    "web_search.claude_subscription_search": (
+        True,
+        lambda s, w: _search_settings(w).claude_subscription_search,
+    ),
     "web_fetch.timeout_seconds": (5.0, lambda s, w: _fetch_settings(w).timeout_seconds),
     "web_fetch.max_bytes": (1_048_576, lambda s, w: _fetch_settings(w).max_bytes),
     "web_fetch.max_redirects": (1, lambda s, w: _fetch_settings(w).max_redirects),
@@ -909,6 +1024,19 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
     "tools.search_interception.block": (False, lambda s, w: _search_interception(w)[1]),
     "tools.search_interception.rg_excludes": (False, lambda s, w: _search_interception(w)[2]),
+    # Read per MCP result by ``mcp.manager.read_result_normalization_mode``, so a
+    # write lands on the next tool call. Observed as the transform actually applied
+    # to a formatted result; ``strip-links`` because ``off`` would also match a
+    # reader that never ran the normalizer at all.
+    "mcp.result_normalization": ("strip-links", lambda s, w: _mcp_result_normalization_applied(w)),
+    # Read per MCP search result by ``mcp.manager.read_search_snippet_chars``.
+    # Observed as the clipped snippet's actual length (400 before, 120 after),
+    # not the reader's return value.
+    "mcp.search_snippet_chars": (120, lambda s, w: _mcp_search_snippet_chars_applied(w)),
+    # Read per MCP result by ``mcp.manager.read_result_text_rendering``.
+    # Observed as the form the model receives (rendered text before, the
+    # server's JSON after), not the reader's return value.
+    "mcp.result_text_rendering": (False, lambda s, w: _mcp_result_text_rendering_applied(w)),
     # ``bash.query_budget.*`` is the same shape: read per ``bash`` call through a
     # fresh ``ConfigManager`` (``builtin._query_budget_config``), so an edit lands
     # on the next command. Observed through that reader, not the raw mapping.
@@ -1215,6 +1343,17 @@ HOST_OWNED_LIVE_SECTIONS = {
     # in ``tests/unit/test_capacity_recovery.py`` (the off switch and keep margin
     # rewritten between updates in one process take effect on the next one).
     "updates",
+    # ``runtime_memory_guard`` is host-owned in the ``memory_guard`` shape: its keys
+    # (``session.runtime_memory.enabled`` / ``limit_mb``) bound what the WAKE
+    # SUPERVISOR's memory sweep may end, not what a session does. The sweep
+    # (``_MachineMemorySweep.sweep_runtimes`` -> ``runtime_memory_pass`` with no
+    # ``settings``) re-reads config.yml every pass, so an edit applies on the next
+    # pass with no restart; no ``Session`` holds it, so a probe here could watch
+    # nothing move. The live half is proven in
+    # ``tests/unit/session/runtime/test_runtime_memory.py::test_live_*`` (``enabled``
+    # and ``limit_mb`` rewritten between two passes on one tracker take effect on
+    # the next pass, each with a no-edit negative control).
+    "runtime_memory_guard",
     # ``console`` is host-owned in the ``desktop``/``runtime`` shape: the limits are
     # admission policy for the DESKTOP CONSOLE HOST, not for a Python ``Session`` —
     # nothing in ``Session`` reads the ``console`` block, so a probe in this file

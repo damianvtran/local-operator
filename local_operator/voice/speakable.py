@@ -30,7 +30,9 @@ the request path.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Literal
 
 #: The registry default for ``voice.max_spoken_chars`` (``settings_io.py``
 #: carries the same literal; ``tests/unit/test_settings_io.py`` pins the two).
@@ -66,15 +68,60 @@ _TABLE_RULE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$",
 _EMPHASIS = re.compile(r"(\*\*|__|\*|_|~~)(?=\S)(.+?)(?<=\S)\1")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _WHITESPACE = re.compile(r"\s+")
+# Display cleaning (``display_text``): the same markup removal, but lines survive.
+_BULLET_LINE = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+(.*)$")
+_HEADING_LINE = re.compile(r"^\s{0,3}#{1,6}\s*")
+_QUOTE_LINE = re.compile(r"^\s*>\s?")
+_INLINE_SPACE = re.compile(r"[ \t]+")
+_BLANK_RUNS = re.compile(r"\n{3,}")
+#: A URL or inline-code span is parked behind this sentinel (private-use code
+#: points) while emphasis is unwrapped, so an underscore or asterisk inside an
+#: address or an identifier is never eaten. ``display_text`` strips both code
+#: points from its input first, so a reply can never forge a placeholder.
+_URL_HOLD = re.compile("\ue000(\\d+)\ue001")
+#: ``clean`` only knows backtick fences; the display path also hides ``~~~`` ones.
+#: A tilde fence must open its own line (a lone ``~~~`` inside prose is not one).
+_DISPLAY_FENCE = re.compile(r"```.*?(?:```|\Z)|(?:(?<=\n)|\A)[ \t]{0,3}~~~.*?(?:~~~|\Z)", re.DOTALL)
+#: GFM accepts one dash per delimiter cell. ``-`` or ``|-`` alone is ordinary text
+#: (an empty bullet, a dash), so a short delimiter row only counts directly under a
+#: header line that carries a pipe (``_is_table_rule``).
+_DISPLAY_TABLE_RULE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+#: Display emphasis, one alternative per marker, tried in this order at each position.
+#: Unlike ``clean`` (whose output nobody reads), a screen shows identifiers, so an
+#: underscore or asterisk INSIDE a word is not emphasis: ``my_var_name``, ``a*b*c``,
+#: ``foo_bar.py``. ``_``/``__`` need a non-word character (or the line edge) outside
+#: both ends. ``*``/``**`` are only refused when an end sits between two ASCII word
+#: characters, so ``**bold**`` still works beside CJK text, which has no spaces.
+#: ``__`` also needs whitespace inside: a bare ``__init__`` / ``__name__`` is a Python
+#: dunder far more often than one bold word, and the agent writes bold as ``**``.
+_W = "A-Za-z0-9_"
+#: Longest emphasised span: bounds the backtracking per opener (see _MAX_EMPHASIS_LINE).
+_SPAN = 300
+_DISPLAY_EMPHASIS = re.compile(
+    r"(?<!\w)__(?=\S)(?P<d>\S(?:(?!__).)*?\s(?:(?!__).)*?)(?<=\S)__(?!\w)"
+    rf"|(?<!\w)_(?=[^\s_])(?P<u>.{{1,{_SPAN}}}?)(?<=\S)_(?!\w)"
+    rf"|(?:(?<![{_W}])|(?=\*+(?![{_W}*])))(?P<m>\*\*|\*)(?=\S)(?P<s>.{{1,{_SPAN}}}?)(?<=\S)"
+    rf"(?:(?<![{_W}])(?P=m)|(?P=m)(?![{_W}]))"
+    rf"|~~(?=\S)(?P<t>.{{1,{_SPAN}}}?)(?<=\S)~~"
+)
+#: ``_DISPLAY_EMPHASIS`` backtracks on unclosed markers (``_a _a _a ...``), so a line
+#: this long is left as written rather than risk quadratic time on a request path.
+_MAX_EMPHASIS_LINE = 2000
 _SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
+
+
+#: Where the spoken words came from: the agent's own ``Spoken:`` paragraph
+#: (``summary``) or the whole reply (``reply``, today's behaviour and the fallback).
+SpokenSource = Literal["summary", "reply"]
 
 
 @dataclass(frozen=True)
 class Speakable:
-    """The text to speak, and whether the cap cut it."""
+    """The text to speak, whether the cap cut it, and which part of the reply it is."""
 
     text: str
     truncated: bool
+    source: SpokenSource = "reply"
 
 
 def normalise_max_chars(value: object) -> int:
@@ -91,6 +138,77 @@ def normalise_max_chars(value: object) -> int:
     except (TypeError, ValueError):
         return DEFAULT_MAX_SPOKEN_CHARS
     return max(MIN_MAX_SPOKEN_CHARS, min(MAX_MAX_SPOKEN_CHARS, number))
+
+
+#: The structural marker the agent opens its spoken paragraph with. Machinery, not
+#: copy: never translated, never spoken, matched case-insensitively and only at the
+#: start of a paragraph. Models bold or italicise labels, so ``**Spoken:**``,
+#: ``**Spoken**:`` and ``_Spoken:_`` all count; group 1 is the opening emphasis so
+#: a ``**Spoken: …**`` that wraps the whole paragraph can drop its closing marker.
+#: At most three spaces of indent, as in Markdown: four spaces or a tab make an
+#: indented CODE block, which may quote the protocol but is never the marker. A
+#: ``>`` quote prefix is not whitespace, so a quoted ``> Spoken:`` is not one either.
+_SPOKEN_LABEL = re.compile(
+    r"(?:[ \t\r]*\n)*[ ]{0,3}(\*\*|__|\*|_)?spoken(?:\1)?[ \t]*:(?:\1)?[ \t]*", re.IGNORECASE
+)
+#: A blank line, however many follow: the end of a paragraph.
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t\r]*\n(?:[ \t\r]*\n)*")
+#: Private-use filler that hides a code fence's bytes from the paragraph scan.
+_FENCE_MASK = "\ue002"
+
+
+def _scan_spoken(text: str) -> tuple[str | None, tuple[int, int] | None]:
+    """``(body, span)`` of the last ``Spoken:`` paragraph; ``(None, None)`` for none.
+
+    ``span`` is the paragraph's ``(start, stop)`` in ``text``. See
+    :func:`select_spoken` for the rules.
+    """
+    masked = _DISPLAY_FENCE.sub(lambda match: _FENCE_MASK * len(match.group(0)), text)
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for stop in (*(match.start() for match in _PARAGRAPH_BREAK.finditer(masked)), len(text)):
+        spans.append((start, stop))
+        if stop < len(text):
+            start = _PARAGRAPH_BREAK.match(masked, stop).end()  # type: ignore[union-attr]
+    found: str | None = None
+    where: tuple[int, int] | None = None
+    for index, (start, stop) in enumerate(spans):
+        label = _SPOKEN_LABEL.match(masked, start, stop)
+        if label is None:
+            continue
+        body = text[label.end() : stop].strip()
+        # ``**Spoken: …**`` wraps the whole paragraph: its closer has no opener left.
+        opener = label.group(1)
+        if opener and label.group(0).count(opener) % 2 == 1 and body.endswith(opener):
+            body = body[: -len(opener)].rstrip()
+        if not body and index + 1 < len(spans):
+            # The label alone on its line, the summary in the paragraph after it.
+            body = text[spans[index + 1][0] : spans[index + 1][1]].strip()
+        found, where = body, (start, stop)
+    return found, where
+
+
+def select_spoken(text: str) -> str | None:
+    """The agent's ``Spoken:`` paragraph, label removed, or ``None`` for no marker.
+
+    A PURE function of ``text``: ``/voice/text`` and every ``/voice/speech``
+    segment re-resolve the same message and must agree on what is spoken, so
+    nothing here may read state, a clock or a setting.
+
+    The LAST paragraph that opens with the label wins: a model that writes it
+    twice means the later one. A paragraph runs to the next blank line. A code
+    fence is masked first, so ``Spoken:`` quoted inside one (an example of this
+    very protocol) is not a marker and a blank line inside one does not end a
+    paragraph; an indented code block or a ``>`` quote is not one either (see
+    ``_SPOKEN_LABEL``). A trailing partial message simply has no marker yet.
+
+    A paragraph that is the label alone takes the paragraph right after it as the
+    summary: the label is machinery and is never itself the thing spoken.
+
+    Returns ``""`` for a marker with nothing after it; the caller reads that as
+    "fall back to the reply", never as silence.
+    """
+    return _scan_spoken(text)[0]
 
 
 def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_WORD) -> str:
@@ -117,6 +235,122 @@ def clean(text: str, *, code_omitted: str = CODE_PLACEHOLDER, link: str = LINK_W
     text = _EMPHASIS.sub(r"\2", text)
     text = text.replace("|", " ")
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def _is_table_rule(line: str, above: str) -> bool:
+    stripped = line.strip()
+    if _TABLE_RULE.fullmatch(stripped) and "-" in stripped:
+        return True
+    header = above.strip()
+    return (
+        "|" in header
+        and bool(header.strip("| \t"))
+        and not _DISPLAY_TABLE_RULE.fullmatch(header)
+        and bool(_DISPLAY_TABLE_RULE.fullmatch(stripped))
+    )
+
+
+def _unwrap_emphasis(match: re.Match[str]) -> str:
+    return next(group for name, group in match.groupdict().items() if name != "m" and group)
+
+
+def _inline(text: str, hold: Callable[[str], str]) -> str:
+    """Park code spans and URLs, then unwrap emphasis (twice: ``**_x_**`` has two layers).
+
+    Code is parked first so a URL's greedy match cannot swallow the closing backtick.
+    A URL gives its trailing emphasis marks back (``**https://a.com**``), so they pair
+    up with the opener instead of printing as asterisks.
+    """
+    text = _INLINE_CODE.sub(lambda match: hold(match.group(1)), text)
+
+    def _url(match: re.Match[str]) -> str:
+        url = match.group(0)
+        core = url.rstrip("*_~")
+        return hold(core) + url[len(core) :]
+
+    text = _URL.sub(_url, text)
+    if len(text) <= _MAX_EMPHASIS_LINE:
+        text = _DISPLAY_EMPHASIS.sub(_unwrap_emphasis, text)
+        text = _DISPLAY_EMPHASIS.sub(_unwrap_emphasis, text)
+    return text
+
+
+def display_text(text: str, *, code_omitted: str = CODE_PLACEHOLDER) -> str:
+    """The reply cleaned for a SCREEN: ``clean``'s markup removal, lines kept.
+
+    ``clean`` folds every run of whitespace and drops pipes because a speaker has
+    no lines; shown flat, a markdown table reads as run-on words. This keeps the
+    line structure instead: single newlines stay, three or more become one blank
+    line, a bullet keeps its marker, a table row is one line with its cells joined
+    by `` · `` (the ``|---|`` rule row goes), and a web address stays as written
+    (it is on screen anyway, unlike in ``clean``). Fenced code is still
+    ``code_omitted`` (``~~~`` fences too), links keep their text, and emphasis,
+    inline-code backticks, heading and quote markers are removed. Unlike ``clean``,
+    what is shown must stay readable: code-span contents and URLs are untouched, and
+    an ``_``/``*`` inside a word (``my_var_name``) is not emphasis. Pure and
+    uncapped: the audio cap never applies.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # The placeholder takes its own line, without adding a blank one when the
+    # fence already started or ended a line.
+    text = _DISPLAY_FENCE.sub(
+        lambda match: (
+            ("" if match.start() == 0 or text[match.start() - 1] == "\n" else "\n")
+            + code_omitted
+            + ("" if text[match.end() : match.end() + 1] == "\n" else "\n")
+        ),
+        text,
+    )
+    # After the fence pass, so the placeholder is covered too: no input may carry
+    # the code points ``hold`` parks text behind (it would restore the wrong span).
+    text = text.replace("\ue000", "").replace("\ue001", "")
+    text = _EMBEDDED_COMMAND.sub(" ", text)
+    text = _MD_LINK.sub(r"\1", text)
+    held: list[str] = []
+
+    def hold(span: str) -> str:
+        # Resolved now, so a span parked around another (code holding an escaped
+        # pipe) restores in one pass at the end.
+        held.append(_URL_HOLD.sub(lambda match: held[int(match.group(1))], span))
+        return f"\ue000{len(held) - 1}\ue001"
+
+    lines = text.split("\n")
+    rules = {
+        index
+        for index, line in enumerate(lines)
+        if _is_table_rule(line, lines[index - 1] if index else "")
+    }
+    # A table is the run of pipe lines touching a rule row (header above, body
+    # below); a line that merely STARTS with a pipe is a row on its own.
+    rows: set[int] = set()
+    for index in rules:
+        for step in (-1, 1):
+            at = index + step
+            while 0 <= at < len(lines) and "|" in lines[at] and at not in rules:
+                rows.add(at)
+                at += step
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index in rules:
+            continue
+        if index in rows or line.lstrip().startswith("|"):
+            # An escaped pipe is a literal one, not a cell break (GFM).
+            line = line.replace("\\|", hold("|"))
+            cells = [
+                _INLINE_SPACE.sub(" ", _inline(cell, hold)).strip() for cell in line.split("|")
+            ]
+            out.append(" · ".join(cell for cell in cells if cell))
+            continue
+        line = _QUOTE_LINE.sub("", _HEADING_LINE.sub("", line))
+        bullet = _BULLET_LINE.match(line)
+        if bullet:
+            indent, marker, rest = bullet.groups()
+            body = _INLINE_SPACE.sub(" ", _inline(rest, hold)).strip()
+            out.append(f"{indent.expandtabs(4)}{marker} {body}")
+            continue
+        out.append(_INLINE_SPACE.sub(" ", _inline(line, hold)).strip())
+    joined = _BLANK_RUNS.sub("\n\n", "\n".join(out)).strip()
+    return _URL_HOLD.sub(lambda match: held[int(match.group(1))], joined)
 
 
 def cap(text: str, max_chars: int, *, tail: str = TRUNCATION_TAIL) -> Speakable:
@@ -173,8 +407,29 @@ def speakable(
     tail: str = TRUNCATION_TAIL,
     code_omitted: str = CODE_PLACEHOLDER,
     link: str = LINK_WORD,
+    summary: bool = True,
 ) -> Speakable:
-    """Clean then cap: the one call ``/voice/text`` makes."""
-    return cap(
-        clean(text, code_omitted=code_omitted, link=link), normalise_max_chars(max_chars), tail=tail
-    )
+    """Select, clean, then cap: the one call ``/voice/text`` makes.
+
+    The agent's ``Spoken:`` paragraph is spoken when it wrote one that survives
+    ``clean`` (``source="summary"``); a missing, empty or cleaned-away paragraph
+    falls back to the whole reply, byte-for-byte what shipped before selection
+    existed (an empty final marker is dropped from it first: the label is never
+    spoken). Either way the same ``clean`` and the same cap apply, so
+    ``max_chars`` guards a six-sentence summary exactly as it guards a reply.
+
+    ``summary=False`` skips selection. A pending approval card's text can quote
+    model-written arguments, and a paragraph in one that happened to open with
+    the label would otherwise stand in for the whole card: what is spoken for a
+    gate must stay the whole card.
+    """
+    limit = normalise_max_chars(max_chars)
+    chosen, marker = _scan_spoken(text) if summary else (None, None)
+    if chosen:
+        cleaned = clean(chosen, code_omitted=code_omitted, link=link)
+        if cleaned:
+            return replace(cap(cleaned, limit, tail=tail), source="summary")
+    if chosen == "" and marker is not None:
+        # An empty final marker: speak the reply, but never the label itself.
+        text = text[: marker[0]] + text[marker[1] :]
+    return cap(clean(text, code_omitted=code_omitted, link=link), limit, tail=tail)

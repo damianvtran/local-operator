@@ -397,3 +397,46 @@ def test_a_newer_payload_is_not_refused_by_an_older_viewer() -> None:
     )
     assert rebuilt.transcript[0].stop_reason == "stop"
     assert not hasattr(rebuilt.transcript[0], "a_future_field")
+
+
+BINDING_NOTICE_TYPE = "session_credential_binding_notice.v1"
+
+
+def test_the_account_change_notice_is_not_a_phone_row_in_either_arm() -> None:
+    """Operator ruling 2026-11-23: "[session credential] This session is now using
+    <account> on <device>." is not shown on the phone — local or remote session.
+
+    The HISTORY arm is the one production feeds it through (the notice is appended
+    as a context message, never emitted as an event): the attach seed of a live
+    session (``fold_history``) and every history page share that fold. The live
+    delivery entry refuses it too, driven the way production reaches it (a bound
+    fold and a ``PeerMessageDeliveredEvent``). A neighbouring incident notice in
+    the same history still paints, so the drop is by type, not by notice family.
+    """
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+    from local_operator.mobile.types import SessionProjection
+
+    binding = CustomMessage(
+        id="c-binding",
+        custom_type=BINDING_NOTICE_TYPE,
+        attribution="system",
+        details={"text": "[session credential] This session is now using acct on laptop."},
+    )
+    durable = history_fold([binding, custom(SESSION_INCIDENT_TYPE, "c-incident")])
+    assert "c-binding" not in durable, [row.kind for row in durable.values()]
+    assert durable["c-incident"].kind == "notice"
+    assert durable["c-incident"].custom_type == SESSION_INCIDENT_TYPE
+
+    projection = SessionProjection(session_id="s-live", pid=1)
+    fold = ProjectionFold(projection)
+    fold.set_peer_cycle_source(None, transcript=None, owner_epoch="owner-epoch")
+    deliveries = (("c-binding", BINDING_NOTICE_TYPE), ("m-bridge", TEAM_BRIDGE_TYPE))
+    for message_id, custom_type in deliveries:
+        fold.fold_event(
+            PeerMessageDeliveredEvent(
+                message_id=message_id, body="payload", custom_type=custom_type, sender={}
+            )
+        )
+    live = {row.id for row in projection.transcript}
+    assert "c-binding" not in live
+    assert "m-bridge" in live, "the neighbouring delivery must still paint"

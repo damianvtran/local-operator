@@ -584,27 +584,36 @@ def test_parent_race_after_safe_open_closes_untransferred_descriptor(lane, monke
     assert rows(lane) == []
 
 
-def _reaches_primitive(source):
+#: The serving module is the primitive's one sanctioned caller, so reaching IT
+#: is reaching the primitive: the scan follows that edge too.
+_MODULES = ("mentioned_file_read", "mentioned_file_serve")
+
+
+def _reaching_nodes(tree):
     names = {
-        "mentioned_file_read",
+        *_MODULES,
         "OwnerMentionedFileReader",
         "begin_establishment",
         "SealedVersion",
+        "MentionedFileServing",
     }
+    literals = {*_MODULES, *("local_operator.network." + m for m in _MODULES)}
     # Imports, aliases, direct symbol use and literal dynamic imports. This
     # guards accidental serving reachability, not arbitrary hostile Python.
-    return any(
-        (
+    return [
+        node
+        for node in ast.walk(tree)
+        if (
             isinstance(node, ast.Import)
             and any(
-                alias.name == "mentioned_file_read" or alias.name.endswith(".mentioned_file_read")
+                alias.name in _MODULES or alias.name.endswith(tuple("." + m for m in _MODULES))
                 for alias in node.names
             )
         )
         or (
             isinstance(node, ast.ImportFrom)
             and (
-                (node.module or "").endswith(".mentioned_file_read")
+                (node.module or "").endswith(tuple("." + m for m in _MODULES))
                 or any(alias.name in names for alias in node.names)
             )
         )
@@ -613,10 +622,79 @@ def _reaches_primitive(source):
         or (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
-            and node.value in {"mentioned_file_read", "local_operator.network.mentioned_file_read"}
+            and node.value in literals
         )
-        for node in ast.walk(ast.parse(source))
-    )
+    ]
+
+
+def _reaches_primitive(source):
+    return bool(_reaching_nodes(ast.parse(source)))
+
+
+def _gated_install_edge(tree):
+    """The nodes of files.install's ONE sanctioned edge, or None if it is not exact.
+
+    Exactly: inside ``def install``, an ``if _mentioned_file_serving_enabled(...)``
+    whose body is the lazy ``from local_operator.network import
+    mentioned_file_serve`` plus ``mentioned_file_serve.install(server)``.
+    """
+    (install,) = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "install"]
+    gates = [
+        n
+        for n in install.body
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Call)
+        and isinstance(n.test.func, ast.Name)
+        and n.test.func.id == "_mentioned_file_serving_enabled"
+        and not n.orelse
+    ]
+    if len(gates) != 1:
+        return None
+    body = gates[0].body
+    if (
+        len(body) != 2
+        or not isinstance(body[0], ast.ImportFrom)
+        or body[0].module != "local_operator.network"
+        or [(a.name, a.asname) for a in body[0].names] != [("mentioned_file_serve", None)]
+        or ast.unparse(body[1]) != "mentioned_file_serve.install(server)"
+    ):
+        return None
+    return {id(node) for statement in body for node in ast.walk(statement)}
+
+
+def _production_offenders(sources):
+    """Product files reaching the primitive, minus EXACTLY the two sanctioned edges.
+
+    WHY THE EXCEPTION IS EXACT AND MUST STAY SO. Serving is reachable only
+    behind the default-off ``mentioned_file_serving`` gate: ``files.install``'s
+    gated lazy import and the thin serving module itself. Anything wider (a
+    module-level import in files.py, a second caller, a relay/CLI/tool/route
+    reference) would make the primitive loadable with the gate off, or give it
+    a second entry nobody reviewed. Widening this needs its own review.
+    """
+    offenders = []
+    for name, source in sources.items():
+        if name in {"network/mentioned_file_read.py", "network/mentioned_file_serve.py"}:
+            continue
+        tree = ast.parse(source)
+        found = _reaching_nodes(tree)
+        if name == "network/files.py":
+            allowed = _gated_install_edge(tree)
+            if allowed is None:
+                offenders.append(name + " (gated edge is not exact)")
+                continue
+            found = [node for node in found if id(node) not in allowed]
+        if found:
+            offenders.append(name)
+    return offenders
+
+
+def _product_sources():
+    product = Path(__file__).resolve().parents[3] / "local_operator"
+    return {
+        path.relative_to(product).as_posix(): path.read_text(encoding="utf-8")
+        for path in product.rglob("*.py")
+    }
 
 
 @pytest.mark.parametrize(
@@ -648,13 +726,34 @@ def test_no_production_registration_or_import_reaches_dormant_primitive():
         "remote_files",
     )
     assert all((product / name).exists() for name in surfaces)
-    primitive = product / "network" / "mentioned_file_read.py"
-    offenders = []
-    for path in product.rglob("*.py"):
-        if path == primitive:
-            continue
-        source = path.read_text(encoding="utf-8")
-        if _reaches_primitive(source):
-            offenders.append(str(path.relative_to(root)))
-    assert offenders == [], f"B1 must stay dormant; production references: {offenders}"
+    sources = _product_sources()
+    # The sanctioned edge exists and is what files.py reaches through.
+    assert _reaches_primitive(sources["network/files.py"])
+    offenders = _production_offenders(sources)
+    assert offenders == [], f"B1 must stay gated; production references: {offenders}"
     assert "mentioned_file_read" not in (root / "pyproject.toml").read_text()
+    assert "mentioned_file_serve" not in (root / "pyproject.toml").read_text()
+
+
+@pytest.mark.parametrize(
+    "name,extra",
+    [
+        ("network/relay.py", "\nfrom local_operator.network import mentioned_file_serve\n"),
+        ("cli.py", "\nimport local_operator.network.mentioned_file_read as reader\n"),
+        ("network/files.py", "\nfrom local_operator.network import mentioned_file_serve\n"),
+        ("network/files.py", "\ndef other(server):\n    mentioned_file_serve.install(server)\n"),
+        ("network/new_surface.py", "x = MentionedFileServing(server)\n"),
+    ],
+)
+def test_a_third_production_reference_still_trips_the_scan(name, extra):
+    sources = _product_sources()
+    sources[name] = sources.get(name, "") + extra
+    assert _production_offenders(sources), f"{name} gained an edge the scan missed"
+
+
+def test_files_install_edge_loosened_from_its_gate_trips_the_scan():
+    sources = _product_sources()
+    gate = "    if _mentioned_file_serving_enabled(server):\n"
+    assert sources["network/files.py"].count(gate) == 1
+    sources["network/files.py"] = sources["network/files.py"].replace(gate, "    if True:\n")
+    assert _production_offenders(sources) == ["network/files.py (gated edge is not exact)"]

@@ -1317,13 +1317,18 @@ def _render(action: str, payload: dict[str, Any], *, show_removed: bool = False)
                 # admission sentence alone says nothing about its skill pin.
                 lines.append(skill_transfer_receipt(status)["message"])
             return lines
-        from local_operator.resume import peer_reason_words, session_state_words
+        from local_operator.resume import (
+            english_status_render,
+            peer_reason_words,
+            session_row_state_words,
+        )
 
         lines = [
             "  ".join(
                 part
                 for part in (
-                    f"{session_state_words(str(row.get('state') or '')) or '?':10}",
+                    # The row's boot claim too (PR #4572 QA Q6); English, as a tool result.
+                    f"{session_row_state_words(row, render=english_status_render) or '?':10}",
                     str(row.get("conversation_name") or "").strip() or "(untitled)",
                     str(row.get("session_id") or ""),
                     "on "

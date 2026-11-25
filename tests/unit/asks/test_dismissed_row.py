@@ -72,7 +72,9 @@ def _readers(
         if window is not None
         else queue.projection(now)
     )
-    kwargs = {} if window is None else {"lapsed_visible_ms": window}
+    # Annotated so the splat is not inferred as dict[str, int]: index_asks
+    # also takes the bool ``include_orphans``, which pyright would reject.
+    kwargs: dict[str, Any] = {} if window is None else {"lapsed_visible_ms": window}
     return {
         "projection": projection,
         "session_asks": store.session_asks(tmp_path, "s1", now=now, **kwargs),

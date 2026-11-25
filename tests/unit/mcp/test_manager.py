@@ -9,6 +9,7 @@ body and its attempt seam run (agent review round 2, major-1).
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -689,6 +690,325 @@ class TestToolCallHygieneAndRetry:
         assert result.is_error is True
         assert "tool not found" in result.text
         assert connects["n"] == baseline  # no reconnect for non-retriable errors
+        await manager.disconnect_all()
+
+
+class TestDroppedArgumentNote:
+    """A strict schema makes the bridge withhold an undeclared argument; the
+    SAME call's result must say so (``clean_outbound_args``). Driven through
+    ``tool.execute`` -- the path a model's call takes -- because a note that
+    the bridge computes and the manager never attaches helps nobody.
+    """
+
+    STRICT_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}, "timeout_s": {"type": "integer"}},
+        "required": ["command"],
+        "additionalProperties": False,
+    }
+
+    async def _manager(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, session: FakeSession
+    ) -> McpManager:
+        manager = McpManager(str(project))
+        schema = self.STRICT_SCHEMA
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            if name == "fast":
+                return ServerConnection(
+                    name=name, config=cfg, session=session, tools=[_tool("search", schema)]
+                )
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        session.calls.clear()
+        return manager
+
+    @pytest.mark.asyncio
+    async def test_misnamed_argument_is_named_in_the_result_and_the_call_still_runs(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = FakeSession()
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "sleep 90", "timeout": 120, "i": "Waiting"}, None, None, ToolContext()
+        )
+
+        # Still dropped and still sent: a call that succeeded before succeeds now.
+        assert session.calls == [("search", {"command": "sleep 90"})]
+        assert result.is_error is False
+        # The server's own text is untouched; the note is a block after it.
+        assert len(result.content) == 2 and result.text.startswith("ok\n[Note: ")
+        note = result.text
+        # Exactly one name: the harness's own intent field is not reported as
+        # the model's mistake.
+        assert "NOT sent: timeout. " in note and "Waiting" not in note
+        assert "Declared arguments: command, timeout_s." in note
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_failed_call_carries_the_note_too(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The recorded loss was a TIMEOUT: the error result is exactly where
+        the model needs to learn its ``timeout`` never arrived."""
+        session = FakeSession(raise_on_call=ValueError("Timed out while waiting for response"))
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "sleep 90", "timeout": 120}, None, None, ToolContext()
+        )
+
+        assert result.is_error is True
+        assert "Timed out while waiting for response" in result.text
+        assert len(result.content) == 2 and "NOT sent: timeout. " in result.text
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_clean_call_and_silent_drops_add_nothing(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Control: declared arguments, the intent field and an empty
+        placeholder leave the result exactly as the server returned it."""
+        session = FakeSession()
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1",
+            {"command": "ls", "timeout_s": 5, "i": "Listing", "cwd": ""},
+            None,
+            None,
+            ToolContext(),
+        )
+
+        assert session.calls == [("search", {"command": "ls", "timeout_s": 5})]
+        assert result.text == "ok" and len(result.content) == 1
+        await manager.disconnect_all()
+
+    #: The shape ``monitors.diff.unpack_records`` exists for: one JSON object
+    #: whose payload string holds blank-line-separated records.
+    #: Compact separators: a fixed point of ``mcp.result_normalization``, so
+    #: the model-call control below is byte-identical too (the machine-read
+    #: calls are never normalized: ``test_machine_read_results_are_never_normalized``).
+    RECORD_ENVELOPE = (
+        '{"messages":"=== Message from a ===\\nhello\\n\\n=== Message from b ===\\nhi"}'
+    )
+
+    @pytest.mark.asyncio
+    async def test_search_tool_hits_are_clipped_on_the_model_call_only(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The manager threads the BARE tool name (``search``) and the live
+        ``mcp.search_snippet_chars`` default into the bridge; a machine-read
+        call of the same tool keeps the server's bytes."""
+        hit = {
+            "title": "Mark Sutcliffe",
+            "url": "https://example.com/m",
+            "snippet": "Mayor of Ottawa since 2022. " * 60,
+            "published_date": None,
+        }
+        raw = json.dumps({"query": "q", "results": [hit, hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        model_call = await tool.execute("c0", {"command": "q"}, None, None, ToolContext())
+        # ``mcp.result_text_rendering`` (default on) renders the hit list as
+        # text: one 3-space snippet line per hit, clipped, the null field gone.
+        lines = model_call.text.split("\n")
+        snippets = [line[3:] for line in lines if line.startswith("   Mayor of Ottawa")]
+        assert len(snippets) == 2 and all(len(s) <= 400 for s in snippets)
+        assert "published_date" not in model_call.text
+        assert lines.count("   https://example.com/m") == 2
+        machine = await tool.execute(
+            "c1",
+            {"command": "q"},
+            None,
+            None,
+            ToolContext().model_copy(update={"monitor_check": True}),
+        )
+        assert machine.text == raw
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_seen_url_ledger_is_per_session_and_skips_machine_reads(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A repeat of a URL the SAME session was shown loses its snippet;
+        another session (a subagent) and a machine-read call do not share or
+        feed that ledger."""
+        hit = {"title": "Olivia Chow", "url": "https://example.com/chow", "snippet": "Mayor."}
+        raw = json.dumps({"query": "q", "results": [hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        async def call(session_id: str, **flags: bool) -> str:
+            ctx = ToolContext(session_id=session_id).model_copy(update=flags)
+            return (await tool.execute("c", {"command": "q"}, None, None, ctx)).text
+
+        assert "Mayor." in await call("parent")
+        assert "Mayor." not in await call("parent")  # seen in this session
+        assert "https://example.com/chow" in await call("parent")  # title + url stay
+        assert "Mayor." in await call("child")  # its own ledger
+        assert await call("watched", monitor_check=True) == raw  # machine read: server bytes
+        assert "Mayor." in await call("watched")  # ... and it recorded nothing
+        await manager.disconnect_all()
+
+    async def _ledger_tool(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> tuple[McpManager, Callable[[str], Any]]:
+        hit = {"title": "Olivia Chow", "url": "https://example.com/chow", "snippet": "Mayor."}
+        raw = json.dumps({"query": "q", "results": [hit]})
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        async def call(session_id: str) -> str:
+            ctx = ToolContext(session_id=session_id)
+            return (await tool.execute("c", {"command": "q"}, None, None, ctx)).text
+
+        return manager, call
+
+    @pytest.mark.asyncio
+    async def test_forget_seen_urls_lets_a_post_compaction_repeat_keep_its_snippet(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #4540 review M1: after a compaction the model no longer has the
+        earlier snippet, so the session's ledger is dropped and a repeat hit
+        carries its snippet again; another session's ledger is untouched."""
+        manager, call = await self._ledger_tool(project, monkeypatch)
+        assert "Mayor." in await call("parent")
+        assert "Mayor." in await call("other")
+        assert "Mayor." not in await call("parent")  # control: elided before compaction
+        manager.forget_seen_urls("parent")  # what the compaction commit calls
+        assert "Mayor." in await call("parent")  # seen before compaction, shown again
+        assert "Mayor." not in await call("parent")  # ...and the new ledger works
+        assert "Mayor." not in await call("other")  # other session keeps its ledger
+        manager.forget_seen_urls("never-seen")  # unknown id: no-op
+        manager.forget_seen_urls("")
+        await manager.disconnect_all()
+        assert manager._seen_urls == {}  # review m5: teardown drops every ledger
+
+    @pytest.mark.asyncio
+    async def test_a_caller_without_a_session_id_gets_no_ledger(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PR #4540 review m4: id-less callers never share one ``""`` ledger."""
+        manager, call = await self._ledger_tool(project, monkeypatch)
+        assert "Mayor." in await call("")
+        assert "Mayor." in await call("")  # no elision without a session id
+        assert "" not in manager._seen_urls
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "machine_read",
+        [{"monitor_check": True}, {"result_parsed_by_harness": True}],
+        ids=["monitor-tick", "harness-parsed-delegate"],
+    )
+    async def test_machine_read_results_are_never_normalized(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, machine_read: dict[str, bool]
+    ) -> None:
+        """A monitor tick is compared against a baseline an already-armed
+        monitor stored before ``mcp.result_normalization`` existed, and a
+        delegate's text is ``json.loads``-ed by the built-in: both keep the
+        server's bytes, while the model's own call is normalized."""
+        page = "Body line with an icon ![](https://px.example/1.gif) and   spaces.\\n" * 10
+        raw = '{"messages": "' + page + '"}'
+        session = FakeSession(
+            call_result=CallToolResult(content=[TextContent(type="text", text=raw)], is_error=False)
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        model_call = await tool.execute("c0", {"command": "read"}, None, None, ToolContext())
+        assert "px.example" not in model_call.text  # control: normalization is on
+        machine = await tool.execute(
+            "c1", {"command": "read"}, None, None, ToolContext().model_copy(update=machine_read)
+        )
+        assert machine.text == raw
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "machine_read",
+        [{"monitor_check": True}, {"result_parsed_by_harness": True}],
+        ids=["monitor-tick", "harness-parsed-delegate"],
+    )
+    async def test_no_note_where_the_harness_parses_the_result_text(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, machine_read: dict[str, bool]
+    ) -> None:
+        """Regression (review R1-M1): a monitor may be armed on a strict MCP
+        tool with an undeclared argument (``test_mcp_extras_are_not_refused``),
+        and every tick then carried the note. The tick's text is what the
+        scheduler compares and ``is_record_log`` must parse WHOLE, so the
+        result has to be the server's text byte-for-byte -- same for a
+        built-in's delegate that ``json.loads`` it. The argument is still
+        dropped; the model's own call (the control) still gets the note."""
+        from local_operator.monitors.diff import is_record_log
+
+        envelope = self.RECORD_ENVELOPE
+        session = FakeSession(
+            call_result=CallToolResult(
+                content=[TextContent(type="text", text=envelope)], is_error=False
+            )
+        )
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        args = {"command": "read", "extra": 1}
+
+        # What the same tool returns when nothing was dropped: the baseline an
+        # already-armed monitor stored before this note existed.
+        clean = await tool.execute("c0", {"command": "read"}, None, None, ToolContext())
+        assert clean.text == envelope and is_record_log(clean.text)
+
+        unattended = await tool.execute(
+            "c1", dict(args), None, None, ToolContext().model_copy(update=machine_read)
+        )
+        assert unattended.text == clean.text == envelope
+        assert len(unattended.content) == len(clean.content) == 1
+        assert is_record_log(unattended.text)
+
+        # Control: the same call on a model's own turn is told, and that text
+        # is exactly what would have broken the record view above.
+        noted = await tool.execute("c2", dict(args), None, None, ToolContext())
+        assert noted.text.startswith(envelope + "\n[Note: ") and "NOT sent: extra. " in noted.text
+        assert "The call was sent without it." in noted.text
+        assert not is_record_log(noted.text)
+
+        # The exemption withholds the NOTE, never the hygiene: all three calls
+        # reached the server without the undeclared key.
+        assert session.calls == [("search", {"command": "read"})] * 3
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_failed_monitor_tick_carries_no_note_either(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The error branches go through the same gate: a failing tick's text
+        is recorded as the check's output and compared like any other."""
+        session = FakeSession(raise_on_call=ValueError("Timed out while waiting for response"))
+        manager = await self._manager(project, monkeypatch, session)
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+
+        result = await tool.execute(
+            "c1", {"command": "read", "extra": 1}, None, None, ToolContext(monitor_check=True)
+        )
+
+        assert result.is_error is True
+        assert len(result.content) == 1 and "[Note:" not in result.text
         await manager.disconnect_all()
 
 

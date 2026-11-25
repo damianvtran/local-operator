@@ -74,6 +74,7 @@ from textual.geometry import Region, Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
+from textual.reactive import Reactive
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
@@ -97,6 +98,7 @@ from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
 from local_operator.harness.approval import (
+    AUTO_MODE_EFFECT,
     LOOSENING_KEPT_BY_ASK_NOTICE,
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
@@ -451,6 +453,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopied,
     EditorCopyStale,
     EditorDraftStarted,
+    EditorPageRequested,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -4427,6 +4430,15 @@ class Band(Chrome):
     other's reasons.
     """
 
+    #: NO AUTO LINK STYLING (PR #4558 design D1). The band's `!` carries an
+    #: ``@click`` meta (the one-click way back to ``ask``), and Textual's
+    #: ``auto_links`` repaints any ``@click`` segment in ``$link-color`` —
+    #: measured turning the alarm's danger red (225,121,113) into link grey
+    #: (212,212,210), i.e. the one alarm in the band lost its ink the moment it
+    #: became actionable. The click itself rides the segment meta and is
+    #: unaffected; only the style override is switched off.
+    auto_links: Reactive[bool] = Reactive(False)
+
     class BoxChanged(TextualMessage):
         """The band's content box is a different size than it was."""
 
@@ -5236,7 +5248,8 @@ class OperatorApp(App[None]):
         # `down`, `pageup`, `pagedown` and `home`/`end` are TextArea cursor
         # bindings, `tab` never leaves the composer, `shift+tab` is effort
         # cycling (priority), and `ctrl+up`/`ctrl+down` page the todo overflow.
-        # So without a chord of its own, "scroll up to load" was mouse-only.
+        # Plain page keys now fall through from the editor at its draft
+        # boundaries; these chords still jump straight to either endpoint.
         #
         # `ctrl+home`/`ctrl+end` because TextArea binds NEITHER (audited
         # against textual 8.2.8: it binds `home,ctrl+a` and `end,ctrl+e` for
@@ -22017,7 +22030,10 @@ class OperatorApp(App[None]):
         else:
             # "MEMBERS", never "roles" (R6): the count comes from member_count(),
             # which excludes the manager, and every sibling surface says members.
-            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+            # Keyed with an ICU plural (not a hand-rolled `s`) so every locale
+            # picks its own plural arm; `shown` stays the raw count, matching
+            # `skills_led_by` beside it.
+            parts.append(_t(_x.skills_member_count(count=slots, shown=str(slots))))
         if registry is None:
             registry = self._team_registry()
         # Only a CONVERSATION row is marked: the account is the default a reader
@@ -31247,6 +31263,8 @@ class OperatorApp(App[None]):
             on_set_global_auto=(
                 None if bridge_latched else partial(self._set_global_auto_for_card, source)
             ),
+            # Tightening is never refused, latched or not: the way back stays.
+            on_set_session_ask=partial(self._set_session_ask_for_card, source),
             person_only=bridge_latched,
             notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
@@ -31923,7 +31941,7 @@ class OperatorApp(App[None]):
             # screen asserting something no longer true.
             self._append_block(
                 NoticeBlock(
-                    "tool approvals: auto — /approvals ask restores prompting",
+                    "tool approvals: auto — click ! auto or /approvals ask to restore prompting",
                     "warning",
                 )
             )
@@ -32048,6 +32066,16 @@ class OperatorApp(App[None]):
         # leaves the user looking at a question whose subject is gone.
         self._close_aside()
         self._clear_transcript()
+
+    def action_approvals_ask(self) -> None:
+        """Click on the band's `!`: switch this session back to asking.
+
+        Exactly ``/approvals ask`` — the same handler, the same receipt — so a
+        click and the typed command cannot drift. Session scope only: the saved
+        default is a separate, deliberate ``/approvals default ask``, and a
+        click on a status glyph must not rewrite ``config.yml``.
+        """
+        self._cmd_approvals("ask", self._notice)
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
         """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
@@ -32204,7 +32232,7 @@ class OperatorApp(App[None]):
                 else " — /approvals default auto saves it for new sessions"
             )
             notice(
-                "tool approvals: auto — every tool runs without asking (this session)" + save_hint,
+                f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)" + save_hint,
                 "warning",
             )
         else:
@@ -32274,7 +32302,7 @@ class OperatorApp(App[None]):
         on_disk = self._configured_approvals_mode()
         saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
         effect = (
-            "every tool runs without asking"
+            AUTO_MODE_EFFECT
             if self._approve_all
             else "write and command tools prompt before running"
         )
@@ -32596,6 +32624,34 @@ class OperatorApp(App[None]):
             )
         return ApprovalSettingOutcome(kind="ok", mode="auto", provenance="session")
 
+    def _set_session_ask_for_card(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The card's `S` while this session is auto: back to asking (R1-M2).
+
+        The mirror of :meth:`_set_session_auto_for_card` — same record, same
+        routing to an owner elsewhere, and the card stays PARKED. No latch
+        check: tightening needs no authority and is never refused.
+        """
+        if self._gate_is_owned_elsewhere():
+            card = self._approval
+            if card is None:
+                return ApprovalSettingOutcome(kind="refused", mode="auto", provenance="session")
+            self.run_worker(
+                self._route_approvals_setting(card, "ask", "session"),
+                thread=False,
+                group="session",
+            )
+            return None
+        self._explicit_approvals_mode = "ask"
+        self._set_approve_all(False)
+        problem = self._persist_approval_override(source, "ask")
+        if problem:
+            return ApprovalSettingOutcome(
+                kind="applied-unsaved", mode="ask", provenance="session", reason=problem
+            )
+        return ApprovalSettingOutcome(kind="ok", mode="ask", provenance="session")
+
     def _set_global_auto_for_card(
         self, source: SessionInteraction
     ) -> ApprovalSettingOutcome | None:
@@ -32805,23 +32861,22 @@ class OperatorApp(App[None]):
         data = (outcome or {}).get("data") or {}
         ok = data.get("ok")
         saved = data.get("approval_saved_for_resume", True)
+        # The receipt's first words name the mode it switched TO; the `S`-as-ask
+        # route (R1-M2) expects "tool approvals: ask", not "...: auto".
+        said = "tool approvals: ask" if argument == "ask" else "tool approvals: auto"
         if ok is None:
             # Fallback for an owner built before the structured outcome. The
             # runtime's DEFAULT-write failure receipt also begins
             # "tool approvals: auto", which is exactly how a failed loosening
             # used to be painted as saved; the failure family names itself, so
             # its absence is part of the evidence, not decoration.
-            if text.startswith("tool approvals: auto") and "NOT saved for resume" in text:
+            if text.startswith(said) and "NOT saved for resume" in text:
                 # A session switch whose live half took and whose record did
                 # not. It is NOT a plain failure — the gate moved — so it gets
                 # the applied-and-unsaved sentence rather than "unchanged".
                 ok, saved = True, False
             else:
-                ok = (
-                    text.startswith("tool approvals: auto")
-                    and "NOT saved" not in text
-                    and "NOT applied" not in text
-                )
+                ok = text.startswith(said) and "NOT saved" not in text and "NOT applied" not in text
         if not ok:
             failure = "NOT saved" in text or "NOT applied" in text
             card.show_setting_outcome(
@@ -32834,7 +32889,7 @@ class OperatorApp(App[None]):
                 ),
             )
             return
-        mode = str(data.get("approval_mode") or "auto")
+        mode = str(data.get("approval_mode") or ("ask" if argument == "ask" else "auto"))
         provenance = str(
             data.get("approval_provenance") or ("session" if scope == "session" else "global")
         )
@@ -36253,6 +36308,8 @@ class OperatorApp(App[None]):
             # contents by identity to know which transcript blocks the user
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
+            from local_operator.session.session import stamp_tui_composer_steer
+
             steer_message = Message.user(sent, images)
             # The delivery mode: only `queue`/`both` ride the keyword, and only
             # when this session's handle takes it. `steer` keeps the legacy call
@@ -36297,6 +36354,7 @@ class OperatorApp(App[None]):
                     can_send_again=False,
                 )
                 return
+            stamp_tui_composer_steer(steer_message)
             if mode != "steer":
                 OperatorApp._steer_message_with_delivery(session, steer_message, mode)
             else:
@@ -41660,8 +41718,19 @@ class OperatorApp(App[None]):
                         aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
                         details[name.casefold()] = (
                             display_form(name, str(getattr(row, "label", "") or "")),
-                            (getattr(row, "description", "") or "").strip() or "no description",
-                            f"alias: {', '.join(aliases)}" if aliases else "",
+                            # Resolved to finished strings here, so the page
+                            # cannot re-translate them itself: `_apply_language`
+                            # re-runs this method and hands the rows back via
+                            # `SettingsView.set_teams` on a live switch. Aliases
+                            # are user-typed identifiers, so only the label is
+                            # copy — the joined names pass through untouched.
+                            (getattr(row, "description", "") or "").strip()
+                            or _t(_x.skills_team_no_description()),
+                            (
+                                _t(_x.skills_team_aliases(aliases=", ".join(aliases)))
+                                if aliases
+                                else ""
+                            ),
                         )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
@@ -41669,7 +41738,7 @@ class OperatorApp(App[None]):
                 display, summary, alias_fact = details.get(
                     team.name.casefold(), (team.name, team.description or "", "")
                 )
-                facts = team.detail or "team"
+                facts = team.detail or _t(_x.skills_team_fallback_facts())
                 if alias_fact:
                     facts = f"{facts} · {alias_fact}"
                 rows.append((display, facts, summary))
@@ -44683,7 +44752,7 @@ class OperatorApp(App[None]):
         if not announce or self._gate_is_owned_elsewhere():
             return _ApprovalsFollow("", False)
         return (
-            _ApprovalsFollow("tool approvals now auto — every tool runs without asking", False)
+            _ApprovalsFollow(f"tool approvals now auto — {AUTO_MODE_EFFECT}", False)
             if wanted_auto
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
@@ -49219,9 +49288,17 @@ class OperatorApp(App[None]):
         # watcher path reaches here with no keypress to follow it. `_rows_key`
         # and `_paint_token` carry the active locale, so this repaint recomposes
         # the whole list in the new language rather than reusing the old strips.
+        #
+        # Team rows are the exception the locale-keyed caches cannot cover: the
+        # app resolves them to finished strings (member count, alias label, the
+        # "no description" fallback) when the page opens, so a repaint alone
+        # re-inks the OLD language (PR #4508 R1/Q1). Re-resolve them here and
+        # hand them over through the narrow setter, which repaints once and
+        # keeps cursor/pane/expansion state — `load` would also re-read the
+        # credential store and catalogues for rows that need no re-resolving.
         settings_view = self._settings_view
         if settings_view is not None:
-            settings_view._repaint()
+            settings_view.set_teams(self._settings_team_rows())
         # /info owns painted Statics, not render-time lookups. Repaint the
         # existing presentation through this shared command/config-watch hook:
         # re-opening it would lose its snapshot/scroll and re-run costly probes.
@@ -50115,6 +50192,19 @@ class OperatorApp(App[None]):
         performs. The visible page is the target, as in :meth:`action_transcript_home`.
         """
         self._reader_transcript_view().action_scroll_end()
+
+    def on_editor_page_requested(self, message: EditorPageRequested) -> None:
+        # Reuse the focused transcript's page path so scroll provenance
+        # releases tail-follow before a later stream update can move the reader.
+        if self.screen.focused is not message.editor:
+            return
+        view = self._reader_transcript_view()
+        if not view.allow_vertical_scroll:
+            return
+        if message.upward:
+            view.action_page_up()
+        else:
+            view.action_page_down()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.
@@ -61586,7 +61676,7 @@ class OperatorApp(App[None]):
             on_disk = self._configured_approvals_mode()
             saved = on_disk if on_disk is not None else mode_word(self._approvals_default_auto)
             effect = (
-                "every tool runs without asking"
+                AUTO_MODE_EFFECT
                 if self._approve_all
                 else "write and command tools prompt before running"
             )
@@ -61649,7 +61739,7 @@ class OperatorApp(App[None]):
             )
             return SlashResult(
                 kind="notice",
-                text="tool approvals: auto — every tool runs without asking (this session)"
+                text=f"tool approvals: auto — {AUTO_MODE_EFFECT} (this session)"
                 + save_hint
                 + not_saved,
                 style="warning",
@@ -64173,6 +64263,12 @@ class OperatorApp(App[None]):
         # path that retires a reasoning phase for a turn that reasoned and then
         # called a tool. Idempotent: a `reasoning_end` already retired it.
         self._retire_reasoning_block()
+        if message.retract_inline_ui and not message.text.strip():
+            block, self._streaming_block = self._streaming_block, None
+            if block is not None:
+                self._transcript_view().remove_block(block)
+            self._refresh_working_activity()
+            return
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the
@@ -67774,6 +67870,21 @@ _SEARCH_STATE_TOKENS: dict[str, str] = {
     # describing the provider beside them (round-2 D2-3).
     "excluded": "muted",
     "needs setup": "muted",
+    # Codes added with the chain's leg split (`provider_state_code`): the two
+    # that spend take `warning` like `auto paid`; the rest stay `muted`.
+    "auto free, then key": "muted",
+    "auto native plan": "muted",
+    "auto native paid": "warning",
+    "auto radient": "warning",
+    # `warning`, not `muted`: out of credits is the one Radient state the user has
+    # to ACT on, and the dimmest ink made it the quietest row on screen (PR #4553
+    # design round 1, D5).
+    "radient refused": "warning",
+    # Listed twins take their auto twins' ink: `enabled, then key` matches
+    # `auto free, then key` (free first), `enabled (credits)` matches
+    # `auto radient` (design round 1, D1/D2).
+    "enabled, then key": "muted",
+    "enabled (credits)": "warning",
 }
 
 
@@ -67781,33 +67892,28 @@ def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
     """The `chain` row: every leg in try order, each marker in its own ink.
 
     The markers come from the provider module's single table
-    (``chain_leg_marker``), so the CLI prints exactly the ones this row paints, and
-    the ink comes from ``CHAIN_MARKER_TOKENS`` -- round 2 measured the same `(paid)`
+    (``chain_leg_entries``), so the CLI prints exactly the ones this row paints, and
+    the ink comes with each entry -- round 2 measured the same `(paid)`
     fact at plain dim here and amber on the provider row two lines below, which
     made the row that says a leg will spend the least emphatic one on screen
     (round-2 D2-3).
     """
-    from local_operator.web_search.providers import (
-        CHAIN_MARKER_TOKENS,
-        chain_leg_marker,
-    )
+    from local_operator.web_search.providers import chain_leg_entries
 
     dim = Style(color=theme_mod.semantic_color("dim"))
     row = Text()
-    legs = [status for status in statuses if status.enabled]
-    if not legs:
+    # LEGS, not providers: a keyed Tavily is walked twice (free, then its key in
+    # the API_KEY band), and the row shows the chain the search actually walks.
+    entries = chain_leg_entries(list(statuses))
+    if not entries:
         row.append(_t(_x.providers_none()), style=dim)
         return row
-    for index, status in enumerate(legs):
+    for index, (label, marker, token) in enumerate(entries):
         if index:
             row.append(" → ", style=dim)
-        row.append(status.label, style=dim)
-        marker = chain_leg_marker(status)
+        row.append(label, style=dim)
         if marker:
-            row.append(
-                f" {marker}",
-                style=Style(color=theme_mod.semantic_color(CHAIN_MARKER_TOKENS[marker])),
-            )
+            row.append(f" {marker}", style=Style(color=theme_mod.semantic_color(token)))
     return row
 
 
@@ -67822,11 +67928,16 @@ def _search_status_detail(status: "ProviderStatus") -> Text:
     """
     # Function-local like every other provider touch in this module: the app is the
     # TUI's entry point and the provider graph stays off its import path.
-    from local_operator.web_search.providers import provider_state_label
+    from local_operator.web_search.providers import (
+        provider_state_code,
+        provider_state_label,
+    )
 
-    state = provider_state_label(status)
+    # Ink by CODE: the newer state words are translated, so the word itself is
+    # not a stable table key.
+    token = _SEARCH_STATE_TOKENS[provider_state_code(status)]
     detail = Text()
-    detail.append(state, style=Style(color=theme_mod.semantic_color(_SEARCH_STATE_TOKENS[state])))
+    detail.append(provider_state_label(status), style=Style(color=theme_mod.semantic_color(token)))
     detail.append(" · ", style=Style(color=theme_mod.semantic_color("dim")))
     detail.append(status.detail, style=Style(color=theme_mod.semantic_color("dim")))
     return detail

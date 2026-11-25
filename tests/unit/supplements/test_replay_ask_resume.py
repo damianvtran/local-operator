@@ -432,55 +432,17 @@ async def test_real_session_bash_never_promotes_stale_directory_decoys(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "answer,eligible",
+    "answer",
     [
-        (
-            "- Between 10 and 20 comments, between 30 and 40 profiles, "
-            "between 50 and 60 links, between 70 and 80 matches.",
-            False,
-        ),
-        (
-            "- Up to 296 comments, at least 225 profiles, about 325 links "
-            "and approximately 3194 matches.",
-            False,
-        ),
-        ("- Delta: -10 comments, -20 profiles, -30 links, -40 matches.", False),
-        ("- Forecast: 10-20 comments, 30-40 profiles, 50-60 links and 70-80 matches.", False),
-        (
-            (
-                "- Ticket 101 covers comments; ticket 202 covers profiles; ticket "
-                "303 covers links; ticket 404 covers matches."
-            ),
-            False,
-        ),
-        (
-            "- IDs: case-296 comments, case-225 profiles, case-325 links and case-3194 matches.",
-            False,
-        ),
-        (
-            (
-                "- Dates: 2026-10-14 comments, 2026-10-15 profiles, 2026-10-16 "
-                "links, 2026-10-17 matches."
-            ),
-            False,
-        ),
-        (
-            (
-                "- Added 296 supplementary comments to 225 ACME Production "
-                "profiles, covering 325 links and 3,194 matches."
-            ),
-            True,
-        ),
+        "- Between 10 and 20 comments, before 100 matches.",
+        "- Added 296 supplementary comments to 225 ACME Production profiles, "
+        "covering 325 links and 3,194 matches.",
     ],
 )
-async def test_real_session_numeric_evidence_controls_graphics_question(
-    tmp_path, answer, eligible, monkeypatch
+async def test_real_session_never_schedules_automatic_follow_on_graphics(
+    tmp_path, answer, monkeypatch
 ):
-    """The real Session freezes the answer, the subscriber runs its actual prefilter
-    and decision. A recording vendor would say yes, but must never be called for
-    an invented dataset. Positive control records the exact four entity counts.
-    Generator rendering is intercepted: this cell tests evidence/decision, not paid HTML.
-    """
+    """Neither estimates nor eligible counts may trigger the retired automatic job."""
     vendor = _Vendor()
     session = _make_session(
         tmp_path / "numeric-session",
@@ -494,10 +456,7 @@ async def test_real_session_numeric_evidence_controls_graphics_question(
     handle._supplements._seam = lambda: vendor
     rendered = []
 
-    def record_render(*args, sounds=()):
-        # Match the runner's keyword-only audio handoff without invoking paid rendering.
-        # This numeric-only turn must still reach graphics with no generated audio.
-        assert list(sounds) == []
+    def record_render(*args, **kwargs):
         rendered.append(args)
 
     monkeypatch.setattr(handle._supplements, "_render", record_render)
@@ -509,16 +468,8 @@ async def test_real_session_numeric_evidence_controls_graphics_question(
             lambda: handle._supplements._task is not None and handle._supplements._task.done(),
             timeout=10,
         )
-        assert vendor.asked == ([dec.GRAPHICS_QUESTION_ID] if eligible else [])
-        assert bool(rendered) is eligible
-        if eligible:
-            datasets = rendered[0][2]
-            assert {r[0]: r[1] for r in datasets[0].rows} == {
-                "comments": "296",
-                "profiles": "225",
-                "links": "325",
-                "matches": "3194",
-            }
+        assert vendor.asked == []
+        assert rendered == []
         assert session.transcript.latest_custom(SUPPLEMENT_CUSTOM_TYPE) is None
     finally:
         await handle.dispose()

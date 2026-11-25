@@ -867,6 +867,19 @@ def purge_network_artifacts(
                 continue
             candidate.unlink()
             removed["audit_files"].append(candidate.name)
+        # The audit writers' siblings go too (round 1, R1-4): the cross-process append
+        # lock and the directory of rows parked by a writer that timed out on it. A
+        # FULL purge removes every writer that could contend, so the lock's "never
+        # unlink" rule (``audit.AUDIT_LOCK_SUFFIX``) does not apply here, and parked
+        # rows belong to the log being deleted. Only these two literal names.
+        lock_leaf = audit_path(root).with_name(AUDIT_FILENAME + ".lock")
+        if lock_leaf.is_file() and not lock_leaf.is_symlink():
+            lock_leaf.unlink()
+            removed["audit_files"].append(lock_leaf.name)
+        parked = audit_path(root).with_name(AUDIT_FILENAME + ".pending")
+        if parked.is_dir() and not parked.is_symlink():
+            shutil.rmtree(parked, ignore_errors=True)
+            removed["audit_files"].append(parked.name)
         if catalog_path(root).exists():
             catalog_path(root).unlink()
             removed["catalog"] = True

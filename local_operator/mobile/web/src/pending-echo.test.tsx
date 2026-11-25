@@ -29,7 +29,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import * as api from "./api";
-import { clearPendingEchoes, registerPendingEcho } from "./pending-echo";
+import {
+	clearPendingEchoes,
+	markPendingEchoAccepted,
+	markPendingEchoWaking,
+	registerPendingEcho,
+} from "./pending-echo";
 import type { SessionProjection, TranscriptEntry } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({
@@ -434,5 +439,48 @@ describe("optimistic pending echo", () => {
 		await waitFor(() => expect(pendingRows(view)).toHaveLength(0));
 		view.publish([], true);
 		expect(pendingRows(view)).toHaveLength(0);
+	});
+});
+
+describe("a pending row for a session that is still waking (design round 1, D2)", () => {
+	/* A cold prompt's boot runs for seconds; a bare `sending…` over that wait
+	   read as stuck. The flag is the row's own, set and cleared through the
+	   store, so the caption follows it on the rendered row. */
+	it("says `waking session…` while flagged, and `sending…` once cleared", async () => {
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: false,
+		});
+		const view = open();
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
+		expect(pendingRows(view)[0]?.textContent).toContain("sending…");
+
+		markPendingEchoWaking("s1", COMMAND_ID, true);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("sending…");
+
+		markPendingEchoWaking("s1", COMMAND_ID, false);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("sending…"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("waking session…");
+	});
+
+	it("lets an acceptance outrank the waking flag", async () => {
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: false,
+			waking: true,
+		});
+		const view = open();
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+
+		markPendingEchoAccepted("s1", COMMAND_ID);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("sent"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("waking session…");
 	});
 });

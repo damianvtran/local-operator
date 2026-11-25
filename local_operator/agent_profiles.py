@@ -461,17 +461,20 @@ def seed_catalogue() -> list[AgentProfile]:
 # -- registry-backed profiles ----------------------------------------------
 
 
-def _agent_instructions(registry: "AgentRegistry", agent: "AgentData") -> str:
+def _agent_instructions(
+    registry: "AgentRegistry", agent: "AgentData", *, strict: bool = False
+) -> str:
     """The agent's own ``system_prompt.md``, bounded, or ''.
 
-    Never raises: a profile whose instructions cannot be read still names a
-    valid role with a valid tool surface, and losing the delegation over a
-    read error would be a worse outcome than running it with less guidance.
+    Ordinary delegation is best effort. A move verifies the authored
+    revision, so it cannot substitute an empty body for a failed read.
     """
 
     try:
         return (registry.get_agent_system_prompt(agent.id) or "")[:MAX_INSTRUCTIONS_CHARS]
-    except Exception:  # noqa: BLE001 - guidance is best-effort
+    except Exception:  # noqa: BLE001 - ordinary guidance is best-effort
+        if strict:
+            raise
         logger.warning("could not read instructions for agent %s", agent.id)
         return ""
 
@@ -529,7 +532,9 @@ def is_specialist(agent: "AgentData") -> bool:
     )
 
 
-def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentProfile:
+def profile_from_agent(
+    registry: "AgentRegistry", agent: "AgentData", *, strict_instructions: bool = False
+) -> AgentProfile:
     """Convert a registered agent into a role profile.
 
     ``when_to_use`` and the tool surface are carried in the agent's tags with a
@@ -547,7 +552,7 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
         label=str(getattr(agent, "label", "") or ""),
         description=str(agent.description or ""),
         tags=list(agent.tags or []),
-        instructions=_agent_instructions(registry, agent),
+        instructions=_agent_instructions(registry, agent, strict=strict_instructions),
         agent_id=agent.id,
         model=agent.model,
         hosting=str(agent.hosting or ""),
@@ -877,6 +882,7 @@ def resolve_profile(
     *,
     registry: Any = None,
     strict_registry: bool = False,
+    strict_instructions: bool = False,
 ) -> AgentProfile | None:
     """Resolve a role NAME to a profile: registry first, then packaged seeds.
 
@@ -962,15 +968,25 @@ def resolve_profile(
         # ordinary chat agents, and honouring one of those would hand a child
         # the full write inventory under a role's name.
         if agent is not None and is_role(agent):
-            return profile_from_agent(registry, agent)
+            return profile_from_agent(registry, agent, strict_instructions=strict_instructions)
     return load_seed(key)
 
 
 def resolve_profile_or_specialist(
+    name: str | None, *, registry: Any = None
+) -> tuple[str | None, AgentProfile | None, str, str]:
+    kind, profile, prompt, display, _ = resolve_profile_or_specialist_identity(
+        name, registry=registry
+    )
+    return kind, profile, prompt, display
+
+
+def resolve_profile_or_specialist_identity(
     name: str | None,
     *,
     registry: Any = None,
-) -> tuple[str | None, "AgentProfile | None", str, str]:
+    strict: bool = False,
+) -> tuple[str | None, AgentProfile | None, str, str, str | None]:
     """Resolve a NAME to an attachable persona, priority order fixed HERE.
 
     The SINGLE source of truth for how a name becomes a persona, shared by
@@ -995,7 +1011,7 @@ def resolve_profile_or_specialist(
        ``None``), so ``reviewer`` and friends still resolve on a fresh machine
        with no registry row of that name.
 
-    Returns ``(kind, profile, specialist_prompt, display_name)`` where ``kind``
+    Returns ``(kind, profile, specialist_prompt, display_name, registry_id)`` where ``kind``
     is ``"role"``/``"seed"`` (``profile`` set, ``specialist_prompt`` empty),
     ``"specialist"`` (``profile`` ``None``, ``specialist_prompt`` set), or
     ``None`` (nothing attachable by that name — ``profile`` ``None`` and both
@@ -1010,21 +1026,24 @@ def resolve_profile_or_specialist(
 
     key = (name or "").strip()
     if not key:
-        return (None, None, "", "")
-    profile = resolve_profile(key, registry=registry)
+        return (None, None, "", "", None)
+    profile = resolve_profile(
+        key, registry=registry, strict_registry=strict, strict_instructions=strict
+    )
     if profile is not None and profile.agent_id is not None:
-        return ("role", profile, "", profile.name)
+        return ("role", profile, "", profile.name, profile.agent_id)
     if registry is not None:
         try:
             specialist = registry.get_agent_by_name(key)
             if specialist is not None and is_specialist(specialist):
                 prompt = (registry.get_agent_system_prompt(specialist.id) or "").strip()
-                return ("specialist", None, prompt, str(specialist.name))
-        except Exception:  # noqa: BLE001 - registry problems mean "not found"
-            pass
+                return ("specialist", None, prompt, str(specialist.name), str(specialist.id))
+        except Exception:  # noqa: BLE001 - best-effort for non-authority lookups
+            if strict:
+                raise
     if profile is not None:
-        return ("seed", profile, "", profile.name)
-    return (None, None, "", "")
+        return ("seed", profile, "", profile.name, None)
+    return (None, None, "", "", None)
 
 
 def classify_name(

@@ -59,6 +59,9 @@ from local_operator.i18n.keys import cli_network_send as _network_send
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
 
+# Stdlib-only by contract (its docstring), so the CLI's import cost is unchanged.
+from local_operator.network.types import REMOTE_COLD_BOOT_BUDGET_S
+
 if TYPE_CHECKING:
     from local_operator.mobile.types import SessionRecord
     from local_operator.session.attached import _RuntimeLocator
@@ -7843,8 +7846,10 @@ PILOT_BIND_TIMEOUT_S = 120.0
 #: Publication grace for a stored send after the peer ACKs engage. Use the
 #: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
 #: inside, never on top of, the CLI's bind deadline. A warm or refused engage
-#: never gets this grace.
-PILOT_COLD_BOOT_BUDGET_S = 30.0
+#: never gets this grace. The number lives in ``network.types`` because the OWNER
+#: classifies its constructing rows (``starting`` → ``not_responding``) with the
+#: same budget, and a second literal is how the two ends would drift apart.
+PILOT_COLD_BOOT_BUDGET_S = REMOTE_COLD_BOOT_BUDGET_S
 
 #: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
 #: outer bound fires. The viewer is given the bind budget as an absolute deadline
@@ -8686,24 +8691,54 @@ async def _pilot_act(
             # The viewer gets THIS verb's budget as its deadline; without it the
             # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
             deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
-            if verb == "send" and not live:
+            # EVERY PILOT VERB, LIVE ROW OR STORED, takes #4470's publication
+            # grace — send, slash, steer and peek alike.
+            # #4470 limited it to stored rows, but a live row can be mid-restart
+            # too: the measured busy->idle case (Mac->node2) had the peer ACCEPT
+            # the engage while the restarted runtime had not republished its
+            # record yet, and the short bind loop then reported "could not start
+            # a runtime" for a session that was merely starting.
+            # A ``--slash`` on a STORED session needs it for a cold boot (#4470):
+            # the bind's short locate retry (``AttachedSession._bind_under_lock``)
+            # gave up before the boot published its record (measured 15.9-22.1 s,
+            # ``relay._warm_after_create``), so the operator's ``/team <name>``
+            # never reached the owner's attach path, the only cure for a team the
+            # GHSA-wmg2-rrrj-p599 gate refused (session 32deb1ecf45b).
+            # Live rows of the OTHER verbs were excluded until 2026-11-25, when a
+            # ``--slash`` on a LIVE, published session with a fresh heartbeat
+            # (pid 2407612 on lop-remote-node-2) failed at once with "could not
+            # start a runtime for this session" while the same command against
+            # 19 stored sessions succeeded. ``RemoteOwner.locate`` answers from
+            # the peer-facts op, which fanned out a FULL catalog listing (232
+            # rows took 11.56 s of a 12 s probe budget); one overrun yields no
+            # row, locate returns (None, None) and the bind raised on that ONE
+            # transient miss. The grace re-asks locate inside this deadline.
+            # Invariants kept: the grace only runs after a SUCCESSFUL engage (a
+            # refused engage raises before any locate, so a genuine refusal still
+            # returns its real code and sentence at once), it is clamped to this
+            # deadline and PILOT_COLD_BOOT_BUDGET_S, it only reads the published
+            # record, and it ends in the same "still starting ... NOT queued"
+            # refusal — no resend, queue or re-engage.
 
-                async def _wait_for_publication(
-                    locate: _RuntimeLocator, bind_deadline: float
-                ) -> SessionRecord:
-                    return await _pilot_wait_for_runtime_record(
-                        locate, bind_deadline, session_id, device
-                    )
-
-                bind = viewer.bind_runtime(
-                    deadline=deadline, wait_for_publication=_wait_for_publication
+            async def _wait_for_publication(
+                locate: _RuntimeLocator, bind_deadline: float
+            ) -> SessionRecord:
+                return await _pilot_wait_for_runtime_record(
+                    locate, bind_deadline, session_id, device
                 )
-            else:
-                bind = viewer.bind_runtime(deadline=deadline)
+
+            bind = viewer.bind_runtime(
+                deadline=deadline, wait_for_publication=_wait_for_publication
+            )
             await asyncio.wait_for(bind, timeout=PILOT_BIND_TIMEOUT_S)
         except ProjectionRefusal as exc:
-            if verb != "send":
-                raise
+            # EVERY VERB answers a refused engage as the peer's own code and
+            # sentence. #4470 converted only ``send`` and let the other verbs
+            # re-raise the bare ``ProjectionRefusal``, which nothing above
+            # ``_pilot_act`` catches — a refused live ``--slash``/``--steer``
+            # escaped ``main`` as a traceback instead of a refusal. Now that
+            # every verb takes the publication grace, the invariant "a refused
+            # engage returns its real error at once" has to hold for all of them.
             raise MeshRefusal(exc.code, exc.sentence) from exc
         except (TimeoutError, ConnectionError) as exc:
             # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
@@ -8857,10 +8892,6 @@ async def _pilot_mailbox_direct(
         remote_owner_for,
     )
     from local_operator.network.types import MeshRefusal
-    from local_operator.session.attached import (
-        _BIND_RETRY_ATTEMPTS,
-        _BIND_RETRY_INITIAL_S,
-    )
 
     peer_row = PeerRow(
         session_id=session_id,
@@ -8888,25 +8919,25 @@ async def _pilot_mailbox_direct(
         # a warm one answers the engage at once. The short locate retry is the
         # bind loop's own, by its constants rather than a copy of their values:
         # a runtime that has just been spawned publishes its record after the
-        # engage returns. Only a catalogued stored session is eligible for the
-        # longer publication wait; a warm row keeps its existing dial failure.
+        # engage returns, so a miss after an ACCEPTED engage takes #4470's
+        # publication grace (``_pilot_wait_for_runtime_record``) for a live row
+        # as well as a stored one. #4470 kept live rows on the short loop and its
+        # "could not start a runtime" dial failure, but the measured busy->idle
+        # restart (Mac->node2, 8.4 s) is a LIVE row whose runtime had not yet
+        # republished: the engage was accepted and the session was only starting.
+        # A refused engage still raises above and never reaches locate, so a
+        # genuinely failed runtime keeps its own reason. The one consequence:
+        # a warm row whose engage is ACCEPTED yet never publishes now answers
+        # "still starting ... NOT queued" after the (clamped) grace instead of
+        # #4470's immediate dial failure; both say nothing was delivered.
         try:
             await owner.engage(cwd="")
         except ProjectionRefusal as exc:
             raise MeshRefusal(exc.code, exc.sentence) from exc
-        delay = _BIND_RETRY_INITIAL_S
-        for attempt in range(_BIND_RETRY_ATTEMPTS):
-            record, _pid = await asyncio.to_thread(owner.locate)
-            if record is not None:
-                return record
-            if not str(getattr(row, "live_state", "") or ""):
-                return await _pilot_wait_for_runtime_record(
-                    owner.locate, bind_deadline, session_id, device
-                )
-            if attempt < _BIND_RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+        record, _pid = await asyncio.to_thread(owner.locate)
+        if record is not None:
+            return record
+        return await _pilot_wait_for_runtime_record(owner.locate, bind_deadline, session_id, device)
 
     try:
         record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
@@ -10225,7 +10256,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     remote = [row_without_stored_claims(row) for row in remote]
     lines: list[str] = []
     cells: list[tuple[str, str, str, str]] = []
-    from local_operator.resume import session_state_words
+    from local_operator.resume import session_row_state_words
 
     for row in remote:
         block = row.get("peer") or {}
@@ -10248,7 +10279,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             (
                 str(row.get("session_id") or ""),
                 holder,
-                session_state_words(str(row.get("state") or "")) or "?",
+                # The ROW, not the token: a booting session is ``stored`` plus a
+                # ``boot_state`` claim (PR #4572 QA Q6), and only the row says so.
+                session_row_state_words(row) or "?",
                 str(row.get("conversation_name") or ""),
             )
         )

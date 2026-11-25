@@ -24,7 +24,7 @@ the message protocol.
 | `info` | one session: state, directory, transcript path, origin, opener, sidebar visibility | read |
 | `spawn` | open a parallel session — a listed workstream by default; takes `prompt`, `name`, `tags`, `team`, `profile`, `model`, `visibility`, `background`, `peer` | write |
 | `resume` | reopen a stored or stopped session headlessly | write |
-| `stop` | end a running session gracefully (no force in this version); its wakes and monitors go DORMANT until it is reopened | exec |
+| `stop` | end a running session gracefully; `force=true` is the operator-safety escalation (signals, cuts work); its wakes and monitors go DORMANT until it is reopened | exec |
 | `park` | end an idle session's runtime to free memory while its wakes and monitors stay ARMED; no address parks THIS session once the current turn ends | exec |
 | `peek` | a bounded transcript read — a window, a search, or a digest | read |
 | `help` | the full per-op reference — accepted inputs with types and defaults, one example and the refusals per op | read |
@@ -133,9 +133,20 @@ is a new workstream, not an edit.
 signals and never cuts work: a session that is working (a turn, an approval, a
 subagent or a job), one due a wake inside the hold window, or an older owner
 that cannot promise an idle-only stop is REFUSED, and the refusal names which.
-Restart is two auditable calls (`stop` + `resume`). There is no force option and
-no way to stop a session that is mid-run from this tool — the escalation stays
-the operator's, in the CLI.
+Restart is two auditable calls (`stop` + `resume`).
+
+`force=true` is the one escalation, for operator safety only: the operator asked
+for that session to be ended, or it is a memory runaway. It runs `lop stop
+--force`'s ladder — a stop marker the runtime's signal gate honours, an
+identity-checked SIGTERM, the receiver's bounded drain, then SIGKILL of that exact
+process — and it cuts the work in flight. A refusal names it; a refusal you have
+no such reason to override is the answer. A bare `kill` from `bash` is refused by
+the runtime itself (no marker sanctions it), so never reach for one instead.
+
+The wake supervisor also ends a runtime on its own when that runtime's OWN memory
+stays over `session.runtime_memory.limit_mb` (default 8192 MiB) for about three
+minutes: its wakes and monitors go dormant, and the session reads why the next time
+it opens.
 
 ## Stop vs park
 
@@ -248,14 +259,15 @@ every list.
 - **Read before relaying.** `sessions op=list` already marks a live session
   whose ask is pending; `peek` it for what was asked, and never re-ask a settled
   question.
-- **Point rather than copy.** "<session title> (<sid>) has open ask a-xxxx: <one
-  line>; answer it there." The operator answers once, in the session that owns
-  the question.
+- **Point rather than copy.** "<session title> (<sid>) has open ask a-xxxx ("<few
+  words>"): <one line>; answer it there." The operator answers once, in the
+  session that owns the question. The few words are the ask's own first
+  question in brief, so a person can match the id to what was asked.
 - **If you must copy an ask into your own** — the operator is not looking at the
   origin — keep the copy attributable: its first line is `From <session title>
-  (<sid>), ask a-xxxx:`, its questions copied verbatim, and one original per
-  copy, never mixed with your own items. Never copy a SECRET question: only its
-  own card can answer it, so point at the origin ask.
+  (<sid>), ask a-xxxx ("<few words>"):`, its questions copied verbatim, and one
+  original per copy, never mixed with your own items. Never copy a SECRET
+  question: only its own card can answer it, so point at the origin ask.
 - **Settle both ends.** Your copy answered: `send` the answer to the origin
   session — the operator answered it, words verbatim — asking it to settle with
   `ask_withdraw reason=answered_in_chat`, one of the tool's two reasons, which

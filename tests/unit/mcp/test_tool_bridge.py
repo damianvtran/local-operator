@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,12 +24,17 @@ from local_operator.harness.types import ImageContent as HarnessImageContent
 from local_operator.harness.types import ToolContext
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
+    MAX_NOTE_DECLARED_NAMES,
+    MAX_NOTE_NAME_CHARS,
+    MAX_NOTE_REJECTED_NAMES,
     build_agent_tool,
     capture_producer_scope,
+    clean_outbound_args,
     create_mcp_tool_name,
     format_mcp_result,
     is_retriable_connection_error,
     normalize_input_schema,
+    outbound_args_note,
     prepare_outbound_args,
 )
 from local_operator.tools import spill
@@ -169,6 +175,95 @@ class TestPrepareOutboundArgs:
         args = {"a": 1, INTENT_FIELD: "why"}
         prepare_outbound_args(args, {"a": {}}, [], False)
         assert args == {"a": 1, INTENT_FIELD: "why"}
+
+
+class TestRejectedOutboundArgs:
+    """The channel beside the cleaned dict: which model-supplied keys a strict
+    schema made the bridge withhold, and the note a result carries for them.
+
+    The recorded case: a worker passed ``timeout`` to a tool declaring
+    ``timeout_s``; the key was dropped silently, the 60 s default applied, six
+    calls timed out and nothing told the model its argument never arrived.
+    """
+
+    STRICT = {"command": {"type": "string"}, "timeout_s": {"type": "integer"}}
+
+    def test_undeclared_model_key_under_strict_schema_is_reported(self) -> None:
+        out = clean_outbound_args(
+            {"command": "sleep 90", "timeout": 120}, self.STRICT, ["command"], False
+        )
+        assert out.cleaned == {"command": "sleep 90"}  # still dropped, as before
+        assert out.rejected == ("timeout",)
+        note = outbound_args_note(out.rejected, self.STRICT)
+        assert note is not None
+        assert "timeout" in note and "NOT sent" in note
+        # The declared names are what lets the model correct itself.
+        assert "Declared arguments: command, timeout_s." in note
+
+    def test_intent_field_drop_is_not_reported(self) -> None:
+        """The harness added ``i``; the model made no mistake."""
+        out = clean_outbound_args(
+            {"command": "ls", INTENT_FIELD: "Listing files"}, self.STRICT, ["command"], False
+        )
+        assert out.cleaned == {"command": "ls"}
+        assert out.rejected == ()
+        assert outbound_args_note(out.rejected, self.STRICT) is None
+
+    @pytest.mark.parametrize("placeholder", [None, "", {}])
+    def test_placeholder_drops_are_not_reported(self, placeholder: object) -> None:
+        """Neither a declared optional placeholder nor an undeclared one: an
+        empty value is a slot the model did not mean to fill."""
+        out = clean_outbound_args(
+            {"command": "ls", "timeout_s": placeholder, "timeout": placeholder},
+            self.STRICT,
+            ["command"],
+            False,
+        )
+        assert out.cleaned == {"command": "ls"}
+        assert out.rejected == ()
+
+    @pytest.mark.parametrize("additional", [None, True, {}])
+    def test_non_strict_schema_forwards_and_reports_nothing(self, additional: Any) -> None:
+        out = clean_outbound_args({"command": "ls", "timeout": 120}, self.STRICT, [], additional)
+        assert out.cleaned == {"command": "ls", "timeout": 120}
+        assert out.rejected == ()
+
+    def test_cleaned_matches_the_dict_entry_point(self) -> None:
+        """One pass feeds both: the dict callers get is the one reported on."""
+        args = {"command": "ls", "timeout": 5, "timeout_s": "", INTENT_FIELD: "why"}
+        assert clean_outbound_args(
+            args, self.STRICT, ["command"], False
+        ).cleaned == prepare_outbound_args(args, self.STRICT, ["command"], False)
+
+    def test_non_dict_input_reports_nothing(self) -> None:
+        out = clean_outbound_args(None, self.STRICT, [], False)
+        assert out.cleaned == {} and out.rejected == ()
+
+    def test_note_names_every_rejected_key_in_plural(self) -> None:
+        note = outbound_args_note(("timeout", "cwd"), self.STRICT)
+        assert note is not None
+        assert "arguments not declared by this tool were NOT sent: timeout, cwd." in note
+        assert "was sent without them" in note
+
+    def test_note_is_bounded(self) -> None:
+        """A server may declare dozens of properties and a model may invent
+        any number of keys: both lists are cut and the remainder counted."""
+        declared = {f"p{n}": {} for n in range(MAX_NOTE_DECLARED_NAMES + 5)}
+        rejected = tuple(f"x{n}" for n in range(MAX_NOTE_REJECTED_NAMES + 3)) + ("y" * 500,)
+        note = outbound_args_note(rejected, declared)
+        assert note is not None
+        assert "(+4 more)" in note  # rejected: 3 extra + the long one
+        assert "(+5 more)" in note  # declared
+        assert f"p{MAX_NOTE_DECLARED_NAMES}" not in note
+        assert "y" * (MAX_NOTE_NAME_CHARS + 1) not in note
+        assert len(note) < 1200
+
+    def test_long_name_is_cut(self) -> None:
+        note = outbound_args_note(("z" * 500,), {})
+        assert note is not None
+        assert "z" * MAX_NOTE_NAME_CHARS + "..." in note
+        assert "z" * (MAX_NOTE_NAME_CHARS + 1) not in note
+        assert "Declared arguments: (none)." in note
 
 
 class TestFormatMcpResult:
@@ -445,9 +540,15 @@ class TestFormatMcpResult:
 
         One JSON line, the shape every MCP JSON result has (no line structure).
         """
-        frame = json.dumps({"url": "https://example.test/judges", "text": ""})
+        # Compact separators: the shape an MCP server emits and a fixed point
+        # of ``mcp.result_normalization`` (no long whitespace-bearing leaf), so
+        # these spill-bound assertions keep measuring the spill path alone.
+        frame = json.dumps(
+            {"url": "https://example.test/judges", "text": ""}, separators=(",", ":")
+        )
         page = json.dumps(
-            {"url": "https://example.test/judges", "text": "J" * (12_000 - len(frame))}
+            {"url": "https://example.test/judges", "text": "J" * (12_000 - len(frame))},
+            separators=(",", ":"),
         )
         assert len(page) == 12_000
         return {"content": [{"type": "text", "text": page}], "isError": False}, page
@@ -591,3 +692,535 @@ def test_auth_challenges_are_retriable_once() -> None:
     assert is_retriable_connection_error(RuntimeError("HTTP 401 Unauthorized"))
     assert is_retriable_connection_error(RuntimeError("WWW-Authenticate: Bearer scope=x"))
     assert is_retriable_connection_error(RuntimeError("mcp/www_authenticate challenge"))
+
+
+_FORGE_WIKI_FETCH = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "mcp_results"
+    / "forge_fetch_wikipedia_mark_sutcliffe.json"
+)
+
+# A Postmedia-shaped page head: tracking pixel, share icons and nav bullets,
+# the markup that dominated the measured run's fetched news pages.
+_POSTMEDIA_HEAD = "\n".join(
+    ["![](https://sb.scorecardresearch.com/p?c1=2&c2=10276888)"]
+    + [
+        f"![{alt}](https://dcs-static.gprod.postmedia.digital/22.2.2/websites/images/"
+        f"share-icons/icon-{i}.svg)"
+        for i, alt in enumerate(["", "Close", "", "Reddit", "X", "", "Share via email"] * 3)
+    ]
+    + [
+        "* [News](https://ottawacitizen.com/category/news/)",
+        "* [Local News](/category/news/local-news/)",
+    ]
+    + [
+        "",
+        "Mark Sutcliffe was sworn in as the 59th mayor of Ottawa on Nov. 15, 2022, after a "
+        "campaign built on [affordability](https://ottawacitizen.com/tag/affordability) "
+        "and transit.",
+    ]
+)
+
+
+def _text_result(text: str, *, is_error: bool = False) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+class TestFormatMcpResultNormalization:
+    """``format_mcp_result`` applies ``mcp.result_normalization`` once, at creation."""
+
+    def test_recorded_forge_fetch_shrinks_and_keeps_cited_facts(self) -> None:
+        raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
+        result = _text_result(raw)
+        formatted = format_mcp_result(result, "c1", "mcp__forge_tools_fetch")
+        # Measured on this payload: 12,389 -> 7,899 chars (0.638) under
+        # prose-links, which keeps a short line's only absolute link (the
+        # page's reference/external-link entries are what a task cites).
+        assert len(formatted.text) <= 0.65 * len(raw)
+        parsed = json.loads(formatted.text)
+        assert parsed["url"] == json.loads(raw)["url"]  # the citation key, byte-equal
+        for fact in ("59th", "mayor of Ottawa", "July 14, 1968"):
+            assert fact in parsed["content"]
+        assert "#cite_note" not in parsed["content"]
+        assert formatted.details is not None
+        assert formatted.details["server_result"]["content"][0]["text"] == raw
+
+    def test_icon_images_and_nav_bullets_are_removed(self) -> None:
+        formatted = format_mcp_result(_text_result(_POSTMEDIA_HEAD))
+        assert "postmedia.digital" not in formatted.text
+        assert "scorecardresearch" not in formatted.text
+        assert "Local News" not in formatted.text
+        assert "59th mayor of Ottawa" in formatted.text
+        assert "Reddit" in formatted.text  # alt text is content, kept
+
+    def test_strip_links_mode_drops_prose_link_targets(self) -> None:
+        prose = format_mcp_result(_text_result(_POSTMEDIA_HEAD), normalization="prose-links").text
+        stripped = format_mcp_result(
+            _text_result(_POSTMEDIA_HEAD), normalization="strip-links"
+        ).text
+        assert "(https://ottawacitizen.com/tag/affordability)" in prose
+        assert "ottawacitizen.com" not in stripped
+        assert "affordability and transit" in stripped
+
+    def test_off_is_byte_identical_to_unnormalized_flattening(self) -> None:
+        raw = _FORGE_WIKI_FETCH.read_text(encoding="utf-8")
+        result = {
+            "content": [{"type": "text", "text": raw}, {"type": "text", "text": _POSTMEDIA_HEAD}]
+        }
+        assert format_mcp_result(result, normalization="off").text == f"{raw}\n\n{_POSTMEDIA_HEAD}"
+
+    @pytest.mark.parametrize("mode", ["prose-links", "strip-links"])
+    def test_embedded_resource_file_is_never_normalized(self, mode: str) -> None:
+        """M1 (review round 2): a GitHub-style file read is exact file contents.
+
+        A model may write it back, so a badge, a docs list and a relative link
+        inside an embedded ``resource`` block survive byte for byte."""
+        readme = (
+            "# widget\n\n![CI](https://ci.example/badge.svg)\n\n## Docs\n\n"
+            "- [Install](docs/install.md)\n- [Home](/)\n\n"
+            "See [CONTRIBUTING](./CONTRIBUTING.md) and [site](https://e.example/x).\n"
+        )
+        result = {
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": {"uri": "repo://o/r/README.md", "text": readme},
+                }
+            ]
+        }
+        assert format_mcp_result(result, normalization=mode).text == (
+            f"[Resource: repo://o/r/README.md]\n{readme}"
+        )
+
+    def test_each_text_block_is_normalized_on_its_own(self) -> None:
+        """M1: a fetched page's link must not pull a sibling code block through
+        the markdown gate -- each block is gated and normalized separately."""
+        code = 'pattern = re.compile(r"[a-z](/foo)")\n'
+        result = {
+            "content": [{"type": "text", "text": _POSTMEDIA_HEAD}, {"type": "text", "text": code}]
+        }
+        text = format_mcp_result(result).text
+        assert text.endswith(f"\n\n{code}")
+        assert "postmedia.digital" not in text
+
+    def test_error_results_are_never_normalized(self) -> None:
+        formatted = format_mcp_result(_text_result(_POSTMEDIA_HEAD, is_error=True))
+        assert formatted.text == f"Error: {_POSTMEDIA_HEAD}"
+
+    def test_spill_stores_the_normalized_text(self, tmp_path, monkeypatch) -> None:
+        """Normalized BEFORE the cut, so the inline head and the spill carry no
+        markup; the duplicate raw text is still dropped from ``server_result``
+        (one durable copy per large result, as before this change)."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        raw = (_POSTMEDIA_HEAD + "\n\n") * 60
+        formatted = format_mcp_result(
+            _text_result(raw), "call", "mcp__demo_page", ToolContext(session_id="norm-spill")
+        )
+        details = formatted.details
+        assert details is not None
+        assert "postmedia.digital" not in formatted.text  # inline head is normalized
+        read = spill.get_store().read_lines(details["spill"]["handle"])
+        assert read is not None
+        stored = "\n".join(read[0])
+        assert "59th mayor of Ottawa" in stored and "postmedia.digital" not in stored
+        assert details["server_result"]["content"] == []
+
+    def test_spill_of_an_unchanged_text_still_drops_the_duplicate(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No normalization delta: the existing de-duplication is unchanged."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        body = "MCP evidence line\n" * 1_000
+        formatted = format_mcp_result(
+            _text_result(body.rstrip("\n")),
+            "call",
+            "mcp__demo_plain",
+            ToolContext(session_id="plain"),
+        )
+        assert formatted.details is not None
+        assert "spill" in formatted.details
+        assert formatted.details["server_result"]["content"] == []  # text-only: dropped
+
+
+class TestFormatMcpResultSearchClip:
+    """``mcp.search_snippet_chars``: hit snippets of a SEARCH tool, keyed by its bare name."""
+
+    _SNIPPET = "Mark Sutcliffe is the 59th mayor of Ottawa, elected in 2022. " * 20
+
+    def _hits(self, n: int = 2) -> str:
+        return json.dumps(
+            {
+                "query": "Mark Sutcliffe",
+                "results": [
+                    {
+                        "title": f"Mark Sutcliffe {i}",
+                        "url": f"https://example.com/{i}",
+                        "snippet": self._SNIPPET,
+                        "published_date": None,
+                    }
+                    for i in range(n)
+                ],
+            }
+        )
+
+    def test_bare_search_name_clips_hits(self) -> None:
+        formatted = format_mcp_result(
+            _text_result(self._hits()),
+            "c1",
+            "mcp__forge_tools_search",
+            mcp_tool_name="search",
+            search_snippet_chars=400,
+        )
+        hits = json.loads(formatted.text)["results"]
+        assert all(len(h["snippet"]) <= 400 and "published_date" not in h for h in hits)
+        assert [h["url"] for h in hits] == ["https://example.com/0", "https://example.com/1"]
+
+    def test_search_in_the_server_label_alone_does_not_clip(self) -> None:
+        """A server named ``research`` must not make its fetch tool a search."""
+        raw = self._hits()
+        formatted = format_mcp_result(
+            _text_result(raw),
+            "c1",
+            "mcp__research_fetch",
+            mcp_tool_name="fetch",
+            search_snippet_chars=400,
+        )
+        assert formatted.text == raw
+
+    def test_errors_and_resources_are_never_clipped(self) -> None:
+        raw = self._hits()
+        error = format_mcp_result(
+            _text_result(raw, is_error=True), mcp_tool_name="search", search_snippet_chars=400
+        )
+        assert error.text == f"Error: {raw}"
+        resource = {
+            "content": [{"type": "resource", "resource": {"uri": "mem://hits", "text": raw}}]
+        }
+        assert (
+            raw
+            in format_mcp_result(resource, mcp_tool_name="search", search_snippet_chars=400).text
+        )
+
+    def test_clip_runs_before_the_spill_cut(self, tmp_path, monkeypatch) -> None:
+        """Over the inline bound raw, under it clipped: the result stays inline."""
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        # 10 hits: ~12.6k chars raw (over the 8 KiB inline bound), ~4.7k clipped.
+        raw = self._hits(10)
+        context = ToolContext(session_id="clip-spill")
+        unclipped = format_mcp_result(_text_result(raw), "c", "mcp__s_search", context)
+        assert unclipped.details is not None and "spill" in unclipped.details  # control
+        clipped = format_mcp_result(
+            _text_result(raw),
+            "c",
+            "mcp__s_search",
+            context,
+            mcp_tool_name="search",
+            search_snippet_chars=400,
+        )
+        assert clipped.details is not None and "spill" not in clipped.details
+        assert len(json.loads(clipped.text)["results"]) == 10
+
+
+class TestSearchSnippetCharsSetting:
+    """``read_search_snippet_chars`` reads the key per call and never raises."""
+
+    def test_absent_key_is_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        assert read_search_snippet_chars() == 400
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("0", 0),
+            ("320", 320),
+            ("off", 0),
+            ("-5", 400),
+            ("lots", 400),
+            ("true", 400),
+            ("100000", 100_000),
+            # Above the max: clamped to it, not reset to 400 (review R2).
+            ("250000", 100_000),
+        ],
+    )
+    def test_configured_value_is_read(self, tmp_path, monkeypatch, raw: str, expected: int) -> None:
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(
+            tmp_path, monkeypatch, f"values:\n  mcp:\n    search_snippet_chars: {raw}\n"
+        )
+        assert read_search_snippet_chars() == expected
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_search_snippet_chars
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.search_snippet_chars"], 0
+        )
+        assert read_search_snippet_chars() == 0
+
+    def test_registry_bounds_mirror_the_consumer(self) -> None:
+        """Pinned: the registry restates the bound instead of importing it."""
+        from local_operator import settings_io
+        from local_operator.tools.result_normalize import SEARCH_SNIPPET_CHARS_MAX
+
+        row = settings_io.BY_KEY["mcp.search_snippet_chars"]
+        assert (row.minimum, row.maximum) == (0, SEARCH_SNIPPET_CHARS_MAX)
+
+
+class TestResultNormalizationSetting:
+    """``read_result_normalization_mode`` reads the key per call and never raises."""
+
+    @staticmethod
+    def _write_config(tmp_path, monkeypatch, body: str | None) -> None:
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        if body is not None:
+            (cfg / "config.yml").write_text(body, encoding="utf-8")
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(cfg))
+
+    def test_absent_key_is_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(tmp_path, monkeypatch, None)
+        assert read_result_normalization_mode() == "prose-links"
+
+    @pytest.mark.parametrize("mode", ["off", "strip-links", "prose-links"])
+    def test_configured_mode_is_read(self, tmp_path, monkeypatch, mode: str) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, f'values:\n  mcp:\n    result_normalization: "{mode}"\n'
+        )
+        assert read_result_normalization_mode() == mode
+
+    def test_unknown_value_falls_back_to_the_default(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, "values:\n  mcp:\n    result_normalization: everything\n"
+        )
+        assert read_result_normalization_mode() == "prose-links"
+
+    def test_bare_yaml_off_means_off(self, tmp_path, monkeypatch) -> None:
+        """YAML 1.1 parses an unquoted ``off`` as False; it still means off."""
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(
+            tmp_path, monkeypatch, "values:\n  mcp:\n    result_normalization: off\n"
+        )
+        assert read_result_normalization_mode() == "off"
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        """The /settings writer and this reader agree on the path."""
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_result_normalization_mode
+
+        self._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.result_normalization"], "off"
+        )
+        assert read_result_normalization_mode() == "off"
+
+
+class TestSeenUrlLedger:
+    """Seen-URL snippet elision through the real formatter (structural-economy §2)."""
+
+    _SNIPPET = "Olivia Chow is the 66th mayor of Toronto, elected in 2023. " * 3
+
+    def _search(self, *urls: str) -> dict[str, Any]:
+        hits = [{"title": f"Hit {u}", "url": u, "snippet": self._SNIPPET} for u in urls]
+        return _text_result(json.dumps({"query": "Olivia Chow", "results": hits}))
+
+    def _fmt(self, result: dict[str, Any], ledger: Any, **kw: Any) -> Any:
+        kw.setdefault("mcp_tool_name", "search")
+        return format_mcp_result(
+            result, "c", "mcp__forge_search", search_snippet_chars=400, seen_urls=ledger, **kw
+        )
+
+    def test_later_search_drops_the_snippet_of_a_url_already_shown(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        first = json.loads(
+            self._fmt(self._search("https://a.example/1", "https://a.example/2"), ledger).text
+        )
+        assert all("snippet" in h for h in first["results"])  # nothing seen yet
+        second = json.loads(
+            self._fmt(self._search("https://a.example/2/#bio", "https://a.example/3"), ledger).text
+        )
+        # Seen (fragment/slash variant): title + url kept byte-equal, snippet gone.
+        assert second["results"][0] == {
+            "title": "Hit https://a.example/2/#bio",
+            "url": "https://a.example/2/#bio",
+        }
+        assert "snippet" in second["results"][1]
+
+    def test_a_fetched_page_url_counts_as_shown(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        page = _text_result(json.dumps({"url": "https://a.example/p", "content": "Body."}))
+        self._fmt(page, ledger, mcp_tool_name="fetch")
+        later = json.loads(self._fmt(self._search("https://a.example/p"), ledger).text)
+        assert later["results"][0] == {
+            "title": "Hit https://a.example/p",
+            "url": "https://a.example/p",
+        }
+
+    def test_off_errors_and_no_ledger_record_nothing(self) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        raw = self._search("https://a.example/1")
+        off = self._fmt(raw, ledger, normalization="off")
+        assert off.text == raw["content"][0]["text"]  # ``off`` stays byte-identical
+        self._fmt(_text_result(raw["content"][0]["text"], is_error=True), ledger)
+        assert ledger.snapshot() == frozenset()
+        # Control: a normalizing, successful call does record.
+        self._fmt(raw, ledger)
+        assert ledger.snapshot() == frozenset({"https://a.example/1"})
+
+    def test_a_url_the_spill_cut_off_is_not_recorded(self, tmp_path, monkeypatch) -> None:
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+        ledger = SeenUrlLedger()
+        urls = [f"https://a.example/{i}" for i in range(60)]
+        formatted = format_mcp_result(
+            self._search(*urls),
+            "c",
+            "mcp__forge_search",
+            ToolContext(session_id="seen-spill"),
+            mcp_tool_name="search",
+            seen_urls=ledger,
+        )
+        assert formatted.details is not None and "spill" in formatted.details  # control: it spilled
+        recorded = ledger.snapshot()
+        assert "https://a.example/0" in recorded and "https://a.example/59" not in recorded
+        assert all(u in formatted.text for u in recorded)
+
+    def test_parallel_siblings_never_both_keep_a_shared_snippet(self) -> None:
+        """The ledger lock orders same-turn siblings: exactly one shows the snippet."""
+        import threading
+
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        for _ in range(20):
+            ledger = SeenUrlLedger()
+            out: list[Any] = []
+            barrier = threading.Barrier(2)
+
+            def run() -> None:
+                barrier.wait()
+                out.append(
+                    json.loads(self._fmt(self._search("https://a.example/shared"), ledger).text)
+                )
+
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert sorted("snippet" in r["results"][0] for r in out) == [False, True]
+
+    def test_persisted_result_is_byte_stable_without_the_ledger(self) -> None:
+        """Resume/replay re-send the persisted bytes; nothing re-derives them."""
+        from local_operator.harness.types import ToolResult
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        ledger = SeenUrlLedger()
+        self._fmt(self._search("https://a.example/1"), ledger)
+        elided = self._fmt(self._search("https://a.example/1"), ledger, text_rendering=True)
+        restored = ToolResult.model_validate_json(elided.model_dump_json())
+        assert restored.text == elided.text
+        assert (
+            "Olivia Chow is the 66th" not in restored.text
+            and "https://a.example/1" in restored.text
+        )
+
+    def test_the_ledger_is_bounded_and_evicts_the_least_recently_shown(self) -> None:
+        """PR #4540 review m5: a ledger never grows past ``max_urls``; the
+        evicted URL is the one shown longest ago, and its snippet comes back."""
+        from local_operator.mcp.tool_bridge import SeenUrlLedger
+
+        assert SeenUrlLedger.MAX_URLS_DEFAULT == 5_000
+        ledger = SeenUrlLedger(max_urls=2)
+        self._fmt(self._search("https://a.example/1"), ledger)
+        self._fmt(self._search("https://a.example/2"), ledger)
+        self._fmt(self._search("https://a.example/1"), ledger)  # re-shown: now most recent
+        self._fmt(self._search("https://a.example/3"), ledger)  # evicts /2, not /1
+        assert len(ledger) == 2
+        assert ledger.snapshot() == frozenset({"https://a.example/1", "https://a.example/3"})
+        again = json.loads(
+            self._fmt(self._search("https://a.example/1", "https://a.example/2"), ledger).text
+        )
+        assert ["snippet" in h for h in again["results"]] == [False, True]
+
+
+class TestFormatMcpResultTextRendering:
+    """``mcp.result_text_rendering`` through the real formatter."""
+
+    def test_search_and_fetch_render_as_text_with_urls_byte_equal(self) -> None:
+        hits = {
+            "query": "q",
+            "results": [{"title": "T", "url": "https://a.example/x?y=1", "snippet": "s"}],
+        }
+        search = format_mcp_result(
+            _text_result(json.dumps(hits)), mcp_tool_name="search", text_rendering=True
+        )
+        assert search.text == "query: q\nresults:\n1. T\n   https://a.example/x?y=1\n   s"
+        page = {"url": "https://a.example/p", "content": "# P\n\nBody.", "offset": 0}
+        fetch = format_mcp_result(
+            _text_result(json.dumps(page)), mcp_tool_name="fetch", text_rendering=True
+        )
+        assert fetch.text == "url: https://a.example/p\noffset: 0\n\n# P\n\nBody."
+        # The raw server payload is still kept for non-model readers.
+        assert fetch.details is not None
+        assert fetch.details["server_result"]["content"][0]["text"] == json.dumps(page)
+
+    def test_off_never_renders(self) -> None:
+        raw = json.dumps({"url": "https://a.example/p", "content": "Body."})
+        off = format_mcp_result(_text_result(raw), normalization="off", text_rendering=True)
+        assert off.text == raw
+
+
+class TestResultTextRenderingSetting:
+    """``read_result_text_rendering`` reads the key per call and never raises."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (None, True),
+            ("values:\n  mcp:\n    result_text_rendering: false\n", False),
+            ("values:\n  mcp:\n    result_text_rendering: off\n", False),
+            ("values:\n  mcp:\n    result_text_rendering: true\n", True),
+            ("values:\n  mcp:\n    result_text_rendering: sometimes\n", True),
+            ("values:\n  mcp:\n    result_text_rendering: 0\n", True),
+        ],
+        ids=["absent", "false", "yaml-off", "true", "text", "zero"],
+    )
+    def test_configured_value_is_read(
+        self, tmp_path, monkeypatch, body: str | None, expected: bool
+    ) -> None:
+        from local_operator.mcp.manager import read_result_text_rendering
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, body)
+        assert read_result_text_rendering() is expected
+
+    def test_settings_registry_write_is_what_the_reader_sees(self, tmp_path, monkeypatch) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.mcp.manager import read_result_text_rendering
+
+        TestResultNormalizationSetting._write_config(tmp_path, monkeypatch, None)
+        settings_io.write_setting(
+            ConfigManager(tmp_path / "cfg"), settings_io.BY_KEY["mcp.result_text_rendering"], False
+        )
+        assert read_result_text_rendering() is False
