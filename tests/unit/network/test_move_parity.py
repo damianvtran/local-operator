@@ -993,7 +993,11 @@ class TestRefusedTeamIsNamedToTheModel:
         from datetime import datetime, timezone
 
         from local_operator.agents import AgentRegistry
-        from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
+        from local_operator.harness.types import (
+            StreamEndEvent,
+            StreamEvent,
+            StreamTextDelta,
+        )
         from local_operator.network.move_team import LOCAL_BINDING_NAME
         from local_operator.prompts_api import build_system_blocks
         from local_operator.resume import write_session_attachment
@@ -1197,8 +1201,15 @@ class TestRelayCreatedTeamSessionIsBriefed:
         from datetime import datetime, timezone
 
         from local_operator.agents import AgentRegistry
-        from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
-        from local_operator.network.move_team import LOCAL_BINDING_NAME, needs_reauthorization
+        from local_operator.harness.types import (
+            StreamEndEvent,
+            StreamEvent,
+            StreamTextDelta,
+        )
+        from local_operator.network.move_team import (
+            LOCAL_BINDING_NAME,
+            needs_reauthorization,
+        )
         from local_operator.prompts_api import build_system_blocks
         from local_operator.resume import bind_session_attachment
         from local_operator.session.goal import GoalState
