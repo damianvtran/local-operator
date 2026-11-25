@@ -144,6 +144,7 @@ from local_operator.session.transcript import (
     custom_type_proven_absent,
     is_bookkeeping_entry,
     is_bookkeeping_message,
+    projection_entries,
     transcript_is_bookkeeping_only,
 )
 from local_operator.supplements.contract import (
@@ -2720,7 +2721,16 @@ class ServingSessionHandle(SessionHandle):
             # "This session already has messages, so its working directory
             # can't change"). ``BOOKKEEPING_CUSTOM_TYPES`` is the transcript
             # module's ONE vocabulary for that distinction.
-            if any(not is_bookkeeping_entry(entry) for entry in transcript.entries()):
+            from local_operator.session.transcript import (
+                resident_entries,
+                transcript_prefix_flag,
+            )
+
+            # Dropped prefix rows answer through the flag the open computed
+            # with this same predicate.
+            if transcript_prefix_flag(transcript, "has_non_bookkeeping") or any(
+                not is_bookkeeping_entry(entry) for entry in resident_entries(transcript)
+            ):
                 return False
             # The same judgement about what is on disk: a file whose every row
             # is bookkeeping must not refuse here either, while anything the
@@ -4465,7 +4475,8 @@ class ServingSessionHandle(SessionHandle):
             if custom_type_proven_absent(transcript.directory, SUPPLEMENT_CUSTOM_TYPE):
                 return
             rows: list[dict[str, Any]] = []
-            for entry in transcript.entries():
+            # supplement_v1 is a keep-set type (prefix rows projected).
+            for entry in projection_entries(transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
@@ -12957,7 +12968,8 @@ class ServingSessionHandle(SessionHandle):
         rows: list[dict[str, Any]] = []
         try:
             transcript = self._session.transcript
-            for entry in transcript.entries():
+            # supplement_v1 is a keep-set type (prefix rows projected).
+            for entry in projection_entries(transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}

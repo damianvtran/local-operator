@@ -348,13 +348,18 @@ def resolve_supplement_file(
     """
     import os
 
-    from local_operator.session.transcript import Transcript
     from local_operator.supplements import denylist
+    from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
     if not SUPPLEMENT_JOB.fullmatch(job):
         return SUPPLEMENT_MISSING
     try:
-        entries = Transcript(directory).entries()
+        from local_operator.session.transcript import read_custom_entries
+
+        # A byte-level read of the one custom type, oldest first (the fold below
+        # is order-sensitive on version ties), instead of constructing a whole
+        # writer ``Transcript`` per file request.
+        entries = list(reversed(read_custom_entries(directory, SUPPLEMENT_CUSTOM_TYPE)))
     except Exception:  # noqa: BLE001 -- an odd transcript serves no file
         return SUPPLEMENT_MISSING
     newest: dict[str, Any] | None = None

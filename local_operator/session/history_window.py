@@ -563,6 +563,13 @@ def _audit_entry_cursor(transcript: Transcript) -> str | None:
     """
     entries = transcript._entries
     cut = context_cut_index(entries, quiet=True)
+    if getattr(transcript, "has_prefix", False) is True:
+        # Suffix-only load: the resident list starts at the cut's anchor, so the
+        # cut is resolved in it, and "a message precedes the cut" is the prefix
+        # flag the open computed. Same id the eager scan returns, no re-read.
+        if not transcript.prefix_flag("has_message"):
+            return None
+        return entries[cut].id if cut < len(entries) else _AUDIT_TAIL_CURSOR
     first = first_message_index(entries)
     # Nothing precedes the context replay: this conversation really does begin
     # where the context phase ends, and the chain terminates there as before.
@@ -577,7 +584,9 @@ def _audit_entry_cursor(transcript: Transcript) -> str | None:
 _AUDIT_TAIL_CURSOR = "\x00audit-tail"
 
 
-def _hoisted_turn_ids(transcript: Transcript) -> frozenset[str]:
+def _hoisted_turn_ids(
+    transcript: Transcript, entries: Sequence[TranscriptEntry] | None = None
+) -> frozenset[str]:
     """Cached :func:`context_preserved_turn_ids` for the current journal state.
 
     Cached because it is asked once per audit page and is not cheap: it runs the
@@ -595,7 +604,9 @@ def _hoisted_turn_ids(transcript: Transcript) -> frozenset[str]:
     cached = transcript._audit_hoisted_cache
     if cached is not None and cached[0] == generation:
         return cached[1]
-    resolved = frozenset(context_preserved_turn_ids(transcript._entries))
+    resolved = frozenset(
+        context_preserved_turn_ids(entries if entries is not None else transcript._entries)
+    )
     transcript._audit_hoisted_cache = (generation, resolved)
     return resolved
 
@@ -630,7 +641,11 @@ def _capture_audit_window(
     cached presentation and re-fire the retitle gate across every session on
     the machine.
     """
-    entries = transcript._entries
+    # Audit pages are the one display path that needs prefix rows in full:
+    # ``entries()`` reads them back (counted). Off the boot path — only a reader
+    # scrolling above the compaction cut gets here. A paged offset reader is the
+    # follow-up (design brief §6 split).
+    entries = transcript.entries()
     cursor = str(claims.get("end_entry_id") or "")
     if cursor == _AUDIT_TAIL_CURSOR:
         end_index = len(entries)
@@ -662,7 +677,7 @@ def _capture_audit_window(
     # MISSING from the audit page rather than one shown twice. Suppress the
     # audit copy: the reader has already been shown that row by the context
     # page it scrolled through to get here.
-    hoisted = _hoisted_turn_ids(transcript)
+    hoisted = _hoisted_turn_ids(transcript, entries)
     messages, indices, window_start = audit_slice(
         entries,
         transcript._attachments,
@@ -802,9 +817,11 @@ def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
     invalidation on every append.
     """
     from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+    from local_operator.session.transcript import projection_entries
 
     ids: set[str] = set()
-    for entry in transcript._entries:
+    # wake_prompt is a keep-set type, so prefix rows are in the projection.
+    for entry in projection_entries(transcript):
         payload = entry.payload
         if str(payload.get("custom_type", "")) != WAKE_PROMPT_MESSAGE_TYPE:
             continue

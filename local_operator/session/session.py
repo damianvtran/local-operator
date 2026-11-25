@@ -2894,7 +2894,11 @@ def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]
             declined = value
     if marker is None:
         return 0, declined, marker_id
-    entries = transcript.entries()
+    from local_operator.session.transcript import resident_entries
+
+    # The newest compaction row is always resident (suffix-only load), and the
+    # readings after it are too.
+    entries = resident_entries(transcript)
     position = next(
         (index for index in range(len(entries) - 1, -1, -1) if entries[index].id == marker_id),
         None,
@@ -3055,9 +3059,14 @@ def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
     both telemetry-only outcomes.
     """
     from local_operator.fork import fork_instant
-    from local_operator.session.transcript import newest_cache_diagnostics_id
+    from local_operator.session.transcript import (
+        newest_cache_diagnostics_id,
+        projection_entries,
+    )
 
-    entries = transcript.entries()
+    # Newest usage row wins, uncut by compaction: prefix money skeletons keep
+    # ``usage`` (and its diagnostics id), so the projection answers exactly.
+    entries = projection_entries(transcript)
     try:
         forked_at = fork_instant(transcript.directory)
     except Exception:  # noqa: BLE001 — an unreadable marker must not fail construction
@@ -4996,7 +5005,11 @@ class Session:
             if saved_prefix and isinstance(saved_prefix.get("blocks"), list):
                 self._frozen_system_blocks = list(saved_prefix["blocks"])
                 self._last_system_blocks = list(self._frozen_system_blocks)
-                for entry in transcript.entries():
+                from local_operator.session.transcript import projection_entries
+
+                # session_state is a keep-set type: every prefix row survives in
+                # the projection, in order, so the fold is identical.
+                for entry in projection_entries(transcript):
                     payload = entry.payload
                     if payload.get("custom_type") != "session_state":
                         continue
@@ -9978,11 +9991,18 @@ class Session:
         opening it: adoption is an enhancement, and a host without a readable
         journal must not have its turn fail over it.
         """
+        from local_operator.session.transcript import (
+            resident_entries,
+            transcript_prefix_flag,
+        )
+
         try:
-            entries = self._transcript.entries()
+            entries = resident_entries(self._transcript)
         except Exception:  # noqa: BLE001 — adoption must never fail a turn
             return True
-        return any(
+        # Dropped prefix rows answer through the flag the open computed with the
+        # same predicate.
+        return transcript_prefix_flag(self._transcript, "has_assistant") or any(
             entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "assistant"
             for entry in entries
         )
@@ -12290,6 +12310,7 @@ class Session:
         except (MeshRefusal, ValueError, KeyError, OSError):
             return  # A forged hint cannot become an authentic saved tool card.
         marker = "profile-applied:" + receipt_id
+        from local_operator.session.transcript import projection_entries
 
         def already_delivered():
             # Compaction folds the overlay into its target and removes the
@@ -12303,7 +12324,8 @@ class Session:
                 == receipt_id
                 and ((row.payload.get("provider_payload") or {}).get("details") or {}).get("status")
                 == "applied"
-                for row in self._transcript.entries()
+                # Skeletons keep role, tool_call_id and the receipt details.
+                for row in projection_entries(self._transcript)
             )
 
         if already_delivered():
@@ -12318,7 +12340,7 @@ class Session:
             target = next(
                 (
                     row
-                    for row in self._transcript.entries()
+                    for row in projection_entries(self._transcript)
                     if row.payload.get("role") == "tool"
                     and row.payload.get("tool_call_id") == result.tool_call_id
                     and (row.payload.get("provider_payload") or {})
@@ -12635,10 +12657,13 @@ class Session:
         ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
         """
         from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
-        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+        from local_operator.session.transcript import (
+            ENTRY_CUSTOM,
+            _entry_to_message,
+            resident_entries,
+        )
 
-        try:
-            entries = self._transcript.entries()
+        def walk(entries: list[Any]) -> str | None:
             for entry in reversed(entries):
                 if entry.type == ENTRY_CUSTOM:
                     if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
@@ -12653,6 +12678,18 @@ class Session:
                 stamped = _input_surface_of(message)
                 if stamped is not None:
                     return stamped
+            return None
+
+        try:
+            # The resident suffix first: the backward walk returns the newest
+            # stamp, so a hit there is the eager answer. Only a suffix with no
+            # stamp at all re-reads the whole journal (counted, off boot: this
+            # runs at the first run's origin probe).
+            found = walk(resident_entries(self._transcript))
+            if found is None and getattr(self._transcript, "has_prefix", False) is True:
+                found = walk(self._transcript.entries())
+            if found is not None:
+                return found
         except Exception:  # noqa: BLE001 — routing must never cost a turn
             logger.debug("origin: could not rebuild the last driver", exc_info=True)
         return "unknown"
@@ -15494,8 +15531,11 @@ class Session:
         Best-effort in the one way that matters: a stamp is a hint on a card, and
         no surface should fail to open a conversation over it.
         """
+        from local_operator.session.transcript import resident_entries
+
         try:
-            entries = self._transcript.entries()
+            # Only the newest rows are read (the slice below).
+            entries = resident_entries(self._transcript)
         except Exception:  # noqa: BLE001 — a repaint fact is never worth a failure
             logger.debug("ask: could not read the transcript for the user stamp", exc_info=True)
             return
@@ -17171,7 +17211,10 @@ class Session:
             ids = details.get("auxiliary_request_ids")
             if isinstance(ids, list):
                 self._auxiliary_spend_ids.update(value for value in ids if isinstance(value, str))
-        receipts = fold_receipts(reversed(transcript.entries()), strict=False)
+        from local_operator.session.transcript import projection_entries
+
+        # auxiliary_usage_v1 is a keep-set type: every row is in the projection.
+        receipts = fold_receipts(reversed(projection_entries(transcript)), strict=False)
         changed = False
         for receipt in receipts:
             if receipt.request_id not in self._auxiliary_spend_ids:
@@ -17679,10 +17722,23 @@ class Session:
         input taints. A corrupt record fails closed. An empty transcript (a
         fresh session) is clean. Never raises: unreadable history is tainted.
         """
-        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+        from local_operator.session.transcript import (
+            ENTRY_CUSTOM,
+            _entry_to_message,
+            resident_entries,
+        )
 
         try:
-            entries = self._transcript.entries()
+            entries = resident_entries(self._transcript)
+            if getattr(self._transcript, "has_prefix", False) is True and not any(
+                entry.type == ENTRY_CUSTOM
+                and entry.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
+                for entry in entries
+            ):
+                # The episode needs message BODIES after the newest record; when
+                # that record is older than the resident suffix, read the whole
+                # journal back (counted, rare).
+                entries = self._transcript.entries()
             start = 0
             for index in range(len(entries) - 1, -1, -1):
                 entry = entries[index]
@@ -18641,8 +18697,16 @@ class Session:
         """
         if transcript.channel_spend_tracked():
             return "marked"
+        from local_operator.session.transcript import (
+            resident_entries,
+            transcript_prefix_flag,
+        )
+
+        if transcript_prefix_flag(transcript, "has_channel_activity"):
+            # Same predicate, evaluated on the dropped prefix at open.
+            return "legacy"
         try:
-            entries = transcript.entries()
+            entries = resident_entries(transcript)
         except Exception:  # noqa: BLE001 — an unreadable journal is not fresh
             logger.debug("channel origin probe failed; treating as legacy", exc_info=True)
             return "legacy"
@@ -25637,7 +25701,10 @@ class Session:
         transcript = self._transcript
 
         def journal() -> list[tuple[str, dict[str, Any]]]:
-            return [(entry.type, entry.payload) for entry in transcript.entries()]
+            # Every taint/flag source row of the prefix is kept in full.
+            from local_operator.session.transcript import projection_entries
+
+            return [(entry.type, entry.payload) for entry in projection_entries(transcript)]
 
         latch = BridgeTaintLatch(inherited=inherited, entries=journal)
         self._bridge_taint = latch
@@ -25725,7 +25792,10 @@ class Session:
         transcript = self._transcript
 
         def journal() -> list[tuple[str, dict[str, Any]]]:
-            return [(entry.type, entry.payload) for entry in transcript.entries()]
+            # Every taint/flag source row of the prefix is kept in full.
+            from local_operator.session.transcript import projection_entries
+
+            return [(entry.type, entry.payload) for entry in projection_entries(transcript)]
 
         self._community_taint = CommunityTaint(entries=journal)
         self._community_taint_row_task: asyncio.Task[None] | None = None
@@ -27309,7 +27379,10 @@ class Session:
         if self._disposed or not token:
             return
         try:
-            for entry in self._transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            # session_incident is a keep-set type.
+            for entry in projection_entries(self._transcript):
                 if entry.payload.get("custom_type") != SESSION_INCIDENT_MESSAGE_TYPE:
                     continue
                 details = entry.payload.get("details")
@@ -27716,8 +27789,10 @@ class Session:
         from the 1000-character copy the writer keeps.
         """
         from local_operator.incidents import format_mcp_unavailable_message
+        from local_operator.session.transcript import resident_entries
 
-        entries = self._transcript.entries()
+        # The resident suffix starts at the cut, so the bound below is unchanged.
+        entries = resident_entries(self._transcript)
         # VISIBILITY BOUND (review round 1, M1): scan only at/above the latest
         # compaction cut. Rows below it were dropped from the context replay —
         # the model's ``build_llm_history`` and the operator's display window
@@ -37606,12 +37681,31 @@ class Session:
                 )
             )
 
+    def _patience_rows(self, cutoff_ms: int) -> list[Any]:
+        """Rows for the patience scan: the resident suffix when it reaches back
+        past ``cutoff_ms`` (the scan stops there), else the whole journal."""
+        from local_operator.session.transcript import resident_entries
+
+        rows = resident_entries(self._transcript)
+        if (
+            getattr(self._transcript, "has_prefix", False) is True
+            and rows
+            and int(float(getattr(rows[0], "ts", 0) or 0) * 1000) > cutoff_ms
+        ):
+            return self._transcript.entries()
+        return rows
+
     def _restore_selected_model(self) -> None:
         """Restore conversation identity independently of today's defaults."""
         from local_operator.session.model_selection import selection_from_payloads
+        from local_operator.session.transcript import (
+            projection_entries,
+            transcript_prefix_flag,
+        )
 
+        # selected_model and the checkpoint are keep-set types, in order.
         saved = selection_from_payloads(
-            row.payload for row in self._transcript.entries() if row.type == ENTRY_CUSTOM
+            row.payload for row in projection_entries(self._transcript) if row.type == ENTRY_CUSTOM
         )
         # A child is skipped like a flag, because its model was also chosen
         # deliberately just before construction: ``run_subagent`` resolved the
@@ -37640,14 +37734,16 @@ class Session:
             # and lost — so either a message row or a `selected_model` row
             # keeps the notice (the latter is the unusable-selection recovery
             # this branch's sibling below also serves).
-            self._model_migration_notice = any(
+            self._model_migration_notice = transcript_prefix_flag(
+                self._transcript, "has_message"
+            ) or any(
                 row.type == ENTRY_MESSAGE
                 or (
                     row.type == ENTRY_CUSTOM
                     and str((row.payload or {}).get("custom_type", ""))
                     == SELECTED_MODEL_CUSTOM_TYPE
                 )
-                for row in self._transcript.entries()
+                for row in projection_entries(self._transcript)
             )
             return
         selector, effort = saved.selector, saved.effort
@@ -38991,7 +39087,7 @@ class Session:
         # fact that could matter is in reach and the scan stays bounded on a
         # long conversation.
         cutoff = now - (pol.ttl_ms + 3_600_000)
-        facts = patience.scan_entries(self._transcript.entries(), cutoff_ms=cutoff)
+        facts = patience.scan_entries(self._patience_rows(cutoff), cutoff_ms=cutoff)
         if patience.fire_is_stale(due.schedule, facts):
             logger.info(
                 "patience: %s predates the last inbound; retiring without a turn",
@@ -39048,9 +39144,8 @@ class Session:
                 from local_operator.wakes import patience
 
                 now = int(time.time() * 1000)
-                facts = patience.scan_entries(
-                    self._transcript.entries(), cutoff_ms=now - (pol.ttl_ms + 3_600_000)
-                )
+                cutoff = now - (pol.ttl_ms + 3_600_000)
+                facts = patience.scan_entries(self._patience_rows(cutoff), cutoff_ms=cutoff)
                 return not patience.fire_is_stale(row, facts)
             except Exception:  # noqa: BLE001 — documented fail-open
                 return True
