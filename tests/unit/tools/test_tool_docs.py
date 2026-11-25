@@ -928,7 +928,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (radient native search chain, PR #4553): 193 -> 196 — the
     # ``radient`` provider id joins the rendered ``provider`` enum. The only
     # entry that moved; measured through this test's own printed table.
-    "web_search": 196,
+    # RE-MEASURED (native search vendors, PR #4569): 196 -> 208 — the
+    # ``provider`` enum gains openai/anthropic/xai/alibaba. Deliberate: a
+    # native vendor the model cannot force is not selectable at all.
+    # RE-MEASURED (native-search family, PR2 part B): 208 -> 222 (+14) — the
+    # enum gains google/kimi/zai/mistral/openrouter, for the same reason.
+    # RE-MEASURED (PR #4569 context-budget offset): 222 -> 208 (-14) — the
+    # description drops its "Use provider only for a specific enabled source"
+    # sentence, which repeated the ``provider`` parameter's own description,
+    # and tightens the parallel-batching line; pays for the enum growth above.
+    # RE-MEASURED (PR #4569 second offset, after main grew +14 chars of
+    # instructions): 208 -> 201 (-7) — "load balancing" kept only in the
+    # ``provider`` description, ``max_results`` drops "Maximum" (the schema
+    # carries the bound), tighter fetch/parallel wording. Enum unchanged.
+    "web_search": 201,
     "write": 137,
 }
 

@@ -21,6 +21,14 @@ def attached() -> Msg:
     return Msg("wire.session_status.attached", {})
 
 
+def booting(*, duration: str) -> Msg:
+    return Msg("wire.session_status.booting", {"duration": duration})
+
+
+def booting_not_answering(*, duration: str) -> Msg:
+    return Msg("wire.session_status.booting_not_answering", {"duration": duration})
+
+
 def complete() -> Msg:
     return Msg("wire.session_status.complete", {})
 

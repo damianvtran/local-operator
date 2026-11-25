@@ -19763,6 +19763,15 @@ def _sessions_peer_status(row: Mapping[str, Any]) -> str:
     block = row.get("peer") or {}
     if block.get("reachable") is False:
         return "link down; status unknown"
+    # A BOOTING SESSION IS NOT A STOPPED ONE (PR #4572 QA Q6). The owner lists
+    # it ``stored`` plus a ``boot_state`` claim, and ``PeerRow`` does not carry
+    # that claim, so the ladder below would say "not running"; ``info``/``list``
+    # say "starting · 12s" or "not answering · starting for 45s" instead.
+    from local_operator.resume import english_status_render, session_row_state_words
+
+    booting = row.get("boot_state") and session_row_state_words(row, render=english_status_render)
+    if booting and booting != str(row.get("state") or ""):
+        return booting
     from local_operator.network.projection import PeerRow
     from local_operator.resume import SessionRow
     from local_operator.session.catalog import status_of

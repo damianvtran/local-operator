@@ -7,11 +7,11 @@
         {
           "path": "local_operator/settings_io.py",
           "symbol": "settings_io._t",
-          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code. Heavy-job section title/description and setting label/help/two choice descriptions add six calls at this same _t render point, not envelope identities. The mcp.result_normalization row (label/help, three choice labels and descriptions) adds eight more _t calls at this render point, likewise plain strings. The mcp.search_snippet_chars row (label/help) adds two more, likewise plain strings. The mcp.result_text_rendering row (label/help) adds two more, likewise plain strings."
+          "note": "registry label/help copy rendered into plain strings; /v1/settings carries the strings, never a code. Heavy-job section title/description and setting label/help/two choice descriptions add six calls at this same _t render point, not envelope identities. The mcp.result_normalization row (label/help, three choice labels and descriptions) adds eight more _t calls at this render point, likewise plain strings. The mcp.search_snippet_chars row (label/help) adds two more, likewise plain strings. The mcp.result_text_rendering row (label/help) adds two more, likewise plain strings. The web_search.claude_subscription_search row (label/help) adds two more, likewise plain strings."
         }
       ],
       "references": {
-        "settings_io.py": 906,
+        "settings_io.py": 908,
         "tui/app.py": 1
       }
     },
@@ -417,10 +417,16 @@
           "path": "local_operator/i18n/duration_message.py",
           "symbol": "format_duration (render callback)",
           "note": "Shared four-branch duration selection immediately renders each generated key through the caller-owned callback and rejects non-string results. session/catalog.status_duration supplies _terminal_label with the config-owned locale; info/copy.info_duration supplies _duration_info_text with the active Info locale and actual source provenance. Both return finished strings, never envelope identities."
+        },
+        {
+          "path": "local_operator/resume.py",
+          "symbol": "session_row_state_words (render)",
+          "note": "Since PR #4588: a federated row that is stored plus a starting/not_responding boot claim selects booting / booting_not_answering (with format_duration through the same callback) and renders them immediately with the caller's render — tr(\"wire.session_status\") in the active locale for the `lop network sessions` CLI table (network/cli.py), english_status_render (messages.render, locale en) for the model-facing network tool listing (network/tool.py) and sessions tool state line (tools/builtin.py). Returns a finished str that is printed or embedded in tool text; no Msg, code or envelope leaves the function."
         }
       ],
       "references": {
         "i18n/duration_message.py": 5,
+        "resume.py": 2,
         "session/catalog.py": 28
       }
     },

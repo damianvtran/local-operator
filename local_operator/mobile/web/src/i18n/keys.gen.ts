@@ -1326,6 +1326,8 @@ export type MessageParams = {
   "wire.session_status.answer_needed": undefined;
   "wire.session_status.approval_needed": undefined;
   "wire.session_status.attached": undefined;
+  "wire.session_status.booting": { "duration": string };
+  "wire.session_status.booting_not_answering": { "duration": string };
   "wire.session_status.complete": undefined;
   "wire.session_status.delegating_jobs": { "count": number };
   "wire.session_status.delegating_queued": { "count": number };
@@ -2266,6 +2268,8 @@ export type MessageParams = {
   "wire.settings.web_fetch_timeout_seconds.label": undefined;
   "wire.settings.web_search.description": undefined;
   "wire.settings.web_search.title": undefined;
+  "wire.settings.web_search_claude_subscription_search.help": undefined;
+  "wire.settings.web_search_claude_subscription_search.label": undefined;
   "wire.settings.web_search_deepseek_evidence.help": undefined;
   "wire.settings.web_search_deepseek_evidence.label": undefined;
   "wire.settings.web_search_enabled.choice.false.description": undefined;

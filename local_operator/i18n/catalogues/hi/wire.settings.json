@@ -880,6 +880,8 @@
   "wire.settings.web_fetch_timeout_seconds.label": "टाइमआउट (s)",
   "wire.settings.web_search.description": "search टूल के लिए प्रोवाइडर और लोड बैलेंसिंग।",
   "wire.settings.web_search.title": "वेब सर्च",
+  "wire.settings.web_search_claude_subscription_search.help": "हर सर्च Claude के अतिरिक्त उपयोग से बिल होती है (API मूल्य); Radient के बाद।",
+  "wire.settings.web_search_claude_subscription_search.label": "Claude साइन-इन सर्च (सशुल्क)",
   "wire.settings.web_search_deepseek_evidence.help": "DeepSeek सर्च के बाद प्रति पेज उद्धरण और प्रासंगिकता स्कोर जोड़ता है।",
   "wire.settings.web_search_deepseek_evidence.label": "DeepSeek पेज साक्ष्य",
   "wire.settings.web_search_enabled.choice.false.description": "सर्च बंद",

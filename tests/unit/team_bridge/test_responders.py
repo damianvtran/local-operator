@@ -1492,6 +1492,133 @@ def test_the_gate_r3_hash_tripwire_fires(tmp_path: Path, relpath: str, source: s
     assert _gate_r3_hash_hits(tmp_path), relpath
 
 
+_JAIL_MODULES = frozenset(
+    {
+        "local_operator.team_bridge.responders.jail",
+        "local_operator.team_bridge.responders.isolation",
+    }
+)
+_JAIL_SUBMODULES = frozenset({"jail", "isolation"})
+_S17_GATED_NAMES = frozenset({"ResponderJail", "IsolationAttestation", "attestation_refusal"})
+
+
+def _gate_s17_uid_hits(root: Path) -> list[str]:
+    """Every place under ``root`` (a directory holding ``local_operator``) that
+    reaches the responder jail or its attestation: an import of either module
+    (absolute or relative), ``from <responders> import jail|isolation``, a
+    ``ResponderJail``/``IsolationAttestation``/``attestation_refusal`` name or
+    attribute, or ``<isolation>.attest`` -- the two modules themselves excepted."""
+
+    import ast
+
+    hits: list[str] = []
+    for path in sorted((root / "local_operator").rglob("*.py")):
+        rel = path.relative_to(root)
+        parts = list(rel.with_suffix("").parts)
+        if ".".join(parts) in _JAIL_MODULES:
+            continue
+        package = parts[:-1]
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.level:
+                    base = package[: len(package) - (node.level - 1)]
+                    full = ".".join(base + ([node.module] if node.module else []))
+                else:
+                    full = node.module or ""
+                names = {a.name for a in node.names}
+                if (
+                    full in _JAIL_MODULES
+                    or (full == _RESPONDERS_PKG and names & (_JAIL_SUBMODULES | {"*"}))
+                    or names & _S17_GATED_NAMES
+                ):
+                    hits.append(f"{rel}:{node.lineno} imports {sorted(names)} from {full}")
+            elif isinstance(node, ast.Import):
+                hits.extend(
+                    f"{rel}:{node.lineno} imports {a.name}"
+                    for a in node.names
+                    if a.name in _JAIL_MODULES
+                )
+            elif isinstance(node, ast.Name) and node.id in _S17_GATED_NAMES:
+                hits.append(f"{rel}:{node.lineno} names {node.id}")
+            elif isinstance(node, ast.Attribute):
+                if node.attr in _S17_GATED_NAMES:
+                    hits.append(f"{rel}:{node.lineno} names .{node.attr}")
+                elif node.attr == "attest":
+                    owner = node.value
+                    owner_name = getattr(owner, "id", None) or getattr(owner, "attr", None)
+                    if owner_name == "isolation":
+                        hits.append(f"{rel}:{node.lineno} calls isolation.attest")
+    return hits
+
+
+def test_nothing_uses_the_responder_jail_before_gate_s17_uid() -> None:
+    """GATE S17-UID (PR #4549 security round 2): a seatbelt jail under the
+    operator's uid exposes every same-uid process's argv and environment via
+    KERN_PROCARGS2 — measured, not closable in the profile. Delete this test only
+    in the PR that runs responder children under a distinct uid AND adds the macOS
+    kernel test proving a jailed child reads no canary from an operator-uid
+    non-platform process (with an unjailed control that does), with its own
+    security round. Removing GATE R3-HASH does not lift this gate.
+
+    The C2 requirements the deleting PR must meet (security round 2, S-17-UID):
+    (a) a separate, non-admin uid for responder children; (b) the KERN_PROCARGS2
+    and ``ps -axww -o args`` canary test run from the real spawn path, neither
+    showing the canary while the unjailed operator-uid control shows both;
+    (c) run home and repos owned by that uid, which cannot read ``~/workspace``
+    or ``~/.aws`` with seatbelt removed; (d) concurrent runs serialized, or
+    same-trust stated on the PR; (e) the profile string executed is the one
+    hashed into the attestation, which records the run uid (S-24).
+    """
+
+    import local_operator
+
+    root = Path(local_operator.__file__).parent.parent
+    hits = _gate_s17_uid_hits(root)
+    assert not hits, "GATE S17-UID tripwire — responder jail used before a distinct uid:\n" + (
+        "\n".join(hits)
+    )
+
+
+@pytest.mark.parametrize(
+    ("relpath", "source", "expect_hit"),
+    [
+        (
+            "local_operator/connector/wake.py",
+            "from local_operator.team_bridge.responders.jail import ResponderJail\n",
+            True,
+        ),
+        (
+            "local_operator/team_bridge/responders/runner.py",
+            "from .isolation import attest\n",
+            True,
+        ),
+        ("local_operator/team_bridge/responders/spawn.py", "from . import jail\n", True),
+        ("local_operator/x.py", "import local_operator.team_bridge.responders.isolation\n", True),
+        ("local_operator/x.py", "def f(m):\n    return m.ResponderJail\n", True),
+        # Clean control: the materializer is not gated.
+        (
+            "local_operator/team_bridge/responders/spawn.py",
+            "from .materialize import materialize_repo\n",
+            False,
+        ),
+    ],
+)
+def test_the_gate_s17_uid_tripwire_fires(
+    tmp_path: Path, relpath: str, source: str, expect_hit: bool
+) -> None:
+    """Negative control: GATE S17-UID is not a probe that cannot fail."""
+
+    target = tmp_path / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source)
+    # The two exempt modules may name themselves freely.
+    exempt = tmp_path / "local_operator" / "team_bridge" / "responders" / "isolation.py"
+    exempt.parent.mkdir(parents=True, exist_ok=True)
+    exempt.write_text("from .jail import ResponderJail\n")
+    assert bool(_gate_s17_uid_hits(tmp_path)) is expect_hit, relpath
+
+
 @pytest.mark.parametrize(
     "command",
     [

@@ -15,10 +15,20 @@
   "web_search.meaning.auto_radient": "在免费环节及任何原生套餐环节之后尝试；从你的Radient额度扣费",
   "web_search.meaning.radient_refused": "在你充值前跳过；5分钟内会重新尝试Radient",
   "web_search.meaning.auto_native_plan": "你的模型套餐自带的搜索，在免费环节之后尝试",
-  "web_search.meaning.auto_native_paid": "你的模型API密钥自带的搜索，按次计费",
+  "web_search.meaning.auto_native_paid": "你的模型提供商自带的搜索，按次计费；在Radient之后尝试",
   "web_search.meaning.auto_free_then_key": "先用免费层级；你的API密钥在Radient之后尝试",
   "web_search.meaning.enabled_then_key": "按你的优先顺序使用免费层级；你的API密钥在Radient之后尝试",
   "web_search.marker.plan": "（套餐）",
   "web_search.marker.credits": "（额度）",
-  "web_search.marker.no_credits": "（无额度）"
+  "web_search.marker.no_credits": "（无额度）",
+  "web_search.native.access_key": "API密钥",
+  "web_search.native.access_plan_key": "套餐登录 / API密钥",
+  "web_search.native.access_key_signin": "API密钥 / 登录",
+  "web_search.native.detail_key": "{vendor}自带的网页搜索；每次搜索向你的{vendor}凭据收取一次搜索费用和一次模型调用费用",
+  "web_search.native.detail_claude_signin_off": "{vendor}自带的网页搜索；要使用你的登录，请在 /settings → 网页搜索 中开启“Claude登录搜索（收费）”",
+  "web_search.native.detail_plan_key": "{vendor}自带的网页搜索；先使用你的{plan}套餐，再使用API密钥（每次搜索费用加一次模型调用）",
+  "web_search.native.no_credential": "{vendor}搜索在此环节没有可用的凭据；请重新登录或保存{vendor} API密钥。",
+  "web_search.native.access_plan": "套餐登录 / 套餐密钥",
+  "web_search.native.detail_plan": "{vendor}自带的网页搜索，已包含在你的{plan}中；不产生额外费用",
+  "web_search.native.detail_search_api": "{vendor}搜索API（无模型调用）；每次搜索向你的{vendor}密钥收取少量费用"
 }

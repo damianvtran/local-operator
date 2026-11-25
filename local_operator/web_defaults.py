@@ -60,6 +60,11 @@ DEFAULT_WEB_SEARCH_CONFIG: dict[str, object] = {
     "timeout_seconds": 20.0,
     "searxng_endpoint": "",
     "deepseek_evidence": False,
+    # Claude-subscription (Anthropic OAuth) native search. OFF by default,
+    # operator decision 2026-11-24: Anthropic draws third-party-harness plan use
+    # from extra usage, so spending it on search must be an explicit opt-in.
+    # The Anthropic API-key leg does not read this.
+    "claude_subscription_search": False,
     "read_enabled": True,
 }
 
@@ -85,4 +90,16 @@ WEB_SEARCH_PROVIDER_IDS: tuple[str, ...] = (
     "parallel",
     "serpapi",
     "searxng",
+    # The native-search family (``web_search/native/``): a model vendor's own
+    # built-in search, billed to the user's plan or model key. Last because they
+    # are the newest rows and none of them is a dedicated search product.
+    "openai",
+    "anthropic",
+    "xai",
+    "alibaba",
+    "google",
+    "kimi",
+    "zai",
+    "mistral",
+    "openrouter",
 )

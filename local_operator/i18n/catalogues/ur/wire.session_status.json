@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number} سیکنڈ",
   "wire.session_status.duration_minutes": "{count, number} منٹ",
   "wire.session_status.duration_hours_minutes": "{hours, plural, one {# گھنٹہ} other {# گھنٹے}} {minutes, number} منٹ",
-  "wire.session_status.duration_days_hours": "{days} دن {hours, plural, one {# گھنٹہ} other {# گھنٹے}}"
+  "wire.session_status.duration_days_hours": "{days} دن {hours, plural, one {# گھنٹہ} other {# گھنٹے}}",
+  "wire.session_status.booting": "شروع ہو رہا · {duration}",
+  "wire.session_status.booting_not_answering": "جواب نہیں دے رہا · {duration} سے شروع ہو رہا"
 }

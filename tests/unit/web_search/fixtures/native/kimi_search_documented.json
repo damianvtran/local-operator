@@ -1,0 +1,23 @@
+{
+  "_note": "DOCUMENTED SHAPE, not a live capture (no credential on the probe machine 2026-11-24); platform.kimi.ai Web Search Basic / kimi-cli SearchWeb Response model",
+  "search_results": [
+    {
+      "site_name": "Python.org",
+      "title": "Python Release Python 3.15.2",
+      "url": "https://www.python.org/downloads/release/python-3152/",
+      "snippet": "Python 3.15.2 is the newest major release.",
+      "date": "2026-10-25",
+      "icon": "",
+      "mime": ""
+    },
+    {
+      "site_name": "Python Insider",
+      "title": "Python 3.15.2 is out",
+      "url": "https://blog.python.org/2026/10/python-3152/",
+      "snippet": "Expedited security release.",
+      "date": "",
+      "icon": "",
+      "mime": ""
+    }
+  ]
+}

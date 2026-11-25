@@ -318,7 +318,14 @@ def test_finder_witness_is_plain_only_force_keeps_base_hold(
         if not deletion:
             assert forced.risk is Risk.LOW, forced.reasons
         return
-    # #4503's pin, for a tree another session made: --force keeps base's hold.
+    if not deletion:
+        # #4565 (operator directive, Aida's 2026-11-25 matrix) supersedes
+        # #4503's pin for a CLEAN merged foreign tree: ``--force`` sheds
+        # ignored payload exactly as plain removal does
+        # (``_merged_force_payload``).
+        assert forced.risk is Risk.LOW, forced.reasons
+        return
+    # A tracked deletion is real work ``--force`` would discard: still held.
     assert forced.risk is Risk.HIGH and forced.targets[0].cleanup_hold, forced.reasons
     assert "preservation check failed" in forced.targets[0].reason
 
@@ -1859,7 +1866,9 @@ def test_content_verified_caches_shed_from_a_foreign_merged_tree(
     # sheds the regenerable NAMES too; only an unreadable walk still holds.
     # Held: an unreadable walk or a nested repository (fail closed), and a
     # source file inside ``__pycache__`` (``worktree_state`` reads it dirty).
-    if payload in {"tagged-unreadable", "tagged-repo", "pycache-with-source"}:
+    # Since 2026-11-24 a source file in ``__pycache__`` of a merged tree is
+    # ignored payload like any other and goes too.
+    if payload in {"tagged-unreadable", "tagged-repo"}:
         assert plain.risk is not Risk.LOW, plain.reasons
     else:
         assert plain.risk is Risk.LOW, plain.reasons
@@ -1904,10 +1913,12 @@ def _build_output(wt: Path, payload: str) -> None:
         ("node-modules", True),
         ("cache-typecheck", True),
         ("egg-info-venv", True),
-        ("node-modules-with-env", False),
+        # 2026-11-24 (guard 0.113.0): a merged, finished tree sheds ALL
+        # ignored payload but nested repositories (``_merged_tree_sheds``).
+        ("node-modules-with-env", True),
         ("node-modules-repo", False),
         ("node-modules-unreadable", False),
-        ("test-output", False),
+        ("test-output", True),
     ],
 )
 def test_finished_foreign_tree_sheds_regenerable_build_output(

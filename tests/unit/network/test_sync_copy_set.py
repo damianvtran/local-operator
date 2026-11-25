@@ -306,6 +306,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "It is never an entry of a session directory, so nothing under this name "
         "belongs in the session copy set.",
     ),
+    "local_operator/team_bridge/responders/pinned_credentials.py": (
+        2,
+        "``RESPONDER_ROLE_NAME`` ('radient-responder-readonly') is an IAM role name and "
+        "``SOURCE_PROFILE`` ('radient-prod-admin') an AWS CLI profile name: identifiers "
+        "the pinned STS resolver passes to AWS, never files or session-directory entries.",
+    ),
+    "local_operator/team_bridge/responders/jail.py": (
+        1,
+        "``CA_BUNDLE_NAME`` ('ca-bundle.crt') names a file INSIDE a responder run's own "
+        "home, never a direct entry of a session directory. The file is a per-run copy "
+        "of the public system trust store, rewritten by ``prepare_home`` for every run, "
+        "so it must not travel with a session.",
+    ),
     "local_operator/session/row_clip.py": (
         1,
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "

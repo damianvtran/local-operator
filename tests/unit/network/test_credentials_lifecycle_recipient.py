@@ -484,6 +484,11 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # The one-session lookup adds no op either: it gates an optional
+        # ``session_id`` filter on the same catalogue answer
+        # (``RelayServer._op_catalog``), so advertising it promises an owner whose
+        # ``net_catalog`` handler answers only that session's row.
+        wire.REMOTE_CATALOG_SESSION_ID_V1: "net_catalog",
         # Paging/search adds no op: it gates optional ``limit``/``cursor``/``query``
         # fields on the same catalogue frame (``RelayServer._catalog_page``), so
         # advertising it promises an owner whose ``net_catalog`` handler pages.
