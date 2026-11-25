@@ -20,7 +20,7 @@ import {
 	setDeliveryMode,
 	type DeliveryMode,
 } from "../lib/delivery";
-import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
+import { getCommands, getHistory, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	QUEUED_DETAIL,
 	deferredSettingsFields,
@@ -546,6 +546,25 @@ const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 const RETAINED_RETRY_ERROR =
 	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
 const RETRY_BUTTON_LABEL = "Retry earlier instruction";
+/* Review round 2, R2-M1 on PR #4584: past the wake bound the session wrote
+   something, but neither the tail nor the bounded history walk carries this
+   command's row. The tail can move for reasons other than our delivery (the
+   failed wake's runtime booting late, the wake supervisor, another surface, a
+   re-fold), so this is NOT a failure claim and NOT a delivery claim: it says
+   what the phone knows and points at the Retry, whose same-`command_id` replay
+   the session dedupes. A literal like its retained-retry siblings above (U5
+   vocabulary: "earlier instruction"), not a relay catalogue key. */
+const UNCONFIRMED_WAKE_ERROR =
+	"Couldn’t confirm your earlier instruction was delivered. Retry it to be sure — it won’t be sent twice.";
+/* How far back the moved-tail confirmation pages (R2-M1). The cap is what
+   keeps a remount after a long absence (the envelope lives up to 24 h) from
+   walking a whole long session's history on every mount. Missing the row
+   because it sits deeper than this is the SAFE direction: the user sees
+   UNCONFIRMED_WAKE_ERROR and a Retry the session dedupes by `command_id`, at
+   worst one extra boot, never a lost message. 3 pages of `getHistory`'s
+   default 80 rows = 240 rows past the 80-row tail. */
+const WAKE_CONFIRM_HISTORY_PAGES = 3;
+const WAKE_CONFIRM_PAGE_ROWS = 80;
 /* D11: the positive acknowledgement is a SUCCESS, not a failure — it renders in
    the neutral/success notice, never the danger alert container.
 
@@ -1037,6 +1056,11 @@ export function Composer({
 		   settle effect). Undefined = no baseline: the bound then fails the send
 		   as before. */
 		tailId?: string;
+		/* Past the bound with a moved tail (R2-M1): the bounded search for this
+		   command's row. Undefined = not started; `"found"` = delivered;
+		   `"missing"` = unconfirmed (envelope and Retry kept). Per tracker, so a
+		   remount re-checks once. */
+		confirm?: "checking" | "found" | "missing";
 	} | null>(null);
 	/* Bumped by the settle effect's own deadline timer, so the effect re-runs
 	   when the wake's settled bound passes even if no frame arrives (a cold
@@ -1537,9 +1561,58 @@ export function Composer({
 		   composer is served while the session is cold. */
 		const movedPastBaseline =
 			pastBound &&
+			/* The baseline is only ever stamped from a durable rebuild; an ended
+			   LIVE frame can end in a transient notice row no rebuild reproduces
+			   (review round 2, R2-m1). */
+			projection.pid === 0 &&
 			waking.tailId !== undefined &&
 			(projection.transcript?.length ?? 0) > 0 &&
 			transcriptTailId(projection.transcript) !== waking.tailId;
+		/* A MOVED TAIL IS NOT PROOF OF DELIVERY (review round 2, R2-M1). Something
+		   wrote, but it need not be our message: the failed wake's own runtime
+		   booting late, the wake supervisor, another surface's prompt, or a
+		   re-fold all move the newest id too. Treating that as delivered retired
+		   the row, the envelope and the Retry, and the message was gone from the
+		   phone. So the move only means "look": the command's own id is the proof,
+		   in the tail (the projection check below) or in a bounded walk of older
+		   history. Found settles as delivered; not found (or the walk errored)
+		   is unconfirmed — the failed-send affordances with neutral copy. A
+		   brand-new session's baseline is `""`, so its first row takes this path
+		   as well. */
+		const carriedInTail =
+			waking !== null && projectionCarriesCommand(projection.transcript, waking.commandId);
+		if (waking && movedPastBaseline && !carriedInTail && waking.confirm === undefined) {
+			const tracker = waking;
+			tracker.confirm = "checking";
+			const oldest = projection.transcript?.[0]?.id ?? null;
+			void (async () => {
+				let found = false;
+				try {
+					let before = oldest;
+					for (let page = 0; page < WAKE_CONFIRM_HISTORY_PAGES && before; page++) {
+						const { entries, has_more } = await getHistory(pid, before, WAKE_CONFIRM_PAGE_ROWS);
+						if (projectionCarriesCommand(entries, tracker.commandId)) {
+							found = true;
+							break;
+						}
+						if (!has_more || entries.length === 0) break;
+						before = entries[0].id;
+					}
+				} catch {
+					/* Unreachable history is not evidence of delivery: unconfirmed. */
+				}
+				/* A newer tracker (a retry's) owns the outcome now. */
+				if (wakingCommand.current !== tracker) return;
+				tracker.confirm = found ? "found" : "missing";
+				setWakeDeadlineTick((n) => n + 1);
+			})();
+		}
+		const unconfirmed =
+			waking !== null &&
+			!waking.failed &&
+			movedPastBaseline &&
+			!carriedInTail &&
+			waking.confirm === "missing";
 		const wakeFailed =
 			waking !== null &&
 			!waking.failed &&
@@ -1549,8 +1622,10 @@ export function Composer({
 				pastBound);
 		const outcome = settleWakingContinuation(
 			pid,
-			(commandId) => movedPastBaseline || projectionCarriesCommand(projection.transcript, commandId),
-			wakeFailed,
+			(commandId) =>
+				projectionCarriesCommand(projection.transcript, commandId) ||
+				(waking?.commandId === commandId && waking.confirm === "found"),
+			wakeFailed || unconfirmed,
 			waking?.commandId ?? null,
 		);
 		if (outcome === "delivered") {
@@ -1558,7 +1633,7 @@ export function Composer({
 			/* A row the tail no longer carries is never retired by the projection
 			   (`usePendingEchoes` filters on the tail), so a delivery read off the
 			   moved tail takes it down here, or it would sit at the bottom. */
-			if (waking && movedPastBaseline) withdrawPendingEcho(pid, waking.commandId);
+			if (waking && movedPastBaseline && !carriedInTail) withdrawPendingEcho(pid, waking.commandId);
 			else if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
 			   the user to wait for exactly this; leaving it up after the landing
@@ -1579,7 +1654,9 @@ export function Composer({
 			if (waking?.failed) {
 				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
 				setErrorOccurrence((current) =>
-					current.message === failedCopy || current.message === RETAINED_RETRY_ERROR
+					current.message === failedCopy ||
+					current.message === RETAINED_RETRY_ERROR ||
+					current.message === UNCONFIRMED_WAKE_ERROR
 						? { message: "" }
 						: current,
 				);
@@ -1587,7 +1664,7 @@ export function Composer({
 				   the user typed over it is theirs. */
 				if (textRef.current.trim() === waking.text.trim()) clearDraft();
 			}
-		} else if (outcome === "failed" && waking && wakeFailed) {
+		} else if (outcome === "failed" && waking && (wakeFailed || unconfirmed)) {
 			waking.failed = true;
 			withdrawPendingEcho(pid, waking.commandId);
 			if (textRef.current.trim() === "") {
@@ -1596,7 +1673,7 @@ export function Composer({
 				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(messageRuntime.t("relay.health.ended_send_failed"));
+			setError(unconfirmed ? UNCONFIRMED_WAKE_ERROR : messageRuntime.t("relay.health.ended_send_failed"));
 		} else if (outcome === null) {
 			/* Settled out from under the tracker (the envelope is gone): the row,
 			   if any is left, no longer knows a wake is running. */

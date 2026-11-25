@@ -28,6 +28,8 @@ describe("the composer's wake bound tracks the relay's deadline (m2)", () => {
 	it("is back-referenced at the daemon constant", () => {
 		const daemon = readFileSync(join(__dirname, "..", "..", "daemon.py"), "utf8");
 		const at = daemon.indexOf("PROMPT_WAKE_DEADLINE_S = ");
+		/* R2-n1: -1 would slice the whole file, which names the bound anyway. */
+		expect(at).toBeGreaterThanOrEqual(0);
 		expect(daemon.slice(Math.max(0, at - 800), at)).toContain("WAKE_SETTLED_BOUND_MS");
 	});
 });

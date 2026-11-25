@@ -96,6 +96,8 @@ afterEach(() => {
 
 beforeEach(() => {
 	vi.mocked(api.sendCommand).mockReset();
+	vi.mocked(api.getHistory).mockReset();
+	vi.mocked(api.getHistory).mockImplementation(async () => ({ entries: [], has_more: false }));
 	vi.stubGlobal("crypto", { randomUUID: () => COMMAND_ID });
 });
 
@@ -210,24 +212,126 @@ describe("a waking row that outlived its composer (M1)", () => {
 	/* REVIEW ROUND 1, M1 (PR #4584): the projection is the 80-row tail, so a
 	   wake that delivered and then ran a long turn has pushed the user row out
 	   of it. Past the bound that looked like "no row, no owner" and the
-	   delivered message was reported failed. Measured RED on b4adabdd: the
-	   failure copy shows, the draft returns and the envelope is kept. */
-	it("treats a moved tail past the bound as delivered, not failed", async () => {
+	   delivered message was reported failed.
+
+	   REVIEW ROUND 2, R2-M1: round 1 read ANY moved tail as that delivery, and
+	   a tail moves for other reasons too (the failed wake's runtime booting
+	   late, the wake supervisor, another surface, a re-fold): the row, the
+	   envelope and the Retry were cleared and the message was lost. The move
+	   now only starts a search for the command's own id, in the tail and then
+	   at most WAKE_CONFIRM_HISTORY_PAGES older pages. Measured RED on 7b45086f
+	   (4 of the 5 cells below): unconfirmed, empty-baseline and live-ended (the
+	   row is retired as delivered, the envelope cleared, no Retry) and found-on-
+	   page-2 (no history is read at all). The found-in-tail cell is a guard
+	   that holds on both heads. */
+	const UNCONFIRMED_COPY =
+		"Couldn’t confirm your earlier instruction was delivered. Retry it to be sure — it won’t be sent twice.";
+	const filler = (from: number, n: number) =>
+		Array.from({ length: n }, (_, i) => userRow(`later-${from + i}`, `row ${from + i}`));
+	/** Serve `getHistory` from one chronological journal, paging like the relay. */
+	function serveHistory(all: TranscriptEntry[]) {
+		vi.mocked(api.getHistory).mockImplementation(async (_sid, before, limit = 80) => {
+			const end = before ? all.findIndex((row) => row.id === before) : all.length;
+			const start = Math.max(0, end - limit);
+			return { entries: all.slice(start, end), has_more: start > 0 };
+		});
+	}
+	/** The composer's confirmation pages (80 rows), not the transcript's own (120). */
+	const confirmCalls = () => vi.mocked(api.getHistory).mock.calls.filter((call) => call[2] === 80);
+
+	/** Wake, then come back past the bound to a pid-0 rebuild showing `tail`. */
+	async function backPastBound(tail: TranscriptEntry[], overrides: Partial<SessionProjection> = {}) {
 		const start = Date.now();
 		const view = mount();
 		await sendWaking(view);
 		const clock = vi.spyOn(Date, "now").mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 1_000);
-		/* The wake delivered, the turn wrote 80+ rows, the runtime parked: the
-		   remount's seed is a pid-0 rebuild whose tail no longer holds the row. */
-		const tail = Array.from({ length: 80 }, (_, i) => userRow(`later-${i}`, `row ${i}`));
-		const back = switchAway(view, frame({ version: 2, transcript: tail }));
-		back.publish(frame({ version: 3, transcript: tail }));
+		const back = switchAway(view, frame({ version: 2, transcript: tail, ...overrides }));
+		back.publish(frame({ version: 3, transcript: tail, ...overrides }));
+		return { back, clock };
+	}
+
+	it("treats a moved tail carrying the command's row as delivered", async () => {
+		const tail = [...filler(0, 40), userRow(COMMAND_ID, SENT), ...filler(40, 39)];
+		const { back, clock } = await backPastBound(tail);
 
 		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
 		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(screen.queryByText(UNCONFIRMED_COPY)).toBeNull();
 		expect(pendingRows(back)).toHaveLength(0);
 		expect((await composer()).value).toBe("");
 		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		expect(confirmCalls()).toHaveLength(0);
+		clock.mockRestore();
+	});
+
+	it("finds a delivery that scrolled out of the tail on history page 2", async () => {
+		/* Journal: 240 older rows with ours at index 100, then the 80-row tail.
+		   Page 1 is rows 160–239, page 2 rows 80–159. */
+		const older = filler(0, 240);
+		older[100] = userRow(COMMAND_ID, SENT);
+		const tail = filler(1000, 80);
+		serveHistory([...older, ...tail]);
+		const { back, clock } = await backPastBound(tail);
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(confirmCalls().map((call) => call[1])).toEqual(["later-1000", "later-160"]);
+		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(screen.queryByText(UNCONFIRMED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe("");
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		clock.mockRestore();
+	});
+
+	it("keeps the envelope and Retry when a moved tail and the bounded history lack the id", async () => {
+		/* Another writer moved the tail; our row is nowhere in the 3 pages the
+		   search may read (it sits at row 10 of 400, past the cap). */
+		const older = filler(0, 400);
+		older[10] = userRow(COMMAND_ID, SENT);
+		const tail = filler(1000, 80);
+		serveHistory([...older, ...tail]);
+		const { back, clock } = await backPastBound(tail);
+
+		expect(await screen.findByText(UNCONFIRMED_COPY)).toBeTruthy();
+		expect(confirmCalls()).toHaveLength(3);
+		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe(SENT);
+		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+		/* The retry's body, under the SAME id: a duplicate is deduped. */
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	it("confirms a brand-new session's first rows by id too (empty baseline)", async () => {
+		/* The waking answer saw no rows, so the baseline is "". */
+		const start = Date.now();
+		const view = mount(frame({ transcript: [] }));
+		await sendWaking(view);
+		const clock = vi.spyOn(Date, "now").mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 1_000);
+		/* A supervisor wake wrote two rows; ours is not among them. */
+		const tail = filler(0, 2);
+		serveHistory(tail);
+		const back = switchAway(view, frame({ version: 2, transcript: tail }));
+		back.publish(frame({ version: 3, transcript: tail }));
+
+		expect(await screen.findByText(UNCONFIRMED_COPY)).toBeTruthy();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe(SENT);
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	it("does not read an ended live frame's tail against the pid-0 baseline (R2-m1)", async () => {
+		/* A dead live owner's last frame can end in a transient notice row no
+		   rebuild reproduces: the ordinary failure path, no history search. */
+		const tail = filler(0, 80);
+		const { back, clock } = await backPastBound(tail, { pid: 4242, kind: "tui", ended: true });
+
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+		expect(confirmCalls()).toHaveLength(0);
+		expect(pendingRows(back)).toHaveLength(0);
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
 		clock.mockRestore();
 	});
 
