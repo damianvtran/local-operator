@@ -1,0 +1,7 @@
+{
+  "session.attachment.team_unrestored": "L’équipe {team} n’est pas rattachée : {reason} Seul l’opérateur peut la rattacher de nouveau, en exécutant /team {team} dans la zone de saisie de cette session (sur cet appareil ou depuis un autre appareil qui la pilote) ; n’essayez pas de la rattacher vous-même.",
+  "session.attachment.reason_authority": "son habilitation enregistrée n’a pas pu être vérifiée sur cet appareil (la session est antérieure au contrôle d’habilitation des équipes ou est arrivée sans enregistrement d’équipe).",
+  "session.attachment.reason_unavailable": "ni sa définition ni son habilitation enregistrée ne sont disponibles sur cet appareil.",
+  "session.attachment.agent_unrestored": "Le profil {agent} n’est pas rattaché : sa définition n’est pas disponible sur cet appareil. Seul l’opérateur peut le rattacher de nouveau, en exécutant /agent {agent} dans la zone de saisie de cette session.",
+  "session.attachment.refusal": "Le message n’a pas été envoyé, car l’équipe ou le profil de cette session n’a pas pu être restauré. Rattachez-le en exécutant /team <name> ou /agent <name> dans cette session, ou détachez-le avec /team clear ou /agent clear."
+}
