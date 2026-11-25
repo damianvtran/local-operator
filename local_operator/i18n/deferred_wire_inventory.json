@@ -440,7 +440,20 @@
         }
       ],
       "references": {
-        "tools/builtin.py": 19
+        "tools/builtin.py": 18
+      }
+    },
+    "wire.sessions_remote_stop": {
+      "reason": "sessions tool remote idle-only stop receipts and approval prompt rendered in-process by tools/builtin.py (_sessions_remote_stop_copy) and returned as finished tool text",
+      "render_points": [
+        {
+          "path": "local_operator/tools/builtin.py",
+          "symbol": "tools.builtin (_sessions_remote_stop_copy)",
+          "note": "remote idle-only stop receipts, refusals and its approval prompt; returned as ToolResult text and approval-prompt strings, never as a key"
+        }
+      ],
+      "references": {
+        "tools/builtin.py": 8
       }
     },
     "wire.operator_setup": {

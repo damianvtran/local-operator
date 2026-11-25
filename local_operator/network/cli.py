@@ -601,6 +601,19 @@ def add_parser(
     )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
+    # THE IDLE-ONLY STOP IS ITS OWN FLAG, never a mode of ``--stop``: ``--stop`` is
+    # the owner's full ladder (it may signal), and this one is the owner's atomic
+    # idle latch and nothing else. It is what the ``sessions`` tool drives for a
+    # session on a peer (``_cmd_stop_if_idle``).
+    net_sessions.add_argument(
+        "--stop-if-idle",
+        metavar="SESSION",
+        default="",
+        help=(
+            "end that session only if it is idle on its device; refused when it is "
+            "busy, and never sends a signal (needs --peer; the peer must support it)"
+        ),
+    )
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
     # verb rather than a new subcommand because they are the same question as
     # `--stop` ("do a thing to a conversation that lives elsewhere") and they take
@@ -7855,6 +7868,94 @@ _STOP_REMEDIES: dict[str, str] = {
 }
 
 
+#: The CLI's wait on its OWN relay for the idle-only stop. It must outlast that
+#: relay's hop to the owner (``relay.engage_hop_bound_s``, 60 s by default), which
+#: in turn outlasts the owner's ``control.DEFAULT_TIMEOUT_S`` wait for the idle
+#: exit; the same 120 s ``--engage`` uses for the same hop.
+STOP_IF_IDLE_TIMEOUT_S = 120.0
+
+#: The sentence for a LOCAL relay that predates the idle-only stop. Its record
+#: advertises the link capabilities of the build that is RUNNING, which can be
+#: older than this CLI after an update (the ``mobility.RELAY_RESTART_MESSAGE``
+#: case); such a relay does not know the ctl op, so nothing is asked of it.
+STOP_IF_IDLE_RELAY_RESTART = (
+    "this device's relay is older than this lop and cannot send an idle-only stop, "
+    "so nothing was sent and nothing was stopped; restart it with "
+    "`lop network restart`, then try again"
+)
+
+
+def _cmd_stop_if_idle(args: argparse.Namespace, *, peer: str, target: str) -> int:
+    """``--stop-if-idle``: ask the owner to end a session ONLY if it latches idle.
+
+    WHY A SEPARATE PATH FROM ``--stop``. ``--stop`` drives ``peer_session_stop``,
+    the owner's full ladder (signals included); an agent tool promising "idle-only,
+    no signal" may never send it. This drives ``peer_session_stop_idle`` and
+    NOTHING ELSE: no fallback to ``--stop``'s op on any refusal, error, timeout or
+    lost reply, and no retry (a second ask could stop a session that has since
+    become busy).
+
+    FAILS CLOSED BEFORE SENDING. Three refusals leave nothing sent anywhere: no
+    ``--peer``; this device's relay record does not advertise
+    ``wire.SESSION_STOP_IDLE_V1`` (a relay older than this CLI — the record
+    carries the running build's capabilities); and, inside that relay, a peer
+    link that did not negotiate it (``relay._ctl_peer_stop_idle``). An old relay
+    that answers ``unknown_local_op`` anyway gets the same restart sentence.
+
+    SENT BUT UNANSWERED IS ITS OWN CODE. ``report_unsent`` separates "never left
+    this device" (``relay_unavailable``) from "sent, no reply"
+    (``stop_idle_unconfirmed``): only the second can have stopped anything, and the
+    caller must be told it MAY have.
+    """
+    from local_operator.network import store, wire
+    from local_operator.network.types import ControlRequestUnsent, MeshRefusal
+
+    if not peer:
+        raise MeshRefusal(
+            "peer_required", "--stop-if-idle needs --peer: a session lives on one device"
+        )
+    record = store.find_own_relay()
+    if record is None:
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
+    if wire.SESSION_STOP_IDLE_V1 not in tuple(getattr(record, "capabilities", None) or ()):
+        raise MeshRefusal("relay_restart_required", STOP_IF_IDLE_RELAY_RESTART)
+    session_id = _translate_act_target(target, peer)
+    try:
+        detail = _relay_call(
+            "peer_session_stop_idle",
+            timeout=STOP_IF_IDLE_TIMEOUT_S,
+            allow_no_answer=True,
+            report_unsent=True,
+            peer=peer,
+            session_id=session_id,
+        )
+    except ControlRequestUnsent:
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message()) from None
+    except MeshRefusal as refusal:
+        if refusal.code in ("unknown_local_op", "not_implemented"):
+            raise MeshRefusal("relay_restart_required", STOP_IF_IDLE_RELAY_RESTART) from None
+        raise
+    if detail is None:
+        raise MeshRefusal(
+            "stop_idle_unconfirmed",
+            "the idle-only stop was sent but this device's relay did not answer, so "
+            "whether the owner acted is unknown; nothing was retried",
+        )
+    if detail.get("intent") != "stop_if_idle":
+        # A RECEIPT FROM THE WRONG OP IS NOT A RECEIPT: only the idle-only owner op
+        # echoes this intent, so anything else is a relay or owner this CLI cannot
+        # vouch for, and its outcome is not reported as this stop's.
+        raise MeshRefusal(
+            "stop_idle_unconfirmed",
+            "the answer did not come from the idle-only stop, so whether the owner "
+            "acted is unknown; nothing was retried",
+        )
+    outcome = str(_reported(detail, "outcome", verb="stop") or "")
+    return _emit(
+        args, {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail}, [str(detail.get("detail") or "")]
+    )
+
+
 #: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
 #: peer answers in about a second (measured against a real pair), but the first
 #: act on a STORED session has to engage a runtime over there — a process launch
@@ -9659,6 +9760,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         "create",
         "engage",
         "stop",
+        "stop_if_idle",
         "archive",
         "unarchive",
         "delete",
@@ -9670,6 +9772,26 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     if listing_flags and any(getattr(args, name, None) for name in acts):
         print(f"{', '.join(listing_flags)} applies to the listing only", file=sys.stderr)
         return 2
+
+    # THE IDLE-ONLY STOP IS DECIDED ALONE, before every other act: beside any other
+    # act one of the two would be silently dropped, and beside ``--force`` it would
+    # promise an escalation it never sends. Both are usage errors (rc 2).
+    stop_if_idle = str(getattr(args, "stop_if_idle", "") or "")
+    if stop_if_idle:
+        if bool(getattr(args, "force", False)):
+            print("--stop-if-idle never forces; --force applies to --stop only", file=sys.stderr)
+            return 2
+        clash = next(
+            (name for name in acts if name != "stop_if_idle" and getattr(args, name, None)), ""
+        )
+        if clash:
+            print(
+                f"--stop-if-idle is one act on one session; --{clash.replace('_', '-')} "
+                "would be another, so this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        return _cmd_stop_if_idle(args, peer=peer, target=stop_if_idle)
 
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
     # the only verbs here that open a VIEWER, and a command line that asked for

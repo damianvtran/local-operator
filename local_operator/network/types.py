@@ -437,6 +437,12 @@ NET_OPS: tuple[str, ...] = (
     "net_session_create_lookup",
     "net_session_engage",
     "net_session_stop",
+    # THE IDLE-ONLY STOP (``relay._op_session_stop_idle``): its own name rather than
+    # a ``mode`` of ``net_session_stop`` because the legacy op's ladder may signal,
+    # and an owner too old to know a new mode would silently run that ladder. An
+    # unknown OP is refused by the owner's authoriser before any handler runs, so
+    # a mismatched build fails closed. Negotiated by ``wire.SESSION_STOP_IDLE_V1``.
+    "net_session_stop_idle",
     # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
     # stored-history.md, slice D5-core). Its own name rather than a phase of
     # ``net_session_engage`` because it starts NOTHING on the peer: it is the
@@ -557,6 +563,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # The idle-only stop's local half (``relay._ctl_peer_stop_idle``): it checks the
+    # link advertises ``wire.SESSION_STOP_IDLE_V1`` before sending anything, and
+    # never falls back to ``peer_session_stop``. Local name, so it may never appear
+    # in ``OP_CAPABILITY``; the peer-scope half is the ``net_session_stop_idle`` row.
+    "peer_session_stop_idle",
     # The client half of ``net_session_history`` (same boundary rule as the four
     # above): a viewer asking ITS OWN relay to fetch a page of a peer's stored
     # journal. A local name, so it may never appear in ``OP_CAPABILITY`` — the
@@ -816,6 +827,12 @@ OP_CAPABILITY: dict[str, str | None] = {
     "net_session_create_lookup": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
+    # ``stop``, the legacy stop's own row, and deliberately NO new capability or
+    # grant: the idle-only stop is strictly weaker than what ``stop`` already
+    # authorises (it can only end an owner that latches itself idle, and never
+    # signals), so every member who may stop may do this, and a ``read`` member is
+    # refused at the authoriser's chokepoint exactly as for ``net_session_stop``.
+    "net_session_stop_idle": "stop",
     # ``view``, and the conservative end of the choice for the same reason the
     # three above it record theirs: a member that may WATCH a session here may
     # read the bytes its runtime would have served anyway. It adds no new

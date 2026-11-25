@@ -144,6 +144,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # namespace so the audited wire.settings and wire.sessions hashes stay put;
         # carried by the seven locales, each needing its own passed ledger row.
         "wire.runtime_memory",
+        # The sessions tool's idle-only REMOTE stop receipts and approval prompt:
+        # own namespace so the audited wire.sessions hash stays put; carried by the
+        # seven locales, each needing its own passed ledger row.
+        "wire.sessions_remote_stop",
         # Radient Saver's settings row and fail-open notices (own namespace so the
         # audited wire.settings hash is untouched).
         "wire.radient_saver",

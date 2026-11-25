@@ -6456,6 +6456,8 @@ class RelayServer:
             "net_session_create_lookup": self._op_session_create_lookup,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
+            # The idle-only stop: the owner's atomic idle latch, never the ladder.
+            "net_session_stop_idle": self._op_session_stop_idle,
             # The stored-journal read beside them: same session plane, same
             # ownership rule, and the ONE op here that neither starts nor stops
             # anything on this device (see the handler).
@@ -12624,6 +12626,76 @@ class RelayServer:
             "detail": outcome.line,
         }
 
+    def _op_session_stop_idle(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """End one of THIS device's sessions only if its runtime latches itself idle.
+
+        WHY A SECOND OP BESIDE ``_op_session_stop``. That op is the human's kill
+        switch: its ladder SIGTERMs, and SIGKILLs, a socket-silent target, and its
+        ``immediate`` mode pushes past a turn in flight. An agent tool that
+        promises "idle-only, no signal" cannot borrow it. This op runs exactly one
+        ladder: ``control.stop_session(graceful_only=True)``, whose only rung is the
+        runtime socket's ``stop_if_idle`` — the owner's own atomic idle latch, taken
+        inside the runtime, so a turn, subagent or ask that starts between a
+        caller's read and this stop is refused rather than cut. Every non-ack shape
+        (busy, wake, an old runtime that answers ``unknown op``, a silent socket)
+        comes back ``refused`` with no signal sent; see ``control.stop_session``.
+
+        CONSTRAINTS. Authority is the existing ``stop`` capability (``types.
+        OP_CAPABILITY``) and the session-scope rule, both enforced by the
+        authoriser before this runs; nothing here widens either. The frame may
+        carry no escalation: a ``force`` or a ``mode`` other than ``graceful`` is a
+        forged or confused request and is REFUSED, never quietly downgraded, so a
+        caller can never believe it asked for more than it got. Not running is an
+        outcome (the legacy op's shape), not an error. The answer echoes
+        ``intent: stop_if_idle`` so the requester can prove which op answered.
+        """
+        from local_operator.session.runtime import control
+
+        session_id = str(frame.get("session_id") or "")
+        mode = str(frame.get("mode") or "graceful")
+        if frame.get("force") or mode != "graceful":
+            raise MeshRefusal(
+                "stop_idle_force_refused",
+                "an idle-only stop carries no force or escalation mode, so nothing was "
+                "stopped; the owner's full stop is the operator's, on that device",
+            )
+        record = self._session_record(session_id)
+        if record is None:
+            return {
+                "intent": "stop_if_idle",
+                "rung": "none",
+                "outcome": "not_running",
+                "pid": 0,
+                "session_id": session_id,
+                "detail": f"{session_id} is not running on {self._own_label()}.",
+            }
+        outcome = asyncio.run(
+            control.stop_session(
+                record,
+                force=False,
+                graceful_only=True,
+                _root=self.root,
+                _command="mesh net_session_stop_idle",
+            )
+        )
+        answer: dict[str, Any] = {
+            "intent": "stop_if_idle",
+            "rung": outcome.method,
+            "outcome": _STOP_OUTCOME_WORD.get(outcome.method, _STOP_OUTCOME_DEFAULT),
+            "method": outcome.method,
+            "pid": outcome.pid,
+            "session_id": session_id,
+            "name": outcome.name,
+            "wakes_dormant": outcome.wakes_dormant,
+            "monitors_dormant": outcome.monitors_dormant,
+            "detail": outcome.line,
+        }
+        if outcome.reason:
+            # The owner's closed token for WHY it refused (busy / wake / old_owner /
+            # unanswered), carried unchanged so the requester can pick its copy.
+            answer["reason"] = outcome.reason
+        return answer
+
     def _op_session_lifecycle(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Archive/restore/delete on a peer — REFUSED BY NAME in this build.
 
@@ -15637,6 +15709,7 @@ class RelayServer:
             "peer_session_create": self._ctl_peer_create,
             "peer_session_engage": self._ctl_peer_engage,
             "peer_session_stop": self._ctl_peer_stop,
+            "peer_session_stop_idle": self._ctl_peer_stop_idle,
             "peer_session_history": self._ctl_peer_history,
         }
 
@@ -17145,6 +17218,65 @@ class RelayServer:
             # default budget.
             timeout=forced_stop_deadline_s() if mode == "immediate" else None,
         )
+
+    def _ctl_peer_stop_idle(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Ask a peer for its idle-only stop — and only if its link negotiated one.
+
+        THE ORDER IS THE GUARANTEE. The link is resolved FIRST and its negotiated
+        capabilities read before any frame is built: a peer that did not advertise
+        ``wire.SESSION_STOP_IDLE_V1`` is refused here with nothing sent
+        (``stop_idle_unsupported``), because the only stop such an owner knows is
+        the signalling ladder. No link is ``peer_unreachable`` — not asked.
+
+        NEVER A FALLBACK. Whatever happens after the frame leaves — a refusal, a
+        lost reply, a timeout, an exception — this never sends ``net_session_stop``
+        and never retries: a second request could stop a session that has since
+        become busy, and the legacy op could signal it. A reply that never came
+        back is ``stop_idle_unconfirmed`` (the owner may or may not have acted),
+        distinct from "never asked", so the caller says so honestly. An owner that
+        answers ``unknown_op`` despite advertising (a build race across a
+        re-dial) is re-labelled unsupported: the op was not run there.
+
+        The hop uses the default budget (``engage_hop_bound_s``), well above the
+        owner's own ``control.DEFAULT_TIMEOUT_S`` wait for the idle exit; there is
+        no forced mode to outlast, unlike ``_ctl_peer_stop``.
+        """
+        if frame.get("force") or str(frame.get("mode") or "graceful") != "graceful":
+            raise MeshRefusal(
+                "stop_idle_force_refused",
+                "an idle-only stop carries no force or escalation mode, so nothing was sent",
+            )
+        peer = str(frame.get("peer") or "")
+        session_id = str(frame.get("session_id") or "")
+        link = self._ensure_link(self._resolve_peer(peer))
+        if link is None:
+            raise MeshRefusal(
+                "peer_unreachable",
+                f"{self._peer_label(peer)} cannot be reached from this device right now, "
+                "so it was not asked and nothing was stopped",
+            )
+        if wire.SESSION_STOP_IDLE_V1 not in link.capabilities:
+            raise MeshRefusal(
+                "stop_idle_unsupported",
+                f"{self._peer_label(peer)} runs a build without the idle-only stop, so "
+                "nothing was sent and nothing was stopped",
+            )
+        try:
+            return self._local_peer_call("net_session_stop_idle", peer, session_id=session_id)
+        except _PeerNoReply:
+            raise MeshRefusal(
+                "stop_idle_unconfirmed",
+                f"{self._peer_label(peer)} stopped answering after the idle-only stop was "
+                "sent, so whether it acted is unknown; nothing was retried",
+            ) from None
+        except MeshRefusal as refusal:
+            if refusal.code == "unknown_op":
+                raise MeshRefusal(
+                    "stop_idle_unsupported",
+                    f"{self._peer_label(peer)} does not serve the idle-only stop, so "
+                    "nothing was stopped",
+                ) from None
+            raise
 
     def _ctl_peer_history(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Fetch one page of a peer's STORED journal, for this device's own viewer.

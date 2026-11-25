@@ -136,6 +136,7 @@ from local_operator.harness.wake_types import WakeOrigin
 from local_operator.i18n.keys import cli_failures as _cli_failures
 from local_operator.i18n.keys import wire_runtime_memory as _rmw
 from local_operator.i18n.keys import wire_sessions as _ws
+from local_operator.i18n.keys import wire_sessions_remote_stop as _wrs
 from local_operator.i18n.text import tr
 from local_operator.imaging import (
     IMAGE_INGEST_MAX_EDGE,
@@ -18744,8 +18745,10 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         " and never cuts work: a session that is working (a turn, an approval, a"
         " subagent or a job), or one due a wake inside the hold window, is refused"
         " with the reason. Its wakes and monitors go DORMANT until it is reopened —"
-        " to free memory and keep them armed, use `park`. With `peer`, always"
-        " refused — an idle-only remote stop is not on the wire yet. `force=true`:"
+        " to free memory and keep them armed, use `park`. With `peer`, the owner's"
+        " own idle-only stop (same refusals, never a signal) on a peer whose build"
+        " offers it; otherwise refused with nothing sent, and `force` is never sent"
+        " to a peer. A lost answer is reported unconfirmed, never retried. `force=true`:"
         " operator-safety escalation, only when the operator asked for it to end or"
         " it is a memory runaway — identity-checked SIGTERM, bounded drain, then"
         " SIGKILL; cuts work in flight, never for tidying.",
@@ -19255,10 +19258,12 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         return _sessions_copy(_ws.approval_park_local(address=address))
     if op == "stop":
         if peer:
-            # The remote form is refused unconditionally on this build, so the
-            # prompt says that instead of asking the operator to approve an act
-            # that will not happen (UX round 1 U3, design round 1 D5).
-            return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+            # The remote form is the owner's idle-only stop (force is refused
+            # before anything is sent), so the prompt carries the same idle-only,
+            # no-signal promise as the local one, naming the deciding device.
+            return _sessions_remote_stop_copy(
+                _wrs.approval_stop_peer_idle(address=address, peer=peer)
+            )
         if args.get("force") is True:
             # The escalation SIGNALS and can cut a turn, so the prompt must not
             # carry the idle-only promise the plain stop's prompt makes.
@@ -20834,51 +20839,126 @@ async def _sessions_info(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
-async def _sessions_stop_mesh(
+async def _sessions_stop_peer_idle(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
-    """``stop`` on `peer`: the OWNER's own ladder, rendered verbatim.
+    """``stop`` on `peer`: the OWNER's idle-only stop, or nothing at all.
 
-    This side carries the request; the peer runs its kill-switch ladder with its
-    own pid proofs and rungs, and its ``StopOutcome`` vocabulary comes back as
-    the receipt (design §3C — "a thin call"). NO FORCE is sent (design §8.4,
-    locked): the one outcome whose remedy is a flag — a ladder that declined to
-    signal a turn in flight — names the CLI escalation instead, because that
-    spelling is the human's route and this tool deliberately does not grow a
-    second one.
+    WHY THIS AND NOT THE CLI's ``--stop``. ``--stop`` is the owner's full kill-
+    switch ladder: with no force it can still SIGTERM/SIGKILL a socket-silent
+    target, which is weaker than the promise this tool makes locally (idle-only,
+    no signal). So the remote form drives ``lop network sessions --stop-if-idle``
+    only: the owner's runtime takes its own atomic idle latch
+    (``control.stop_session(graceful_only=True)`` via ``net_session_stop_idle``),
+    and a busy, waking or too-old owner refuses with no signal sent.
+
+    CONSTRAINTS. No force crosses devices (refused here, nothing sent). Old or
+    mixed builds fail closed BEFORE sending: this device's relay must advertise
+    ``wire.SESSION_STOP_IDLE_V1`` and so must the peer's link, else the receipt
+    says nothing was sent. No fallback to ``--stop`` and NO RETRY on any outcome:
+    a lost answer is reported as unconfirmed — the stop may have landed — with
+    the listing to check, because a second request could stop a session that
+    has since become busy. Authority is the caller's existing drive grant on the
+    peer (the owner's ``stop`` capability); a view-only member gets the owner's
+    own refusal sentence. The self-guard is not needed: a remote session is never
+    this process.
     """
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import control
+
     peer = str(params.peer or "").strip()
     address = str(params.session or params.target or "").strip()
-    early, payload = await _mesh_op(
-        tool_call_id, "sessions", _mesh_stop_argv(peer, address), _MESH_STOP_TIMEOUT_S, context
-    )
-    if early is not None:
-        return early
+    if params.force is True:
+        return _error(tool_call_id, "sessions", _sessions_remote_stop_copy(_wrs.force_refused()))
+    unconfirmed = _sessions_remote_stop_copy(_wrs.unconfirmed(peer=peer))
+    base: dict[str, Any] = {"op": "stop", "session_id": address, "peer": peer}
+    try:
+        code, payload, stderr = await _mesh_cli_json(
+            _mesh_stop_if_idle_argv(peer, address), _MESH_STOP_TIMEOUT_S, context
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        # The request may already be with the owner: never "nothing changed",
+        # never a retry (``_mesh_op``'s timeout sentence would claim the first).
+        return _error(
+            tool_call_id, "sessions", unconfirmed, details={**base, "outcome": "unconfirmed"}
+        )
+    if payload is None:
+        # This build's own CLI printed no document: it may have died after
+        # sending, so the honest answer is the same unconfirmed one.
+        text = "\n".join(line for line in (unconfirmed, stderr) if line)
+        return _error(
+            tool_call_id, "sessions", text, details={**base, "outcome": "unconfirmed", "rc": code}
+        )
     refusal = _mesh_refusal_sentence(payload)
     if refusal:
-        return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
+        refusal_code = str(payload.get("code") or "")
+        details = {**base, "outcome": "refused", "code": refusal_code, "mesh": payload}
+        # The two refusals after which NOTHING was sent to the owner, so the
+        # receipt may say "nothing was stopped" with certainty.
+        if refusal_code == "stop_idle_unsupported":
+            return _error(
+                tool_call_id,
+                "sessions",
+                _sessions_remote_stop_copy(_wrs.unsupported(peer=peer)),
+                details=details,
+            )
+        if refusal_code == "relay_restart_required":
+            return _error(
+                tool_call_id,
+                "sessions",
+                _sessions_remote_stop_copy(_wrs.relay_restart()),
+                details=details,
+            )
+        if refusal_code == "stop_idle_unconfirmed":
+            details["outcome"] = "unconfirmed"
+            return _error(tool_call_id, "sessions", unconfirmed, details=details)
+        # Unauthorised, view-only, unreachable, unknown peer: the refusing party's
+        # own sentence, which is the only one that knows which guard fired.
+        return _error(tool_call_id, "sessions", refusal, details=details)
     outcome = str(payload.get("outcome") or "")
-    sentence = str(payload.get("detail") or "")
-    lines = [sentence or f"the stop of {address} on {peer} reported {outcome or 'no outcome'}"]
-    if outcome == "skipped":
-        # The ladder declined to signal a target whose turn is in flight — its
-        # own text says so; the remedy is the CLI's --force, named here because
-        # this tool deliberately does not spell one (design §8.4).
-        lines.append(
-            "this tool sends no --force: run `lop network sessions --peer "
-            f"{peer} --stop {address} --force` to push past the turn in flight"
-        )
-    details: dict[str, Any] = {
-        "op": "stop",
+    method = str(payload.get("method") or payload.get("rung") or "")
+    name = str(payload.get("name") or payload.get("session_id") or address)
+    details = {
+        **base,
         "session_id": str(payload.get("session_id") or address),
-        "peer": peer,
+        "name": name,
         "outcome": outcome,
-        "mesh": payload,
+        "method": method,
+        "intent": payload.get("intent"),
+        "wakes_dormant": payload.get("wakes_dormant") or 0,
+        "monitors_dormant": payload.get("monitors_dormant") or 0,
     }
-    text = "\n".join(lines)
-    if payload.get("ok") is False:
-        return _error(tool_call_id, "sessions", text, details=details)
-    return _text(tool_call_id, "sessions", text, details=details)
+    reason = str(payload.get("reason") or "")
+    if reason:
+        details["reason"] = reason
+    if outcome == "not_running":
+        return _text(
+            tool_call_id,
+            "sessions",
+            _sessions_remote_stop_copy(_wrs.not_running(name=name, peer=peer)),
+            details=details,
+        )
+    # THE OWNER'S OUTCOME, IN THE LOCAL STOP'S WORDS: the same ``StopOutcome``
+    # fields cross the wire, so the same keyed receipt (busy / wake / old owner /
+    # unanswered / pending) is chosen; the owner's English line is the fallback.
+    receipt = _sessions_receipt(
+        SimpleNamespace(
+            method=method,
+            name=name,
+            reason=reason,
+            line=str(payload.get("detail") or ""),
+        ),
+        control.DEFAULT_TIMEOUT_S,
+    )
+    ended = payload.get("ok") is True
+    lines = [receipt or f"the stop of {address} on {peer} reported {outcome or 'no outcome'}"]
+    if ended and (details["wakes_dormant"] or details["monitors_dormant"]):
+        # Same cost note as the local stop. Its park remedy is local-only today,
+        # but naming the dormant schedules is the fact the caller needs.
+        lines.append(_sessions_copy(_ws.stop_dormant_hint()))
+    render = _text if ended or method == "pending" else _error
+    return render(tool_call_id, "sessions", "\n".join(lines), details=details)
 
 
 #: The sessions tool's own receipts, resolved at render time so a live language
@@ -20887,6 +20967,10 @@ async def _sessions_stop_mesh(
 #: shape of an independently-owned namespace, so adding these receipts could not
 #: move any already-audited locale's bytes (agent review round 1 R2).
 _sessions_copy = tr("wire.sessions")
+#: The idle-only REMOTE stop's receipts and approval prompt: its own namespace so
+#: adding them could not move the audited ``wire.sessions`` bytes (the
+#: ``wire.runtime_memory`` precedent below).
+_sessions_remote_stop_copy = tr("wire.sessions_remote_stop")
 #: The force-stop escalation's copy (runtime memory-runaway incident). Its own
 #: namespace, shared with the guard's settings rows, so adding it could not move
 #: the audited ``wire.sessions`` bytes.
@@ -20945,9 +21029,9 @@ async def _sessions_stop(
     taking the host into swap could not be stopped by the agent asked to stop it.
     """
     if str(params.peer or "").strip():
-        # The remote transport does not yet carry the idle-only capability.
-        # Refuse rather than forwarding a weaker stop under this tool's promise.
-        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_remote_refused()))
+        # Only the negotiated idle-only remote stop, never the CLI's ladder;
+        # see ``_sessions_stop_peer_idle`` for what fails closed and why.
+        return await _sessions_stop_peer_idle(tool_call_id, params, context)
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -21861,9 +21945,13 @@ def _mesh_engage_argv(peer: str, address: str) -> list[str]:
     return ["network", "sessions", "--json", "--peer", peer, "--engage", address]
 
 
-def _mesh_stop_argv(peer: str, address: str) -> list[str]:
-    """``--stop``: the owner's own ladder, NO force — v1's rule (design §8.4)."""
-    return ["network", "sessions", "--json", "--peer", peer, "--stop", address]
+def _mesh_stop_if_idle_argv(peer: str, address: str) -> list[str]:
+    """``--stop-if-idle``: the owner's idle-only stop and nothing else.
+
+    Never ``--stop``: that flag is the owner's full ladder, which may signal, and
+    this tool's stop promises no signal (``_sessions_stop_peer_idle``).
+    """
+    return ["network", "sessions", "--json", "--peer", peer, "--stop-if-idle", address]
 
 
 def _mesh_peek_argv(peer: str, address: str, params: SessionsParams) -> list[str]:

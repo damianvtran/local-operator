@@ -123,6 +123,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.slash.notifications_page",
         "wire.tool_rows.bridge",
         "wire.sessions",
+        "wire.sessions_remote_stop",
         "wire.operator_setup",
         "wire.github",
         "wire.errors.bedrock",

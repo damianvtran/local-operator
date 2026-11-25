@@ -213,6 +213,14 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         'tools/builtin.py (_sessions_copy = tr("wire.sessions")) and returned '
         "as finished tool text"
     ),
+    # The idle-only remote stop's receipts (``builtin._sessions_stop_peer_idle``): its
+    # own namespace so adding them could not move the audited ``wire.sessions``
+    # bytes (and lapse its ledger rows), the ``wire.runtime_memory`` precedent.
+    "wire.sessions_remote_stop": (
+        "sessions tool remote idle-only stop receipts and approval prompt rendered "
+        "in-process by tools/builtin.py (_sessions_remote_stop_copy) and returned "
+        "as finished tool text"
+    ),
     # Deferred rather than raising the eager total ceiling: the phone-approvals
     # setup copy (mostly the terminal-only `tui.*` report/usage lines) pushed hi
     # past EAGER_TOTAL_MAX_BYTES, yet no client resolves one of its keys. The
