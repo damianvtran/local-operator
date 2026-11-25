@@ -653,6 +653,37 @@ def _notice(
     )
 
 
+#: The shape a team name (``teams._NAME_RE``) or agent id
+#: (``agents._AGENT_ID_RE``) is held to on every write path, so a stored name
+#: matching it is safe to place verbatim inside the ``<attachment-notice>``
+#: section. The union (128 characters) is used because the notice only needs
+#: "cannot break out of its section", not each registry's exact bound.
+_NOTICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+#: How much of an invalid name the escaped fallback shows: enough to recognise
+#: it, never an unbounded paste billed on every turn.
+_NOTICE_NAME_MAX_CHARS = 64
+
+
+def _notice_name(name: str) -> str:
+    """``name`` as it may appear inside the model-facing ``<attachment-notice>``.
+
+    WHY (PR #4583 review R1-2): the name comes from ``attachment.json``, a file
+    that can arrive from another device or be hand-edited, and it is
+    interpolated into a section the model reads every turn. A newline or a
+    literal ``</attachment-notice>`` would end the section early and let the
+    rest of the string pose as harness text. A name every registry would
+    accept passes through unchanged (the common case, and what ``/team <name>``
+    needs to be typed back); anything else is shown as a bounded ``ascii()``
+    repr with angle brackets escaped, so it can neither carry a control
+    character nor open or close a tag, and the raw string is never emitted.
+    """
+    if _NOTICE_NAME_RE.fullmatch(name):
+        return name
+    shown = ascii(name[:_NOTICE_NAME_MAX_CHARS])
+    return shown.replace("<", "\\x3c").replace(">", "\\x3e")
+
+
 def _text(message: Msg) -> str:
     """The English text of a catalogue message (fragments and headlines).
 
@@ -9608,6 +9639,13 @@ class Session:
             read_local_attachment,
         )
 
+        # The reason describes THIS pass's miss (PR #4583 review R1-1). Only the
+        # authority branch below sets it, so it must start empty every pass:
+        # otherwise a session first refused for authority whose definition later
+        # went missing (a re-resolve landing on another miss site) would keep
+        # telling the model "authority could not be verified" — the wrong cause
+        # and the wrong remedy. Empty reads as the neutral "unavailable" reason.
+        self._unresolved_team_reason = ""
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
             return
@@ -9867,13 +9905,17 @@ class Session:
             )
             lines.append(
                 _text(
-                    _attach_copy.team_unrestored(team=self._unresolved_team, reason=_text(reason))
+                    _attach_copy.team_unrestored(
+                        team=_notice_name(self._unresolved_team), reason=_text(reason)
+                    )
                 )
             )
         elif self._unresolved_agent and not self._goal_state.agent_name:
             # A team owns the agent slot (issue #2014), so a stored agent beside
             # a missing team is superseded, not separately missing.
-            lines.append(_text(_attach_copy.agent_unrestored(agent=self._unresolved_agent)))
+            lines.append(
+                _text(_attach_copy.agent_unrestored(agent=_notice_name(self._unresolved_agent)))
+            )
         if not lines:
             return ""
         return "<attachment-notice>\n" + "\n".join(lines) + "\n</attachment-notice>"
