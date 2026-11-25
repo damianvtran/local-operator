@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "Kiểm tra bản cập nhật: nguồn {source}; phiên bản {version}; trạng thái sẵn sàng {readiness}; tuổi cache {age}.",
+  "cli.update_discovery.check.cached_unverified": "Không xác minh được phiên bản mới nhất trên PyPI. Phiên bản {version} trong cache không phải căn cứ chính thức; chưa cài đặt gì.",
+  "cli.update_discovery.check.ahead": "Bản local-operator {installed} đã cài mới hơn phiên bản {latest} quan sát được trên PyPI; không thử hạ phiên bản."
+}

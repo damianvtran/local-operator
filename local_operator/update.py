@@ -7,8 +7,9 @@ command that upgrades whatever they actually have, without being pointed at
 ``lop-update`` — that script archives local git ``main`` into the uv-tool
 env, which is the opposite audience.
 
-"Latest" is always ``https://pypi.org/pypi/local-operator/json`` →
-``info.version``, compared to ``importlib.metadata.version("local-operator")``
+"Latest" is the newest readiness-checked release observed by the existing
+project JSON / simple-file / conditional exact-release discovery graph (see
+:func:`_fetch_pypi_read`), compared to the installed distribution version
 — but only once that release is DOWNLOADABLE (see
 :func:`_ready_pypi_version`): PyPI names the version before its files finish
 uploading, and advertising that window sends the installer after artifacts
@@ -28,7 +29,9 @@ has to dismiss. The probe is news, not a prerequisite, so it must not compete
 with the credentials-fallback line.
 
 ``/update`` and ``lop update`` bypass the TTL (they need a live answer) but
-still rewrite the cache so the next splash is free.
+still rewrite the cache so the next splash is free. Discovery preserves the
+background cache fallback on outage; the explicit CLI rejects that fallback
+before claiming freshness or entering an installer/service stage.
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from functools import wraps
 from importlib.metadata import (
@@ -850,6 +853,41 @@ class StageReport:
 
 
 @dataclass(frozen=True)
+class DiscoveryView:
+    """Bounded request observation: no arbitrary URLs, bodies or exceptions.
+
+    Skipped views expose the existing early-return graph without adding probes.
+    """
+
+    view: Literal["project-json", "simple-json", "release-json"]
+    outcome: Literal["ok", "http-error", "transport-error", "parse-error", "mismatch", "skipped"]
+    status: int | None = None
+    elapsed_ms: int = 0
+    named_version: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscoveryProvenance:
+    """Observation only; background cache and installation policy stay intact."""
+
+    route: Literal["pypi-discovery"] = "pypi-discovery"
+    source: Literal["unknown", "live", "cache-ttl", "cache-fallback", "unavailable"] = "unknown"
+    forced: bool = False
+    live_attempted: bool = False
+    cache_age_seconds: int | None = None
+    selected_version: str | None = None
+    selected_view: Literal["project-json", "project-releases", "release-json"] | None = None
+    named_version: str | None = None
+    wheel_policy: Literal["macos-universal2", "host-compatible"] | None = None
+    readiness: Literal["unknown", "ready", "pending", "unavailable", "cached-ready"] = "unknown"
+    wheel_filename: str | None = None
+    fallback: Literal[
+        "none", "project-unavailable", "simple-unavailable", "release-unavailable"
+    ] = "none"
+    views: tuple[DiscoveryView, ...] = ()
+
+
+@dataclass(frozen=True)
 class VersionCheck:
     installed: str
     latest: str | None
@@ -861,6 +899,7 @@ class VersionCheck:
     #: between them (UX round 1, M1), so the distinction travels here while
     #: the advertisement rule above keeps treating both as "do not offer".
     pending_version: str | None = None
+    provenance: DiscoveryProvenance = DiscoveryProvenance()
 
 
 @dataclass(frozen=True)
@@ -1246,6 +1285,7 @@ class _PypiRead:
     version: str | None
     answered: bool = False
     named_version: str | None = None
+    provenance: DiscoveryProvenance = DiscoveryProvenance()
 
 
 def _final_release(value: Any) -> Any | None:
@@ -1334,27 +1374,167 @@ def _get_json(url: str, client: Any | None, headers: dict[str, str] | None = Non
     return response.json()
 
 
+def _receipt_version(value: str | None) -> str | None:
+    """Untrusted metadata may select a release, but must never inject diagnostics."""
+    if value is None or not re.fullmatch(r"[0-9A-Za-z.!+_-]{1,80}", value):
+        return None
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        Version(value)
+    except InvalidVersion:
+        return None
+    return value
+
+
+class _DiscoveryResponse:
+    """Observe existing JSON parsing without copying any response content."""
+
+    def __init__(self, response: Any, views: list[DiscoveryView]) -> None:
+        self.response = response
+        self.views = views
+
+    @property
+    def status_code(self) -> int:
+        return self.response.status_code
+
+    def raise_for_status(self) -> Any:
+        return self.response.raise_for_status()
+
+    def json(self) -> Any:
+        try:
+            payload = self.response.json()
+        except Exception:
+            self.views[-1] = replace(self.views[-1], outcome="parse-error")
+            raise
+        self.views[-1] = replace(
+            self.views[-1], named_version=_receipt_version(_named_pypi_version(payload))
+        )
+        return payload
+
+
+class _DiscoveryClient:
+    """A scoped observer, not another transport/retry layer.
+
+    Both existing JSON readers use this adapter for this one discovery call.
+    No raw URL, exception, header or response body enters its receipts.
+    """
+
+    def __init__(self, client: Any | None) -> None:
+        self.client = client
+        self.views: list[DiscoveryView] = []
+
+    def get(self, url: str, **kwargs: Any) -> _DiscoveryResponse:
+        import httpx
+
+        view: Literal["project-json", "simple-json", "release-json"] = (
+            "project-json"
+            if url == PYPI_JSON_URL
+            else "simple-json" if url == PYPI_SIMPLE_URL else "release-json"
+        )
+        start = time.monotonic()
+        try:
+            response = (httpx.get if self.client is None else self.client.get)(url, **kwargs)
+        except Exception:
+            self.views.append(
+                DiscoveryView(
+                    view, "transport-error", elapsed_ms=int((time.monotonic() - start) * 1000)
+                )
+            )
+            raise
+        status = response.status_code
+        self.views.append(
+            DiscoveryView(
+                view,
+                "ok" if 200 <= status < 300 else "http-error",
+                status,
+                int((time.monotonic() - start) * 1000),
+            )
+        )
+        return _DiscoveryResponse(response, self.views)
+
+
+def _discovery_provenance(
+    observer: _DiscoveryClient,
+    *,
+    payload: Any = None,
+    ready: str | None = None,
+    named: str | None = None,
+    answered: bool = False,
+    fallback: Literal[
+        "none", "project-unavailable", "simple-unavailable", "release-unavailable"
+    ] = "none",
+) -> DiscoveryProvenance:
+    views = list(observer.views)
+    for view in ("project-json", "simple-json", "release-json"):
+        if not any(item.view == view for item in views):
+            views.append(DiscoveryView(view, "skipped"))
+    filename = None
+    if ready is not None and isinstance(payload, dict):
+        files = payload.get("urls")
+        releases = payload.get("releases")
+        if not _downloadable_wheel(files, ready) and isinstance(releases, dict):
+            files = releases.get(ready)
+        if isinstance(files, list):
+            for entry in files:
+                if _installer_wheel(entry, ready):
+                    candidate = entry.get("filename")
+                    # The Mac acceptance predicate intentionally predates strict
+                    # filename parsing. Diagnostics must still exclude controls
+                    # and cap untrusted display bytes without changing that gate.
+                    if isinstance(candidate, str) and re.fullmatch(
+                        r"[A-Za-z0-9_.+-]{1,255}", candidate
+                    ):
+                        from packaging.utils import (
+                            InvalidWheelFilename,
+                            parse_wheel_filename,
+                        )
+
+                        try:
+                            name, wheel_version, _, _ = parse_wheel_filename(candidate)
+                        except InvalidWheelFilename:
+                            continue
+                        if str(name) == "local-operator" and str(wheel_version) == ready:
+                            filename = candidate
+                            break
+    return DiscoveryProvenance(
+        source="live" if answered else "unavailable",
+        live_attempted=True,
+        selected_view=(
+            (
+                "release-json"
+                if views[-1].view == "release-json" and views[-1].outcome == "ok"
+                else (
+                    "project-releases"
+                    if isinstance(payload, dict) and named != _named_pypi_version(payload)
+                    else "project-json"
+                )
+            )
+            if answered
+            else None
+        ),
+        selected_version=_receipt_version(ready),
+        named_version=_receipt_version(named),
+        wheel_policy="macos-universal2" if _HOST_IS_MACOS else "host-compatible",
+        readiness="ready" if ready is not None else "pending" if answered else "unavailable",
+        wheel_filename=filename,
+        fallback=fallback,
+        views=tuple(views),
+    )
+
+
 def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
     """One live read: ready version, or an answered-but-not-ready refusal.
 
-    THE PROJECT DOCUMENT ALONE LAGS A RELEASE (2026-11-17, fix/update-live-index).
-    ``/pypi/local-operator/json`` is served by PyPI's Fastly edge with
-    ``cache-control: max-age=900``; right after a publish an edge can keep the
-    previous object for minutes. Reproduced twice that day on two hosts:
-    ~1 min after 0.106.6 went live ``lop update`` said 0.106.5 was latest, and
-    ~4 min after 0.106.7 ``lop update --check`` said 0.106.6, while the same URL
-    fetched elsewhere already named the new release. Measured the same day, a
-    client CANNOT bust that object: ``Cache-Control: no-cache`` and
-    ``max-age=0`` request headers and a random query string all still came back
-    ``x-cache: ...HIT`` with the same ETag. So the answer is a cross-check of
-    independently cached sources, taking the newest that is proven ready:
+    Preserve the existing request graph and source priority: the project
+    document's ``info.version`` can be raised to a newer final, non-yanked
+    ``releases`` key. The JSON simple index then contributes a newer candidate
+    only after its exact-version document confirms it. A failed project read
+    still returns before probing simple; receipts explicitly show that skip.
 
-    1. the project document — ``info.version``, raised to its newest final,
-       non-yanked ``releases`` key when those two disagree;
-    2. the JSON simple index (:data:`PYPI_SIMPLE_URL`, a separate edge object,
-       and the page uv resolves against); a newer final version there is
-       confirmed through ITS per-version document, an object no client has
-       asked the edge for yet, so it cannot be a stale copy of the release.
+    Different views can disagree around publication. The observations below
+    identify those views and their outcomes; they do not prove global freshness,
+    a particular CDN/cache cause, or what an earlier installed build observed.
 
     The simple-index probe is best effort: unreachable, malformed, or naming a
     version whose own document is not served (or names something else) leaves
@@ -1362,13 +1542,19 @@ def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
     unchanged: a newer version with no installer wheel yet is the same
     "still publishing" refusal (``answered`` with ``named_version``).
     """
+    observer = _DiscoveryClient(client)
     try:
-        payload = _get_json(PYPI_JSON_URL, client)
+        payload = _get_json(PYPI_JSON_URL, observer)
     except Exception:
-        return _PypiRead(version=None)
+        return _PypiRead(
+            version=None, provenance=_discovery_provenance(observer, fallback="project-unavailable")
+        )
     named = _named_pypi_version(payload)
     if named is None:
-        return _PypiRead(version=None)
+        observer.views[-1] = replace(observer.views[-1], outcome="parse-error")
+        return _PypiRead(
+            version=None, provenance=_discovery_provenance(observer, fallback="project-unavailable")
+        )
     ready = _ready_pypi_version(payload)
     listed = _newest_listed_release(payload)
     named_final = _final_release(named)
@@ -1378,27 +1564,47 @@ def _fetch_pypi_read(*, client: Any | None = None) -> _PypiRead:
         if _downloadable_wheel(files, listed):
             named, ready = listed, listed
 
+    fallback: Literal[
+        "none", "project-unavailable", "simple-unavailable", "release-unavailable"
+    ] = "none"
     try:
-        simple = _newest_simple_release(
-            _get_json(PYPI_SIMPLE_URL, client, headers={"Accept": _SIMPLE_JSON_ACCEPT})
+        simple_payload = _get_json(
+            PYPI_SIMPLE_URL, observer, headers={"Accept": _SIMPLE_JSON_ACCEPT}
         )
+        simple = _newest_simple_release(simple_payload)
+        observer.views[-1] = replace(observer.views[-1], named_version=_receipt_version(simple))
+        if not isinstance(simple_payload, dict) or not isinstance(
+            simple_payload.get("files"), list
+        ):
+            observer.views[-1] = replace(observer.views[-1], outcome="parse-error")
+            fallback = "simple-unavailable"
     except Exception:
         simple = None
+        fallback = "simple-unavailable"
     baseline = _final_release(named)
     if simple is not None and (baseline is None or _final_release(simple) > baseline):
-        document, _why = _pypi_release_document(simple, client=client)
+        document, _why = _pypi_release_document(simple, client=observer)
         if document is not None:
-            logger.info(
-                "PyPI project JSON names %s but the simple index and %s's own document "
-                "name %s; using the newer (CDN lag right after publish)",
-                named,
-                simple,
-                simple,
-            )
+            selected = _ready_pypi_version(document)
             return _PypiRead(
-                version=_ready_pypi_version(document), answered=True, named_version=simple
+                version=selected,
+                answered=True,
+                named_version=simple,
+                provenance=_discovery_provenance(
+                    observer, payload=document, ready=selected, named=simple, answered=True
+                ),
             )
-    return _PypiRead(version=ready, answered=True, named_version=named)
+        fallback = "release-unavailable"
+        if observer.views[-1].outcome == "ok":
+            observer.views[-1] = replace(observer.views[-1], outcome="mismatch")
+    return _PypiRead(
+        version=ready,
+        answered=True,
+        named_version=named,
+        provenance=_discovery_provenance(
+            observer, payload=payload, ready=ready, named=named, answered=True, fallback=fallback
+        ),
+    )
 
 
 def _fetch_pypi_version(*, client: Any | None = None) -> str | None:
@@ -1441,10 +1647,24 @@ def check_latest(
 
     latest: str | None
     pending: str | None = None
+    # Cache age is context, never a freshness guarantee. Infinite ages include
+    # missing/corrupt/future-dated stores and are represented as unknown.
+    import math
+
+    provenance = DiscoveryProvenance(
+        forced=force,
+        cache_age_seconds=int(age) if math.isfinite(age) else None,
+        source="cache-ttl",
+        selected_version=_receipt_version(cached),
+        readiness="cached-ready",
+    )
     if cached is not None and age < TTL_S and not force:
         latest = cached
     else:
         read = _fetch_pypi_read(client=client)
+        provenance = replace(
+            read.provenance, forced=force, cache_age_seconds=provenance.cache_age_seconds
+        )
         if read.version is not None:
             latest = read.version
             _write_cache(path, {"version": read.version, "ready": True})
@@ -1463,12 +1683,19 @@ def check_latest(
                 pass
         else:
             latest = cached
+            provenance = replace(
+                provenance,
+                source="cache-fallback" if cached is not None else "unavailable",
+                selected_version=_receipt_version(cached),
+                readiness="cached-ready" if cached is not None else "unavailable",
+            )
 
     return VersionCheck(
         installed=installed,
         latest=latest,
         behind=is_behind(installed, latest),
         pending_version=pending,
+        provenance=provenance,
     )
 
 
@@ -11434,6 +11661,55 @@ def _snapshot_command(
     )
 
 
+def _print_discovery(result: VersionCheck) -> None:
+    """Print before any terminal report so its existing last-line contract holds.
+
+    The receipt is a technical, closed-schema diagnostic, not evidence that uv
+    was invoked or that any registry edge is globally current. Debug always
+    includes it, even when all observed versions agree.
+    """
+    from local_operator.i18n.keys import cli_update_discovery as copy
+    from local_operator.i18n.text import tr
+
+    provenance = result.provenance
+    if os.environ.get("LOCAL_OPERATOR_DEBUG") == "true":
+        print("update-discovery " + json.dumps(asdict(provenance), sort_keys=True))
+    if not result.behind or result.latest is None or provenance.source == "cache-fallback":
+        print(
+            tr("cli.update_discovery")(
+                copy.check_summary(
+                    source=(
+                        f"{provenance.source}/{provenance.selected_view or '-'}"
+                        f";fallback={provenance.fallback}"
+                    ),
+                    version=provenance.selected_version or provenance.named_version or "-",
+                    readiness=provenance.readiness,
+                    age=(
+                        f"{provenance.cache_age_seconds}s"
+                        if provenance.cache_age_seconds is not None
+                        else "-"
+                    ),
+                )
+            )
+        )
+
+
+def _no_upgrade_sentence(result: VersionCheck) -> str:
+    from local_operator.i18n.keys import cli_update_discovery as copy
+    from local_operator.i18n.text import tr
+
+    installed = parse_version(result.installed)
+    latest = parse_version(result.latest) if result.latest is not None else None
+    if installed is not None and latest is not None and installed > latest:
+        return tr("cli.update_discovery")(
+            copy.check_ahead(
+                installed=result.installed,
+                latest=result.latest or "-",
+            )
+        )
+    return f"local-operator {result.installed} is the latest"
+
+
 def _update_command_body(
     *,
     check: bool = False,
@@ -11531,6 +11807,23 @@ def _update_command_body(
     _reach("check")
     result = check_latest(force=True)
     _note_versions(install_version=result.installed, target=result.latest or "")
+    _print_discovery(result)
+    if result.provenance.source == "cache-fallback":
+        # The background caller still gets its useful offline cache. An explicit
+        # forced check, however, must not turn that stale observation into a
+        # claim of current publication, an offer, or an installation attempt.
+        from local_operator.i18n.keys import cli_update_discovery as copy
+        from local_operator.i18n.text import tr
+
+        return _fail(
+            "check",
+            "network",
+            tr("cli.update_discovery")(
+                copy.check_cached_unverified(
+                    version=result.provenance.selected_version or "-",
+                )
+            ),
+        )
     if result.latest is None:
         if result.pending_version is not None:
             # PyPI answered; the release exists and is still publishing.
@@ -11554,7 +11847,7 @@ def _update_command_body(
         # NOT a report exit: ``--check`` answers a question and installs
         # nothing, so the update report (which says an update ran) stays out.
         # Exit 2 for "behind" is the documented answer, not a failure.
-        print(f"local-operator {result.installed} is the latest")
+        print(_no_upgrade_sentence(result))
         return 0
 
     if not result.behind:
@@ -11570,7 +11863,7 @@ def _update_command_body(
         # The stage is idempotent and says so out loud: a service already on the
         # current build is reported as such and not touched, so the cost of
         # running it on every `lop update` is a health probe per daemon.
-        print(f"local-operator {result.installed} is the latest")
+        print(_no_upgrade_sentence(result))
         _reach("services")
         stage = _run_services_tail(services=services)
         _reach("report")

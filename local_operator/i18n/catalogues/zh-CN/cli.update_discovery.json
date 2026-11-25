@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "更新检查：来源{source}；版本{version}；就绪状态{readiness}；缓存已存放{age}。",
+  "cli.update_discovery.check.cached_unverified": "无法核实PyPI上的最新版本。缓存中的版本{version}不能作为权威依据；未安装任何内容。",
+  "cli.update_discovery.check.ahead": "已安装的local-operator版本{installed}高于本次观测到的PyPI版本{latest}；未尝试降级。"
+}

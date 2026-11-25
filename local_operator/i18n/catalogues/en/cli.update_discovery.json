@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "Update discovery: {source}; version {version}; readiness {readiness}; cache age {age}.",
+  "cli.update_discovery.check.cached_unverified": "Could not verify the latest version on PyPI. Cached version {version} is not authoritative; nothing was installed.",
+  "cli.update_discovery.check.ahead": "Installed local-operator {installed} is ahead of the observed PyPI version {latest}; no downgrade was attempted."
+}

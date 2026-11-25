@@ -1108,7 +1108,9 @@ def test_update_command_check_current(capsys: pytest.CaptureFixture[str]) -> Non
     ):
         assert update_command(check=True) == 0
         refresh.assert_not_called()
-    assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0].startswith("Update discovery:")
+    assert lines[-1] == "local-operator 0.27.0 is the latest"
 
 
 def test_update_command_check_network_error(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1157,7 +1159,8 @@ def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> No
         perform.assert_not_called()
         stage.assert_called_once_with()
     out = capsys.readouterr().out.strip().splitlines()
-    assert out[0] == "local-operator 0.27.0 is the latest"
+    assert out[0].startswith("Update discovery:")
+    assert out[1] == "local-operator 0.27.0 is the latest"
     # The machine-readable report line rides AFTER every human line (additive:
     # the desktop app parses it; see update._emit_update_report).
     report = json.loads(out[-1])["update_report"]

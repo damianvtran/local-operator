@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "Búsqueda de actualizaciones: {source}; versión {version}; estado {readiness}; antigüedad de la caché {age}.",
+  "cli.update_discovery.check.cached_unverified": "No se pudo verificar la última versión en PyPI. La versión en caché {version} no es una referencia definitiva; no se instaló nada.",
+  "cli.update_discovery.check.ahead": "La versión instalada de local-operator {installed} es posterior a la versión observada en PyPI {latest}; no se intentó instalar una versión anterior."
+}

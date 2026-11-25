@@ -1,0 +1,5 @@
+{
+  "cli.update_discovery.check.summary": "اپ ڈیٹ کی جانچ: ماخذ {source}؛ ورژن {version}؛ تیاری کی حالت {readiness}؛ کیش کی عمر {age}۔",
+  "cli.update_discovery.check.cached_unverified": "PyPI پر تازہ ترین ورژن کی تصدیق نہیں ہو سکی۔ کیش میں محفوظ ورژن {version} کو مستند نہیں سمجھا جا سکتا؛ کچھ بھی انسٹال نہیں کیا گیا۔",
+  "cli.update_discovery.check.ahead": "انسٹال شدہ local-operator {installed}، PyPI پر نظر آنے والے ورژن {latest} سے نیا ہے؛ پرانا ورژن انسٹال کرنے کی کوشش نہیں کی گئی۔"
+}
