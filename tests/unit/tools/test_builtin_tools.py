@@ -137,7 +137,12 @@ _GNU_SED = "sed -i 's/a/b/' f"
     ("platform", "command", "stderr", "expected"),
     [
         ("darwin", _GNU_SED, _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
-        ("darwin", _GNU_SED, 'sed: 1: "x\n": extra characters at the end of x command\n', builtin.BSD_SED_INPLACE_HINT),
+        (
+            "darwin",
+            _GNU_SED,
+            'sed: 1: "x\n": extra characters at the end of x command\n',
+            builtin.BSD_SED_INPLACE_HINT,
+        ),
         ("darwin", _GNU_SED, 'sed: 1: "f": invalid command code f\n', builtin.BSD_SED_INPLACE_HINT),
         ("darwin", "sed -Ei 's/a/b/' f", _BSD_SED_STDERR, builtin.BSD_SED_INPLACE_HINT),
         # GNU sed words it differently; Linux never gets BSD advice.
@@ -149,8 +154,32 @@ _GNU_SED = "sed -i 's/a/b/' f"
         # (round 1, m2): no -i at all, an empty suffix, or an attached suffix.
         ("darwin", "echo a | sed 'foo'", 'sed: 1: "foo\n": invalid command code f\n', None),
         ("darwin", "sed -i '' 's/a' f", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
-        ("darwin", "sed -i.bak 's/a' f", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
-        ("darwin", "sed 's/a' f; grep -i x y", 'sed: 1: "s/a\n": unterminated substitute pattern\n', None),
+        (
+            "darwin",
+            "sed -i.bak 's/a' f",
+            'sed: 1: "s/a\n": unterminated substitute pattern\n',
+            None,
+        ),
+        (
+            "darwin",
+            "sed 's/a' f; grep -i x y",
+            'sed: 1: "s/a\n": unterminated substitute pattern\n',
+            None,
+        ),
+        # A ` -i ` inside the script text is not a flag: BSD getopt stops at
+        # the first operand (round 2, n1).
+        (
+            "darwin",
+            "sed 's/a -i b' f",
+            'sed: 1: "s/a -i b\n": unterminated substitute pattern\n',
+            None,
+        ),
+        (
+            "darwin",
+            "sed -e 's/a -i b' f",
+            'sed: 1: "s/a -i b\n": unterminated substitute pattern\n',
+            None,
+        ),
     ],
 )
 def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
@@ -165,8 +194,21 @@ def test_bsd_sed_hint_matches_only_bsd_sed_on_darwin(
     "name",
     # One file per distinct BSD message: BSD parses FILE as the script, so its
     # first character picks the complaint (round 1, m1).
-    ["f", "x.py", "src/main.py", "app.py", "config.py", "index.ts", "tests/x.py",
-     "yarn.lock", "README.md", "./x.py", "lib/a.py", "requirements.txt", ":x.py"],
+    [
+        "f",
+        "x.py",
+        "src/main.py",
+        "app.py",
+        "config.py",
+        "index.ts",
+        "tests/x.py",
+        "yarn.lock",
+        "README.md",
+        "./x.py",
+        "lib/a.py",
+        "requirements.txt",
+        ":x.py",
+    ],
 )
 def test_bsd_sed_hint_matches_real_failures_for_every_first_letter(tmp_path, name) -> None:
     target = tmp_path / name
@@ -178,6 +220,37 @@ def test_bsd_sed_hint_matches_real_failures_for_every_first_letter(tmp_path, nam
     )
     assert ran.returncode != 0, ran
     assert builtin._bsd_sed_hint(command, ran.stderr) == builtin.BSD_SED_INPLACE_HINT, ran.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs the real BSD sed")
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # GNU-form spellings the first prefix missed (round 2, m2): the shell
+        # drops `''`/`""`, so `-i''` reaches sed as a bare `-i`; a path-qualified
+        # sed; a sed inside a nested shell's quoted script; `-i` after `-e SCRIPT`.
+        ("sed -i'' 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("sed -i\"\" 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("/usr/bin/sed -i 's/a/b/' f", builtin.BSD_SED_INPLACE_HINT),
+        ("bash -c \"sed -i 's/a/b/' f\"", builtin.BSD_SED_INPLACE_HINT),
+        ("sed -e 's/a/b/' -i f", builtin.BSD_SED_INPLACE_HINT),
+        # ` -i ` only inside the script text: a bad script, not GNU's -i (n1).
+        ("sed 's/a -i b' f", None),
+        ("sed -i '' 's/a -i b' f", None),
+    ],
+)
+def test_bsd_sed_hint_on_real_sed_spellings(tmp_path, command, expected) -> None:
+    (tmp_path / "f").write_text("a\n")
+    ran = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    assert ran.returncode != 0, ran
+    assert builtin._bsd_sed_hint(command, ran.stderr) == expected, ran.stderr
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the hint is Darwin-only by design")
@@ -976,7 +1049,10 @@ async def test_read_large_file_capped_with_footer(tools, context, tmp_path) -> N
 
 def _source_lines(count: int) -> list[str]:
     """~60-char source-like lines, so a span's rendered size is predictable."""
-    return [f"    value_{i:05d} = compute(alpha, beta, gamma)  # note {i:05d}" for i in range(1, count + 1)]
+    return [
+        f"    value_{i:05d} = compute(alpha, beta, gamma)  # note {i:05d}"
+        for i in range(1, count + 1)
+    ]
 
 
 def _on_the_wire(result: ToolResult) -> str:

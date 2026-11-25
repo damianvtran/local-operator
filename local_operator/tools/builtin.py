@@ -4600,8 +4600,24 @@ _BSD_SED_INPLACE_RE = re.compile(
 #: ``echo a | sed 'foo'`` failing with ``invalid command code`` gets no
 #: in-place advice (round 1, m2). Stops at a shell separator so a later
 #: command's ``-i`` is not attributed to this sed.
+#:
+#: Round 2 (m2, n1), each form measured against real BSD sed on macOS:
+#:
+#: * ``sed`` may follow ``/`` (``/usr/bin/sed``) or a quote opening a nested
+#:   shell's script (``bash -c "sed -i …"``), not just whitespace/separators.
+#: * ``-i''`` / ``-i""`` reach sed as a bare ``-i`` (the shell drops the empty
+#:   quotes), so they fail exactly like ``-i`` and are treated as it.
+#: * Only OPTION tokens (``-…``, plus the argument ``-e``/``-f`` take) may sit
+#:   between ``sed`` and ``-i``: BSD's getopt stops at the first operand, so a
+#:   `` -i `` inside the script text (``sed 's/a -i b' f``) is not a flag and
+#:   gets no in-place advice, while ``sed -e 's/a/b/' -i f`` still does.
+#:   A token is quote-aware (``'…'`` / ``"…"`` count as one span), so a script
+#:   holding spaces is never split into fake option tokens.
+_SED_TOKEN = r"""(?:[^\s|;&'"]|'[^']*'|"[^"]*")+"""
 _GNU_SED_INPLACE_CMD_RE = re.compile(
-    r"(?:^|[\s;&|(`])sed\s(?:[^|;&\n]*?\s)?-[A-Za-z]*i\s+(?!''|\"\")\S"
+    r"(?:^|[\s;&|(`\"'/])sed"
+    rf"(?:\s+(?:-[A-Za-z]*[ef]\s+{_SED_TOKEN}|-{_SED_TOKEN}))*?"
+    r"\s+-[A-Za-z]*i(?:''|\"\")?\s+(?!''|\"\")\S"
 )
 #: One line, not a man page: the fix is a single argument and the model already
 #: knows ``sed``.
@@ -8183,9 +8199,7 @@ def _read_ranged_snapshot(path: Path, start: int, end: int | None) -> _RangedRea
         with path.open("rb") as handle:
             binary, lines, window_lines, total_lines = _stream_text_window(handle, start, end)
             body = _number_lines(lines, start, span=window_lines)
-            if total_lines is None and not _fits_output_budget(
-                body, READ_RANGE_OUTPUT_LIMIT_CHARS
-            ):
+            if total_lines is None and not _fits_output_budget(body, READ_RANGE_OUTPUT_LIMIT_CHARS):
                 # The head would be clamped and the footer needs the exact
                 # count, so recover it: the same scanner with retention off,
                 # over the same bytes, never a second divergent splitter.
