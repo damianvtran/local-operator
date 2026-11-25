@@ -1,252 +1,270 @@
-"""Cold-open account context: one store per process, memoised, single-loop.
-
-Regression cover for the v0.113.3 open trace, where the ``account_context``
-phase of two openai cold opens took 701 ms and 1851 ms because every open
-bootstrapped a NEW writable ``AuthStore`` (cross-process file lock, WAL pragma,
-schema script, ``BEGIN IMMEDIATE``) on the auth.db ~25 lop processes share.
-See ``cold_model._AccountContextWorker`` for the design these tests pin.
-"""
+"""A cold open reads current account metadata without owning the account's lifetime."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import os
+import sqlite3
+import sys
+import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from local_operator.config import ConfigManager
+from local_operator.model import configure
+from local_operator.model.registry import ModelInfo
 from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.registry import store_provider_key
 from local_operator.session import cold_model
 from local_operator.session.frontend_state import FrontendModelSpec
 
 pytestmark = pytest.mark.asyncio
 
+_WINDOWS = {"synthetic-a": 150_000, "synthetic-b": 250_000, "synthetic-rotated": 350_000}
+
 
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch: pytest.MonkeyPatch) -> Any:
+def _offline_listing(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in ("OPENAI_API_KEY", "OPENAI_OAUTH_TOKEN", "LOCAL_OPERATOR_OPENAI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
-    cold_model._reset_account_context_cache()
-    yield
-    cold_model._reset_account_context_cache()
+    monkeypatch.setattr(configure, "resolve_model_info", _listing)
 
 
-@pytest.fixture
-def root(tmp_path: Path) -> Path:
-    # A config root as a running process has it: config.yml and auth.db exist
-    # before the first cold open, so their fingerprints are stable.
-    ConfigManager(config_dir=tmp_path).get_config()
-    AuthStore(tmp_path / "auth.db").close()
-    return tmp_path
-
-
-@pytest.fixture
-def connects(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Count writable-store bootstraps (``AuthStore._connect``)."""
-    calls: list[int] = []
-    real = AuthStore._connect
-
-    def _counting(self: AuthStore) -> Any:
-        calls.append(1)
-        return real(self)
-
-    monkeypatch.setattr(AuthStore, "_connect", _counting)
-    return calls
-
-
-@pytest.fixture
-def no_listing(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, ...]]:
-    """Keep ``resolve_model_info`` offline and record which credential it saw."""
-    from local_operator.model import configure
-    from local_operator.model.registry import ModelInfo
-
-    seen: list[tuple[Any, ...]] = []
-
-    def _info(provider: str, model_id: str, *, credential: Any = None, base: Any = None) -> Any:
-        seen.append(credential)
-        token = str(credential[0]) if credential else ""
-        # A window derived from the bearer, so two credentials give two answers.
-        window = 100_000 + int(hashlib.sha1(token.encode()).hexdigest()[:4], 16)
-        return ModelInfo(
-            id=model_id, name=model_id, description="", context_window=window, max_tokens=8192
-        )
-
-    monkeypatch.setattr(configure, "resolve_model_info", _info)
-    return seen
-
-
-def _spec() -> FrontendModelSpec:
-    return FrontendModelSpec(provider="openai", model_id="gpt-5.1")
-
-
-def _seed(root: Path, provider: str, credential: dict[str, Any]) -> None:
-    store = AuthStore(root / "auth.db")
-    try:
-        store.upsert_credential(provider, credential)
-    finally:
-        store.close()
-
-
-def _db_bytes(root: Path) -> dict[str, bytes]:
-    return {
-        p.name: p.read_bytes()
-        for p in root.iterdir()
-        if p.name.startswith("auth.db") and not p.name.endswith("-shm")
-    }
-
-
-async def test_two_cold_opens_build_at_most_one_writable_store(
-    root: Path, connects: list[int], no_listing: list[Any]
-) -> None:
-    _seed(root, "openai", {"type": "api_key", "key": "sk-one", "source": "login"})
-    connects.clear()
-    a = await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    b = await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-b")
-    assert a.context_metadata_resolved and b.context_metadata_resolved
-    assert len(connects) <= 1, f"{len(connects)} writable AuthStore bootstraps"
-
-
-async def test_concurrent_resolutions_are_single_flight(
-    root: Path, monkeypatch: pytest.MonkeyPatch, no_listing: list[Any]
-) -> None:
-    _seed(root, "openai", {"type": "api_key", "key": "sk-one", "source": "login"})
-    from local_operator.providers import failover
-
-    real = failover._resolve_access_for_provider
-    calls: list[str] = []
-
-    async def _slow(*args: Any, **kwargs: Any) -> Any:
-        calls.append(args[2])
-        await asyncio.sleep(0.05)
-        return await real(*args, **kwargs)
-
-    monkeypatch.setattr(failover, "_resolve_access_for_provider", _slow)
-    results = await asyncio.gather(
-        *(
-            cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-            for _ in range(5)
-        )
+def _listing(provider: str, model_id: str, *, credential: Any, **kwargs: Any) -> ModelInfo:
+    return ModelInfo(
+        id=model_id,
+        name=model_id,
+        description="",
+        context_window=_WINDOWS[credential[0]],
+        max_tokens=8192,
     )
-    assert calls == ["sess-a"]
-    assert len({r.context_window for r in results}) == 1
-    # Each caller owns its copy: mutating one cannot leak into the memo.
-    results[0].context_window = 1
-    again = await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert again.context_window == results[1].context_window
-    assert calls == ["sess-a"]
 
 
-async def test_expired_token_refresh_runs_on_one_loop_without_cross_loop_error(
-    root: Path, monkeypatch: pytest.MonkeyPatch, no_listing: list[Any]
-) -> None:
-    """``read_only`` does NOT stop an expired bearer refreshing, and the store's
-    refresh single-flight is ``asyncio.Lock``s. Three sessions resolving the same
-    expired login concurrently contend on that lock; on per-call loops the lock
-    binds to one and the next waiter raises "bound to a different event loop"."""
-    expired = {
-        "type": "oauth",
-        "refresh": "r1",
-        "access": "access-1",
-        "expires": int(time.time() * 1000) + 1000,  # inside the refresh skew
-        "account_id": "acct-1",
-        "org_id": "org-1",
-    }
-    _seed(root, "openai", expired)
-    loops: set[int] = set()
-    refreshes: list[str] = []
+async def _resolve(
+    root: Path, key: str = "same-session", model_id: str = "gpt-5.1"
+) -> FrontendModelSpec:
+    return await cold_model.resolve_context_metadata(
+        root, FrontendModelSpec(provider="openai", model_id=model_id), stickiness_key=key
+    )
 
-    async def _refresh(creds: dict[str, Any]) -> dict[str, Any]:
-        loops.add(id(asyncio.get_running_loop()))
-        refreshes.append(creds["refresh"])
-        await asyncio.sleep(0.05)
-        return {"access": "access-2", "expires": int(time.time() * 1000) + 3600_000}
 
-    monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self, provider: _refresh)
-    for round_ in range(2):
-        results = await asyncio.gather(
-            *(
-                cold_model.resolve_context_metadata(
-                    root, _spec(), stickiness_key=f"sess-{round_}-{i}"
-                )
-                for i in range(3)
-            )
+def _seed(root: Path, *, bearer: str = "synthetic-a", expired: bool = False) -> None:
+    with closing(AuthStore(root / "auth.db")) as store:
+        store.upsert_credential(
+            "openai",
+            {
+                "type": "oauth",
+                "access": bearer,
+                "refresh": "synthetic-refresh",
+                "expires": 1 if expired else int(time.time() * 1000) + 3_600_000,
+                "account_id": "synthetic-account",
+                "org_id": "synthetic-org",
+            },
         )
-        assert all(r.context_metadata_resolved for r in results)
-        # Expire it again so the second round contends on the same lock anew.
-        store = AuthStore(root / "auth.db")
-        store.upsert_credential("openai", {**expired, "access": f"access-r{round_}"})
-        store.close()
-    assert refreshes, "the expired login was never refreshed — the test lost its subject"
-    assert len(loops) == 1, "refreshes ran on more than one event loop"
-    assert all(c is not None and c[0] == "access-2" for c in no_listing)
 
 
-async def test_read_only_resolution_writes_nothing_to_auth_db(
-    root: Path, no_listing: list[Any]
+def _rotation() -> dict[str, Any]:
+    return {
+        "access": "synthetic-rotated",
+        "refresh": "synthetic-rotated-refresh",
+        "expires": int(time.time() * 1000) + 3_600_000,
+    }
+
+
+def _read_pair(root: Path) -> tuple[str, str]:
+    with closing(AuthStore(root / "auth.db")) as store:
+        row = store.list_credentials("openai")[0]
+        return row.data["access"], row.data["refresh"]
+
+
+async def _entered(event: threading.Event) -> None:
+    assert await asyncio.to_thread(event.wait, 5), "worker did not reach the synthetic barrier"
+
+
+async def test_current_schema_cold_opens_do_not_wait_for_a_sqlite_writer(tmp_path: Path) -> None:
+    _seed(tmp_path)
+    path = tmp_path / "auth.db"
+    before = path.read_bytes()
+    with closing(sqlite3.connect(path)) as writer:
+        # Keep the real writer reserved until BOTH distinct sessions return. A
+        # request that tries to reserve it itself fails SQLite's busy timeout;
+        # there is no wall-clock threshold or chance to run after its release.
+        writer.execute("BEGIN IMMEDIATE")
+        for session in ("first-session", "second-session"):
+            answer = await _resolve(tmp_path, session)
+            assert answer.context_window == 150_000 and answer.context_metadata_resolved
+            assert writer.in_transaction
+        writer.rollback()
+    assert path.read_bytes() == before
+    with closing(AuthStore(path)) as store:
+        assert all(
+            store.session_credential_id("openai", session) is None
+            for session in ("first-session", "second-session")
+        )
+
+
+async def test_same_session_reads_ambient_changes_then_supported_provider_store_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = AuthStore(root / "auth.db")
-    store.upsert_credential("openai", {"type": "api_key", "key": "sk-one", "source": "login"})
-    store.upsert_credential("openai", {"type": "api_key", "key": "sk-two", "source": "login"})
-    store.close()
-    before = _db_bytes(root)
-    for key in ("sess-a", "sess-b", "sess-c"):
-        await cold_model.resolve_context_metadata(root, _spec(), stickiness_key=key)
-    cold_model._reset_account_context_cache()  # close the worker's store first
-    assert _db_bytes(root) == before
+    from local_operator.secrets import client as secrets_client
+
+    # Match the desktop host's config root for both auth and the provider store.
+    # Use the real keyfile fallback without a broker or host keychain.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(secrets_client, "PEER_AUTHENTICATION_SUPPORTED", False)
+    assert (await _resolve(tmp_path)).context_window == 128_000
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-a")
+    assert (await _resolve(tmp_path)).context_window == 150_000
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-b")
+    assert (await _resolve(tmp_path)).context_window == 250_000
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert (await _resolve(tmp_path)).context_window == 128_000
+
+    store_provider_key("OPENAI_API_KEY", "synthetic-b", base=tmp_path)
+    configure.invalidate_model_info_cache()  # same invalidation as the credentials route
+    assert (tmp_path / "secrets" / "store.db").is_file()
+    assert (await _resolve(tmp_path)).context_window == 250_000
 
 
-async def test_memo_keys_on_session_and_credential_and_expires(
-    root: Path, monkeypatch: pytest.MonkeyPatch, no_listing: list[Any]
+async def test_same_session_reads_committed_login_changes_and_replaced_database(
+    tmp_path: Path,
 ) -> None:
-    store = AuthStore(root / "auth.db")
-    store.upsert_credential("openai", {"type": "api_key", "key": "sk-one", "source": "login"})
-    first = await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert [c[0] for c in no_listing] == ["sk-one"]
+    _seed(tmp_path)
+    assert (await _resolve(tmp_path)).context_window == 150_000
+    _seed(tmp_path, bearer="synthetic-b")  # same account, new persisted access
+    assert (await _resolve(tmp_path)).context_window == 250_000
 
-    # A different conversation never reuses another's answer: it may be pinned
-    # to a different account.
-    await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-b")
-    assert len(no_listing) == 2
-
-    # Same key, unchanged state: served from the memo.
-    await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert len(no_listing) == 2
-
-    # A credential change (here: the login replaced) misses at once.
-    for row in store.list_credentials("openai"):
-        store.delete_credential(row.id)
-    store.upsert_credential("openai", {"type": "api_key", "key": "sk-new", "source": "login"})
-    store.close()
-    changed = await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert no_listing[-1][0] == "sk-new"
-    assert changed.context_window != first.context_window
-
-    # And a cached entry expires after the TTL.
-    seen = len(no_listing)
-    clock = [time.monotonic()]
-    monkeypatch.setattr(cold_model.time, "monotonic", lambda: clock[0])
-    await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert len(no_listing) == seen
-    clock[0] += cold_model._ACCOUNT_CONTEXT_TTL_S + 1
-    await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert len(no_listing) == seen + 1
+    replacement = tmp_path / "replacement"
+    _seed(replacement, bearer="synthetic-rotated")
+    # Every store is already closed, so no old WAL is attached to this path.
+    path = tmp_path / "auth.db"
+    old_inode = path.stat().st_ino
+    (replacement / "auth.db").replace(path)
+    assert path.stat().st_ino != old_inode
+    assert (await _resolve(tmp_path)).context_window == 350_000
 
 
-async def test_failure_is_not_cached(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from local_operator.providers import failover
+async def test_next_same_session_lookup_recovers_from_failover_soft_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(tmp_path)
+    real = AuthStore.get_oauth_access
+    calls = 0
 
-    calls: list[int] = []
+    async def transient_busy(self: AuthStore, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("synthetic transient database failure")
+        return await real(self, *args, **kwargs)
 
-    async def _boom(*args: Any, **kwargs: Any) -> Any:
-        calls.append(1)
-        raise RuntimeError("store unavailable")
+    # The real failover bridge catches this and produces a valid fallback spec.
+    # The next cold resolution must ask again, not replay that fallback.
+    monkeypatch.setattr(AuthStore, "get_oauth_access", transient_busy)
+    assert (await _resolve(tmp_path)).context_window == 128_000
+    assert (await _resolve(tmp_path)).context_window == 150_000
+    assert calls == 2
 
-    monkeypatch.setattr(failover, "_resolve_access_for_provider", _boom)
-    for _ in range(2):
-        with pytest.raises(RuntimeError):
-            await cold_model.resolve_context_metadata(root, _spec(), stickiness_key="sess-a")
-    assert len(calls) == 2
 
+async def test_slow_listing_does_not_serialize_another_cold_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked_listing(provider: str, model_id: str, **kwargs: Any) -> ModelInfo:
+        if model_id == "gpt-5.2":
+            entered.set()
+            assert release.wait(10), "test did not release listing"
+        return _listing(provider, model_id, **kwargs)
+
+    monkeypatch.setattr(configure, "resolve_model_info", blocked_listing)
+    slow = asyncio.create_task(_resolve(tmp_path, "slow", "gpt-5.2"))
+    try:
+        await _entered(entered)
+        fast = await asyncio.wait_for(_resolve(tmp_path, "fast"), 5)
+        assert fast.context_window == 150_000 and not slow.done()
+    finally:
+        release.set()
+        await slow
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="config directory symlink requires privileges")
+async def test_retargeted_config_does_not_close_an_old_db_with_refresh_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old, new, live = (tmp_path / name for name in ("old", "new", "live"))
+    _seed(old, expired=True)
+    _seed(new, bearer="synthetic-b")
+    live.symlink_to(old, target_is_directory=True)
+    entered, release = threading.Event(), threading.Event()
+
+    async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        entered.set()
+        assert await asyncio.to_thread(release.wait, 10), "test did not release refresh"
+        return _rotation()
+
+    monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self, provider: refresh)
+    ongoing = asyncio.create_task(_resolve(live))
+    try:
+        await _entered(entered)
+        switch = tmp_path / "switch"
+        switch.symlink_to(new, target_is_directory=True)
+        os.replace(switch, live)
+        replacement = await asyncio.wait_for(_resolve(live, "new-session"), 5)
+        assert replacement.context_window == 250_000 and not ongoing.done()
+    finally:
+        release.set()
+        earlier = await ongoing
+    assert earlier.context_window == 350_000
+    assert _read_pair(old) == ("synthetic-rotated", "synthetic-rotated-refresh")
+    assert _read_pair(new) == ("synthetic-b", "synthetic-refresh")
+    assert (await _resolve(live)).context_window == 250_000  # original session key
+
+
+async def test_normal_loop_shutdown_drains_refresh_after_viewer_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(tmp_path, expired=True)
+    stopping, drained, release = threading.Event(), threading.Event(), threading.Event()
+
+    async def viewer() -> None:
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        shutdown = loop.shutdown_default_executor
+
+        async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+            loop.call_soon_threadsafe(entered.set)
+            assert await asyncio.to_thread(release.wait, 10), "test did not release refresh"
+            return _rotation()
+
+        async def at_shutdown(*args: Any, **kwargs: Any) -> None:
+            # Run the signal on the next loop turn. With no executor job to
+            # drain, real shutdown returns immediately, *before* that signal.
+            loop.call_soon(stopping.set)
+            await shutdown(*args, **kwargs)
+            drained.set()
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self, provider: refresh)
+        monkeypatch.setattr(loop, "shutdown_default_executor", at_shutdown)
+        ongoing = asyncio.create_task(_resolve(tmp_path))
+        await asyncio.wait_for(entered.wait(), 5)
+        ongoing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await ongoing
+
+    def run() -> tuple[str, str]:
+        asyncio.run(viewer())
+        return _read_pair(tmp_path)
+
+    owner = asyncio.create_task(asyncio.to_thread(run))
+    try:
+        await _entered(stopping)
+        assert not drained.is_set(), "normal shutdown escaped the already-sent refresh"
+    finally:
+        release.set()
+        persisted = await owner
+    assert persisted == ("synthetic-rotated", "synthetic-rotated-refresh")

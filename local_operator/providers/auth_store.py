@@ -2158,25 +2158,31 @@ class AuthStore:
                         (secrets.token_hex(16),),
                     )
                 conn.commit()
-                # Local metadata, never credential payload: old rows remain unknown until
-                # a real login write attests an incarnation. Refresh cannot create one.
-                # Concurrent process startup must serialize the check and ALTER, not
-                # swallow duplicate-column errors (which can conceal real corruption).
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    columns = {
-                        row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
-                    }
-                    if "login_incarnation" not in columns:
-                        conn.execute(
-                            "ALTER TABLE auth_credentials ADD COLUMN "
-                            "login_incarnation TEXT DEFAULT NULL"
-                        )
-                    conn.commit()
-                except BaseException:
-                    with suppress(Exception):
-                        conn.rollback()
-                    raise
+                # The bootstrap guard still owns schema installation and serializes
+                # cooperating migrations. Check the live schema on this connection
+                # before competing with credential writers: an up-to-date store needs
+                # no SQLite writer lock just to open. Do not cache this check by path;
+                # a replaced database must be initialized/migrated on its own merits.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
+                if "login_incarnation" not in columns:
+                    # Recheck inside the write transaction before ALTER, including
+                    # against any schema writer that doesn't take the bootstrap guard.
+                    # Old rows stay unverified until a real login attests an incarnation.
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        columns = {
+                            row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
+                        }
+                        if "login_incarnation" not in columns:
+                            conn.execute(
+                                "ALTER TABLE auth_credentials ADD COLUMN "
+                                "login_incarnation TEXT DEFAULT NULL"
+                            )
+                        conn.commit()
+                    except BaseException:
+                        with suppress(Exception):
+                            conn.rollback()
+                        raise
                 for path in (
                     ()
                     if memory

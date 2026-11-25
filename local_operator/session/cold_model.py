@@ -21,12 +21,7 @@ reads history beyond the model-selection rows.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import contextlib
 import logging
-import os
-import threading
-import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
@@ -534,149 +529,6 @@ def resolve_conversation_model(
     return model
 
 
-#: How long a resolved account context is served without asking the store
-#: again. The answer this memo carries is METADATA for the cold viewer's band —
-#: the selected account's context window — not a bearer, so the staleness bound
-#: is "the band may show the previous window for up to a minute after a
-#: change the fingerprint below cannot see" (a provider-side listing change, a
-#: token silently expiring into a different route). Every change to the
-#: credential rows or to ``config.yml`` that this process can observe moves the
-#: fingerprint and misses immediately; the TTL only bounds the rest.
-_ACCOUNT_CONTEXT_TTL_S = 60.0
-
-#: Entries the memo keeps. One per (conversation, model) pair opened within a
-#: TTL, so this is a ceiling on a pathological sweep, not a working-set size.
-_ACCOUNT_CONTEXT_MAX = 256
-
-_account_context_lock = threading.Lock()
-#: key -> (monotonic expiry, resolved spec). Guarded by the lock above.
-_account_context_memo: dict[tuple[Any, ...], tuple[float, FrontendModelSpec]] = {}
-#: key -> the one in-flight resolution every concurrent caller awaits.
-_account_context_inflight: dict[tuple[Any, ...], concurrent.futures.Future[ModelSpec]] = {}
-
-
-def _stat_fingerprint(path: Path) -> tuple[int, ...] | None:
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
-
-
-class _AccountContextWorker:
-    """One thread, one event loop and one writable ``AuthStore`` per auth.db.
-
-    WHY. The v0.113.3 open trace (two openai cold opens on the operator's
-    machine) measured the ``account_context`` phase at 701 ms and 1851 ms; the
-    second was the 4570 ms worst open of the run, and the same window held an
-    805 ms ``desktop.events.route`` for a DIFFERENT click. The previous code
-    built a fresh writable ``AuthStore`` inside ``asyncio.run`` on a throwaway
-    thread for every cold open, and ``AuthStore._connect`` takes the per-process
-    bootstrap mutex plus a CROSS-PROCESS file lock on the auth.db ~25 lop
-    processes share, then runs the WAL pragma, the schema script, ``BEGIN
-    IMMEDIATE`` and chmods. Under that contention one connect costs seconds.
-    This worker pays that bootstrap once per process per auth.db.
-
-    WHY NOT ``shared_auth_store``. That store is safe to read from any thread,
-    but its refresh single-flight (``_refresh_locks``) is a set of
-    ``asyncio.Lock``s, and ``read_only=True`` does NOT stop an expired OAuth
-    bearer from being refreshed (``read_only`` governs stickiness only; see
-    ``AuthStore`` around ``_refresh_lock_for``). A lock that once waited on one
-    loop raises "is bound to a different event loop" when it next waits on
-    another, so a per-call ``asyncio.run`` loop — or this worker's loop next to
-    the server loop's other users of the shared store — could break a refresh.
-    Owning a PRIVATE store whose every coroutine runs on this ONE long-lived
-    loop keeps those locks single-loop by construction, and keeps the
-    connection's thread affinity: creation, resolution and close all happen on
-    this thread. Cross-process refresh coordination is the store's lease, which
-    is per database, so a private store is as coordinated as any other.
-
-    The thread is a daemon so it never holds interpreter exit; a forked child
-    finds the thread dead and starts its own.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
-        # Touched only on the worker thread.
-        self._stores: dict[str, tuple[tuple[int, int] | None, Any]] = {}
-
-    def submit(self, coro: Any) -> concurrent.futures.Future[Any]:
-        with self._lock:
-            if self._loop is None or self._thread is None or not self._thread.is_alive():
-                loop = asyncio.new_event_loop()
-                ready = threading.Event()
-
-                def _run() -> None:
-                    asyncio.set_event_loop(loop)
-                    loop.call_soon(ready.set)
-                    loop.run_forever()
-
-                thread = threading.Thread(
-                    target=_run, name="lop-cold-account-context", daemon=True
-                )
-                thread.start()
-                ready.wait()
-                self._loop, self._thread, self._stores = loop, thread, {}
-            loop = self._loop
-        return asyncio.run_coroutine_threadsafe(coro, loop)
-
-    def store_for(self, db_path: Path) -> Any:
-        """The worker's store for ``db_path`` — call on the worker thread only.
-
-        Keyed on the file's identity as well as its path, for the reason
-        ``auth_store._file_identity`` gives: a connection is bound to the inode
-        it opened, so a deleted-and-recreated auth.db must get a new store.
-        """
-        from local_operator.providers.auth_store import AuthStore, _file_identity
-
-        key = str(db_path)
-        identity = _file_identity(db_path)
-        held = self._stores.get(key)
-        if held is not None and held[0] == identity and identity is not None:
-            return held[1]
-        if held is not None:
-            with contextlib.suppress(Exception):
-                held[1].close()
-        store = AuthStore(db_path)
-        self._stores[key] = (_file_identity(db_path), store)
-        return store
-
-    def stop(self) -> None:
-        """Close every held store ON the worker thread, then end it (tests).
-
-        Production never calls this: the thread is a daemon and its store is
-        released with the process, like ``shared_auth_store``'s."""
-        with self._lock:
-            loop, thread = self._loop, self._thread
-            self._loop = self._thread = None
-        if loop is None or thread is None or not thread.is_alive():
-            return
-
-        async def _close() -> None:
-            for _identity, store in self._stores.values():
-                with contextlib.suppress(Exception):
-                    store.close()
-            self._stores.clear()
-
-        asyncio.run_coroutine_threadsafe(_close(), loop).result(timeout=5)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(timeout=5)
-        loop.close()
-
-
-_account_context_worker = _AccountContextWorker()
-
-
-def _reset_account_context_cache() -> None:
-    """Forget every memoised context and stop the worker (tests)."""
-    with _account_context_lock:
-        _account_context_memo.clear()
-        _account_context_inflight.clear()
-    _account_context_worker.stop()
-
-
 async def resolve_context_metadata(
     config_dir: Path, model: FrontendModelSpec, *, stickiness_key: str
 ) -> FrontendModelSpec:
@@ -690,114 +542,40 @@ async def resolve_context_metadata(
     OpenAI-only by its caller's decision, and moved here verbatim so the cold
     viewer and the draft preview agree; the preview SKIPS this step entirely
     (see :func:`synthesise_cold_state`).
-
-    Memoised per process for :data:`_ACCOUNT_CONTEXT_TTL_S`, single-flight per
-    key, and resolved on :class:`_AccountContextWorker` (see there for the
-    trace numbers and why). The key carries the conversation's stickiness key —
-    two conversations may be pinned to DIFFERENT accounts, so they never share
-    an answer — the full input spec, and a fingerprint of ``auth.db``, its WAL
-    and ``config.yml``: any committed credential write or config edit moves it.
-    A failure is never cached.
-    """
-    db_path = config_dir / "auth.db"
-    static: tuple[Any, ...] = (str(db_path), stickiness_key, model.model_dump_json())
-    key = (*static, _state_fingerprint(config_dir))
-    now = time.monotonic()
-    with _account_context_lock:
-        hit = _account_context_memo.get(key)
-        if hit is not None and hit[0] > now:
-            return hit[1].model_copy(deep=True)
-        future = _account_context_inflight.get(key)
-        if future is None:
-            future = _account_context_worker.submit(
-                _resolve_on_worker(config_dir, db_path, model, stickiness_key)
-            )
-            _account_context_inflight[key] = future
-            future.add_done_callback(lambda done: _settle_account_context(key, static, done))
-    # Shielded: one caller's cancellation (the operator clicking away) must not
-    # cancel the resolution every other waiter on this key is sharing.
-    _fingerprint, resolved = await asyncio.shield(asyncio.wrap_future(future))
-    return FrontendModelSpec.model_validate(resolved.model_dump(mode="python"))
-
-
-def _state_fingerprint(config_dir: Path) -> tuple[Any, ...]:
-    """What a committed credential write or a config edit is visible as.
-
-    ``auth.db`` runs in WAL mode, so a commit moves ``auth.db-wal`` (size or
-    mtime) and a checkpoint moves ``auth.db``; ``config.yml`` carries the
-    ``use_max_context_window`` setting the answer depends on. Three ``stat``
-    calls — microseconds — against the connect this memo exists to avoid. A
-    move that is NOT a credential change (another process's sticky write, a
-    checkpoint) only costs a miss; it can never serve a wrong answer.
-    """
-    from local_operator.config import CONFIG_FILE_NAME
-
-    db_path = config_dir / "auth.db"
-    return (
-        _stat_fingerprint(db_path),
-        _stat_fingerprint(db_path.with_name(db_path.name + "-wal")),
-        _stat_fingerprint(config_dir / CONFIG_FILE_NAME),
-    )
-
-
-def _settle_account_context(
-    key: tuple[Any, ...],
-    static: tuple[Any, ...],
-    done: concurrent.futures.Future[tuple[tuple[Any, ...] | None, ModelSpec]],
-) -> None:
-    with _account_context_lock:
-        if _account_context_inflight.get(key) is done:
-            del _account_context_inflight[key]
-        if done.cancelled() or done.exception() is not None:
-            return  # a failure is never cached: the next open asks again
-        fingerprint, resolved = done.result()
-        if fingerprint is None:
-            return  # the state moved under the resolution; not provably current
-        now = time.monotonic()
-        if len(_account_context_memo) >= _ACCOUNT_CONTEXT_MAX:
-            for stale in [k for k, (exp, _) in _account_context_memo.items() if exp <= now]:
-                del _account_context_memo[stale]
-            while len(_account_context_memo) >= _ACCOUNT_CONTEXT_MAX:
-                del _account_context_memo[next(iter(_account_context_memo))]
-        spec = FrontendModelSpec.model_validate(resolved.model_dump(mode="python"))
-        _account_context_memo[(*static, fingerprint)] = (now + _ACCOUNT_CONTEXT_TTL_S, spec)
-
-
-async def _resolve_on_worker(
-    config_dir: Path, db_path: Path, model: FrontendModelSpec, stickiness_key: str
-) -> tuple[tuple[Any, ...] | None, ModelSpec]:
-    """The resolution itself; runs on the worker's loop and thread only.
-
-    Returns the state fingerprint the answer is provably current for, or
-    ``None``. It is taken AFTER the worker's store is open — opening the first
-    connection on a quiet database creates ``auth.db-wal``, so a fingerprint
-    taken before would never match again — and compared after resolving: a
-    write that landed mid-resolution (including an expired bearer's refresh)
-    leaves the answer uncached rather than filed under state it may predate.
     """
     from local_operator.config import ConfigManager
     from local_operator.model.configure import context_spec_for_access
+    from local_operator.providers.auth_store import AuthStore
     from local_operator.providers.failover import (
         AuthRetryKeyState,
         _resolve_access_for_provider,
     )
 
-    auth = _account_context_worker.store_for(db_path)
-    before = _state_fingerprint(config_dir)
-    access = await _resolve_access_for_provider(
-        auth,
-        "openai",
-        stickiness_key,
-        AuthRetryKeyState(),
-        None,
-        read_only=True,
-        model_id=model.model_id,
-        scoped_blocks=True,
-    )
-    settings = ConfigManager(config_dir=config_dir).get_config().values
-    resolved = context_spec_for_access(model, access, settings)
-    after = _state_fingerprint(config_dir)
-    return (after if after == before else None), resolved
+    configured_model = model
+
+    async def _resolve() -> ModelSpec:
+        # AuthStore's SQLite connection is thread-affine. Creation, credential
+        # resolution and close belong to this ONE worker's event loop, not
+        # separately scheduled default-executor jobs.
+        auth = AuthStore(config_dir / "auth.db")
+        try:
+            access = await _resolve_access_for_provider(
+                auth,
+                "openai",
+                stickiness_key,
+                AuthRetryKeyState(),
+                None,
+                read_only=True,
+                model_id=configured_model.model_id,
+                scoped_blocks=True,
+            )
+            settings = ConfigManager(config_dir=config_dir).get_config().values
+            return context_spec_for_access(configured_model, access, settings)
+        finally:
+            auth.close()
+
+    resolved = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+    return FrontendModelSpec.model_validate(resolved.model_dump(mode="python"))
 
 
 async def synthesise_cold_state(
