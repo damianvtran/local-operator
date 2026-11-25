@@ -11768,3 +11768,26 @@ async def test_inline_widget_history_and_stream_negotiate_on_desktop_http(move_a
     ]
     assert frames[0]["payload"] == live
     assert frames[1] == replace
+
+
+@pytest.mark.asyncio
+async def test_a_cold_snapshot_carries_the_stored_title(tmp_path):
+    """UI #2099 Q1C-F1: a cold session's snapshot names it from ``title.json``.
+
+    A session that is not running and was never on a loaded catalogue page has
+    no live runtime to supply ``conversation_title``, so the frame shipped
+    ``""`` while the catalogue row (``session_name`` -> ``stored_session_title``)
+    showed the stored title, and the desktop header read "Untitled chat".
+    """
+    from local_operator.resume import write_session_title
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    write_session_title(
+        tmp_path / "sessions" / sid, "Quarterly invoices", user_set=False, past_names=[]
+    )
+    async with pool.session(sid, read=True) as bridge:
+        snapshot = await bridge.snapshot()
+    frontend = snapshot["payload"]["frontend"]["snapshot"]
+    assert frontend["conversation_title"] == "Quarterly invoices"
+    await pool.close()
