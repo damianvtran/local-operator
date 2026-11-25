@@ -4893,6 +4893,17 @@ async def _stream_with_failover_events(
             if access is not None:
                 last_access = access
             key = access.access_token if access is not None else None
+            if current_request.model.auth_route_default:
+                from local_operator.model.configure import auth_route_spec
+
+                # The cascade may skip or refresh the row seen at startup, or
+                # rotate again after an error. Bind only the omitted model to
+                # this attempt's bearer so transport and model always agree.
+                resolved = auth_route_spec(current_request.model, access)
+                if resolved is not current_request.model:
+                    current_request = current_request.with_model(resolved)
+                    spec = resolved
+                    yield StreamModelEvent(model=resolved)
             if provider == "openai" and access is not None:
                 from local_operator.model.configure import context_spec_for_access
 

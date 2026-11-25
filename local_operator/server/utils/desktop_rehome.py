@@ -94,6 +94,14 @@ async def rehome_after_login(
     values = manager.get_config().values
     provider = str(values.get("hosting", "") or "").strip().lower()
     model_id = str(values.get("model_name", "") or "").strip()
+    if provider and not model_id:
+        from local_operator.model.defaults import (
+            OAUTH_SUGGESTED_MODELS,
+            default_model_for,
+        )
+
+        if provider in OAUTH_SUGGESTED_MODELS:
+            model_id = default_model_for(provider, config_dir=manager.config_dir) or ""
     if not provider or not model_id:
         # Nothing to move them TO. The planner leaves this state alone as well
         # (its case 1), so it is not a failure: a default with no model is its

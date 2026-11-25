@@ -57,7 +57,11 @@ from local_operator.model.catalogue import (
     note_unavailable,
 )
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
-from local_operator.model.defaults import default_model_for
+from local_operator.model.defaults import (
+    RouteDefaultModel,
+    default_model_for,
+    suggested_model_for,
+)
 from local_operator.model.effort import (
     default_effort,
     resolve_effort_in,
@@ -101,7 +105,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
-    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.auth_store import AuthStore, OAuthAccess
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
@@ -3437,6 +3441,8 @@ def configure_model(
         model_info = resolve_model_info(canonical, model_name, base=config_dir)
 
     spec = build_model_spec(canonical, model_name, model_info)
+    if isinstance(model_name, RouteDefaultModel):
+        spec = spec.model_copy(update={"auth_route_default": True})
     if definition.local_setup:
         from local_operator.providers.local import local_model_info
 
@@ -3553,6 +3559,36 @@ def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
     if isinstance(openai, Mapping) and openai.get("use_max_context_window") is False:
         return False
     return OPENAI_USE_MAX_CONTEXT_WINDOW
+
+
+def auth_route_spec(spec: ModelSpec, access: OAuthAccess | None) -> ModelSpec:
+    """Finalize an omitted ID against the credential used on this attempt."""
+    if not spec.auth_route_default or access is None:
+        return spec
+    location = str((access.raw or {}).get("location") or "")
+    suggestion = suggested_model_for(
+        spec.provider, oauth=access.kind == "oauth", vertex_locations=(location,)
+    )
+    if suggestion is None or suggestion.id == spec.model_id:
+        return spec
+    # The curated rows describe the model actually served; don't carry Neon's
+    # limits to Express Flash. Keep the user's sampling/effort intent.
+    resolved = build_model_spec(
+        spec.provider, suggestion.id, get_model_info(spec.provider, suggestion.id)
+    )
+    effort = spec.reasoning_effort
+    if effort is not None:
+        effort = resolve_effort_in(
+            resolved.reasoning_efforts, resolved.reasoning_default_effort, effort
+        )
+    return resolved.model_copy(
+        update={
+            "auth_route_default": True,
+            "temperature": spec.temperature,
+            "top_p": spec.top_p,
+            "reasoning_effort": effort if effort is not None else resolved.reasoning_effort,
+        }
+    )
 
 
 def context_spec_for_access(

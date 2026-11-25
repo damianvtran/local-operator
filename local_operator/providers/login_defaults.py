@@ -28,9 +28,14 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from local_operator.model.defaults import suggested_model_for
+from local_operator.model.defaults import (
+    OAUTH_SUGGESTED_MODELS,
+    local_route_suggestion,
+    suggested_model_for,
+)
 from local_operator.providers.model_access import is_accessible, is_stranded
 from local_operator.providers.registry import (
     credential_provider_id,
@@ -87,6 +92,7 @@ def plan_login_defaults(
     *,
     oauth: bool | None = None,
     accessible: Collection[str] | None = None,
+    config_dir: Path | None = None,
 ) -> LoginDefaults:
     """Decide what a just-completed login for ``provider_id`` should write.
 
@@ -267,7 +273,13 @@ def plan_login_defaults(
     if oauth is None:
         flavour = get_provider_definition(provider_id)
         oauth = flavour is not None and flavour.login_kind not in (None, "api_key")
-    suggestion = suggested_model_for(resolved, oauth=oauth) if definition is not None else None
+    suggestion = None
+    if definition is not None:
+        suggestion = (
+            local_route_suggestion(resolved, config_dir)
+            if config_dir is not None and resolved in OAUTH_SUGGESTED_MODELS
+            else suggested_model_for(resolved, oauth=oauth)
+        )
     default_model = suggestion.id if suggestion is not None else ""
 
     # The STRANDED default (see the docstring): a hosting the registry owns and
@@ -394,6 +406,14 @@ def apply_login_defaults(manager: "ConfigManager", plan: LoginDefaults) -> bool:
         manager.set_config_value("hosting", plan.hosting)
         wrote = True
     if plan.model_name is not None:
-        manager.set_config_value("model_name", plan.model_name)
-        wrote = True
+        # A login is not an explicit model pick. Leave the model omitted for
+        # providers with different wire IDs across auth tiers, so the next turn
+        # can pair the model with whatever credential actually serves it.
+        hosting = plan.hosting or manager.get_config_value("hosting")
+        if hosting in OAUTH_SUGGESTED_MODELS:
+            if plan.hosting is not None:
+                manager.set_config_value("model_name", "")
+        else:
+            manager.set_config_value("model_name", plan.model_name)
+            wrote = True
     return wrote

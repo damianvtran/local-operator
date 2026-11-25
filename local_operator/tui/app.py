@@ -58921,6 +58921,7 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
                 accessible=accessible,
+                config_dir=manager.config_dir,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -59013,6 +59014,14 @@ class OperatorApp(App[None]):
             )
             provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
+            if provider and not model_id:
+                from local_operator.model.defaults import (
+                    OAUTH_SUGGESTED_MODELS,
+                    default_model_for,
+                )
+
+                if provider in OAUTH_SUGGESTED_MODELS:
+                    model_id = default_model_for(provider, config_dir=manager.config_dir) or ""
         except Exception:  # noqa: BLE001 — a repair must never fail a completed login
             return self._deferred_close(from_pending, speak=True)
         if not is_first_provider_login(accessible, login_provider):

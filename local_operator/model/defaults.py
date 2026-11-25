@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from local_operator.providers.auth_store import AuthStore
 
 
 class SuggestedModel(NamedTuple):
@@ -75,9 +78,8 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # OpenAI's API model page recommends Sol for everyday agent work; its
     # GPT-6.2 launch announcement also lists Sol for ChatGPT subscribers in Codex.
     "openai": SuggestedModel("gpt-6.2-sol", "GPT-6.2 Sol"),
-    # api-docs.deepseek.com lists the direct Pro id alongside the cheaper Flash
-    # tier. Do not substitute a dated/aggregator id on the direct API.
-    "deepseek": SuggestedModel("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    # DeepSeek serves V4.1 Flash on the stable direct API id, not a dated id.
+    "deepseek": SuggestedModel("deepseek-flash", "DeepSeek V4.1 Flash"),
     # docs.z.ai/guides/llm/glm-5.4: Coding Plan only at launch. Both lop Z.AI
     # logins go to /api/coding/paas/v4, including the pasted-key login.
     "zai": SuggestedModel("glm-5.4", "GLM-5.4"),
@@ -89,9 +91,9 @@ SUGGESTED_MODELS: dict[str, SuggestedModel] = {
     # Grok 4.7. It is the most capable model we've built." Same id on the
     # API-key and the xai-oauth route (both store under ``xai``).
     "xai": SuggestedModel("grok-4.7", "Grok 4.7"),
-    # AI Studio publishes Neon as paid-only. A Gemini API key doesn't disclose
-    # the project's billing tier, and lop has no consumer subscription route.
-    "google": SuggestedModel("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    # AI Studio offers Neon on paid tiers only; free-tier keys can explicitly
+    # select gemini-3.8-flash. The key itself does not disclose its billing tier.
+    "google": SuggestedModel("gemini-4-neon", "Gemini 4 Neon"),
     # Key auth uses the publisher-only endpoint (including Express Mode). The
     # express-mode docs list 2.5 Flash but not Neon; Cloud login can use Neon.
     "google-vertex": SuggestedModel("gemini-2.5-flash", "Vertex Gemini 2.5 Flash"),
@@ -205,36 +207,52 @@ def _keyed_name(canonical: str, suggestion: SuggestedModel) -> str:
     return suggestion.name
 
 
-def default_model_for(hosting: str, *, config_dir: Path | None = None) -> str | None:
-    """Resolve an omitted model; only inspect auth for routes that disagree.
+def stored_route_suggestion(hosting: str, store: AuthStore) -> SuggestedModel | None:
+    """Suggest for the eligible local OAuth tier without contacting the vendor."""
+    locations = store.fresh_oauth_locations_for_default(hosting)
+    return suggested_model_for(hosting, oauth=bool(locations), vertex_locations=locations)
 
-    Start-up cannot run the streaming credential cascade (it can refresh or
-    borrow a key). Its first local tier is stored OAuth, ahead of pasted or env
-    keys. Inspect that tier read-only, using the caller's config root, and fall
-    back to the key suggestion if there is no local route evidence. For Vertex,
-    don't assume a specific OAuth row will win when several are available.
+
+def local_route_suggestion(hosting: str, config_dir: Path) -> SuggestedModel | None:
+    """Preview a new turn's route without refreshing a token or borrowing a key.
+
+    Startup and the provider census need a useful local answer before a request
+    exists. A blocked or expired OAuth row isn't positive evidence of service;
+    when multiple fresh Cloud rows remain, don't guess which region will win.
+    This is presentation only: dispatch has the actual credential winner.
     """
     canonical = _canonical(hosting)
-    if config_dir is not None and canonical in OAUTH_SUGGESTED_MODELS:
+    if canonical in OAUTH_SUGGESTED_MODELS:
         from local_operator.providers.auth_store import AuthStore
 
         try:
             store = AuthStore.open_read_only(config_dir / "auth.db")
             try:
-                rows = [
-                    row
-                    for row in store.list_credentials(canonical)
-                    if row.credential_type == "oauth"
-                    and row.data.get("access")
-                    and not store.grant_is_dead(row.id)
-                ]
+                return stored_route_suggestion(canonical, store)
             finally:
                 store.close()
         except Exception:  # noqa: BLE001 — damaged auth metadata must not prevent startup
-            rows = []
-        if rows:
-            locations = tuple(str(row.data.get("location") or "") for row in rows)
-            suggestion = suggested_model_for(canonical, oauth=True, vertex_locations=locations)
-            if suggestion is not None:
-                return suggestion.id
+            pass
+    return suggested_model_for(canonical)
+
+
+class RouteDefaultModel(str):
+    """An omitted model's provisional display ID, not an explicit selection.
+
+    Startup passes a string pair through bootstrap and the session factory.
+    Keep omission distinguishable until configure_model builds the ModelSpec;
+    an identical string named by the caller must never be retargeted.
+    """
+
+
+def default_model_for(hosting: str, *, config_dir: Path | None = None) -> str | None:
+    """Resolve an omitted model; only inspect auth for routes that disagree."""
+    canonical = _canonical(hosting)
+    if canonical in OAUTH_SUGGESTED_MODELS:
+        suggestion = (
+            local_route_suggestion(canonical, config_dir)
+            if config_dir is not None
+            else suggested_model_for(canonical)
+        )
+        return RouteDefaultModel(suggestion.id) if suggestion is not None else None
     return DEFAULT_MODEL_NAMES.get(canonical)

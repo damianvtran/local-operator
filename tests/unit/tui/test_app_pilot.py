@@ -1161,7 +1161,7 @@ async def test_login_from_bad_provider_setup_state_repairs_the_config(
     assert repaired.get_config_value("hosting") == "deepseek"
     # The model belonged to the provider that was replaced, so it is replaced
     # too -- otherwise a real provider is pointed at a model that never existed.
-    assert repaired.get_config_value("model_name") == "deepseek-v4-pro"
+    assert repaired.get_config_value("model_name") == "deepseek-flash"
 
 
 @pytest.mark.parametrize(
@@ -15358,13 +15358,13 @@ async def test_a_login_rehomes_the_session_it_stranded(
         for _ in range(6):
             await pilot.pause()
 
-    assert receipt == ("Default moved to deepseek/deepseek-v4-pro — not signed in to radient.")
+    assert receipt == ("Default moved to deepseek/deepseek-flash — not signed in to radient.")
     assert ConfigManager(tmp_path).get_config_value("hosting") == "deepseek"
-    assert rehome == "Switched to deepseek/deepseek-v4-pro — not signed in to radient."
+    assert rehome == "Switched to deepseek/deepseek-flash — not signed in to radient."
     assert [(spec.provider, spec.model_id) for spec in session.switched] == [
-        ("deepseek", "deepseek-v4-pro")
+        ("deepseek", "deepseek-flash")
     ]
-    assert session.model_label == "deepseek/deepseek-v4-pro"
+    assert session.model_label == "deepseek/deepseek-flash"
 
 
 @pytest.mark.asyncio
@@ -15667,10 +15667,10 @@ async def test_the_login_paints_one_statement_of_the_move(
             await pilot.pause()
         text = _transcript_text(app)
 
-    assert text.count("Switched to deepseek/deepseek-v4-pro — not signed in to radient.") == 1
-    assert "model: radient/auto → deepseek/deepseek-v4-pro (this session)" not in text
+    assert text.count("Switched to deepseek/deepseek-flash — not signed in to radient.") == 1
+    assert "model: radient/auto → deepseek/deepseek-flash (this session)" not in text
     assert "/model default saves this for new sessions" not in text
-    assert session.model_label == "deepseek/deepseek-v4-pro"
+    assert session.model_label == "deepseek/deepseek-flash"
 
 
 @pytest.mark.asyncio
@@ -15711,9 +15711,9 @@ async def test_a_rehome_queued_before_the_session_binds_runs_on_the_bind_edge(
             await pilot.pause()
         text = _transcript_text(app)
 
-    assert session.model_label == "deepseek/deepseek-v4-pro"
+    assert session.model_label == "deepseek/deepseek-flash"
     assert app._rehome_await_bind is None
-    assert "Switched to deepseek/deepseek-v4-pro — not signed in to radient." in text
+    assert "Switched to deepseek/deepseek-flash — not signed in to radient." in text
 
 
 @pytest.mark.asyncio

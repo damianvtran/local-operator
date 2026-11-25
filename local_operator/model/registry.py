@@ -2080,7 +2080,7 @@ deepseek_models: Dict[str, ModelInfo] = {
     # pricing page still prices carry it. The legacy ids below deliberately do not.
     "deepseek-flash": ModelInfo(
         id="deepseek-flash",
-        name="DeepSeek Flash",
+        name="DeepSeek V4.1 Flash",
         max_tokens=393_216,
         context_window=1_000_000,
         supports_images=True,
@@ -3345,6 +3345,9 @@ glm_models: Dict[str, ModelInfo] = {
         name="GLM-5.4",
         max_tokens=131_072,
         context_window=1_000_000,
+        # Coding Plan's model card explicitly lists image input; callers
+        # requiring stated vision support must not wait for live metadata.
+        supports_images=True,
         supports_prompt_cache=True,
         description="Z.AI's flagship GLM Coding Plan model.",
         recommended=True,

@@ -15,10 +15,21 @@ from local_operator.model.defaults import DEFAULT_MODEL_NAMES, default_model_for
 
 
 def test_default_model_for_known_provider() -> None:
-    assert default_model_for("deepseek") == "deepseek-v4-pro"
+    assert default_model_for("deepseek") == "deepseek-flash"
     assert default_model_for("zai") == "glm-5.4"
     # noop aliases to test, which has no default.
     assert default_model_for("noop") is None
+
+
+def test_curated_default_metadata_matches_vendor_models() -> None:
+    from local_operator.model.configure import build_model_spec
+    from local_operator.model.registry import get_model_info
+
+    flash = get_model_info("deepseek", "deepseek-flash")
+    assert flash.name == "DeepSeek V4.1 Flash"
+    assert flash.recommended and flash.supports_images
+    glm = build_model_spec("zai", "glm-5.4", get_model_info("zai", "glm-5.4"))
+    assert glm.supports_images and glm.supports_images_stated
 
 
 def test_default_model_for_unknown_provider() -> None:
@@ -44,7 +55,7 @@ def test_apply_login_defaults_sets_hosting_and_model_when_empty(
 
     manager = ConfigManager(tmp_path)
     assert manager.get_config_value("hosting") == "deepseek"
-    assert manager.get_config_value("model_name") == "deepseek-v4-pro"
+    assert manager.get_config_value("model_name") == "deepseek-flash"
 
 
 def test_apply_login_defaults_leaves_existing_hosting_untouched(
@@ -81,7 +92,7 @@ def test_apply_login_defaults_leaves_existing_hosting_untouched(
         # a provider that never existed is worse (boots, then fails at stream).
         ("ollama", "ollama", ""),
         # Ordinary provider with a default: the baseline case.
-        ("deepseek", "deepseek", "deepseek-v4-pro"),
+        ("deepseek", "deepseek", "deepseek-flash"),
     ],
 )
 def test_repair_never_leaves_a_model_from_the_replaced_provider(
@@ -196,7 +207,7 @@ def test_apply_login_defaults_repairs_an_unknown_hosting(
 
     reloaded = ConfigManager(tmp_path)
     assert reloaded.get_config_value("hosting") == "deepseek"
-    assert reloaded.get_config_value("model_name") == "deepseek-v4-pro"
+    assert reloaded.get_config_value("model_name") == "deepseek-flash"
 
 
 def test_apply_login_defaults_leaves_a_legacy_alias_hosting_untouched(
@@ -238,14 +249,14 @@ def test_resolve_hosting_model_falls_back_to_default_model(
     args = argparse.Namespace(hosting=None, model=None)
     hosting, model = resolve_hosting_model(None, args, manager)
     assert hosting == "deepseek"
-    assert model == "deepseek-v4-pro"
+    assert model == "deepseek-flash"
 
 
 @pytest.mark.parametrize(
     ("hosting", "credential", "expected"),
     [
         ("openai", None, "gpt-6.2-sol"),
-        ("google", None, "gemini-3.8-flash"),
+        ("google", None, "gemini-4-neon"),
         ("google-vertex", None, "gemini-2.5-flash"),
         ("google-vertex", {"location": "global"}, "gemini-4-neon"),
         ("google-vertex", {"location": "eu"}, "gemini-4-neon"),
@@ -298,7 +309,7 @@ def test_omitted_model_uses_the_local_inference_route(
         ("google-vertex-sa", "us", "gemini-4-neon"),
         ("google-vertex-sa", "northamerica-northeast1", "gemini-3.8-flash"),
         ("google-vertex-key", "global", "gemini-2.5-flash"),
-        ("google", "global", "gemini-3.8-flash"),
+        ("google", "global", "gemini-4-neon"),
     ],
 )
 def test_vertex_login_suggestion_follows_auth_and_location(
@@ -351,7 +362,7 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
 #: configured pair (63) — are asserted against it. The branches whose length is the IDS'
 #: are not, because no copy change can bound them: measured, `openrouter/anthropic/
 #: claude-opus-5-20260101` puts the sentence at 84 and the repairing sentence
-#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-v4-pro'`)
+#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-flash'`)
 #: at 83, both of which wrap. That is a real, known wrap in a branch no alternative copy
 #: would fix, and it is recorded here rather than hidden by an assertion that would pass
 #: for the wrong reason.
@@ -496,8 +507,8 @@ def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
     # The WRITE branch too: literal, and inside the same row budget. This is the
     # receipt that would otherwise be the silent one — the round-4 NIT's point is that
     # every branch of this copy is asserted against the bytes a user sees.
-    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-v4-pro'."
-    assert len(write_receipt) == 62 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
+    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-flash'."
+    assert len(write_receipt) == 61 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)
 
 
 # ---------------------------------------------------------------------------
@@ -511,11 +522,11 @@ _OPERATOR_TARGETS = {
     "anthropic": "claude-opus-5-5",
     "openai": "gpt-6.2-sol",
     # The direct API's Pro id, not the OpenRouter spelling.
-    "deepseek": "deepseek-v4-pro",
+    "deepseek": "deepseek-flash",
     "zai": "glm-5.4",
     "alibaba": "qwen4-max",
     "xai": "grok-4.7",
-    "google": "gemini-3.8-flash",
+    "google": "gemini-4-neon",
     "google-vertex": "gemini-2.5-flash",
     "alibaba-token-plan": "qwen4-max",
     "kimi": "kimi-k3.1-pro",
@@ -627,26 +638,30 @@ def test_the_route_decides_the_kimi_spelling() -> None:
     assert plan_login_defaults("anthropic", "", None).model_name == "claude-opus-5-5"
 
 
-def test_the_cli_plans_with_the_flavour_that_ran_not_the_storage_id(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_cli_login_does_not_pin_the_kimi_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``radient-key`` stores under ``radient``, whose own login is OAuth, so a
-    storage-id derivation planned a pasted key as an OAuth grant (review round
-    1, #5). Kimi is where the flavour changes the model id, so it is the probe:
-    the CLI must hand the planner what the login actually returned.
-    """
+    """A new key does not outrank an existing OAuth grant, or pin its wire ID."""
     from local_operator.paths import CONFIG_DIR_ENV
     from local_operator.providers import auth_cli
+    from local_operator.providers.auth_store import AuthStore
 
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
-    auth_cli._apply_login_defaults("kimi", oauth=False)
-    assert ConfigManager(tmp_path).get_config_value("model_name") == "kimi-k3.1-pro"
-
-    other = tmp_path / "oauth"
-    other.mkdir()
-    monkeypatch.setenv(CONFIG_DIR_ENV, str(other))
-    auth_cli._apply_login_defaults("kimi", oauth=True)
-    assert ConfigManager(other).get_config_value("model_name") == "k3.1-pro"
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        grant = store.upsert_credential("kimi", {"type": "oauth", "access": "synthetic-oauth"})
+        store.upsert_credential(
+            "kimi", {"type": "api_key", "key": "synthetic-key", "source": "login"}
+        )
+        auth_cli._apply_login_defaults("kimi", oauth=False)
+        assert "model to 'k3.1-pro'" in capsys.readouterr().out
+        config = ConfigManager(tmp_path)
+        assert config.get_config_value("hosting") == "kimi"
+        assert not config.get_config_value("model_name")
+        store.block_credential(grant.id, "kimi")
+        assert default_model_for("kimi", config_dir=tmp_path) == "kimi-k3.1-pro"
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize(

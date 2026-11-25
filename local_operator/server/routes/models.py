@@ -142,7 +142,9 @@ async def _vertex_listing_credential(
         },
     },
 )
-async def list_providers() -> CRUDResponse[ProviderListResponse]:
+async def list_providers(
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+) -> CRUDResponse[ProviderListResponse]:
     """
     List all available model providers with their details.
 
@@ -152,10 +154,17 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
     try:
         # Discovery belongs to the model request. Hiding stopped servers here
         # made them impossible to select in the desktop application's setup UI.
-        from local_operator.model.defaults import suggested_model_for
+        from local_operator.model.defaults import (
+            stored_route_suggestion,
+            suggested_model_for,
+        )
 
         def with_suggestion(provider: ProviderDetail) -> ProviderDetail:
-            suggested = suggested_model_for(provider.id)
+            suggested = (
+                stored_route_suggestion(provider.id, provider_auth_store)
+                if provider.id == "google-vertex"
+                else suggested_model_for(provider.id)
+            )
             if suggested is None:
                 return provider
             return provider.model_copy(
