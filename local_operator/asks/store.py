@@ -402,6 +402,87 @@ def read_events(session_directory: Path | str, *, strict: bool = False) -> list[
     return events
 
 
+_ASK_CREATION_KINDS = frozenset({EVENT_QUEUED, EVENT_RELAYED})
+_ASK_FOLLOWUP_KINDS = frozenset(
+    {
+        EVENT_ANSWERED,
+        EVENT_DECLINED,
+        EVENT_DISMISSED,
+        EVENT_REVISED,
+        EVENT_WITHDRAWN,
+        EVENT_RELAY_SURFACED,
+        EVENT_CONTEXT,
+        EVENT_CONSENT_USED,
+    }
+)
+
+
+def read_complete_events(session_directory: Path | str) -> list[dict[str, Any]] | None:
+    """Evidence for clearing a live queued claim, not the tolerant inbox view.
+
+    Validate and consume the same bytes from one open of the append-only file.
+    Writers append a whole LF-terminated row in one write; a complete prefix is
+    a point-in-time view, not a promise that another append cannot follow it.
+    Never skip a bad row here: older settled rows can otherwise conceal the
+    one outstanding ask. Missing/empty is unknown, not a settled queue.
+    """
+    from local_operator.network.origin import StampLineRejected, parse_stamp_line
+
+    try:
+        raw = asks_log_path(session_directory).read_bytes()
+    except FileNotFoundError:
+        return None
+    if not raw.endswith(b"\n"):
+        return None
+
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    lines = raw.split(b"\n")
+    lines.pop()  # The required final LF leaves exactly one empty fragment.
+    for line in lines:
+        try:
+            event = parse_stamp_line(line)
+        except StampLineRejected:
+            return None
+        if not isinstance(event, dict):
+            return None
+        version, at, kind, ask_id = (event.get(key) for key in ("v", "at", "kind", "ask_id"))
+        if (
+            type(version) is not int
+            or version != EVENT_SCHEMA
+            or type(at) is not int
+            or at <= 0
+            or not isinstance(ask_id, str)
+            or not ask_id
+            or not isinstance(kind, str)
+        ):
+            return None
+        if kind in _ASK_CREATION_KINDS:
+            if ask_id in seen:
+                return None
+            if kind == EVENT_QUEUED:
+                # Both queued writers add a positive timeout to the row's
+                # creation time (`at`). An impossible deadline is not evidence
+                # of expiry, even if the tolerant fold would mark it expired.
+                deadline = event.get("expires_at")
+                if type(deadline) is not int or deadline <= at:
+                    return None
+            else:
+                origin = event.get("relay")
+                if not isinstance(origin, dict) or not all(
+                    isinstance(origin.get(key), str) and origin[key]
+                    for key in ("session_id", "ask_id")
+                ):
+                    return None
+            seen.add(ask_id)
+        elif kind not in _ASK_FOLLOWUP_KINDS or ask_id not in seen:
+            return None
+        elif kind in {EVENT_ANSWERED, EVENT_REVISED} and not isinstance(event.get("answers"), dict):
+            return None
+        events.append(event)
+    return events
+
+
 # ---------------------------------------------------------------------------
 # The fold
 # ---------------------------------------------------------------------------
@@ -1663,6 +1744,7 @@ __all__ = [
     "open_asks",
     "outstanding_asks",
     "pending_row",
+    "read_complete_events",
     "read_entry",
     "read_events",
     "read_index",

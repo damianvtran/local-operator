@@ -9912,6 +9912,28 @@ class RelayServer:
             )
         return rows
 
+    def _queued_ask_pending(self, session_id: str) -> bool:
+        """Check a live record's QUEUED claim against the owner's durable fold.
+
+        A heartbeat can outlive the ask deadline (or a settle written before the
+        runtime republishes). Only a complete owner journal that folds to known,
+        settled asks clears the claim in this read. Never use viewer-filtered notices:
+        some viewers get no notices even while the queue is genuinely open.
+        """
+        from local_operator.asks import store as ask_store
+
+        try:
+            events = ask_store.read_complete_events(ask_store.session_dir(self.root, session_id))
+            if events is None:
+                return True
+            records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
+            return not records or any(
+                ask_store.is_outstanding(row.get("status")) for row in records
+            )
+        except Exception:  # noqa: BLE001 — an unknown read cannot disprove the live claim
+            logger.debug("catalogue: queued ask state unreadable for %s", session_id, exc_info=True)
+            return True
+
     def local_session_rows(self, *, uncapped: bool = False) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.
 
@@ -9947,6 +9969,11 @@ class RelayServer:
                 continue
             seen.add(record.session_id)
             stamp = read_stamp(self.root, record.session_id)
+            pending = record.pending if state == "live" else None
+            pending_queued = pending == "ask" and record.pending_queued
+            if pending_queued and not self._queued_ask_pending(record.session_id):
+                pending = None
+                pending_queued = False
             rows.append(
                 {
                     "session_id": record.session_id,
@@ -9958,14 +9985,10 @@ class RelayServer:
                     "subagents_running": record.subagents_running,
                     "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
-                    "pending": record.pending if state == "live" else None,
+                    "pending": pending,
                     # Only when TRUE: an older viewer ignores the key, and its
                     # absence means "a gate" (every older owner's meaning).
-                    **(
-                        {"pending_queued": True}
-                        if state == "live" and record.pending and record.pending_queued
-                        else {}
-                    ),
+                    **({"pending_queued": True} if pending_queued else {}),
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at
@@ -9994,7 +10017,7 @@ class RelayServer:
                     # catalogue order) runs on, never a minted epoch.
                     "last_user_at": (
                         last_user_at(self.root / "sessions" / record.session_id)
-                        if record.busy or state == "wedged" or record.pending
+                        if record.busy or state == "wedged" or pending
                         else None
                     ),
                     "pid": record.pid,

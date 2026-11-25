@@ -248,6 +248,7 @@ def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
     import subprocess
     import sys
 
+    from local_operator.asks import store as ask_store
     from local_operator.session.runtime import registry
     from local_operator.session.runtime.types import SessionRecord
 
@@ -256,6 +257,13 @@ def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
     _record, link = _live_link(pair, monkeypatch)
     # Started by a THIRD device: this viewer (B) is not its origin.
     _own_session(server_a, "d_someone_else")
+    _ask_event(
+        server_a,
+        ask_store.EVENT_QUEUED,
+        "q-third",
+        expires_at=ask_store.now_ms() + 3_600_000,
+        questions=[{"id": "q0", "question": "A third device's question?", "options": []}],
+    )
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
 
     class _Peer:
@@ -297,16 +305,155 @@ def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
         _publish(pending="ask", pending_queued=True)
         row = _catalog_row(link)
         assert row["pending"] == "ask" and row.get("pending_queued") is True
+        assert not row.get("notices"), "this viewer must not see the question"
         assert _parks(row) == [], "a queued ask paged a member that did not start it"
         # A BLOCKING gate on the same session is still a park everywhere.
         _publish(pending="ask")
         row = _catalog_row(link)
         assert "pending_queued" not in row
         assert _parks(row) == ["ask"]
+        _publish(pending="approval")
+        row = _catalog_row(link)
+        assert row["pending"] == "approval" and "pending_queued" not in row
+        assert _parks(row) == ["approval"]
     finally:
         link.close("test")
         child.kill()
         child.wait()
+
+
+@pytest.mark.parametrize(
+    "settle",
+    [
+        "answer",
+        "withdraw",
+        "expire",
+        "missing",
+        "empty",
+        "torn",
+        "unterminated",
+        "bad-json",
+        "bad-record",
+        "unknown-kind",
+        "orphan",
+        "bad-deadline",
+        "missing-deadline",
+        "deadline-at-creation",
+        "deadline-before-creation",
+    ],
+)
+def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, settle: str
+) -> None:
+    """A heartbeat can keep its open claim after the ask stops waiting."""
+    import os
+
+    from local_operator.asks import store as ask_store
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    owner, viewer, _host, _port = pair
+    _record, link = _live_link(pair, monkeypatch)
+    _own_session(owner, viewer.identity.device_id)
+    clock = ask_store.now_ms()
+    deadline = clock + 1000
+    monkeypatch.setattr(ask_store, "now_ms", lambda: clock)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SID,
+            conversation_name="synthetic queued ask",
+            cwd=str(owner.root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+            pending="ask",
+            pending_queued=True,
+        ),
+        owner.root,
+    )
+
+    def queue(ask_id: str, expires_at: int) -> None:
+        _ask_event(
+            owner,
+            ask_store.EVENT_QUEUED,
+            ask_id,
+            expires_at=expires_at,
+            questions=[{"id": "q0", "question": "Keep waiting?", "options": []}],
+        )
+
+    def assert_claim(ask_id: str | None) -> None:
+        row = _catalog_row(link)
+        assert row["state"] == "live"
+        assert row["pending"] == ("ask" if ask_id else None)
+        assert row.get("pending_queued") is (True if ask_id else None)
+        ask_notices = [
+            notice["key"]
+            for notice in row.get("notices", [])
+            if notice["key"].startswith(ra.ASK_NOTICE_PREFIX)
+        ]
+        assert ask_notices == ([f"{ra.ASK_NOTICE_PREFIX}{ask_id}"] if ask_id else [])
+
+    try:
+        queue("q-first", deadline)
+        assert_claim("q-first")
+        if settle == "answer":
+            _ask_event(owner, ask_store.EVENT_ANSWERED, "q-first", answers={"q0": "yes"})
+        elif settle == "withdraw":
+            _ask_event(owner, ask_store.EVENT_WITHDRAWN, "q-first", by="fixture")
+        else:
+            clock = deadline + 1
+        if settle not in {"answer", "withdraw", "expire"}:
+            # A settled historical ask must not mask corrupt evidence of a newer one.
+            _ask_event(owner, ask_store.EVENT_WITHDRAWN, "q-first", by="fixture")
+            assert_claim(None)
+            journal = ask_store.asks_log_path(ask_store.session_dir(owner.root, SID))
+            history = journal.read_bytes()
+            queue("q-new", clock + 1000)
+            assert_claim("q-new")
+            newest = journal.read_bytes()[len(history) :]
+            if settle == "missing":
+                journal.unlink()
+            else:
+                journal.write_bytes(
+                    {
+                        "empty": b"",
+                        "torn": history + newest[:30],
+                        "unterminated": history.rstrip(b"\n"),
+                        "bad-json": history + b"{broken}\n",
+                        "bad-record": history + b'{"v":1,"kind":"queued"}\n',
+                        "unknown-kind": history + newest.replace(b'"queued"', b'"future"'),
+                        "orphan": history + newest.replace(b'"queued"', b'"withdrawn"'),
+                        "bad-deadline": history
+                        + newest.replace(str(clock + 1000).encode(), b"true"),
+                        "missing-deadline": history
+                        + newest.replace(b'"expires_at":' + str(clock + 1000).encode() + b",", b""),
+                        "deadline-at-creation": history
+                        + newest.replace(str(clock + 1000).encode(), str(clock).encode()),
+                        "deadline-before-creation": history
+                        + newest.replace(str(clock + 1000).encode(), str(clock - 1).encode()),
+                    }[settle]
+                )
+            row = _catalog_row(link)
+            assert row["state"] == "live"
+            assert row["pending"] == "ask" and row.get("pending_queued") is True
+            return
+        assert_claim(None)
+        if settle == "expire":
+            _ask_event(owner, ask_store.EVENT_ANSWERED, "q-first", answers={"q0": "late"})
+            assert_claim(None)
+        queue("q-new", clock + 1000)
+        assert_claim("q-new")
+
+        journal = ask_store.asks_log_path(ask_store.session_dir(owner.root, SID))
+        journal.unlink()
+        journal.mkdir()  # A real read error for both the verifier and notice reader.
+        row = _catalog_row(link)
+        assert row["pending"] == "ask" and row.get("pending_queued") is True
+        assert row["asks_unknown"] is True
+    finally:
+        link.close("test")
 
 
 def ra_now() -> int:
