@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "session.attachment",
-  "history_sha256": "8610898d41507bf79967b40038772da62fec325eebb3cce9ef3db977ac96b5bf",
+  "history_sha256": "677ac6810cf2f5bf00f8f2e00f2a3bf9bdd6bcf99084cb7adab4b271f0bc50f4",
   "entries": [
     {
       "locale": "zh-CN",
@@ -24,6 +24,35 @@
       "status": "passed",
       "note": "Independent audit #1 of 2 (safety copy; a second independent audit follows — this row is not final sign-off). Read all 5 keys against en + context sidecar. Verified in bytes: key set/order, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format controls; NFC. Safety meaning preserved: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). NIT: 授权记录 for 'recorded authority' vs existing 操作者权限 (cli.group_help.operator); reads naturally, no change needed. 配置档/操作者/附加 match majority usage. Full-width ：（）；。 punctuation.",
       "head": "a404fc67087ce5c59f3f42cb6cc3878913a2b46e",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "db833082c085db82dff269030ceb7cc6ed1fc87565b981d54d1a97142e8c0f07",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #2; session e93c9320acbc)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #2 of 2 (second independent audit for safety copy; formed own verdict before reading audit #1's notes). Read all 5 keys against en + context sidecar, glossary §2 and the locale style guide. Verified in bytes: key parity, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format (Cf) controls. Safety meaning unambiguous: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). Clean: 只有操作者…/不要自行尝试附加该团队; 附加/解除/配置档/输入框/操作者 match existing zh-CN usage; full-width punctuation.",
+      "head": "4fca7ff2e281ff8f6454ca8b861948aa34cdc126",
       "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
       "keys_reviewed": [
         "session.attachment.team_unrestored",
