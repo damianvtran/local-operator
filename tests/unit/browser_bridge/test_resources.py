@@ -746,17 +746,19 @@ def test_an_owed_handle_whose_tab_number_was_reused_stays_owed(tmp_path: Path) -
     assert resource.record["stranded_surfaces"] == [{"surface": "ui:8:A", "allocation_id": "a"}]
 
 
-# -- pending-ask hold (session a64fec9430f3) ---------------------------------
+# -- pending-ask handoff hold (session a64fec9430f3) -------------------------
 #
 # The incident: a sign-in tab was left open for ask a-e69c, the fleet update
 # retired the runtime, and the retiring process's disposal closed the tab
-# because the scope was unretained. These pin that a disposal while an ask is
-# OPEN keeps the tab, that the hold is released once the ask settles (answered,
-# timed out, withdrawn) or the tab is gone, and that ordinary cleanup with no
-# open ask is unchanged.
+# because the scope was unretained. The hold is keyed: only an ask bound to
+# the exact live tab AND its origin (`bind_ask_handoff`, written by
+# `ask browser_handoff=true`) keeps that tab, and only until THAT ask settles.
+
+SIGNIN = "https://signin.example.test/login?next=%2Fapps"
+TAB = "bridge:100:private"
 
 
-def _queue_ask(directory: Path, ask_id: str, *, expires_in_ms: int = 3_600_000) -> None:
+def _queue_ask(directory: Path, ask_id: str, *, expires_in_ms: int = 3_600_000) -> int:
     from local_operator.asks import store
 
     now = store.now_ms()
@@ -775,6 +777,7 @@ def _queue_ask(directory: Path, ask_id: str, *, expires_in_ms: int = 3_600_000) 
             "urgent": False,
         },
     )
+    return now + expires_in_ms
 
 
 def _settle_ask(directory: Path, ask_id: str, kind: str) -> None:
@@ -797,119 +800,178 @@ def _methods(bridge: BridgeFixture) -> list[str]:
     return [method for method, _ in bridge.calls]
 
 
+def _owned_tab(directory: Path, url: str = SIGNIN) -> BrowserResource:
+    resource = BrowserResource(directory, directory.name)
+    resource.initialize()
+    resource.remember(TAB)
+    resource.note_surface_origin(url)
+    return resource
+
+
+def _handoff(resource: BrowserResource, ask_id: str, **kw: Any) -> None:
+    resource.bind_ask_handoff(ask_id, _queue_ask(resource.directory, ask_id, **kw))
+
+
 @pytest.mark.asyncio
-async def test_disposal_with_an_open_ask_keeps_the_tab(
+async def test_disposal_keeps_the_tab_bound_to_an_open_handoff_ask(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:
-    """The reproduction: before the hold this closed the tab (`owner_finish`
-    on an unretained scope answers `closed`)."""
-    resource = BrowserResource(tmp_path, tmp_path.name)
-    resource.initialize()
-    resource.remember("bridge:100:private")
-    _queue_ask(tmp_path, "a-e69c")
+    """The reproduction: before the hold this closed the tab."""
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-e69c")
     result = await resource.finish(resource.generation, "disposed")
     assert result.state == "retained"
-    retain = [p for m, p in bridge.calls if m == "owner_retain"]
-    assert retain and retain[0]["reason"] == "pending ask a-e69c"
+    assert [p["reason"] for m, p in bridge.calls if m == "owner_retain"] == ["pending ask a-e69c"]
     record = json.loads(resource.path.read_text())
-    assert record["retention"] == "pending ask a-e69c"
-    assert record["surface_id"] == "bridge:100:private"
-    assert isinstance(record[resources.ASK_HOLD_EXPIRES_FIELD], int)
+    assert record["surface_id"] == TAB
+    assert record[resources.ASK_HANDOFFS_FIELD][0]["origin"] == "https://signin.example.test"
     assert "close" not in _methods(bridge)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("settle", ["none", "answered", "withdrawn", "timed_out"])
-async def test_disposal_without_an_open_ask_closes_as_before(
-    tmp_path: Path, bridge: BridgeFixture, settle: str
+async def test_an_unrelated_open_ask_does_not_retain_an_active_tab(
+    tmp_path: Path, bridge: BridgeFixture
 ) -> None:
-    """Ordinary cleanup is unchanged: no ask, or only settled ones, closes."""
-    resource = BrowserResource(tmp_path, tmp_path.name)
-    resource.initialize()
-    resource.remember("bridge:100:private")
-    if settle == "timed_out":
-        _queue_ask(tmp_path, "a-1", expires_in_ms=-1_000)
-    elif settle != "none":
-        _queue_ask(tmp_path, "a-1")
-        _settle_ask(tmp_path, "a-1", settle)
-    result = await resource.finish(resource.generation, "disposed")
-    assert result.state == "closed"
-    assert "owner_retain" not in _methods(bridge)
-    assert not json.loads(resource.path.read_text()).get("retention")
-
-
-@pytest.mark.asyncio
-async def test_a_child_finish_does_not_add_the_hold(tmp_path: Path, bridge: BridgeFixture) -> None:
-    """A child's authoritative finish keeps its own handoff rules (explicit
-    retain hands to the parent); only a session's disposal derives the hold."""
-    resource = BrowserResource(tmp_path, tmp_path.name)
-    resource.initialize()
-    resource.remember("bridge:100:private")
-    _queue_ask(tmp_path, "a-1")
-    assert (await resource.finish(resource.generation, "completed")).state == "closed"
-    assert "owner_retain" not in _methods(bridge)
-
-
-@pytest.mark.asyncio
-async def test_no_live_tab_means_no_hold(tmp_path: Path, bridge: BridgeFixture) -> None:
-    resource = BrowserResource(tmp_path, tmp_path.name)
-    resource.initialize()
-    resource.remember("bridge:100:private")
-    resource.remember("")  # the agent closed its tab before asking
-    bridge.recover_reply = {"state": "closed", "tab": ""}
-    _queue_ask(tmp_path, "a-1")
+    """Over-retention control: a tab held for the agent's own work plus an
+    unbound preference question closes at disposal exactly as before."""
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-preference")
     assert (await resource.finish(resource.generation, "disposed")).state == "closed"
     assert "owner_retain" not in _methods(bridge)
 
 
-async def _retire_with_open_ask(directory: Path, bridge: BridgeFixture) -> None:
-    first = BrowserResource(directory, directory.name)
-    first.initialize()
-    first.remember("bridge:100:private")
-    _queue_ask(directory, "a-1")
+@pytest.mark.asyncio
+async def test_another_asks_settlement_cannot_release_the_handoff(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-unrelated")
+    _handoff(resource, "a-signin")
+    _settle_ask(tmp_path, "a-unrelated", "answered")
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+    assert "owner_release" not in _methods(bridge)
+    assert resource.record["retention"] == "pending ask a-signin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["answered", "withdrawn", "timed_out"])
+async def test_a_settled_handoff_closes_as_before(
+    tmp_path: Path, bridge: BridgeFixture, settle: str
+) -> None:
+    resource = _owned_tab(tmp_path)
+    if settle == "timed_out":
+        _handoff(resource, "a-1", expires_in_ms=-1_000)
+    else:
+        _handoff(resource, "a-1")
+        _settle_ask(tmp_path, "a-1", settle)
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+    assert resources.ASK_HANDOFFS_FIELD not in json.loads(resource.path.read_text())
+
+
+@pytest.mark.asyncio
+async def test_origin_isolation_a_handoff_for_a_does_not_hold_the_tab_on_b(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin")
+    # The agent then drove the same tab to another site.
+    resource.note_surface_origin("https://other.example.test/dashboard")
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+def test_binding_refuses_without_a_live_tab_or_a_known_origin(tmp_path: Path) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    with pytest.raises(resources.BrowserOwnershipError, match="no browser tab"):
+        resource.bind_ask_handoff("a-1", None)
+    resource.remember(TAB)
+    with pytest.raises(resources.BrowserOwnershipError, match="not known"):
+        resource.bind_ask_handoff("a-1", None)
+
+
+@pytest.mark.asyncio
+async def test_child_completion_with_a_handoff_keeps_the_old_rule(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-1")
+    assert (await resource.finish(resource.generation, "completed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+async def _retire_with_handoff(directory: Path, bridge: BridgeFixture) -> None:
+    first = _owned_tab(directory)
+    _handoff(first, "a-1")
     assert (await first.finish(first.generation, "disposed")).state == "retained"
     bridge.calls.clear()
 
 
 @pytest.mark.asyncio
-async def test_successor_run_readdresses_the_held_tab_and_keeps_it_while_open(
+async def test_successor_readdresses_the_held_tab_and_keeps_it_while_open(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:
-    """Runtime restart: the next run recovers the SAME tab (addressable), and
-    its own disposal keeps holding it while the ask is still open."""
-    await _retire_with_open_ask(tmp_path, bridge)
+    await _retire_with_handoff(tmp_path, bridge)
     successor = BrowserResource(tmp_path, tmp_path.name)
     successor.initialize()
     await successor.ensure_recovered()
-    assert successor.record["surface_id"] == "bridge:100:private"
+    assert successor.record["surface_id"] == TAB
     assert "owner_release" not in _methods(bridge)
-    result = await successor.finish(successor.generation, "disposed")
-    assert result.state == "retained"
+    assert (await successor.finish(successor.generation, "disposed")).state == "retained"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("settle", ["answered", "withdrawn"])
-async def test_successor_releases_the_hold_once_the_ask_settles(
+async def test_successor_releases_when_the_ask_settled_while_it_was_down(
     tmp_path: Path, bridge: BridgeFixture, settle: str
 ) -> None:
-    await _retire_with_open_ask(tmp_path, bridge)
+    await _retire_with_handoff(tmp_path, bridge)
     _settle_ask(tmp_path, "a-1", settle)
     successor = BrowserResource(tmp_path, tmp_path.name)
     successor.initialize()
     await successor.ensure_recovered()
-    # Released at recovery: the answering turn still drives the same tab...
-    assert successor.record["surface_id"] == "bridge:100:private"
+    assert successor.record["surface_id"] == TAB
     assert successor.record["retention"] == ""
     assert "owner_release" in _methods(bridge)
-    # ...and ordinary cleanup closes it afterwards.
     assert (await successor.finish(successor.generation, "disposed")).state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_successor_releases_when_the_ask_settles_after_it_took_over(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Settlement AFTER an update: the new runtime recovered while the ask was
+    still open (hold kept), then the answer arrives; its disposal releases."""
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    assert successor.record["retention"] == "pending ask a-1"
+    _settle_ask(tmp_path, "a-1", "answered")
+    assert (await successor.finish(successor.generation, "disposed")).state == "closed"
+    assert _methods(bridge)[-2:] == ["owner_release", "owner_finish"]
+
+
+@pytest.mark.asyncio
+async def test_owner_close_drops_the_handoff_and_lifts_the_hold(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    await successor.drop_ask_handoffs()
+    assert "owner_release" in _methods(bridge)
+    assert successor.record["retention"] == ""
+    assert resources.ASK_HANDOFFS_FIELD not in successor.record
 
 
 @pytest.mark.asyncio
 async def test_hold_is_released_when_the_tab_was_closed_meanwhile(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:
-    await _retire_with_open_ask(tmp_path, bridge)
+    await _retire_with_handoff(tmp_path, bridge)
     successor = BrowserResource(tmp_path, tmp_path.name)
     successor.initialize()
     bridge.recover_reply = {"state": "closed", "tab": ""}
@@ -923,9 +985,7 @@ async def test_hold_is_released_when_the_tab_was_closed_meanwhile(
 async def test_an_explicit_retain_is_never_rewritten_or_released(
     tmp_path: Path, bridge: BridgeFixture
 ) -> None:
-    resource = BrowserResource(tmp_path, tmp_path.name)
-    resource.initialize()
-    resource.remember("bridge:100:private")
+    resource = _owned_tab(tmp_path)
     resource.record["retention"] = "pending login"
     result = await resource.finish(resource.generation, "disposed")
     assert result.state == "retained"
@@ -934,19 +994,15 @@ async def test_an_explicit_retain_is_never_rewritten_or_released(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_refuses_a_live_ask_hold_and_closes_a_lapsed_one(
+async def test_cleanup_refuses_a_live_handoff_hold_and_closes_a_lapsed_one(
     tmp_path: Path, bridge: BridgeFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session that is never resumed cannot pin the tab forever: once the
-    ask's deadline passes, `lop browser cleanup` releases the hold and closes."""
-    await _retire_with_open_ask(tmp_path, bridge)
+    await _retire_with_handoff(tmp_path, bridge)
     record = json.loads((tmp_path / RESOURCE_NAME).read_text())
     assert record["state"] == "retained"
     eligible, reason = cleanup_disposition(record)
     assert not eligible and "waiting on that answer" in reason
-    # No deadline at all: held until the ask settles.
     assert not cleanup_disposition({**record, resources.ASK_HOLD_EXPIRES_FIELD: None})[0]
-
     deadline = int(record[resources.ASK_HOLD_EXPIRES_FIELD])
     monkeypatch.setattr(resources, "_now_ms", lambda: deadline + 1)
     assert cleanup_disposition(record) == (True, "")

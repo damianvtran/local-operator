@@ -83,46 +83,58 @@ STRANDED_FIELD = "stranded_surfaces"
 #: an idle exit or a restart is not the session ending: the ask outlives the
 #: process and is answered by its successor.
 #:
-#: The hold is DERIVED, never asserted by the model: it is recomputed from the
-#: session's own ask log at every ``finish`` (and released at ``recover``), so
-#: it exists exactly while an ask is ``open``. It is distinguishable from an
-#: explicit ``retain`` by this prefix and never overwrites one. Its expiry is the
-#: latest deadline among the open asks (``ASK_HOLD_EXPIRES_FIELD``); past it the
-#: hold no longer protects the row from ``lop browser cleanup``, so a session
-#: that is never resumed cannot pin a tab forever.
+#: The hold is EXPLICIT and KEYED, never inferred from "some ask is open":
+#: the ``ask`` tool's ``browser_handoff=true`` writes one binding per ask to
+#: ``ASK_HANDOFFS_FIELD`` — ``{ask_id, surface_id, origin, expires_at}`` — at
+#: the moment it queues the question, naming the exact tab and the origin the
+#: user is being sent to. A binding holds only while ALL of these are true:
+#: its own ask is still ``open`` in the session's ask log; the record's live
+#: surface is still that exact handle; and the last origin the agent observed
+#: on it (``SURFACE_ORIGIN_FIELD``) is still the bound origin. So an unrelated
+#: ask neither creates a hold nor, by settling, releases one; a tab the agent
+#: navigated elsewhere or closed is not held for a handoff it no longer shows.
+#: It is distinguishable from an explicit ``retain`` by ``ASK_HOLD_PREFIX`` and
+#: never overwrites one. Its expiry (``ASK_HOLD_EXPIRES_FIELD``) is the latest
+#: deadline among the live bindings; past it the hold no longer protects the
+#: row from ``lop browser cleanup``, so a session that is never resumed cannot
+#: pin a tab forever.
 ASK_HOLD_PREFIX = "pending ask "
 ASK_HOLD_EXPIRES_FIELD = "retention_expires_at"
+ASK_HANDOFFS_FIELD = "ask_handoffs"
+SURFACE_ORIGIN_FIELD = "surface_origin"
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def open_ask_hold(directory: Path) -> tuple[str, int | None] | None:
-    """``(reason, expires_at_ms)`` while the session in ``directory`` has an open ask.
+def url_origin(url: Any) -> str:
+    """``scheme://host[:port]`` of ``url``, lower-cased; ``""`` when it has none."""
+    from urllib.parse import urlsplit
 
-    ``None`` when no ask is open. Reads the same durable log the ask queue
-    folds (``asks.jsonl`` in the session directory) through the same ``fold``,
-    so "open" here cannot disagree with the ask bar: a timed-out, answered,
-    declined or withdrawn ask folds to settled and releases the hold.
-    ``expires_at`` is ``None`` when any open ask has no deadline (it then
-    lasts until that ask settles).
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
 
-    Raises ``OSError``/``ValueError`` on an unreadable log: the caller decides
-    which way an unknown fails (adding a hold fails closed to the old close;
-    dropping one keeps it), so the error is not swallowed here.
+
+def open_ask_ids(directory: Path) -> set[str]:
+    """Ids of the asks still ``open`` in the session log at ``directory``.
+
+    The same durable log and the same ``fold`` the ask queue uses, so "open"
+    here cannot disagree with the ask bar: answered, declined, withdrawn and
+    timed-out asks are settled. Raises ``OSError``/``ValueError`` on an
+    unreadable log so each caller chooses which way an unknown fails.
     """
     from local_operator.asks import store as ask_store
 
     records = ask_store.fold(ask_store.read_events(directory), _now_ms())
-    pending = ask_store.outstanding_asks(records)
-    if not pending:
-        return None
-    newest = str(pending[-1].get("ask_id", "")) or "?"
-    deadlines = [r.get("expires_at") for r in pending]
-    known = [d for d in deadlines if isinstance(d, int) and not isinstance(d, bool)]
-    expires = max(known) if len(known) == len(deadlines) else None
-    return f"{ASK_HOLD_PREFIX}{newest}", expires
+    return {str(r.get("ask_id", "")) for r in ask_store.outstanding_asks(records)}
 
 
 def is_ask_hold(retention: Any) -> bool:
@@ -1360,7 +1372,7 @@ class BrowserResource:
             # extension would make this run's own disposal keep a tab nobody is
             # waiting on. A still-open ask keeps it (the tab is now addressable
             # again through the `tab` this reply just re-attributed).
-            await self._drop_settled_ask_hold()
+            await self._refresh_ask_hold(may_add=False)
         # A successful reconcile means this link really does implement the
         # lifecycle, so any `unavailable` marker written by an earlier degraded
         # pass under a different peer is retired with it.
@@ -1666,21 +1678,86 @@ class BrowserResource:
             # no message, matching how the CLI renders its outer handler.
             return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
 
+    def bind_ask_handoff(self, ask_id: str, expires_at: Any) -> dict[str, Any]:
+        """Record that ``ask_id`` sends the user to THIS session's live tab.
+
+        Called by the ``ask`` tool (``browser_handoff=true``) right after the
+        ask is durably queued. Binds the exact live handle and the origin last
+        observed on it, so the hold can never transfer to another tab or page.
+        Raises ``BrowserOwnershipError`` when there is no live tab to bind.
+        """
+        self.initialize()
+        surface = str(self.record.get("surface_id", ""))
+        if not surface:
+            raise BrowserOwnershipError("no browser tab is open in this session to hand off")
+        if not self.record.get(SURFACE_ORIGIN_FIELD):
+            # The origin is half of the key: unbound to a page, the hold could
+            # follow the tab anywhere. Every open/goto/snapshot records it.
+            raise BrowserOwnershipError(
+                "the page this tab shows is not known yet; snapshot it, then ask again"
+            )
+        binding = {
+            "ask_id": str(ask_id),
+            "surface_id": surface,
+            "origin": str(self.record.get(SURFACE_ORIGIN_FIELD, "")),
+            "expires_at": (
+                expires_at
+                if isinstance(expires_at, int) and not isinstance(expires_at, bool)
+                else None
+            ),
+        }
+        bindings = [
+            b
+            for b in self.record.get(ASK_HANDOFFS_FIELD, [])
+            if isinstance(b, dict) and b.get("ask_id") != binding["ask_id"]
+        ]
+        self.record[ASK_HANDOFFS_FIELD] = [*bindings, binding]
+        self._save()
+        return binding
+
+    def note_surface_origin(self, url: Any) -> None:
+        """Remember the origin the agent last saw its live tab on (or forget it)."""
+        origin = url_origin(url) if self.record.get("surface_id") else ""
+        if origin == self.record.get(SURFACE_ORIGIN_FIELD, ""):
+            return
+        self.assert_current()
+        if origin:
+            self.record[SURFACE_ORIGIN_FIELD] = origin
+        else:
+            self.record.pop(SURFACE_ORIGIN_FIELD, None)
+        self._save()
+
+    def _live_handoffs(self, open_ids: set[str]) -> list[dict[str, Any]]:
+        surface = str(self.record.get("surface_id", ""))
+        origin = str(self.record.get(SURFACE_ORIGIN_FIELD, ""))
+        if not surface:
+            return []
+        return [
+            b
+            for b in self.record.get(ASK_HANDOFFS_FIELD, [])
+            if isinstance(b, dict)
+            and b.get("ask_id") in open_ids
+            and b.get("surface_id") == surface
+            # Origin isolation: a binding made for origin A never holds the tab
+            # once the agent has seen it on origin B (or lost track of where it
+            # is). Both sides must be known and equal.
+            and b.get("origin") and b.get("origin") == origin
+        ]
+
     async def _refresh_ask_hold(self, *, may_add: bool) -> None:
-        """Make this scope's pending-ask hold match the session's ask log.
+        """Make this scope's pending-ask hold match its live handoff bindings.
 
-        Called under ``self.lock`` from ``finish`` on an owner-aware link, just
-        before the existing retention/``owner_finish`` step, which then honours
-        whatever this leaves (see ``ASK_HOLD_PREFIX`` for the incident).
+        Called under ``self.lock`` from ``finish`` (before the existing
+        retention/``owner_finish`` step, which then honours whatever this
+        leaves) and from ``recover`` on the next run.
 
-        * An explicit ``retain`` (any reason without the prefix) is the model's
-          or the user's statement and is never touched.
-        * ``may_add``: a live surface plus an open ask writes the hold, so the
-          ``owner_retain`` below keeps the tab through this disposal. No live
-          surface means nothing to keep — the hold is not written.
-        * An existing hold whose asks have all settled is RELEASED on the host
-          before the finish, otherwise the extension's copy of the retention
-          would keep a tab the user is no longer being asked to use.
+        * An explicit ``retain`` (no ``ASK_HOLD_PREFIX``) is never touched.
+        * ``may_add`` (a first settle by disposal): live bindings write the
+          hold, so ``owner_retain`` keeps the tab through this disposal.
+        * An existing hold with no live binding left is RELEASED on the host,
+          or the extension's copy of the retention would keep the tab.
+        * Bindings that can never hold again (ask settled, other tab, other
+          origin) are pruned so a later ask cannot revive them.
 
         An unreadable ask log adds nothing (the old close behaviour) and keeps
         an existing hold (its expiry still bounds it).
@@ -1688,33 +1765,43 @@ class BrowserResource:
         current = self.record.get("retention")
         if current and not is_ask_hold(current):
             return
+        if not current and not self.record.get(ASK_HANDOFFS_FIELD):
+            return
         try:
-            hold = open_ask_hold(self.directory)
+            open_ids = open_ask_ids(self.directory)
         except (OSError, ValueError):
             return
-        live = bool(self.record.get("surface_id"))
-        if hold is not None and live and (current or may_add):
-            reason, expires = hold
-            self.record["retention"] = reason
-            self.record[ASK_HOLD_EXPIRES_FIELD] = expires
+        live = self._live_handoffs(open_ids)
+        if live != self.record.get(ASK_HANDOFFS_FIELD):
+            if live:
+                self.record[ASK_HANDOFFS_FIELD] = live
+            else:
+                self.record.pop(ASK_HANDOFFS_FIELD, None)
             self._save()
-        elif current:
-            # Settled asks, or the tab is already gone (closed explicitly or by
-            # the user): the hold protects nothing any more.
+        if live and (current or may_add):
+            deadlines = [b.get("expires_at") for b in live]
+            known = [d for d in deadlines if isinstance(d, int) and not isinstance(d, bool)]
+            self.record["retention"] = f"{ASK_HOLD_PREFIX}{live[-1]['ask_id']}"
+            self.record[ASK_HOLD_EXPIRES_FIELD] = (
+                max(known) if len(known) == len(deadlines) else None
+            )
+            self._save()
+        elif current and not live:
             await self._release_ask_hold()
 
-    async def _drop_settled_ask_hold(self) -> None:
-        if not is_ask_hold(self.record.get("retention")):
-            return
-        try:
-            hold = open_ask_hold(self.directory)
-        except (OSError, ValueError):
-            return
-        if hold is None:
+    async def drop_ask_handoffs(self) -> None:
+        """The owner's explicit ``close`` wins: forget every binding, lift the hold."""
+        had_hold = is_ask_hold(self.record.get("retention"))
+        if self.record.pop(ASK_HANDOFFS_FIELD, None) is not None and not had_hold:
+            self._save()
+        if had_hold:
             await self._release_ask_hold()
 
     async def _release_ask_hold(self) -> None:
-        await self.client().call("owner_release", self.params())
+        # A legacy link never accepted the retention (see `finish_degraded`),
+        # so there is nothing on the host to release; only the record changes.
+        if self.ownership_mode() is not False:
+            await self.client().call("owner_release", self.params())
         self.assert_current()
         self.record["retention"] = ""
         self.record.pop(ASK_HOLD_EXPIRES_FIELD, None)

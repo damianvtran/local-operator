@@ -1058,141 +1058,205 @@ async def test_child_open_result_drops_top_level_left_open_reminder(
         await parent.dispose()
 
 
-# -- pending-ask hold across a runtime retirement (session a64fec9430f3) -----
+# -- pending-ask handoff across a runtime retirement (session a64fec9430f3) --
 #
-# The incident's own shape through the real stack: Session -> authenticated
-# HTTP -> the bundled extension's ownership code. The agent opens a tab, queues
-# an ask and ends its turn WITHOUT closing; the runtime is then retired (an
-# update, an idle exit), which runs the ordinary `Session.dispose`. Before the
-# pending-ask hold that disposal closed the tab; the user answered to nothing.
+# The incident's own shape through the real stack: Session -> the real `ask`
+# and `browser` tools -> authenticated HTTP -> the bundled extension's
+# ownership code. The agent opens a tab, asks the user to act in it
+# (`browser_handoff=true`) and ends its turn WITHOUT closing; the runtime is
+# then retired (an update, an idle exit), which runs the ordinary
+# `Session.dispose`. Before the hold that disposal closed the tab.
 
 
-def _queue_open_ask(session: Session, ask_id: str, *, expires_in_ms: int = 3_600_000) -> None:
-    from local_operator.asks import store
-
-    now = store.now_ms()
-    store.append_event(
-        session._browser.resource.directory,
-        {
-            "v": 1,
-            "kind": "queued",
-            "ask_id": ask_id,
-            "at": now,
-            "created_at": now,
-            "expires_at": now + expires_in_ms,
-            "timeout_s": max(1, expires_in_ms // 1000),
-            "questions": [{"id": "signin", "question": "Sign in?", "options": []}],
-            "tool_call_id": "call_synthetic",
-            "urgent": False,
-        },
-    )
+async def _no_blocking_ask(_questions: Any) -> Any:
+    raise AssertionError("the queued ask path must not block")
 
 
-def _answer_ask(directory: Path, ask_id: str) -> None:
-    from local_operator.asks import store
-
-    store.append_event(
-        directory,
-        {
-            "v": 1,
-            "kind": "answered",
-            "ask_id": ask_id,
-            "at": store.now_ms(),
-            "answers": {"signin": ["Signed in"]},
-            "by": {"surface": "unverified"},
-            "tool_call_id": "call_synthetic",
-        },
-    )
+def _asking_session(root: Path) -> Session:
+    session = _session(root)
+    session.set_ask_handler(_no_blocking_ask)
+    return session
 
 
-async def _open(session: Session, call_id: str = "synthetic-open") -> Any:
-    opened = await execute_browser(
-        call_id,
-        {"action": "open", "url": "https://example.test/"},
-        None,
-        None,
-        session._build_tool_context(),
-    )
+async def _tool(session: Session, call_id: str, name: str, args: dict[str, Any]) -> Any:
+    from local_operator.tools.builtin import execute_ask
+
+    run = execute_ask if name == "ask" else execute_browser
+    return await run(call_id, args, None, None, session._build_tool_context())
+
+
+async def _open(session: Session, url: str = "https://example.test/") -> Any:
+    opened = await _tool(session, "synthetic-open", "browser", {"action": "open", "url": url})
     assert not opened.is_error, opened.text
     return opened
 
 
+async def _ask(session: Session, *, handoff: bool, qid: str = "signin") -> str:
+    asked = await _tool(
+        session,
+        f"synthetic-ask-{qid}",
+        "ask",
+        {
+            "questions": [
+                {
+                    "id": qid,
+                    "question": f"Sign in to the page I opened? ({qid})",
+                    "options": [{"label": "Signed in"}, {"label": "Skip"}],
+                }
+            ],
+            "browser_handoff": handoff,
+        },
+    )
+    assert not asked.is_error, asked.text
+    assert bool((asked.details or {}).get("browser_handoff")) is handoff
+    return str(asked.details["ask_id"])
+
+
+def _settle_ask(directory: Path, ask_id: str, kind: str = "answered") -> None:
+    from local_operator.asks import store
+
+    event: dict[str, Any] = {
+        "v": 1,
+        "kind": kind,
+        "ask_id": ask_id,
+        "at": store.now_ms(),
+        "tool_call_id": "call_synthetic",
+    }
+    if kind == "answered":
+        event["answers"] = {"signin": ["Signed in"]}
+        event["by"] = {"surface": "unverified"}
+    store.append_event(directory, event)
+
+
 @pytest.mark.asyncio
-async def test_pending_ask_keeps_tab_across_runtime_retirement_then_answer_releases(
+async def test_handoff_tab_survives_retirement_and_releases_after_answer_on_successor(
     protocol_peer: tuple[int, str], headless_tui_env: Path
 ) -> None:
-    session = _session(headless_tui_env)
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
     try:
         await _open(session)
         held_surface = session._browser.surface_id
-        _queue_open_ask(session, "a-signin")
+        ask_id = await _ask(session, handoff=True)
     finally:
-        # The retirement: ordinary disposal, no explicit close, no retain.
-        await session.dispose()
+        await session.dispose()  # the retirement: no close, no retain
     assert _control(protocol_peer)["tabs"] == 1, "disposal closed the tab the ask points at"
     _control(protocol_peer, restartWorker=True)
 
-    successor = _session(headless_tui_env)
-    directory = successor._browser.resource.directory
+    successor = _asking_session(headless_tui_env)
     try:
-        # Next turn, new runtime: the SAME tab is addressable again.
-        snap = await execute_browser(
-            "synthetic-snapshot",
-            {"action": "snapshot"},
-            None,
-            None,
-            successor._build_tool_context(),
-        )
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
         assert not snap.is_error, snap.text
         assert successor._browser.surface_id == held_surface
-        # Still unanswered: a second retirement keeps holding it.
+        assert successor._browser.resource.record["retention"] == f"pending ask {ask_id}"
+        # The answer lands AFTER the new runtime took over, mid-run.
+        _settle_ask(directory, ask_id)
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handoff_still_open_keeps_holding_across_a_second_retirement(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
     finally:
         await successor.dispose()
     assert _control(protocol_peer)["tabs"] == 1
 
-    _answer_ask(directory, "a-signin")
-    answering = _session(headless_tui_env)
-    try:
-        snap = await execute_browser(
-            "synthetic-snapshot-2",
-            {"action": "snapshot"},
-            None,
-            None,
-            answering._build_tool_context(),
-        )
-        assert not snap.is_error, snap.text
-        assert answering._browser.surface_id == held_surface
-        assert answering._browser.resource.record.get("retention") == ""
-    finally:
-        # Answer settled the hold: ordinary cleanup closes the tab.
-        await answering.dispose()
-    assert _control(protocol_peer)["tabs"] == 0
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ask", ["none", "timed_out"])
-async def test_disposal_without_an_open_ask_still_closes_the_tab(
+@pytest.mark.parametrize("ask", ["none", "unrelated"])
+async def test_disposal_without_a_handoff_still_closes_the_tab(
     protocol_peer: tuple[int, str], headless_tui_env: Path, ask: str
 ) -> None:
-    session = _session(headless_tui_env)
+    """Over-retention control: an active tab plus an unrelated (unbound)
+    open ask closes exactly as before."""
+    session = _asking_session(headless_tui_env)
     try:
         await _open(session)
-        if ask == "timed_out":
-            _queue_open_ask(session, "a-late", expires_in_ms=-1_000)
+        if ask == "unrelated":
+            await _ask(session, handoff=False, qid="preference")
     finally:
         await session.dispose()
     assert _control(protocol_peer)["tabs"] == 0
 
 
 @pytest.mark.asyncio
-async def test_another_session_cannot_reach_a_tab_held_for_an_ask(
+async def test_unrelated_asks_settlement_does_not_release_the_handoff(
     protocol_peer: tuple[int, str], headless_tui_env: Path
 ) -> None:
-    session = _session(headless_tui_env)
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session)
+        other = await _ask(session, handoff=False, qid="preference")
+        await _ask(session, handoff=True)
+        _settle_ask(directory, other)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handoff_for_origin_a_does_not_hold_the_tab_on_origin_b(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, "https://signin.example.test/login")
+        await _ask(session, handoff=True)
+        moved = await _tool(
+            session, "synthetic-goto", "browser", {"action": "goto", "url": "https://other.test/"}
+        )
+        assert not moved.is_error, moved.text
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_owner_close_wins_over_a_pending_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+        closed = await _tool(session, "synthetic-close", "browser", {"action": "close"})
+        assert not closed.is_error, closed.text
+        assert _control(protocol_peer)["tabs"] == 0
+        from local_operator.browser_bridge.resources import ASK_HANDOFFS_FIELD
+
+        assert not session._browser.resource.record.get("retention")
+        assert ASK_HANDOFFS_FIELD not in session._browser.resource.record
+        await _open(session, "https://next.example.test/")
+    finally:
+        await session.dispose()
+    # The ask is still open, but its binding died with the closed tab: the
+    # new, unbound tab closes at disposal.
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_another_session_cannot_reach_a_tab_held_for_a_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
     try:
         await _open(session)
         held = session._browser.surface_id
-        _queue_open_ask(session, "a-signin")
+        await _ask(session, handoff=True)
     finally:
         await session.dispose()
     assert _control(protocol_peer)["tabs"] == 1
@@ -1208,24 +1272,19 @@ async def test_another_session_cannot_reach_a_tab_held_for_an_ask(
     )
     other.add_dispose_hook(lease.release)
     try:
-        context = other._build_tool_context()
         # Adoption and a handed-tab close are the two verbs that take a handle;
         # neither may reach a tab this session never owned.
-        adopted = await execute_browser(
-            "synthetic-foreign-adopt", {"action": "open", "tab": held}, None, None, context
+        adopted = await _tool(
+            other, "synthetic-foreign-adopt", "browser", {"action": "open", "tab": held}
         )
-        assert adopted.is_error
-        closed = await execute_browser(
-            "synthetic-foreign-close", {"action": "close", "tab": held}, None, None, context
+        assert adopted.is_error and "owner_refused" in adopted.text, adopted.text
+        closed = await _tool(
+            other, "synthetic-foreign-close", "browser", {"action": "close", "tab": held}
         )
         assert closed.is_error
         assert _control(protocol_peer)["tabs"] == 1
-        recovered = await execute_browser(
-            "synthetic-foreign-recover", {"action": "recover"}, None, None, context
-        )
+        await _tool(other, "synthetic-foreign-recover", "browser", {"action": "recover"})
         assert other._browser.surface_id == ""
-        assert held not in (recovered.text or "")
     finally:
         await other.dispose()
-    # The other session's disposal must not have closed the held tab.
     assert _control(protocol_peer)["tabs"] == 1

@@ -32038,9 +32038,23 @@ async def _execute_browser_owned(
             await _close_stranded_quietly(resource)
             resource.allocate()
         failed_close = False
+        observed_url: Any = None
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if not result.is_error:
+                # The page the tab last showed THIS session: an ask handoff is
+                # bound to that origin (resources.SURFACE_ORIGIN_FIELD), so a tab
+                # the agent has since driven to another site is not held for it.
+                observed_url = (result.details or {}).get("url")
+            if action == "close" and not result.is_error:
+                # The owner's explicit close always wins over a pending-ask hold.
+                # Best-effort: the tab is already closed, and a hold that could
+                # not be lifted here is lifted by the next finish (no live tab).
+                try:
+                    await resource.drop_ask_handoffs()
+                except Exception:  # noqa: BLE001 - never cost the close its result
+                    logger.warning("pending-ask hold not lifted on close", exc_info=True)
             if action == "close":
                 # 'close' also settles tabs this session owns but no longer
                 # holds the live handle for; otherwise the model's explicit close
@@ -32079,6 +32093,8 @@ async def _execute_browser_owned(
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
                     host=_host_of_surface(state.surface_id),
                 )
+                if observed_url or not state.surface_id:
+                    resource.note_surface_origin(observed_url)
             except (BrowserOwnershipError, OSError, ValueError):
                 logger.warning("browser ownership record not updated", exc_info=True)
             if pending:
@@ -38166,6 +38182,17 @@ class AskParams(BaseModel):
         ),
     )
 
+    # PENDING-ASK BROWSER HANDOFF (session a64fec9430f3, 2026-11-25): a sign-in
+    # tab left open for an ask was closed by the runtime's disposal when an
+    # update retired it mid-wait. This flag is the EXPLICIT key that binds the
+    # ask to this session's live tab and its current origin
+    # (`BrowserResource.bind_ask_handoff`), so only that ask holds that tab,
+    # and only until that ask settles — never "any open ask holds any tab".
+    browser_handoff: bool = Field(
+        default=False,
+        description="true if the user must act in your open browser tab; keeps it open until answered.",
+    )
+
     @model_validator(mode="after")
     def _exactly_one_source(self) -> "AskParams":
         """EXACTLY ONE of `questions` / `relay` (#2520).
@@ -38593,6 +38620,29 @@ async def execute_ask(
     if bounds_error is not None:
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    handoff_resource: Any = None
+    if params.browser_handoff:
+        # Refused BEFORE anything is queued: a handoff that cannot be bound
+        # would leave an ask promising a tab nothing keeps open.
+        browser = getattr(context, "browser", None) if context is not None else None
+        handoff_resource = getattr(browser, "resource", None)
+        if params.relay is not None:
+            return _error(
+                tool_call_id, "ask", "browser_handoff applies to your own questions, not a relay."
+            )
+        if not callable(enqueue) or handoff_resource is None:
+            return _error(
+                tool_call_id,
+                "ask",
+                "browser_handoff needs the queued ask and a browser tab this session owns; "
+                "ask without it, or use browser action='retain'.",
+            )
+        if not str(getattr(browser, "surface_id", "") or ""):
+            return _error(
+                tool_call_id,
+                "ask",
+                "browser_handoff needs an open browser tab: 'open' the page first.",
+            )
     if params.relay is not None:
         # A RELAY NEVER ENTERS THE BLOCKING ARM (#2520). A relay is a pointer at
         # a row in another session's LOG; with no queue there is no log to point
@@ -38636,16 +38686,30 @@ async def execute_ask(
                 "ask",
                 str(outcome.get("error") or "this ask could not be queued."),
             )
+        details = dict(outcome.get("details") or {})
+        if handoff_resource is not None:
+            from local_operator.browser_bridge.resources import BrowserOwnershipError
+
+            try:
+                handoff_resource.bind_ask_handoff(
+                    str(details.get("ask_id", "")), details.get("expires_at")
+                )
+            except (BrowserOwnershipError, OSError, ValueError) as exc:
+                # The ask is already queued, so it stands; say the tab is not
+                # held rather than implying it is.
+                return _text(
+                    tool_call_id,
+                    "ask",
+                    f"{outcome.get('text') or ''}\n\nThe browser tab is NOT held for this ask "
+                    f"({exc}); use browser action='retain' if the user needs it.",
+                    details=details,
+                )
+            details["browser_handoff"] = True
         # NO QUESTION REPETITION: the model has just written them, and echoing
         # them back buys nothing but tokens. What the receipt must carry is the
         # part the model cannot know — that the answer arrives LATER, that a
         # receipt is not permission to act, and when the deadline falls.
-        return _text(
-            tool_call_id,
-            "ask",
-            str(outcome.get("text") or ""),
-            details=dict(outcome.get("details") or {}),
-        )
+        return _text(tool_call_id, "ask", str(outcome.get("text") or ""), details=details)
     # A HOST THAT KNOWS IT CANNOT ASK REFUSES IN WORDS (review round 1,
     # MINOR-1 / QA Q1). ``AskUnavailableError`` is raised only by the
     # queued-only ask surface when something awaits it with the engine off;
