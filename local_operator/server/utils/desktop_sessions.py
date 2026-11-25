@@ -4451,6 +4451,7 @@ class DesktopSessionBridge:
         # is empty, and a runtime that never ran the engine must keep reading as a
         # host that cannot answer (``asks_open`` absent).
         cold_asks = await self._cold_ask_rows()
+        stored_title = await self._stored_title_fallback()
         capture = self._capture_wire_state()
         # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
         # The read above yields the loop twice, and a facade can finish a resync
@@ -4488,6 +4489,18 @@ class DesktopSessionBridge:
                 # the rows this frame carries.
                 snapshot.pop("asks_truncated", None)
                 bound_ask_snapshot_in_place(snapshot)
+        # THE LIVE TITLE WINS; THE STORED ONE FILLS A BLANK (UI #2099 Q1C-F1).
+        # Applied to the BUILT frame, not the canonical state: the canonical
+        # object is never mutated (``FrontendStateStore.state_reference``), and
+        # a blank there is the runtime's honest "I have no name", which only
+        # this frame needs to paper over. Re-checked against the captured
+        # state because a rename may have landed between the read and the
+        # capture -- the live name is the newer one (it reaches frontend state
+        # before ``title.json``).
+        if stored_title:
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict) and not snapshot.get("conversation_title"):
+                snapshot["conversation_title"] = stored_title
         if open_trace.enabled():
             open_trace.mark(
                 "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
@@ -4504,6 +4517,47 @@ class DesktopSessionBridge:
             },
         }
         return frame if inline_ui else without_desktop_inline_ui(frame)
+
+    async def _stored_title_fallback(self) -> str:
+        """The persisted title, for a frame whose state carries none; else ``""``.
+
+        WHY (UI #2099 Q1C-F1): a session that is not running and was not
+        restored with a durable checkpoint title (an older session, or one never
+        on a loaded catalogue page) opens on a facade whose
+        ``conversation_title`` is ``""``. The desktop header and tab read that
+        field, so they said "Untitled chat" / "New chat" while the sidebar row
+        for the SAME session showed its name.
+
+        THE CATALOGUE'S RESOLVER, not a second one: the row title comes from
+        ``resume.session_name``, whose stored-title half is
+        ``stored_session_title`` (``title.json`` first, then the journalled
+        ``conversation_name`` rows), so list and snapshot agree by
+        construction. Deliberately NOT ``session_name`` itself: its last
+        fallback is the opening message, which is a row LABEL, not a title --
+        putting it in ``conversation_title`` would tell the client the
+        conversation has been named when it has not.
+
+        Skipped when the live state already has a title (the common, attached
+        case costs nothing), and run off the loop because a miss on the
+        stat-keyed memo scans two transcript windows. Best-effort: a title is
+        decoration and must never cost the open.
+        """
+        remote = self.remote
+        if remote is not None:
+            try:
+                if getattr(self._canonical_state(), "conversation_title", ""):
+                    return ""
+            except Exception:  # noqa: BLE001 -- fall through to the stored read
+                pass
+        from local_operator.resume import stored_session_title
+
+        try:
+            return await asyncio.to_thread(
+                stored_session_title, self.root / "sessions" / self.session_id
+            )
+        except Exception:  # noqa: BLE001 -- decoration must not cost the open
+            logger.debug("stored title read failed for %s", self.session_id, exc_info=True)
+            return ""
 
     def _can_paint_supplements(self, declared: bool) -> bool:
         """Cold history has no attach socket; negotiate its reader, not another viewer.
