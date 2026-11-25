@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "web_search",
+  "history_sha256": "5703db7f00ebfb9f13516c3912b1a38a804db069c93eac0302195f08591a3332",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "6f1bb1fcd8c1203199ec1b38c4ba18fd57d4916876a21f63bbc16651f952a0fb",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 1 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "minor: '$0.01' localised to '0,01 $' (sidecar says verbatim); state.auto_free_then_key is 30/24 cells (no truncation: dynamic column) — record a vi width exception, no shorter phrasing keeps 'khóa' unambiguous. nit: state.auto_radient 25/24. 'gốc' for native accepted (vi dev usage), glossed as 'tích hợp' in the legend."
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    }
+  ]
+}

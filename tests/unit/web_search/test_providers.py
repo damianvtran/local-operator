@@ -2159,7 +2159,8 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
         "duckduckgo enabled (in your priority order)"
     )
     assert provider_landing_line("deepseek", statuses["deepseek"]) == (
-        "deepseek enabled (auto paid; tried after the free providers, never before a free leg)"
+        "deepseek enabled (auto paid; tried after the free providers and Radient, never before a "
+        "free leg)"
     )
     # A provider that cannot serve is told the command that fixes it, instead of
     # "enabled (off; not usable yet)" (round-1 U4).
@@ -2188,6 +2189,68 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
         "auto native paid",
         "auto radient",
         "radient refused",
+        # Listed twins added in PR #4553 design round 1 (D1, D2).
+        "enabled, then key",
+        "enabled (credits)",
     }
     assert "after the free pool" not in state_meaning("enabled (best-effort)")
     assert "pool" in state_meaning("enabled (best-effort)")
+
+
+#: Each dual-mode provider: its stored key name, its free leg's mode, and how
+#: the key would appear on the wire (header name, value prefix).
+_DUAL_MODE_WIRE = {
+    "tavily": ("TAVILY_API_KEY", "keyless", "authorization", "Bearer "),
+    "perplexity": ("PERPLEXITY_API_KEY", "anonymous", "authorization", "Bearer "),
+    "parallel": ("PARALLEL_API_KEY", "keyless-mcp", "authorization", "Bearer "),
+    "exa": ("EXA_API_KEY", "keyless-mcp", "x-api-key", ""),
+}
+
+
+async def _wire_request(provider_id: str, credentials, mode: str) -> httpx.Request:
+    """The one request a transport sends while serving ``mode``'s leg.
+
+    The handler answers 503 so the test reads only what was SENT; the
+    transport's failure is the chain's fallback trigger and irrelevant here.
+    """
+    from local_operator.web_search.providers import LEG_MODE
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503)
+
+    token = LEG_MODE.set(mode)
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(Exception):
+                await PROVIDERS[provider_id].search(
+                    client, credentials, WebSearchSettings(), "q", 2
+                )
+    finally:
+        LEG_MODE.reset(token)
+    assert len(seen) == 1
+    return seen[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_id", sorted(_DUAL_MODE_WIRE))
+async def test_a_free_leg_never_sends_the_stored_key(provider_id, tmp_path, monkeypatch) -> None:
+    """R1-2 (PR #4553 review round 1, MAJOR): with a key STORED, the provider's
+    FREE leg must serve keyless -- otherwise it spends the user's key while
+    rotating in the free band -- and its keyed leg must send the key."""
+    key_name, free_mode, header, prefix = _DUAL_MODE_WIRE[provider_id]
+    for name, *_rest in _DUAL_MODE_WIRE.values():
+        monkeypatch.delenv(name, raising=False)
+    credentials = _credentials(tmp_path)
+    secret = f"stored-{provider_id}-secret"
+    _store_key(credentials, key_name, secret)
+
+    free = await _wire_request(provider_id, credentials, free_mode)
+    assert secret not in str(free.url)
+    assert all(secret not in value for value in free.headers.values())
+    assert secret not in free.content.decode("utf-8", "replace")
+
+    keyed = await _wire_request(provider_id, credentials, "api-key")
+    assert keyed.headers.get(header) == f"{prefix}{secret}"

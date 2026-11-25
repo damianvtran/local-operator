@@ -2244,6 +2244,11 @@ def provider_state_code(status: ProviderStatus) -> str:
         # (`off` used to say this, which also read as the master switch and as the
         # old `disabled`; round-1 D6.)
         return "needs setup"
+    if status.tier == "radient" and radient_credit_refusal_remaining() is not None:
+        # Out of credits is a state of its own, listed or not: the leg is still in
+        # the chain but is skipped locally until the remembered 402 lapses, and
+        # that is the one fact the user has to act on.
+        return "radient refused"
     if status.listed:
         # A listed leg whose transport spends money or a model turn is in the PAID
         # band, and plain `enabled` is what made the operator's own frame read as
@@ -2253,17 +2258,24 @@ def provider_state_code(status: ProviderStatus) -> str:
         # as walled in practice, so plain `enabled` would hide a fact the auto row
         # prints for the same provider on an install that did not list it
         # (round-2 U2-6).
-        if status.tier in ("metered", "radient") or any(
+        if status.tier == "radient":
+            # Radient spends CREDITS, and the chain marks this leg `(credits)`:
+            # `enabled (paid)` gave one leg two words and borrowed the API-key
+            # band's vocabulary (PR #4553 design round 1, D2).
+            return "enabled (credits)"
+        if status.tier == "metered" or any(
             leg.cost_class == "paid" and leg.band == "native" for leg in status.legs
         ):
             return "enabled (paid)"
+        if any(leg.band == "metered" for leg in status.legs):
+            # A LISTED keyed dual-mode provider (Tavily is in the default order)
+            # is tried free first and spends its key later in the API-key band;
+            # plain `enabled` hid that second, paid leg. Listed twin of
+            # `auto free, then key` (PR #4553 design round 1, D1).
+            return "enabled, then key"
         return "enabled (best-effort)" if status.tier == "fallback" else "enabled"
     if status.tier == "radient":
-        # Out of credits is a state of its own: the leg is still in the chain but
-        # is skipped locally until the remembered 402 lapses.
-        return (
-            "radient refused" if radient_credit_refusal_remaining() is not None else "auto radient"
-        )
+        return "auto radient"
     if status.tier == "native":
         if status.legs and all(leg.cost_class == "plan" for leg in status.legs):
             return "auto native plan"
@@ -2287,6 +2299,8 @@ _KEYED_STATE_WORDS: dict[str, Callable[[], Msg]] = {
     "auto native plan": web_search_copy.state_auto_native_plan,
     "auto native paid": web_search_copy.state_auto_native_paid,
     "auto free, then key": web_search_copy.state_auto_free_then_key,
+    "enabled, then key": web_search_copy.state_enabled_then_key,
+    "enabled (credits)": web_search_copy.state_enabled_credits,
 }
 
 
@@ -2297,7 +2311,9 @@ _KEYED_STATE_WORDS: dict[str, Callable[[], Msg]] = {
 #: order.
 STATE_MEANINGS: dict[str, str | Msg] = {
     "enabled": "in your priority order",
-    "enabled (paid)": "listed, and tried in the paid band after every free leg",
+    # "and Radient": the paid (API-key) band runs after the Radient band, the
+    # operator's free -> native -> Radient -> API-key order (design round 1, N2).
+    "enabled (paid)": "listed, and tried in the paid band after every free leg and Radient",
     # NOT "tried after the free pool": only a METERED listed leg is hoisted, so a
     # listed best-effort leg stays in the prefix -- inside the rotating pool, ahead
     # of the auto-joined free band this entry would be describing (round-3 D3-1,
@@ -2307,7 +2323,7 @@ STATE_MEANINGS: dict[str, str | Msg] = {
     "enabled (best-effort)": "listed; the tier that gets walled most often, tried in the pool",
     "auto free": "with the free providers",
     "auto best-effort": "joined automatically; tried after the free pool",
-    "auto paid": "tried after the free providers, never before a free leg",
+    "auto paid": "tried after the free providers and Radient, never before a free leg",
     "excluded": "never used, whatever else is configured",
     # NOT "not in any chain": a LISTED leg with no credential is deliberately kept
     # in the chain and walked, where it fails locally in the availability check --
@@ -2317,6 +2333,10 @@ STATE_MEANINGS: dict[str, str | Msg] = {
     # Keyed meanings for the codes the leg split added (rendered by
     # ``state_meaning``; the older English entries predate the catalogue).
     "auto free, then key": web_search_copy.meaning_auto_free_then_key(),
+    "enabled, then key": web_search_copy.meaning_enabled_then_key(),
+    # A listed Radient leg sits in the same band as an auto-joined one, so it
+    # means the same thing (design round 1, D2).
+    "enabled (credits)": web_search_copy.meaning_auto_radient(),
     "auto native plan": web_search_copy.meaning_auto_native_plan(),
     "auto native paid": web_search_copy.meaning_auto_native_paid(),
     "auto radient": web_search_copy.meaning_auto_radient(),
@@ -2494,8 +2514,17 @@ def chain_leg_entries(statuses: list[ProviderStatus]) -> list[tuple[str, str, st
         if status.enabled
         for leg in status.legs
     ]
+    refused = radient_credit_refusal_remaining() is not None
     entries: list[tuple[str, str, str]] = []
     for _position, label, cost_class in sorted(legs):
+        if cost_class == "credits" and refused:
+            # A remembered 402 makes the transport refuse at once, so an amber
+            # `(credits)` would promise a leg that will not be tried; the dim
+            # `(no credits)` says it is skipped (PR #4553 design round 1, D5).
+            from local_operator.i18n.text import tr
+
+            entries.append((label, tr("web_search")(web_search_copy.marker_no_credits()), "muted"))
+            continue
         marker, token = _leg_marker(cost_class)
         entries.append((label, marker, token))
     return entries
@@ -2566,6 +2595,21 @@ def provider_order_note(
     return "(" + "; ".join(clauses) + ")"
 
 
+def _provider_detail(
+    provider_id: SearchProviderId, config_dir: Path | None, settings: WebSearchSettings
+) -> str | Msg:
+    """The row's detail text, which for Radient depends on the sign-in state.
+
+    A signed-in Radient row that still said "sign in with `local-operator login
+    radient`" read as "you are not signed in" beside its amber state word, so the
+    sign-in clause is printed only while the row needs it (PR #4553 design round
+    1, D4).
+    """
+    if provider_id == "radient" and provider_available(provider_id, config_dir, settings):
+        return web_search_copy.radient_detail_signed_in()
+    return PROVIDERS[provider_id].detail
+
+
 def provider_statuses(
     settings: WebSearchSettings,
     config_dir: Path | None,
@@ -2596,7 +2640,7 @@ def provider_statuses(
             enabled=provider_id in position,
             available=provider_available(provider_id, config_dir, settings),
             access=provider_copy(PROVIDERS[provider_id].access),
-            detail=provider_copy(PROVIDERS[provider_id].detail),
+            detail=provider_copy(_provider_detail(provider_id, config_dir, settings)),
             listed=provider_id in settings.providers,
             excluded=provider_id in settings.excluded_providers,
             # The band the provider is FIRST tried in; a listed leg sits where

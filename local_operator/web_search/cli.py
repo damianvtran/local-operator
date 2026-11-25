@@ -110,14 +110,14 @@ def _stack() -> tuple[ConfigManager, Path]:
 
 def format_search_status(manager: ConfigManager, config_dir: Path | None) -> str:
     """Plain, width-tolerant status table shared by CLI and TUI."""
+    from rich.cells import cell_len
+
     from local_operator.web_search.providers import (
         chain_label,
         provider_state_label,
         provider_statuses,
         state_legend,
     )
-    from rich.cells import cell_len
-
     from local_operator.web_search.service import load_search_settings
 
     settings = load_search_settings(manager)
@@ -134,7 +134,7 @@ def format_search_status(manager: ConfigManager, config_dir: Path | None) -> str
     )
     rows = [header]
     # The state column is as wide as its widest word, in CELLS: the keyed words
-    # (`auto Radient credits`, and every translation) can outrun the old fixed
+    # (translations especially) can outrun the old fixed
     # 16-character pad, which pushed that row's columns out of line.
     states = [provider_state_label(status) for status in statuses]
     width = max([16, *(cell_len(state) for state in states)])

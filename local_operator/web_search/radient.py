@@ -33,6 +33,7 @@ Radient consumers do.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -61,8 +62,14 @@ RADIENT_CREDIT_TTL_SECONDS = 300.0
 RADIENT_SEARCH_PROVIDER = "tavily"
 
 _RADIENT_CREDIT_LOCK = threading.Lock()
-#: ``time.monotonic()`` of the last 402, or ``None`` when no refusal is fresh.
-_RADIENT_CREDIT_REFUSED_AT: float | None = None
+#: ``time.monotonic()`` of each remembered 402, keyed by ``(base URL, credential
+#: fingerprint)``. KEYED, not one process-wide timestamp: a 402 is a verdict on ONE
+#: account at ONE hub, so after ``login radient`` as a funded account (or a switch
+#: of hub) the next search must reach the server instead of being skipped for up
+#: to the TTL (PR #4553 review round 1, R1-6). The fingerprint is a truncated
+#: SHA-256 of the bearer -- never the bearer itself -- so the cache holds no
+#: credential material.
+_RADIENT_CREDIT_REFUSALS: dict[tuple[str, str], float] = {}
 
 
 def _english(message: Msg) -> str:
@@ -75,27 +82,53 @@ def _english(message: Msg) -> str:
     return render(message.code, message.params, locale="en")
 
 
-def radient_credit_refusal_remaining() -> float | None:
-    """Seconds until a remembered 402 lapses, or ``None`` when none is fresh."""
+def credential_fingerprint(token: str) -> str:
+    """A short, non-reversible handle for a bearer: the 402 cache's account key."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def radient_credit_refusal_remaining(
+    base: str | None = None, fingerprint: str | None = None
+) -> float | None:
+    """Seconds until a remembered 402 lapses, or ``None`` when none is fresh.
+
+    The search path passes BOTH parts and so asks about exactly the account it
+    is about to bill. The status surfaces pass neither (they hold no bearer and
+    must not resolve one per render): they read "some account in this process
+    was refused", which a successful search clears for its hub
+    (:func:`_forget_credit_refusals`), so a stale "out of credits" lasts at most
+    until the next Radient search succeeds.
+    """
+    now = time.monotonic()
     with _RADIENT_CREDIT_LOCK:
-        refused_at = _RADIENT_CREDIT_REFUSED_AT
-    if refused_at is None:
+        matches = [
+            refused_at
+            for (entry_base, entry_fp), refused_at in _RADIENT_CREDIT_REFUSALS.items()
+            if (base is None or entry_base == base)
+            and (fingerprint is None or entry_fp == fingerprint)
+        ]
+    if not matches:
         return None
-    remaining = RADIENT_CREDIT_TTL_SECONDS - (time.monotonic() - refused_at)
+    remaining = RADIENT_CREDIT_TTL_SECONDS - (now - max(matches))
     return remaining if remaining > 0 else None
 
 
-def _remember_credit_refusal() -> None:
-    global _RADIENT_CREDIT_REFUSED_AT
+def _remember_credit_refusal(base: str = "", fingerprint: str = "") -> None:
     with _RADIENT_CREDIT_LOCK:
-        _RADIENT_CREDIT_REFUSED_AT = time.monotonic()
+        _RADIENT_CREDIT_REFUSALS[(base, fingerprint)] = time.monotonic()
+
+
+def _forget_credit_refusals(base: str) -> None:
+    """Drop every remembered 402 at ``base``: a served search proves it funded."""
+    with _RADIENT_CREDIT_LOCK:
+        for key in [key for key in _RADIENT_CREDIT_REFUSALS if key[0] == base]:
+            del _RADIENT_CREDIT_REFUSALS[key]
 
 
 def reset_radient_credit_cache_for_tests() -> None:
     """Forget any remembered 402 (tests only; mirrors the DeepSeek helper)."""
-    global _RADIENT_CREDIT_REFUSED_AT
     with _RADIENT_CREDIT_LOCK:
-        _RADIENT_CREDIT_REFUSED_AT = None
+        _RADIENT_CREDIT_REFUSALS.clear()
 
 
 def radient_login_present(config_dir: Path | None) -> bool:
@@ -110,6 +143,13 @@ def radient_login_present(config_dir: Path | None) -> bool:
     ``RADIENT_API_KEY`` store row does, because that branch never receives the
     central login's bearer. Never raises: an unreadable store reads as "not
     signed in", which keeps a paid leg out of the chain rather than in it.
+
+    The canonical branch reads the SAME store the token comes from
+    (``radient_credentials._radient_auth_store``): ``config_dir``-scoped, and
+    mesh-aware, so a paired device that borrows the owner's Radient bearer gets
+    the leg its search would in fact be served on. The ambient
+    ``shared_auth_store`` it used to read ignored both (PR #4553 review round 1,
+    R1-5). ``list_credentials`` is a read: it never dials a peer.
     """
     try:
         base = _radient_base_url(config_dir)
@@ -121,9 +161,13 @@ def radient_login_present(config_dir: Path | None) -> bool:
             from local_operator.providers.registry import provider_secret_value
 
             return bool(provider_secret_value("RADIENT_API_KEY", base=config_dir))
-        from local_operator.providers.auth_store import shared_auth_store
+        from local_operator.providers.radient_credentials import _radient_auth_store
 
-        return bool(shared_auth_store().list_credentials("radient"))
+        store = _radient_auth_store(config_dir)
+        try:
+            return bool(store.list_credentials("radient"))
+        finally:
+            store.close()
     except Exception:  # noqa: BLE001 -- an unreadable store is "not signed in"
         return False
 
@@ -148,6 +192,7 @@ async def _radient_token(config_dir: Path | None, base: str) -> str:
 
 def _search_cost(payload: dict[str, Any]) -> tuple[SearchCost, SearchUsage]:
     """The bill from the server's ``cost`` object, or the list-price fallback."""
+    from local_operator.clients.radient_cost import micro_from_amount
     from local_operator.web_search.cost import (
         BASIS_BILLED,
         BASIS_PER_SEARCH,
@@ -156,13 +201,17 @@ def _search_cost(payload: dict[str, Any]) -> tuple[SearchCost, SearchUsage]:
 
     cost = payload.get("cost")
     if isinstance(cost, dict):
-        amount = cost.get("amount_usd")
+        # The Radient cost contract allows a decimal STRING amount (the shape that
+        # survives JSON without rounding); the shared parser reads both, so a
+        # "0.0025" bill is recorded as billed rather than replaced by the list
+        # price (PR #4553 review round 1, R1-4).
+        micro = micro_from_amount(cost.get("amount_usd"))
         units = cost.get("units")
-        if isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount >= 0:
+        if micro is not None and micro >= 0:
             vendor = str(cost.get("provider") or RADIENT_SEARCH_PROVIDER)
             return (
                 SearchCost(
-                    usd=float(amount),
+                    usd=micro / 1_000_000,
                     basis=f"{BASIS_BILLED} Radient ({vendor})",
                     priced_from_usage=True,
                 ),
@@ -192,13 +241,16 @@ async def search_radient(
     limit: int,
 ) -> SearchResponse:
     """One Radient search, raising on every failure so the chain moves on."""
-    if radient_credit_refusal_remaining() is not None:
-        # Fresh 402: skip the round trip. The reason still names the fix.
-        raise RuntimeError(_english(web_search_copy.radient_credits_low()))
     base = _radient_base_url(config_dir).rstrip("/")
     token = await _radient_token(config_dir, base)
     if not token:
         raise RuntimeError(_english(web_search_copy.radient_not_signed_in()))
+    fingerprint = credential_fingerprint(token)
+    if radient_credit_refusal_remaining(base, fingerprint) is not None:
+        # Fresh 402 for THIS account at THIS hub: skip the round trip. The token
+        # is resolved first (a local store read, no network) so a different
+        # account is never skipped on another one's verdict.
+        raise RuntimeError(_english(web_search_copy.radient_credits_low()))
     response = await client.get(
         f"{base}/tools/search",
         headers={"Authorization": f"Bearer {token}"},
@@ -211,7 +263,7 @@ async def search_radient(
         },
     )
     if response.status_code == 402:
-        _remember_credit_refusal()
+        _remember_credit_refusal(base, fingerprint)
         raise RuntimeError(_english(web_search_copy.radient_credits_low()))
     if response.status_code == 401:
         raise RuntimeError(_english(web_search_copy.radient_sign_in_again()))
@@ -246,6 +298,7 @@ async def search_radient(
         )
         is not None
     ]
+    _forget_credit_refusals(base)
     cost, usage = _search_cost(payload)
     raw_cost = payload.get("cost")
     record = raw_cost.get("usage_record_id") if isinstance(raw_cost, dict) else None

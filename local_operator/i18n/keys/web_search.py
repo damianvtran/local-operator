@@ -13,6 +13,10 @@ def marker_credits() -> Msg:
     return Msg("web_search.marker.credits", {})
 
 
+def marker_no_credits() -> Msg:
+    return Msg("web_search.marker.no_credits", {})
+
+
 def marker_plan() -> Msg:
     return Msg("web_search.marker.plan", {})
 
@@ -33,6 +37,10 @@ def meaning_auto_radient() -> Msg:
     return Msg("web_search.meaning.auto_radient", {})
 
 
+def meaning_enabled_then_key() -> Msg:
+    return Msg("web_search.meaning.enabled_then_key", {})
+
+
 def meaning_radient_refused() -> Msg:
     return Msg("web_search.meaning.radient_refused", {})
 
@@ -47,6 +55,10 @@ def radient_credits_low() -> Msg:
 
 def radient_detail() -> Msg:
     return Msg("web_search.radient.detail", {})
+
+
+def radient_detail_signed_in() -> Msg:
+    return Msg("web_search.radient.detail_signed_in", {})
 
 
 def radient_not_signed_in() -> Msg:
@@ -71,6 +83,14 @@ def state_auto_native_plan() -> Msg:
 
 def state_auto_radient() -> Msg:
     return Msg("web_search.state.auto_radient", {})
+
+
+def state_enabled_credits() -> Msg:
+    return Msg("web_search.state.enabled_credits", {})
+
+
+def state_enabled_then_key() -> Msg:
+    return Msg("web_search.state.enabled_then_key", {})
 
 
 def state_radient_refused() -> Msg:

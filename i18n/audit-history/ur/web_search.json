@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "web_search",
+  "history_sha256": "5d3962ef5ab84cd8866b3467c8ba9a77ee11ca1ccec1751d0da9405dfb093bdc",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "410fb3a34cf25741d1f1bb0de41afe2c1d30c13e0f45fcbc6f23d4be0c841425",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 4 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "minor: manual U+200E LRM before '$0.01' in radient.detail — the ur guide forbids manual bidi controls and i18n/display.py isolated_status_text() rejects them (not on this namespace's tr() path today); 'اندرونی' (corpus: 'internal', e.g. Internal Server Error) for native/built-in vs corpus 'بلٹ اِن' (14 keys), 5 keys; 'سرچ' vs corpus 'تلاش' (51 of 53 search keys, settings title 'ویب تلاش'); '(ادائیگی)' = 'payment' for '(paid)' vs corpus 'ادا شدہ', and 25/24 cells. Bidi otherwise sound: Urdu ، ؛ ۔ punctuation, Latin islands byte-identical, no other controls."
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    }
+  ]
+}

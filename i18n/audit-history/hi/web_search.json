@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "web_search",
+  "history_sha256": "ccb3fa29c2c0ddbdffbda3c4bb165e143b9324803a988709f853c24e58fb21d2",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "62a39176c9a33ce1d60484dfd86638febb4946485fc0eb8153862c865c586b06",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 2 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "nit: 'खत्म' -> 'ख़त्म' (hi nukta rule; corpus mixed 21/18); 'से बिल होता है' -> 'से कटता है'. Register आप, glossary (क्रेडिट, कुंजी, प्लान, नेटिव, Radient Console verbatim) and widths all clean."
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    }
+  ]
+}

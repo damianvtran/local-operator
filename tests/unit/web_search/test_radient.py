@@ -180,3 +180,49 @@ def test_the_sync_client_model_keeps_cost_and_total_found() -> None:
     )
     assert parsed.cost == COST
     assert parsed.total_found == 7
+
+
+def test_a_string_amount_is_billed_not_replaced_by_the_list_price() -> None:
+    """R1-4 (PR #4553 review round 1): the Radient cost contract allows a decimal
+    STRING ``amount_usd``; it used to fall through to the $0.01 list price."""
+    cost, _usage = radient_module._search_cost({"cost": {**COST, "amount_usd": "0.0025"}})
+    assert cost.usd == pytest.approx(0.0025)
+    assert cost.priced_from_usage is True
+    assert "Radient sent no cost" not in cost.basis
+
+
+@pytest.mark.asyncio
+async def test_the_402_verdict_belongs_to_one_account_at_one_hub(monkeypatch) -> None:
+    """R1-6: a remembered 402 must not skip a DIFFERENT (funded) account or hub."""
+    tokens = iter(["account-a", "account-a", "account-b"])
+
+    async def token(_c, _b):
+        return next(tokens)
+
+    monkeypatch.setattr(radient_module, "_radient_token", token)
+    calls: list[httpx.Request] = []
+    refused = lambda _r: httpx.Response(402, json={"error": "insufficient credits"})  # noqa: E731
+    with pytest.raises(RuntimeError, match="credit balance is too low"):
+        await _search(refused, calls)
+    # Same account: skipped locally, no request.
+    with pytest.raises(RuntimeError, match="credit balance is too low"):
+        await _search(refused, calls)
+    assert len(calls) == 1
+    # A different account reaches the server at once.
+    response = await _search(
+        lambda _r: httpx.Response(200, json={"results": [], "cost": COST}), calls
+    )
+    assert len(calls) == 2
+    assert response.provider == "radient"
+    # The cache holds a fingerprint, never the bearer itself.
+    assert all("account-a" not in fp for _b, fp in radient_module._RADIENT_CREDIT_REFUSALS)
+
+
+@pytest.mark.asyncio
+async def test_a_served_search_clears_that_hubs_refusal() -> None:
+    """A 200 proves the hub is funded again, so the status surfaces stop saying
+    "out of credits" for it."""
+    radient_module._remember_credit_refusal(BASE, "someone-else")
+    assert radient_module.radient_credit_refusal_remaining() is not None
+    await _search(lambda _r: httpx.Response(200, json={"results": [], "cost": COST}))
+    assert radient_module.radient_credit_refusal_remaining() is None

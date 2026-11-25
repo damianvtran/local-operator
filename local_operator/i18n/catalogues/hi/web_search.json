@@ -1,19 +1,24 @@
 {
   "web_search.radient.access": "Radient क्रेडिट",
   "web_search.radient.detail": "आपके Radient खाते से Tavily सर्च, हर सर्च पर आपके क्रेडिट से $0.01; `local-operator login radient` से साइन इन करें",
+  "web_search.radient.detail_signed_in": "आपके Radient खाते से Tavily सर्च, हर सर्च पर आपके क्रेडिट से $0.01",
   "web_search.radient.credits_low": "सर्च के लिए आपका Radient क्रेडिट बैलेंस बहुत कम है। Radient Console में क्रेडिट जोड़ें; Radient सर्च 5 मिनट के भीतर फिर से आज़माई जाएगी।",
   "web_search.radient.sign_in_again": "Radient ने आपका साइन-इन अस्वीकार कर दिया। फिर से साइन इन करने के लिए `local-operator login radient` चलाएँ।",
   "web_search.radient.not_signed_in": "आप Radient में साइन इन नहीं हैं। `local-operator login radient` चलाएँ।",
-  "web_search.state.auto_radient": "ऑटो, Radient क्रेडिट",
+  "web_search.state.auto_radient": "ऑटो, क्रेडिट",
   "web_search.state.radient_refused": "Radient क्रेडिट खत्म",
   "web_search.state.auto_native_plan": "ऑटो, नेटिव (प्लान)",
   "web_search.state.auto_native_paid": "ऑटो, नेटिव (सशुल्क)",
   "web_search.state.auto_free_then_key": "ऑटो मुफ़्त, फिर कुंजी",
-  "web_search.meaning.auto_radient": "मुफ़्त और नेटिव चरणों के बाद आज़माया जाता है; आपके Radient क्रेडिट से बिल होता है",
+  "web_search.state.enabled_then_key": "सक्षम, फिर कुंजी",
+  "web_search.state.enabled_credits": "सक्षम (क्रेडिट)",
+  "web_search.meaning.auto_radient": "मुफ़्त चरणों और किसी भी नेटिव प्लान चरण के बाद आज़माया जाता है; आपके Radient क्रेडिट से बिल होता है",
   "web_search.meaning.radient_refused": "क्रेडिट जोड़ने तक छोड़ा जाता है; Radient 5 मिनट के भीतर फिर से आज़माया जाता है",
   "web_search.meaning.auto_native_plan": "आपके मॉडल प्लान की बिल्ट-इन सर्च, मुफ़्त चरणों के बाद आज़माई जाती है",
   "web_search.meaning.auto_native_paid": "आपकी मॉडल API कुंजी की बिल्ट-इन सर्च, हर सर्च पर बिल",
   "web_search.meaning.auto_free_then_key": "पहले मुफ़्त टियर; आपकी API कुंजी Radient के बाद आज़माई जाती है",
+  "web_search.meaning.enabled_then_key": "आपके प्राथमिकता क्रम में मुफ़्त टियर पर; आपकी API कुंजी Radient के बाद आज़माई जाती है",
   "web_search.marker.plan": "(प्लान)",
-  "web_search.marker.credits": "(क्रेडिट)"
+  "web_search.marker.credits": "(क्रेडिट)",
+  "web_search.marker.no_credits": "(क्रेडिट नहीं)"
 }

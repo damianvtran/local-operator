@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from rich.cells import cell_len, set_cell_size
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import web_search as web_search_copy
+from local_operator.i18n.messages import render
 from local_operator.web_search.io import WebReadIO
 from local_operator.web_search.models import (
     DEFAULT_WEB_SEARCH_CONFIG,
@@ -354,7 +356,17 @@ class WebSearchService:
                     # that has no usable credential stays in the chain and reports
                     # `not configured` here, rather than being silently dropped from
                     # the chain the status surfaces describe.
-                    failures.append(f"{label}: not configured")
+                    if provider_id == "radient":
+                        # Radient has no `search setup` credential, so the generic
+                        # placeholder named nothing to do; its sign-in refusal names
+                        # `local-operator login radient` (PR #4553 review round 1,
+                        # R1-8). English: failure reasons reach the model.
+                        failures.append(
+                            f"{label}: "
+                            + render(web_search_copy.radient_not_signed_in().code, {}, locale="en")
+                        )
+                    else:
+                        failures.append(f"{label}: not configured")
                     continue
                 # Pin the leg's mode for the transport (``providers.LEG_MODE``):
                 # the free leg of a keyed provider must not spend the key.
@@ -462,8 +474,13 @@ class WebSearchService:
         breakdown = "; ".join(
             f"{provider_id}: {_short_reason(reason, per_leg)}" for provider_id, reason in tried
         )
+        # The count is of PROVIDERS, as the sentence says: a keyed dual-mode
+        # provider is walked twice (free leg, then key), so counting legs printed
+        # "13/13 providers" for 11 providers. The tried list still names every
+        # leg (`tavily`, `tavily (key)`) (PR #4553 review round 1, R1-7).
+        providers = len({leg.provider for leg in candidates})
         raise RuntimeError(
-            f"{len(candidates)}/{len(candidates)} providers failed: {lead} " f"(tried: {breakdown})"
+            f"{providers}/{providers} providers failed: {lead} " f"(tried: {breakdown})"
         )
 
 

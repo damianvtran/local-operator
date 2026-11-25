@@ -460,7 +460,7 @@ async def test_row23_success_is_billed_and_recorded_as_radient(tmp_path, monkeyp
 
 
 def test_row24_env_only_radient_key_is_not_signed_in(tmp_path, monkeypatch) -> None:
-    from local_operator.providers import auth_store
+    from local_operator.providers import radient_credentials
     from local_operator.web_search import radient as radient_module
 
     monkeypatch.setenv("RADIENT_API_KEY", "env-only")
@@ -476,10 +476,27 @@ def test_row24_env_only_radient_key_is_not_signed_in(tmp_path, monkeypatch) -> N
             assert provider == "radient"
             return self.rows
 
-    monkeypatch.setattr(auth_store, "shared_auth_store", lambda: Store([]))
+        def close(self) -> None:
+            closed.append(True)
+
+    # The probe reads the token resolver's OWN store (config_dir-scoped and
+    # mesh-aware), never the ambient one (review round 1, R1-5).
+    seen: list[object] = []
+    closed: list[bool] = []
+
+    def store_for(rows):
+        def build(config_dir):
+            seen.append(config_dir)
+            return Store(rows)
+
+        return build
+
+    monkeypatch.setattr(radient_credentials, "_radient_auth_store", store_for([]))
     assert radient_module.radient_login_present(_cfg(tmp_path)) is False
-    monkeypatch.setattr(auth_store, "shared_auth_store", lambda: Store([object()]))
+    monkeypatch.setattr(radient_credentials, "_radient_auth_store", store_for([object()]))
     assert radient_module.radient_login_present(_cfg(tmp_path)) is True
+    assert seen == [_cfg(tmp_path), _cfg(tmp_path)]
+    assert closed == [True, True], "the probe must close the store it opened"
 
 
 def test_row25_the_402_verdict_lapses_after_its_ttl(monkeypatch) -> None:
@@ -532,7 +549,10 @@ async def test_row27_a_thirteen_leg_failure_names_every_leg(tmp_path, monkeypatc
     with pytest.raises(RuntimeError) as caught:
         await service.search("q")
     message = str(caught.value)
-    assert message.startswith("13/13 providers failed: ")
+    # 13 legs but 11 PROVIDERS: tavily and exa are each walked twice (free leg,
+    # then key), and the count names providers (review round 1, R1-7).
+    assert len({label.split(" ")[0] for label in legs}) == 11
+    assert message.startswith("11/11 providers failed: ")
     for label in legs:
         assert f"{label}: " in message
     assert cell_len(message) <= REASON_MAX_CELLS
@@ -554,3 +574,90 @@ def test_settings_members_are_the_provider_ids() -> None:
     rows = {row.key: row for row in SETTINGS if row.key.startswith("web_search.")}
     assert tuple(rows["web_search.providers"].members) == PROVIDER_IDS
     assert tuple(rows["web_search.excluded_providers"].members) == PROVIDER_IDS
+
+
+def test_listed_rows_name_their_paid_leg_and_the_refused_radient_state(
+    tmp_path, monkeypatch
+) -> None:
+    """Design round 1, D1/D2/D5 (PR #4553).
+
+    D1: a LISTED keyed Tavily (it is in the default order) has a paid leg in the
+    API-key band, and its row must say so, not plain `enabled`.
+    D2: a listed Radient says `(credits)` like its chain marker, not `(paid)`.
+    D5: a remembered 402 marks the Radient row AND its chain leg as refused.
+    """
+    from local_operator.web_search import radient as radient_module
+    from local_operator.web_search.providers import (
+        chain_label,
+        provider_state_code,
+        provider_state_label,
+        provider_statuses,
+        state_legend,
+    )
+
+    radient_module.reset_radient_credit_cache_for_tests()
+    _modes(monkeypatch, {**FREE_MODES, "tavily": "api-key", "radient": "radient-credits"})
+    monkeypatch.setattr(
+        "local_operator.web_search.providers._provider_detail",
+        lambda provider_id, _c, _s: "detail",
+    )
+    settings = WebSearchSettings(providers=["duckduckgo", "tavily", "radient"], strategy="ordered")
+    rows = {status.id: status for status in provider_statuses(settings, _cfg(tmp_path))}
+    assert provider_state_code(rows["tavily"]) == "enabled, then key"
+    assert provider_state_label(rows["tavily"]) == "enabled, then key"
+    assert provider_state_code(rows["radient"]) == "enabled (credits)"
+    legend = state_legend(list(rows.values()))
+    assert "enabled, then key = in your priority order on the free tier" in legend
+    assert "enabled (credits) = tried after the free legs" in legend
+    assert "Radient (credits)" in chain_label(list(rows.values()))
+
+    radient_module._remember_credit_refusal("https://radient.test/v1", "fp")
+    try:
+        rows = {status.id: status for status in provider_statuses(settings, _cfg(tmp_path))}
+        assert provider_state_code(rows["radient"]) == "radient refused"
+        chain = chain_label(list(rows.values()))
+        assert "Radient (no credits)" in chain and "Radient (credits)" not in chain
+    finally:
+        radient_module.reset_radient_credit_cache_for_tests()
+
+
+def test_the_radient_detail_drops_the_sign_in_clause_once_signed_in(tmp_path, monkeypatch) -> None:
+    """Design round 1, D4: a signed-in row must not tell the user to sign in."""
+    from local_operator.web_search.providers import provider_statuses
+
+    _modes(monkeypatch, dict(FREE_MODES))
+    out = {s.id: s for s in provider_statuses(WebSearchSettings(), _cfg(tmp_path))}
+    assert "login radient" in out["radient"].detail
+    _modes(monkeypatch, {**FREE_MODES, "radient": "radient-credits"})
+    signed = {s.id: s for s in provider_statuses(WebSearchSettings(), _cfg(tmp_path))}
+    assert "login radient" not in signed["radient"].detail
+    assert "$0.01 per search" in signed["radient"].detail
+
+
+@pytest.mark.asyncio
+async def test_a_listed_signed_out_radient_names_the_sign_in(tmp_path, monkeypatch) -> None:
+    """Review round 1, R1-8: the generic `not configured` named nothing to run."""
+    from local_operator.web_search import providers as providers_module
+
+    _modes(monkeypatch, {"duckduckgo": "credential-free"})
+    monkeypatch.setitem(
+        providers_module.PROVIDERS,
+        "duckduckgo",
+        replace(providers_module.PROVIDERS["duckduckgo"], search=_failing("duckduckgo")),
+    )
+    settings = WebSearchSettings(
+        providers=["radient", "duckduckgo"],
+        strategy="ordered",
+        excluded_providers=["tavily", "exa", "parallel", "perplexity"],
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await WebSearchService(settings, _cfg(tmp_path)).search("q")
+    message = str(caught.value)
+    # The sign-in sentence LEADS the digest (it is no longer the skipped
+    # `not configured` placeholder) and the tried list names the leg.
+    assert message.startswith(
+        "2/2 providers failed: You are not signed in to Radient. "
+        "Run `local-operator login radient`."
+    )
+    assert "radient: You are not signed in" in message
+    assert "not configured" not in message

@@ -532,11 +532,20 @@ async def execute_web_search(
     # sums it for a total any more, so a search cannot be counted twice.
     from local_operator.session.channel_spend import emit_web_spend
 
+    # A Radient search's ``cost`` came from the server that charged it
+    # (``priced_from_usage``), so it is recorded as that bill, with Radient's
+    # usage record id (carried as ``request_id``, ``radient.search_radient``) as
+    # the reconciliation handle. Every other search keeps the client estimate.
+    server_billed = bool(
+        response.provider == "radient" and response.cost and response.cost.priced_from_usage
+    )
     emit_web_spend(
         getattr(context, "record_channel_spend", None),
         channel="search",
         provider=response.provider,
         usd=response.cost.usd if response.cost else None,
+        server_billed=server_billed,
+        usage_record_id=(response.request_id or "") if server_billed else "",
     )
 
     # Hand the captured page context to THIS session, so `web_read` can answer

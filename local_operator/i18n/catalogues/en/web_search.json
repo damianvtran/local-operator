@@ -1,19 +1,24 @@
 {
   "web_search.radient.access": "Radient credits",
   "web_search.radient.detail": "Tavily search through your Radient account, $0.01 per search from your credits; sign in with `local-operator login radient`",
+  "web_search.radient.detail_signed_in": "Tavily search through your Radient account, $0.01 per search from your credits",
   "web_search.radient.credits_low": "Your Radient credit balance is too low for search. Add credits in the Radient Console; Radient search is retried within 5 minutes.",
   "web_search.radient.sign_in_again": "Radient refused your sign-in. Run `local-operator login radient` to sign in again.",
   "web_search.radient.not_signed_in": "You are not signed in to Radient. Run `local-operator login radient`.",
-  "web_search.state.auto_radient": "auto Radient credits",
+  "web_search.state.auto_radient": "auto credits",
   "web_search.state.radient_refused": "out of Radient credits",
   "web_search.state.auto_native_plan": "auto native (plan)",
   "web_search.state.auto_native_paid": "auto native (paid)",
   "web_search.state.auto_free_then_key": "auto free, then key",
-  "web_search.meaning.auto_radient": "tried after the free and native legs; billed to your Radient credits",
+  "web_search.state.enabled_then_key": "enabled, then key",
+  "web_search.state.enabled_credits": "enabled (credits)",
+  "web_search.meaning.auto_radient": "tried after the free legs and any native-plan legs; billed to your Radient credits",
   "web_search.meaning.radient_refused": "skipped until you add credits; Radient is retried within 5 minutes",
   "web_search.meaning.auto_native_plan": "your model plan's built-in search, tried after the free legs",
   "web_search.meaning.auto_native_paid": "your model API key's built-in search, billed per search",
   "web_search.meaning.auto_free_then_key": "free tier first; your API key is tried after Radient",
+  "web_search.meaning.enabled_then_key": "in your priority order on the free tier; your API key is tried after Radient",
   "web_search.marker.plan": "(plan)",
-  "web_search.marker.credits": "(credits)"
+  "web_search.marker.credits": "(credits)",
+  "web_search.marker.no_credits": "(no credits)"
 }

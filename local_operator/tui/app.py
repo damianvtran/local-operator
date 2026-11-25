@@ -67803,7 +67803,15 @@ _SEARCH_STATE_TOKENS: dict[str, str] = {
     "auto native plan": "muted",
     "auto native paid": "warning",
     "auto radient": "warning",
-    "radient refused": "muted",
+    # `warning`, not `muted`: out of credits is the one Radient state the user has
+    # to ACT on, and the dimmest ink made it the quietest row on screen (PR #4553
+    # design round 1, D5).
+    "radient refused": "warning",
+    # Listed twins take their auto twins' ink: `enabled, then key` matches
+    # `auto free, then key` (free first), `enabled (credits)` matches
+    # `auto radient` (design round 1, D1/D2).
+    "enabled, then key": "muted",
+    "enabled (credits)": "warning",
 }
 
 

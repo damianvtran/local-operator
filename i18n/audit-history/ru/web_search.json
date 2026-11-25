@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "web_search",
+  "history_sha256": "a4785373b984c95ba135be37d5e3f3ecad5ad37f8cd9c1b4719a72c2f10cc2bf",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "web_search",
+      "source_sha256": "9db6805bb0f3be0bea18c3448b15cbc90f41a5945f1cba2e01c7425d93385543",
+      "context_sha256": "b45a6903b8dcee865549344489113edf7ec04c8603c8514903ca9f31922ece89",
+      "target_sha256": "6eed830d15244d0c7aa7894976fafb2b506b85501d6606e5ede22a4bceac56c8",
+      "translator": {
+        "agent": "coder (lopdev task subagent for PR #4553; translated the web_search namespace in commit 3b4cde56bef8)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "as stated by the manager's audit brief; not independently verified by the auditor",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor: none disclosed in the brief"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team member, independent of the translator; task pr4553-i18n-audit)",
+        "session": "5aed21c78773",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 2 nit",
+        "independent_from_translator": true,
+        "scope": "full audit of all 17 keys against en + context sidecar, glossary, locale style guide and shipped corpus usage; state words/legend rendered through the real providers.state_legend() under the locale",
+        "namespace_finding_detail": "minor: four state words over the 24-cell maxCells (radient_refused 27, auto_native_plan 27, auto_free_then_key 26, auto_native_paid 25); cli.py widens the column to the widest word so nothing truncates — shorten radient_refused to 'нет кредитов Radient' (20) and record a ru width exception for the rest; meaning.radient_refused 'Radient повторяется' is unidiomatic. nit: 'API-ключ' vs corpus 'ключ API' (8:1); 'Пополните кредиты' -> 'Пополните баланс'."
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4553 head b54c8d96aecaa6b9b62332f0af3e4d5703f6be74. target_sha256 is the audited file; corrected strings for the findings are in the auditor's report. Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
+    }
+  ]
+}
