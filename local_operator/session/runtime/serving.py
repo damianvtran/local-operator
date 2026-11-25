@@ -4651,38 +4651,61 @@ class ServingSessionHandle(SessionHandle):
             ProfileRegistryUnavailable,
         )
 
-        registry = getattr(self._session, "agent_registry", None)
-        complete = getattr(registry, "require_complete_metadata", None)
-        try:
-            if complete is not None and (
-                getattr(self._session, "active_agent", "")
-                or getattr(self._session, "active_team", None)
-                or getattr(self._session, "_unresolved_agent", "")
-                or getattr(self._session, "_unresolved_team", "")
-            ):
-                complete()
-        except ProfileRegistryUnavailable:
-            self._command_reservations.reject(command_id)
-            raise
-        unresolved = getattr(self._session, "_unresolved_agent", "") or getattr(
-            self._session, "_unresolved_team", ""
-        )
-        team = getattr(self._session, "active_team", None)
-        if team is not None:
-            resolve = getattr(self._session, "_resolve_profile_or_specialist", None)
-            if resolve is not None and resolve(team.manager)[0] is None:
-                unresolved = team.manager
-        if unresolved:
-            self._command_reservations.reject(command_id)
-            raise AttachmentUnavailable()
+        def check_attachment() -> None:
+            registry = getattr(self._session, "agent_registry", None)
+            complete = getattr(registry, "require_complete_metadata", None)
+            try:
+                if complete is not None and (
+                    getattr(self._session, "active_agent", "")
+                    or getattr(self._session, "active_team", None)
+                    or getattr(self._session, "_unresolved_agent", "")
+                    or getattr(self._session, "_unresolved_team", "")
+                ):
+                    complete()
+            except ProfileRegistryUnavailable:
+                self._command_reservations.reject(command_id)
+                raise
+            unresolved = getattr(self._session, "_unresolved_agent", "") or getattr(
+                self._session, "_unresolved_team", ""
+            )
+            team = getattr(self._session, "active_team", None)
+            if team is not None:
+                resolve = getattr(self._session, "_resolve_profile_or_specialist", None)
+                if resolve is not None and resolve(team.manager)[0] is None:
+                    unresolved = team.manager
+            if unresolved:
+                self._command_reservations.reject(command_id)
+                raise AttachmentUnavailable()
+
+        # Retain the old read-only refusal (and its precedence) for anything
+        # that could close, hand over or queue instead of starting a local turn.
+        # Only defer the check for a pending move this owner could run now;
+        # the actual recovery call is below the early-return gates.
+        recover_bound_team = False
+        if getattr(self._session, "_pending_moved_team", None) is not None:
+            turn_lock = getattr(self._session, "_turn_lock", None)
+            recover_bound_team = not (
+                self._disposing
+                or self._retiring_cause
+                or self._updating
+                or self._draining
+                or self._prompt_queue
+                or getattr(self._session, "is_streaming", False)
+                or (turn_lock is not None and turn_lock.locked())
+                or (_goal_context is not None and not self._goal_prompt_current(_goal_context))
+            )
+        if not recover_bound_team:
+            check_attachment()
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
         from local_operator.session.file_provenance import admitted_ticket
 
-        file_capture = admitted_ticket(
-            self._session, text, command_id, _file_admission, harness_injected
-        )
+        file_capture = None
+        if not recover_bound_team:
+            file_capture = admitted_ticket(
+                self._session, text, command_id, _file_admission, harness_injected
+            )
         # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
         #
         # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
@@ -4833,6 +4856,19 @@ class ServingSessionHandle(SessionHandle):
             self._refuse_admitted(command_id)
             raise RuntimeError(
                 f"prompt queue is full ({MAX_QUEUED_PROMPTS}); wait for an admitted turn to start"
+            )
+        if recover_bound_team:
+            # Nothing awaited on this route: the same owner is still idle and
+            # eligible. Do not freeze a file ticket until attachment admission
+            # succeeds, just as on the preflight path above.
+            try:
+                self._session._retry_bound_team_for_admission()
+            except ProfileRegistryUnavailable:
+                self._command_reservations.reject(command_id)
+                raise
+            check_attachment()
+            file_capture = admitted_ticket(
+                self._session, text, command_id, _file_admission, harness_injected
             )
         self._maybe_name_conversation(text)
         admitted: asyncio.Future[None] = self._loop.create_future()

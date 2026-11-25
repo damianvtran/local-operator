@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -58,6 +59,8 @@ class _DefinitionNotLoaded(TeamIdentityRefused):
         super().__init__(team, f"{subject} is unavailable")
         self.team = team
         self.subject = subject
+        # Supplied only by the bound restore that actually read this record.
+        self.binding: dict[str, Any] | None = None
 
 
 class TeamDefinitionsPending(TeamIdentityRefused):
@@ -986,11 +989,133 @@ def check_promotion(root: Path, directory: Path) -> None:
     _check_destination(root, directory, _local_binding(directory), promoting=True)
 
 
-def restore_bound(directory: Path, name: str, registry: TeamRegistry | None) -> Team:
+def restore_bound(
+    directory: Path,
+    name: str,
+    registry: TeamRegistry | None,
+    *,
+    pending_move: PendingMovedTeam | None = None,
+) -> Team:
     """Resolve the named object; attach still requires its recorded ceiling."""
     expected = _local_binding(directory)
+    if pending_move is not None and (
+        registry is None
+        or expected != pending_move.binding
+        or _pending_moved_team(registry.config_dir, directory, name, pending_move.binding)
+        != pending_move
+    ):
+        raise TeamIdentityRefused(name)
     team = _resolve(registry, name) if registry is not None else None
-    return _verify_name(name, expected, team)
+    try:
+        return _verify_name(name, expected, team)
+    except _DefinitionNotLoaded as missing:
+        missing.binding = expected
+        raise
+
+
+@dataclass(frozen=True)
+class PendingMovedTeam:
+    """The exact failed comparison and its locally attested placement."""
+
+    team: str
+    agent: str
+    binding: dict[str, Any]
+    network: str
+    owner: str
+    source: str
+    source_session: str
+    mirror: str
+
+
+def _pending_moved_team(
+    root: Path, directory: Path, name: str, expected: dict[str, Any]
+) -> PendingMovedTeam | None:
+    from local_operator.network import store
+    from local_operator.network.projection import self_device_id
+    from local_operator.session.placement import read_stamp
+
+    # A local override (even an unreadable one) supersedes the move record.
+    # Accept only the record check_arrival writes; local-only fields such as
+    # explicit_local must not travel through this path into a runtime ceiling.
+    if directory.parent != root / "sessions" or set(expected) != {
+        "name",
+        "id",
+        "digest",
+        "manager",
+        "delegation",
+        "origin",
+    }:
+        return None
+    try:
+        (directory / LOCAL_BINDING_NAME).lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        return None
+    stamp = read_stamp(root, directory.name)
+    owner = self_device_id(root)
+    mirror = expected.get("origin")
+    digest = expected.get("digest")
+    if (
+        stamp is None
+        or stamp.session_id != directory.name
+        or not owner
+        or stamp.home_device != owner
+        or stamp.placement.home_device != owner
+        or stamp.placement.network_id != stamp.network_id
+        or stamp.origin.get("kind") != "moved"
+        or not re.fullmatch(r"n_[0-9a-f]{24}", stamp.network_id)
+        or not isinstance(mirror, str)
+        or not mirror
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or stamp.origin.get(KEY) != expected
+        or _local_binding(directory) != expected
+    ):
+        return None
+    source = stamp.origin.get("source_device")
+    source_session = stamp.origin.get("source_session_id")
+    if not isinstance(source, str) or not source:
+        return None
+    if not isinstance(source_session, str) or not source_session:
+        return None
+    stored = _attachment(directory, expected)
+    if stored is None or stored.team != name:
+        return None
+    record = store.load(stamp.network_id, root=root)
+    if (
+        record.trust != "active"
+        or record.stale
+        or record.self_device_id != owner
+        or record.network_id != stamp.network_id
+        or not isinstance(record.removed_ids, list)
+    ):
+        return None
+    for device in {owner, source, mirror}:
+        member = record.member(device)
+        if (
+            member is None
+            or member.device_id != device
+            or device in record.removed_ids
+            or not member.active
+            or member.lifecycle != "active"
+        ):
+            return None
+    return PendingMovedTeam(
+        name, stored.agent, expected, stamp.network_id, owner, source, source_session, mirror
+    )
+
+
+def pending_moved_team(
+    root: Path, directory: Path, name: str, error: BaseException
+) -> PendingMovedTeam | None:
+    """Hold only evidence of a previously compared, still-owned move."""
+    if isinstance(error, _DefinitionNotLoaded) and isinstance(error.binding, dict):
+        try:
+            return _pending_moved_team(root, directory, name, error.binding)
+        except (OSError, TypeError, ValueError):
+            pass  # Unreadable evidence cannot arm admission recovery.
+    return None
 
 
 def is_pending_definition(error: BaseException) -> bool:
@@ -1026,6 +1151,7 @@ def bind_runtime_authority(
     *,
     restoring: bool,
     readonly_shell: bool = False,
+    pending_move: PendingMovedTeam | None = None,
 ) -> TeamAuthority:
     from local_operator.harness.subagent import read_max_team_depth
 
@@ -1039,14 +1165,34 @@ def bind_runtime_authority(
         # Only an explicit local attach starts a new authorization. Resume,
         # fork and transit must only consume ceilings already written.
         expected, depth, confined = None, read_max_team_depth(root), False
-    snapshot = _snapshot(
-        team, teams, agents, max_depth=depth, readonly_shell=readonly_shell or confined
-    )
-    if restoring:
-        snapshot = _with_recorded_efforts(_with_recorded_tiers(snapshot, expected), expected)
-    record = snapshot.record()
-    if restoring:
-        _compare(expected, record, local=True)
+    if pending_move is not None and (not restoring or expected != pending_move.binding):
+        raise TeamIdentityRefused(team.name)
+    try:
+        snapshot = _snapshot(
+            team, teams, agents, max_depth=depth, readonly_shell=readonly_shell or confined
+        )
+        if restoring:
+            snapshot = _with_recorded_efforts(_with_recorded_tiers(snapshot, expected), expected)
+        record = snapshot.record()
+        if restoring:
+            # A pending move has not yet attached on this owner. It may only
+            # recover the revision arrival attested, unlike an ordinary resume
+            # of a locally established binding, which can follow brief edits.
+            _compare(expected, record, local=True, exact_revision=pending_move is not None)
+    except _DefinitionNotLoaded as missing:
+        missing.binding = expected
+        raise
+    if pending_move is not None:
+        # Recheck AFTER reading definitions and BEFORE journalling/exposing the
+        # authority. A changed attachment/placement or revoked member cannot be
+        # cured by a matching name or even an otherwise valid new binding.
+        if (
+            root is None
+            or directory is None
+            or _pending_moved_team(root, directory, team.name, pending_move.binding) != pending_move
+            or _mirrored_origin(root, team) != pending_move.mirror
+        ):
+            raise TeamIdentityRefused(team.name)
     # ``isinstance``: a restore only reaches here after _compare accepted
     # ``expected`` as a record; anything else must never read as an explicit
     # local choice.
