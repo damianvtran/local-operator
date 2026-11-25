@@ -1615,8 +1615,8 @@ export function Composer({
 		   bound the row's own arrival is the signal. Not the session list's
 		   activity time or a turn counter: neither rides the pid-0 rebuild this
 		   composer is served while the session is cold. */
-		const movedPastBaseline =
-			pastBound &&
+		const hasMovedColdTail =
+			waking !== null &&
 			/* The baseline is only ever stamped from a durable rebuild; an ended
 			   LIVE frame can end in a transient notice row no rebuild reproduces
 			   (review round 2, R2-m1). */
@@ -1624,6 +1624,7 @@ export function Composer({
 			waking.tailId !== undefined &&
 			(projection.transcript?.length ?? 0) > 0 &&
 			transcriptTailId(projection.transcript) !== waking.tailId;
+		const movedPastBaseline = pastBound && hasMovedColdTail;
 		/* A MOVED TAIL IS NOT PROOF OF DELIVERY (review round 2, R2-M1). Something
 		   wrote, but it need not be our message: the failed wake's own runtime
 		   booting late, the wake supervisor, another surface's prompt, or a
@@ -1640,13 +1641,16 @@ export function Composer({
 		if (waking && movedPastBaseline && !carriedInTail && waking.confirm === undefined) {
 			const tracker = waking;
 			tracker.confirm = "checking";
-			/* THE TRANSCRIPT'S OWN FIRST-CURSOR RULE (QA round 2, Q2-1 on PR
-			   #4584). `transcript[0]` is the pinned opener on exactly the capped
-			   projections this search exists for; history before it is empty, so
-			   a delivered wake read as unconfirmed. The opener itself is not
-			   lost by skipping it: `carriedInTail` already read every tail row. */
+			/* A pinned opener has no history before it, and `carriedInTail` has
+			   already checked it. With `transcript_has_older` but no pin, the
+			   current daemon can send a contiguous, user-headed 80-row tail:
+			   skipping its head would spend one of our bounded older-row slots on
+			   overlap. Keep the shape fallback only for legacy projections without
+			   that signal, and don't change the transcript's own paging policy. */
 			const tail = projection.transcript ?? [];
-			const oldest = firstHistoryCursor(tail, projectionHeadPinned(tail, projection.transcript_head_pinned));
+			const headPinned = projection.transcript_head_pinned ??
+				(projection.transcript_has_older === true ? false : undefined);
+			const oldest = firstHistoryCursor(tail, projectionHeadPinned(tail, headPinned));
 			confirmAbort.current?.abort();
 			const abort = new AbortController();
 			confirmAbort.current = abort;
@@ -1769,16 +1773,23 @@ export function Composer({
 			wakingCommand.current = null;
 			forgetFailedWake(pid);
 		}
-		/* Re-run once the bound passes: a cold session publishes nothing after a
-		   failed wake, so without this timer a quiet stream would never re-enter
-		   the check above. Cleared on every re-run; at most one is pending. */
+		/* A quiet cold stream may never re-enter this effect. Even a watched
+		   failure needs the deadline callback if the cold seed already moved
+		   and history still needs checking. Don't re-arm after the deadline or
+		   a verdict, and leave the callback with the tracker that scheduled it. */
 		const tracked = wakingCommand.current;
-		if (tracked === null || tracked.failed || tracked.pid !== pid) return;
+		if (tracked === null || tracked.pid !== pid) return;
+		if (tracked.failed && (!hasMovedColdTail || tracked.confirm !== undefined)) return;
 		const remaining = tracked.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
 		if (remaining <= 0) return;
-		const timer = setTimeout(() => setWakeDeadlineTick((n) => n + 1), remaining);
+		const timer = setTimeout(() => {
+			if (wakingCommand.current === tracked) setWakeDeadlineTick((n) => n + 1);
+		}, remaining);
 		return () => clearTimeout(timer);
-	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick]);
+	}, [
+		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
+		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick,
+	]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one

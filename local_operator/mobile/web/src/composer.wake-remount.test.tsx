@@ -22,7 +22,7 @@
 // `SessionScreen` and `Composer`, with only the projection slot and the
 // network faked.
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import { WAKE_SETTLED_BOUND_MS } from "./components/composer";
@@ -269,12 +269,8 @@ describe("a waking row that outlived its composer (M1)", () => {
 		   Page 1 is rows 160–239, page 2 rows 80–159. */
 		const older = filler(0, 240);
 		older[100] = userRow(COMMAND_ID, SENT);
-		/* An UNPINNED tail, as a current daemon serves one: no
-		   `transcript_head_pinned` on the wire (`types.py` pops it when false)
-		   and an assistant row at the head. An all-user 80-row tail would trip
-		   the older-daemon fallback in `projectionHeadPinned` (80 rows, user
-		   head → treated as pinned), shifting both cursors by one row of
-		   harmless overlap; the pinned case has its own cell below. */
+		/* With no wire hints, an assistant-headed tail still takes the unpinned
+		   branch of the legacy length-and-kind fallback. */
 		const tail = filler(1000, 80);
 		tail[0] = { ...tail[0], kind: "assistant" };
 		serveHistory([...older, ...tail]);
@@ -290,6 +286,23 @@ describe("a waking row that outlived its composer (M1)", () => {
 		clock.mockRestore();
 	});
 
+	it("finds the oldest of 240 older rows behind an unpinned user-headed tail", async () => {
+		/* The daemon omits a false pin. The three exclusive pages must cover
+		   160–239, 80–159, then 0–79; overlap with the tail would miss row 0. */
+		const older = filler(0, 240);
+		older[0] = userRow(COMMAND_ID, SENT);
+		const tail = filler(1000, 80);
+		serveHistory([...older, ...tail]);
+		const { back, clock } = await backPastBound(tail, { transcript_has_older: true });
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(confirmCalls().map((call) => call[1])).toEqual(["later-1000", "later-160", "later-80"]);
+		expect(screen.queryByText(UNCONFIRMED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		clock.mockRestore();
+	});
+
 	it("keeps the envelope and Retry when a moved tail and the bounded history lack the id", async () => {
 		/* Another writer moved the tail; our row is nowhere in the 3 pages the
 		   search may read (it sits at row 10 of 400, past the cap). */
@@ -300,7 +313,9 @@ describe("a waking row that outlived its composer (M1)", () => {
 		const { back, clock } = await backPastBound(tail);
 
 		expect(await screen.findByText(UNCONFIRMED_COPY)).toBeTruthy();
-		expect(confirmCalls()).toHaveLength(3);
+		/* With neither wire hint, a full user-headed tail still uses the legacy
+		   pinned-opener heuristic and the search still stops after three pages. */
+		expect(confirmCalls().map((call) => call[1])).toEqual(["later-1001", "later-321", "later-241"]);
 		expect(screen.queryByText(FAILED_COPY)).toBeNull();
 		expect(pendingRows(back)).toHaveLength(0);
 		expect((await composer()).value).toBe(SENT);
@@ -384,7 +399,9 @@ describe("a waking row that outlived its composer (M1)", () => {
 		const after = filler(100, 85);
 		serveHistory([opener, ...filler(0, 20), userRow(COMMAND_ID, SENT), ...after]);
 		const tail = [opener, ...after.slice(-79)];
-		const { back, clock } = await backPastBound(tail, { transcript_head_pinned: true });
+		const { back, clock } = await backPastBound(tail, {
+			transcript_head_pinned: true, transcript_has_older: true,
+		});
 
 		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
 		expect(confirmCalls()[0]?.[1]).toBe("later-106");
@@ -480,13 +497,17 @@ describe("a waking row that outlived its composer (M1)", () => {
 	   "An earlier instruction may have been delivered…" and make 0 walks. */
 	const RETAINED_COPY =
 		"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
-	async function failWhileWatching(transcript: TranscriptEntry[]) {
-		const start = Date.now();
+	async function watchUntilFailure(transcript: TranscriptEntry[]) {
 		const view = mount(frame({ transcript }));
 		await sendWaking(view);
 		view.publish(frame({ version: 2, transcript, ended: true, wake_failed: COMMAND_ID }));
 		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
 		expect(pendingRows(view)).toHaveLength(0);
+		return view;
+	}
+	async function failWhileWatching(transcript: TranscriptEntry[]) {
+		const start = Date.now();
+		const view = await watchUntilFailure(transcript);
 		const clock = vi.spyOn(Date, "now").mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 60_000);
 		return { view, clock };
 	}
@@ -536,6 +557,35 @@ describe("a waking row that outlived its composer (M1)", () => {
 		expect((await composer()).value).toBe("");
 		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
 		clock.mockRestore();
+	});
+
+	it("reconciles a watched failure at the bound with only a moved cold seed", async () => {
+		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
+		try {
+			const view = await watchUntilFailure([]);
+			const tail = filler(1000, 80);
+			serveHistory([userRow(COMMAND_ID, SENT), ...tail]);
+			switchAway(view, frame({ version: 3, transcript: tail, transcript_has_older: true }));
+
+			expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY);
+			expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+			expect((await composer()).value).toBe(SENT);
+			expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+			expect(confirmCalls()).toHaveLength(0);
+
+			/* No publish after remount: only the deadline can start this walk. */
+			await act(async () => { await vi.advanceTimersByTimeAsync(WAKE_SETTLED_BOUND_MS); });
+			await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+			expect(confirmCalls().map((call) => call[1])).toEqual(["later-1000"]);
+			expect(screen.queryByText(FAILED_COPY)).toBeNull();
+			expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+			expect((await composer()).value).toBe("");
+
+			await act(async () => { await vi.advanceTimersByTimeAsync(WAKE_SETTLED_BOUND_MS); });
+			expect(confirmCalls()).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("leaves a retained envelope with no waking row on its retained-retry path", async () => {
