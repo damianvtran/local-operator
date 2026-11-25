@@ -973,6 +973,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # Defaults to True, so the probe disables it -- the tuple is (value written,
     # reader), and a reader that negated would report the BASELINE as the change.
     "web_search.read_enabled": (False, lambda s, w: _search_settings(w).read_enabled),
+    # The Claude-subscription opt-in defaults to False and gates the Anthropic
+    # native leg's subscription mode; `execute_web_search` rebuilds settings per
+    # call, so a toggle from another process reaches the very next search.
+    "web_search.claude_subscription_search": (
+        True,
+        lambda s, w: _search_settings(w).claude_subscription_search,
+    ),
     "web_fetch.timeout_seconds": (5.0, lambda s, w: _fetch_settings(w).timeout_seconds),
     "web_fetch.max_bytes": (1_048_576, lambda s, w: _fetch_settings(w).max_bytes),
     "web_fetch.max_redirects": (1, lambda s, w: _fetch_settings(w).max_redirects),
