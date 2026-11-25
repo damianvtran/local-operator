@@ -66,7 +66,7 @@ def _by_name(verdict: classify_mod.Verdict) -> dict[str, classify_mod.RankedTarg
 
 @pytest.mark.asyncio
 async def test_nine_path_loop_refuses_only_the_ineligible_tree(real_home: Path) -> None:
-    repo_ = real_home / "repo_"
+    repo_ = real_home / "repo"
     trees = [_finished(real_home, repo_, n) for n in NAMES]
     bad = _branch_tree(real_home, repo_, "full-diff-history")
     _git("worktree", "lock", "--reason", "initializing", str(bad), cwd=repo_)
@@ -96,7 +96,7 @@ async def test_nine_path_loop_refuses_only_the_ineligible_tree(real_home: Path) 
 
 @pytest.mark.parametrize("sep", [" && ", "; ", "\n"])
 def test_mixed_chain_with_one_untracked_tree(real_home: Path, sep: str) -> None:
-    repo_ = real_home / "repo_"
+    repo_ = real_home / "repo"
     good = [_finished(real_home, repo_, n) for n in NAMES[:3]]
     bad = _branch_tree(real_home, repo_, "wip")
     (bad / "untracked.txt").write_text("wip\n")
@@ -117,7 +117,7 @@ def test_mixed_chain_with_one_untracked_tree(real_home: Path, sep: str) -> None:
 def test_unpinned_group_keeps_the_whole_call_off_the_exact_route(
     real_home: Path, words: str
 ) -> None:
-    repo_ = real_home / "repo_"
+    repo_ = real_home / "repo"
     _finished(real_home, repo_, "a1")
     cmd = (
         f"for n in {words}; do git -C {repo_} worktree remove --force -- "
@@ -136,7 +136,7 @@ def test_unpinned_group_keeps_the_whole_call_off_the_exact_route(
 
 
 def test_single_target_control_is_unchanged(real_home: Path) -> None:
-    repo_ = real_home / "repo_"
+    repo_ = real_home / "repo"
     wt = _finished(real_home, repo_, "solo")
     cmd = f"git -C {repo_} worktree remove --force -- {wt}"
     from local_operator.guardrails.resolve import resolve_command
