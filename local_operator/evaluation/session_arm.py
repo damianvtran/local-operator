@@ -4909,7 +4909,29 @@ async def run_session_episode(
         ):
             status = "truncated"
             terminal_reason = spend_stop.reason
-        elif terminal_reason == "max-steps" or steps >= bridge.max_steps:
+        elif (
+            terminal_reason == "max-steps"
+            or steps >= bridge.max_steps
+            or (
+                # The driver's OWN budget stop. ``steps`` counts admitted
+                # epochs only, so a run whose groups all called the command
+                # tool (never ``apply_actions``) exhausts the attempted-group
+                # budget with ``steps == 0`` and slipped past the check above.
+                # The cancel reason it sent ("episode step budget reached")
+                # cannot be read back: the Session drops graceful-cancel
+                # reasons by design (rewriting them as cut-off causes would
+                # file deliberate stops as errors on every surface), so the
+                # driver must classify from its own fact, ``budget_stop_sent``.
+                # Same precedence as the spend stop: the wall bound, a turn-end
+                # error or a named cut-off cause keeps its own label.
+                budget_stop_sent
+                and not wall_fired
+                and not (
+                    last_turn_end is not None
+                    and (last_turn_end.error or last_turn_end.cut_off_cause)
+                )
+            )
+        ):
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
         else:
