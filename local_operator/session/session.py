@@ -496,6 +496,12 @@ INPUT_SURFACE_KEY = "lop_input_surface"
 #: non-mobile, which errs quiet on the phone.
 INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
 
+#: Custom transcript entry holding the conversation's latched inline-UI head row
+#: (``Session._settle_inline_ui_head_latch``). A full snapshot per change, like
+#: ``system_prefix``: ``latest_custom`` restores it on resume. Small by design:
+#: the hint text plus the compaction marker it was decided under.
+INLINE_UI_HEAD_LATCH_CUSTOM_TYPE = "inline_ui_head_latch_v1"
+
 
 def _input_surface(value: object, default: str = "tui") -> str:
     """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
@@ -5005,6 +5011,20 @@ class Session:
                     )
                     self._system_state_message_id = entry.id
         self._state_baseline_from_replay = self._system_state_message_id is not None
+        # The inline-UI head-row latch (see ``_settle_inline_ui_head_latch``).
+        # Persisted with the conversation, because a resumed or restarted
+        # runtime replays the SAME signed thinking blocks and must send the
+        # head row they were signed under.
+        saved_latch = transcript.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) or {}
+        # (A full snapshot per change, so the newest row is the whole state.)
+        latched_text = saved_latch.get("text")
+        self._inline_ui_head_latch: str | None = (
+            latched_text if isinstance(latched_text, str) else None
+        )
+        latched_compaction = saved_latch.get("compaction_id")
+        self._inline_ui_head_latch_compaction_id: str | None = (
+            latched_compaction if isinstance(latched_compaction, str) else None
+        )
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
         # providers do, a bare zero-arg callable (some hosts, most tests) does
@@ -7825,6 +7845,9 @@ class Session:
         # that will actually be advertised. Reconciling afterwards would make
         # the frozen prefix and the delta disagree with the request.
         desired = self._reconcile_tool_inventory(list(desired))
+        # Same boundary as the prefix epoch: before this call's request is
+        # built, so the loop's per-call hint read sees the settled latch.
+        await self._settle_inline_ui_head_latch(model or self._model)
         if not getattr(self._system_blocks_provider, "append_only_state", False):
             return desired
         if self._frozen_system_blocks is None:
@@ -7858,6 +7881,86 @@ class Session:
         # normally (see the open-asks replay rule in ``_system_state_delta``).
         self._state_baseline_from_replay = False
         return list(self._frozen_system_blocks)
+
+    def _live_inline_ui_hint(self) -> str | None:
+        """This run's discovery hint as the input surface decides it right now."""
+        if self._output_contract is not None:
+            return None
+        return inline_ui_instructions(
+            self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
+        )
+
+    async def _settle_inline_ui_head_latch(self, model: ModelSpec) -> None:
+        """Decide the conversation's inline-UI head row before a main-turn call.
+
+        WHY: with thinking on, the Anthropic Messages body (first party and
+        Bedrock invoke) pins the hint at ``messages[0]`` (``AnthropicClient.
+        _build_body``), and every signed thinking block is bound to ALL content
+        before it. The live hint is decided per run and even per call (a wake
+        or peer run has none, a TUI steer turns it on, a live answer from
+        another surface turns it off), so following it would add or drop the
+        head row under already-signed blocks: an HTTP 400 ("Content that
+        preceded this block when it was created is missing") plus a miss of the
+        whole message-level cache. So the head row belongs to the conversation:
+
+        - Unlatched, the first call whose live hint is present latches it, but
+          only while the history holds no signed thinking (those blocks were
+          signed WITHOUT the row; adding it would shift their prefix). No live
+          hint means no head row and no latch.
+        - Latched, every later Anthropic thinking request for this
+          conversation sends the same bytes: later runs, wakes, steers, other
+          surfaces, resumes and asides. A surface that cannot render widgets
+          still gets prose: inline-UI output projects to text for viewers
+          without the capability (``inline_ui_text.project_inline_ui``).
+        - Re-decided only at a compaction boundary, where history is rewritten
+          anyway, and only once no signed thinking survives it (turns kept
+          verbatim may still carry blocks signed under the old row).
+
+        Other wires and non-thinking requests keep following the live hint
+        (tail placement, nothing signed), so this is a no-op for them.
+        """
+        # Local import: the provider clients module is heavy and session.py keeps
+        # it off its import path (same as ``audio_format_refusal``).
+        from local_operator.providers.clients import (
+            carries_signed_thinking,
+            inline_ui_hint_binds_head,
+        )
+
+        if not inline_ui_hint_binds_head(model):
+            return
+        live = self._live_inline_ui_hint()
+        marker = self._transcript.latest_entry("compaction")
+        compaction_id = marker.id if marker is not None else None
+        if self._inline_ui_head_latch is None:
+            if live is None or carries_signed_thinking(self._context.messages):
+                return
+            decided = live
+        elif compaction_id != self._inline_ui_head_latch_compaction_id:
+            if carries_signed_thinking(self._context.messages):
+                return
+            decided = live
+        else:
+            return
+        if (decided, compaction_id) == (
+            self._inline_ui_head_latch,
+            self._inline_ui_head_latch_compaction_id,
+        ):
+            return
+        # Durable before the request that first carries it, like the prefix
+        # epoch: a crash after dispatch must not resume without the row.
+        await self._transcript.append_custom(
+            INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": decided, "compaction_id": compaction_id}
+        )
+        self._inline_ui_head_latch = decided
+        self._inline_ui_head_latch_compaction_id = compaction_id
+
+    def _inline_ui_head_hint(self, model: ModelSpec, live: str | None) -> str | None:
+        """The hint a request for ``model`` carries: the latch where it binds."""
+        from local_operator.providers.clients import inline_ui_hint_binds_head
+
+        if inline_ui_hint_binds_head(model):
+            return self._inline_ui_head_latch
+        return live
 
     def _system_blocks_are_frozen(self) -> bool:
         """Whether this session's system blocks are currently epoch-frozen.
@@ -24412,12 +24515,10 @@ class Session:
                 # Resolve at each call, not once per run: a folded steer can
                 # change the input surface between provider requests. Helpers
                 # bypass this loop config and must keep the exact system prefix.
-                get_inline_ui_hint=lambda: (
-                    inline_ui_instructions(
-                        self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
-                    )
-                    if self._output_contract is None
-                    else None
+                # On an Anthropic thinking wire the per-conversation latch
+                # wins over the live value (``_settle_inline_ui_head_latch``).
+                get_inline_ui_hint=lambda: self._inline_ui_head_hint(
+                    self._model, self._live_inline_ui_hint()
                 ),
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
@@ -34260,6 +34361,10 @@ class Session:
             model=self._model,
             purpose="aside",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
             system_blocks_frozen=self._system_blocks_are_frozen(),
             system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
@@ -34398,6 +34503,10 @@ class Session:
             model=self._model,
             purpose="clearance",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
             system_blocks_frozen=self._system_blocks_are_frozen(),
             system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
@@ -34551,6 +34660,10 @@ class Session:
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
             system_blocks_frozen=self._system_blocks_are_frozen(),
             system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
