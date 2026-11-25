@@ -718,7 +718,14 @@ def _update_selection_after_commit(
             if kind == "selected_model":
                 reduced = {
                     key: details[key]
-                    for key in ("version", "selector", "effort", "boot", "fast", "auth_route_default")
+                    for key in (
+                        "version",
+                        "selector",
+                        "effort",
+                        "boot",
+                        "fast",
+                        "auth_route_default",
+                    )
                     if key in details
                 }
             elif kind == ANCHOR_CUSTOM_TYPE:
