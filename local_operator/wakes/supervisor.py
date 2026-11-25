@@ -1110,6 +1110,16 @@ PARKED_PROBE_TIMEOUT_S = 180.0
 PARKED_PROBE_START_MARGIN_S = 15.0
 
 
+def _monitor_entry_is_parked(config_dir: Path, session_id: str) -> bool:
+    """Whether the on-disk monitor entry is parked — for the probe's log label only."""
+    from local_operator.monitors import store as monitor_store
+
+    try:
+        return _is_parked_monitor_entry(monitor_store.read_entry(config_dir, session_id))
+    except Exception:  # noqa: BLE001 — a label must never fail the probe
+        return False
+
+
 def _is_parked_monitor_entry(entry: Any) -> bool:
     """A monitor entry stamped ``parked_at`` by a park (and not held)."""
     return (
@@ -1174,7 +1184,18 @@ def _sweep_probe_group(pid: int) -> None:
 
 
 async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "") -> bool:
-    """Run a parked session's due monitor checks WITHOUT reopening it.
+    """Run a runtime-less session's due monitor checks WITHOUT booting it.
+
+    Named for its first use (parked sessions); since the wake boot economy
+    change it runs for EVERY due monitor row whose session has no live runtime.
+    Its log lines say ``parked monitors`` for a parked session and ``cold
+    monitors`` for an idle-exited one, so the two populations stay countable.
+
+    COST, measured from the supervisor log (8,657 probe samples before this
+    widening): maxrss median ~106 MB, p90 ~116 MB, max ~171 MB, for the life of
+    one short subprocess; it shares the ``_MAX_CONCURRENT_ENGAGES`` slots with
+    engagements and is bounded by ``PARKED_PROBE_TIMEOUT_S``. A cold boot it
+    avoids costs a median 11.4 s of boot and ~147 s of residency.
 
     True only when the probe ran every due check and each was unchanged (it
     advanced their counters itself); then the session stays parked. Every other
@@ -1193,6 +1214,16 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
 
     if await _has_live_runtime(config_dir, session_id):
         return False
+    label = (
+        "parked monitors"
+        if await asyncio.to_thread(_monitor_entry_is_parked, config_dir, session_id)
+        else "cold monitors"
+    )
+    # Probe wall time is LOGGED (round 1, R2): every runtime-less monitor is now
+    # probed before any engage, so a probe holds one of the shared engage slots
+    # and delays a real change by its duration. The distribution has to be read
+    # from these lines before any cap or slot split is set.
+    probe_started = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -1213,13 +1244,13 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
             env=_parked_probe_env(config_dir),
         )
     except OSError as exc:
-        logger.warning("parked monitors %s: probe could not start (%s); engaging", session_id, exc)
+        logger.warning("%s %s: probe could not start (%s); engaging", label, session_id, exc)
         return False
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=PARKED_PROBE_TIMEOUT_S)
     except asyncio.TimeoutError:
         await _reap_probe(proc)
-        logger.warning("parked monitors %s: probe timed out; engaging", session_id)
+        logger.warning("%s %s: probe timed out; engaging", label, session_id)
         return False
     except asyncio.CancelledError:
         # SHUTDOWN, NOT A VERDICT (review round 1, R1-5). Swallowing the
@@ -1249,11 +1280,17 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
     # that matters — real servers such as Slack's — cannot be measured in
     # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
-        "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        "%s %s: %s (%s, %s checked, %.1fs, maxrss self=%s KiB children=%s KiB)",
+        label,
         session_id,
-        "quiet — left parked" if quiet else "engaging",
+        (
+            ("quiet — left parked" if label == "parked monitors" else "quiet — not booted")
+            if quiet
+            else "engaging"
+        ),
         verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
+        time.monotonic() - probe_started,
         maxrss.get("self", "?"),
         maxrss.get("children", "?"),
     )
@@ -2299,13 +2336,15 @@ class _Sweeper:
         moment: int,
         *,
         schedule_id: str = "",
-        parked: bool = False,
+        probe_first: bool = False,
     ) -> bool:
         """Start one engagement in the background. False when already running.
 
-        ``parked`` (monitor rows only): the session was PARKED, so its due
-        checks are first run by :func:`_parked_monitors_quiet` outside the
-        session, and the engagement happens only when one is not quiet. Shares
+        ``probe_first`` (monitor rows only; renamed from ``parked`` when the
+        probe widened past parked sessions, round 1 R4): the
+        session's due checks are first run by :func:`_parked_monitors_quiet`
+        outside the session — for any session with no live runtime, parked or
+        not — and the engagement happens only when one is not quiet. Shares
         the engagement semaphore, so probes and engagements together stay
         within ``_MAX_CONCURRENT_ENGAGES``.
 
@@ -2357,7 +2396,7 @@ class _Sweeper:
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
-                if is_monitor and parked:
+                if is_monitor and probe_first:
                     # Inside the try so the in-flight key is popped by the
                     # ``finally`` below on every path, quiet or not.
                     async with self._semaphore:
@@ -2504,12 +2543,23 @@ class _Sweeper:
             origins=origins,
         ):
             origin = origins.get(session_id)
-            parked = bool(
-                origin and monitors and _is_parked_monitor_entry(monitors.get(session_id))
-            )
+            # EVERY monitors-pass row is probed first, parked or not (wake boot
+            # economy, 2026-11-24). Parking was a proxy for "no runtime"; the
+            # probe itself re-checks liveness (``_parked_monitors_quiet`` asks
+            # ``_has_live_runtime`` before spawning, the probe re-asks at commit),
+            # so a session a runtime hosts still reaches ``_engage_one``'s live
+            # skip. Before this, 1,039 of 2,878 cold boots in 3.57 days (36.1%)
+            # booted an idle-exited session only to find its check unchanged.
+            probe = bool(origin and monitors)
             engaged = (
                 self.engage(
-                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=parked
+                    config_dir,
+                    session_id,
+                    cwd,
+                    due_ms,
+                    moment,
+                    schedule_id=origin,
+                    probe_first=probe,
                 )
                 if origin
                 else self.engage(config_dir, session_id, cwd, due_ms, moment)

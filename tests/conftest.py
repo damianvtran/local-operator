@@ -403,6 +403,10 @@ _AMBIENT_VARS = (
     # a live supervisor it is harmless on its own (no test process shares that
     # pid), but it belongs to the same live-machine state as the token.
     "LOP_WAKE_SUPERVISOR_PID",
+    # "The supervisor started this runtime" (``owned_runtimes.SUPERVISOR_STARTED_ENV``):
+    # inherited from a supervisor-started shell, every session a test loads would
+    # pull its wakes forward (``harness.wake.take_supervisor_started``).
+    "LOP_WAKE_SUPERVISOR_STARTED",
     # The team-bridge connector's supervision gate
     # (``team_bridge/connector/__main__._is_supervised``). All three decide
     # whether THIS process may exit and leave a service manager to restart it,

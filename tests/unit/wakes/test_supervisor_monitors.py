@@ -86,6 +86,15 @@ def _arm(
         monitor_state.write_counters(config_dir, session_id, "m1", counters)
 
 
+async def _not_quiet(config_dir, session_id, cwd=""):  # noqa: ANN001, ANN202
+    """The probe's "engage" answer, for tests about the ENGAGEMENT after it.
+
+    Every runtime-less monitor row is probed first now (wake boot economy); a
+    real probe subprocess would read the wall clock, not these tests' NOW_MS.
+    """
+    return False
+
+
 def _state(config_dir: Path) -> tuple[Any, ...]:
     return _load_and_reconcile_state(config_dir)
 
@@ -253,6 +262,7 @@ async def test_a_cold_monitor_session_is_engaged_with_a_monitor_schedule_id(
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
     monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(sup, "_parked_monitors_quiet", _not_quiet)
     _arm(tmp_path, "coldmonitor1", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
 
     assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
@@ -277,6 +287,7 @@ async def test_a_failed_monitor_engage_backs_off_in_memory(
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", failing)
     monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(sup, "_parked_monitors_quiet", _not_quiet)
     _arm(tmp_path, "failingmon01", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
 
     await fire_due_wakes(tmp_path, now_ms=NOW_MS)
@@ -403,25 +414,68 @@ async def test_a_parked_monitor_is_probed_first_and_engaged_only_when_not_quiet(
 
 
 @pytest.mark.asyncio
-async def test_an_unparked_cold_monitor_is_never_probed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("quiet", [True, False])
+async def test_an_unparked_cold_monitor_is_probed_and_booted_only_when_not_quiet(
+    quiet: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Negative control: only a PARK routes through the probe."""
+    """Wake boot economy: an idle-exited (NOT parked) session is probed first too.
+
+    Before, only a park routed through the probe and every other runtime-less
+    session was cold-booted to run its check (36.1% of all cold boots found
+    nothing). Quiet: zero engagements. Not quiet: exactly one.
+    """
+    works: list[Any] = []
+    probed: list[str] = []
 
     async def fake_engage(session_id, cwd, work, **_kwargs):  # noqa: ANN001, ANN202
-        return None
+        works.append(session_id)
 
     async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
         return False
 
     async def probe(config_dir, session_id, cwd=""):  # noqa: ANN001, ANN202
-        raise AssertionError("an idle-exited session is engaged as before")
+        probed.append(session_id)
+        return quiet
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
     monkeypatch.setattr(sup, "_has_live_runtime", cold)
     monkeypatch.setattr(sup, "_parked_monitors_quiet", probe)
     _arm(tmp_path, "coldmonitor2", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == (0 if quiet else 1)
+    assert probed == ["coldmonitor2"]
+    assert works == ([] if quiet else ["coldmonitor2"])
+
+
+@pytest.mark.asyncio
+async def test_a_wake_row_is_never_routed_through_the_monitor_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: the probe is for monitor rows; a due WAKE engages as before."""
+    from local_operator.wakes.store import write_entry as write_wake
+
+    works: list[str] = []
+
+    async def fake_engage(session_id, cwd, work, **_kwargs):  # noqa: ANN001, ANN202
+        works.append(session_id)
+
+    async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
+        return False
+
+    async def probe(config_dir, session_id, cwd=""):  # noqa: ANN001, ANN202
+        raise AssertionError("a wake row must not be probed")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+    monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(sup, "_parked_monitors_quiet", probe)
+    _make_session(tmp_path, "wakeonly0001")
+    write_wake(
+        tmp_path,
+        "wakeonly0001",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "m", "next_due_at": NOW_MS - 1_000, "created_at": 1}],
+    )
     assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
+    assert works == ["wakeonly0001"]
 
 
 @pytest.mark.asyncio
