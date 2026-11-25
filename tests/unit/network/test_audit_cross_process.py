@@ -637,3 +637,76 @@ def test_a_symlinked_pending_directory_is_not_followed(tmp_path: Path) -> None:
     log.record(audit.AuditEvent(event="panic_raised"))
     assert [r["event"] for r in _all_rows(tmp_path)] == ["panic_raised"]
     assert sorted(os.listdir(elsewhere)) == ["00000000000000000001-1-aa.jsonl"]
+
+
+def _fail_open_once(monkeypatch: pytest.MonkeyPatch, name: str, err: int) -> list[str]:
+    """Arm ONE transient ``err`` on the next ``os.open`` of the pending entry ``name``."""
+    real_open = os.open
+    armed = [name]
+
+    def flaky(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if armed and Path(path).name == armed[0]:
+            armed.pop()
+            raise OSError(err, f"{os.strerror(err)} (injected)")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(audit.os, "open", flaky)
+    return armed
+
+
+@pytest.mark.parametrize("err", [errno.EMFILE, errno.EIO])
+def test_a_transient_error_reading_a_spill_refuses_and_keeps_it_for_the_next_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    """R3-1: an EMFILE/EIO is not a hostile entry; set aside, the parked row was lost."""
+    spill = _park_one(tmp_path, "PARKED", monkeypatch)
+    armed = _fail_open_once(monkeypatch, spill, err)
+    first = _quiet(audit.AuditLog(tmp_path))
+    first.record(audit.AuditEvent(event="panic_raised", subject="own"))
+    assert not armed, "the injected fault never fired"
+    assert len(first._buffer) == 1 and first.drain_failures == 1, "the lock was granted"
+    assert first.pending_rejected == 0 and first._file_lock_depth == 0
+    assert not (tmp_path / "network" / "audit.jsonl").exists() or _all_rows(tmp_path) == []
+    assert _parked(tmp_path) == [spill]  # left in place, not renamed
+    audit.write_event(tmp_path, event="member_removed", subject="later")
+    first.close()
+    rows = _all_rows(tmp_path)
+    subjects = [r.get("subject") for r in rows]
+    for subject in ("PARKED", "own", "later"):
+        assert subjects.count(subject) == 1, (subject, subjects)
+    assert subjects[0] == "PARKED"
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert _parked(tmp_path) == []
+
+
+@pytest.mark.parametrize("err", [errno.EMFILE, errno.EIO])
+def test_a_transient_error_reading_a_torn_claim_refuses_and_numbers_nothing_inside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    """R3-1: a granted lock here numbered ``own`` as seq 2, inside claim 1-3 (R2-1 class)."""
+    pending = tmp_path / "network" / "audit.jsonl.pending"
+    pending.mkdir(parents=True)
+    row = lambda seq, subject: json.dumps(  # noqa: E731
+        {"event": "onboard_requested", "seq": seq, "subject": subject}, sort_keys=True
+    )
+    claim = "00000000000000000001-1-aa.1-3.draining"
+    (pending / claim).write_text("".join(row(n, f"P{n}") + "\n" for n in (1, 2, 3)))
+    live = tmp_path / "network" / "audit.jsonl"
+    live.write_text(row(1, "P1") + "\n")  # torn: only P1 reached the log
+    armed = _fail_open_once(monkeypatch, claim, err)
+    first = _quiet(audit.AuditLog(tmp_path))
+    first.record(audit.AuditEvent(event="panic_raised", subject="own"))
+    assert not armed, "the injected fault never fired"
+    assert len(first._buffer) == 1 and first.drain_failures == 1, "the lock was granted"
+    assert first.pending_rejected == 0 and first._file_lock_depth == 0
+    assert [r.get("subject") for r in _all_rows(tmp_path)] == ["P1"]  # nothing numbered
+    assert _parked(tmp_path) == [claim]  # the claim keeps its name and its numbers
+    audit.write_event(tmp_path, event="member_removed", subject="later")
+    first.close()
+    rows = _all_rows(tmp_path)
+    subjects = [r.get("subject") for r in rows]
+    for subject in ("P1", "P2", "P3", "own", "later"):
+        assert subjects.count(subject) == 1, (subject, subjects)
+    assert subjects[:3] == ["P1", "P2", "P3"]
+    assert [r["seq"] for r in rows] == [1, 2, 3, 4, 5]
+    assert _parked(tmp_path) == []

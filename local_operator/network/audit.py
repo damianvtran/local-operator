@@ -90,6 +90,7 @@ beside their reader.
 
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import json
@@ -1981,6 +1982,20 @@ class AuditLog:
                     if last - first + 1 != len(lines):
                         raise ValueError(f"its range {first}-{last} does not match its rows")
             except Exception as exc:  # noqa: BLE001 - per entry; the flock must be released
+                if not _is_shape_fault(exc):
+                    # TRANSIENT, NOT HOSTILE (round 3, R3-1): an EMFILE/ENFILE/EIO/
+                    # ENOMEM says nothing about the entry, so setting it aside lost a
+                    # legitimate parked row for good - and, for a torn claim, granted a
+                    # lock that numbered new rows inside the claim's range (the R2-1
+                    # class). Refused instead, with the entry untouched: nothing was
+                    # renamed before the read, so there is no claim to undo, and
+                    # ``_enter_file_lock`` releases the flock; the next writer retries.
+                    print(
+                        f"warning: parked audit rows in {name} could not be read ({exc}); "
+                        "they stay parked for the next writer",
+                        file=sys.stderr,
+                    )
+                    return False
                 if not self._set_aside(source, exc) and claimed:
                     return False  # an unresolved claim is still in place
                 continue
@@ -2809,6 +2824,23 @@ def _restamp(line: str, seq: int) -> str:
         return line
     row["seq"] = seq
     return json.dumps(row, separators=(",", ":"), ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def _is_shape_fault(exc: BaseException) -> bool:
+    """Is this failure reading a parked entry about the ENTRY itself (set it aside)?
+
+    Only a fault that will recur on every later read is a shape fault (round 3,
+    R3-1): a ``ValueError`` from :func:`_read_parked` (bad JSON - including a
+    ``UnicodeDecodeError`` - a non-record row, not ``S_ISREG``, over the cap, or a
+    claim whose range does not match its rows) and ``ELOOP`` (``O_NOFOLLOW`` met a
+    planted symlink). A FIFO or directory opens fine under ``O_NONBLOCK`` and is
+    caught by the ``fstat`` check, so it is a ``ValueError`` too. Every other
+    ``OSError`` (EMFILE, ENFILE, EIO, ENOMEM, ...) may succeed next time, and any
+    other exception is unclassified; both refuse the lock rather than discard rows.
+    """
+    if isinstance(exc, ValueError):
+        return True
+    return isinstance(exc, OSError) and exc.errno == errno.ELOOP
 
 
 def _read_parked(path: Path) -> list[str]:
