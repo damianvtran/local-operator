@@ -926,7 +926,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (native search vendors, PR #4569): 196 -> 208 — the
     # ``provider`` enum gains openai/anthropic/xai/alibaba. Deliberate: a
     # native vendor the model cannot force is not selectable at all.
-    "web_search": 208,
+    # RE-MEASURED (native-search family, PR2 part B): 208 -> 222 (+14) — the
+    # enum gains google/kimi/zai/mistral/openrouter, for the same reason.
+    "web_search": 222,
     "write": 137,
 }
 

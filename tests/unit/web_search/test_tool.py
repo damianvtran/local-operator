@@ -60,6 +60,11 @@ def test_provider_argument_is_closed_to_supported_catalogue() -> None:
         "anthropic",
         "xai",
         "alibaba",
+        "google",
+        "kimi",
+        "zai",
+        "mistral",
+        "openrouter",
     }
 
 

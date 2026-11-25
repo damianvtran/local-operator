@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "clave API / inicio de sesión",
   "web_search.native.detail_key": "Búsqueda web integrada de {vendor}; cobra una tarifa por búsqueda más un turno del modelo a tu credencial de {vendor}",
   "web_search.native.detail_plan_key": "Búsqueda web integrada de {vendor}; primero se usa tu plan {plan} y después tu clave API (tarifa por búsqueda más un turno del modelo)",
-  "web_search.native.no_credential": "La búsqueda de {vendor} no tiene una credencial utilizable para este tramo; vuelve a iniciar sesión o guarda una clave API de {vendor}."
+  "web_search.native.no_credential": "La búsqueda de {vendor} no tiene una credencial utilizable para este tramo; vuelve a iniciar sesión o guarda una clave API de {vendor}.",
+  "web_search.native.access_plan": "inicio de sesión / clave del plan",
+  "web_search.native.detail_plan": "Búsqueda web integrada de {vendor}, incluida en tu {plan}; no genera cargos",
+  "web_search.native.detail_search_api": "API de búsqueda de {vendor} (sin turno de modelo); cobra una pequeña tarifa por búsqueda a tu clave de {vendor}"
 }

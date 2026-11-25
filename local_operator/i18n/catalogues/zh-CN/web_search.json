@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "API 密钥 / 登录",
   "web_search.native.detail_key": "{vendor} 内置网页搜索；每次搜索向你的 {vendor} 凭据收取一次搜索费用和一次模型调用费用",
   "web_search.native.detail_plan_key": "{vendor} 内置网页搜索；先使用你的 {plan} 套餐，再使用你的 API 密钥（每次搜索费用加一次模型调用）",
-  "web_search.native.no_credential": "{vendor} 搜索在此环节没有可用的凭据；请重新登录或保存 {vendor} API 密钥。"
+  "web_search.native.no_credential": "{vendor} 搜索在此环节没有可用的凭据；请重新登录或保存 {vendor} API 密钥。",
+  "web_search.native.access_plan": "套餐登录 / 套餐密钥",
+  "web_search.native.detail_plan": "{vendor} 内置网页搜索，已包含在你的 {plan} 中；不产生额外费用",
+  "web_search.native.detail_search_api": "{vendor} 搜索 API（无模型调用）；每次搜索向你的 {vendor} 密钥收取少量费用"
 }

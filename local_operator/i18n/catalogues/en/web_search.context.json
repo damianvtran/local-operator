@@ -152,5 +152,21 @@
     "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
     "tone": "plain, actionable",
     "note": "{vendor} is a brand name, never translated."
+  },
+  "web_search.native.access_plan": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search served only by a subscription plan's credential (sign-in or the plan's own key); no pay-as-you-go billing",
+    "maxCells": 24
+  },
+  "web_search.native.detail_plan": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search row funded by a subscription plan. {vendor} is a brand name; {plan} is a product plan name (GLM Coding Plan, Kimi Code plan), never translated."
+  },
+  "web_search.native.detail_search_api": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a vendor's standalone search API (returns results directly, no model answer). {vendor} is a brand name, never translated."
   }
 }

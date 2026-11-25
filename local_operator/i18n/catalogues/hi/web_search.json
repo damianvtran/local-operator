@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "API कुंजी / साइन-इन",
   "web_search.native.detail_key": "{vendor} की अंतर्निहित वेब खोज; आपके {vendor} क्रेडेंशियल पर प्रति खोज शुल्क और एक मॉडल टर्न का बिल लगता है",
   "web_search.native.detail_plan_key": "{vendor} की अंतर्निहित वेब खोज; पहले आपका {plan} प्लान आज़माया जाता है, फिर आपकी API कुंजी (प्रति खोज शुल्क और एक मॉडल टर्न)",
-  "web_search.native.no_credential": "{vendor} खोज के पास इस चरण के लिए कोई उपयोगी क्रेडेंशियल नहीं है; फिर से साइन इन करें या {vendor} API कुंजी सहेजें।"
+  "web_search.native.no_credential": "{vendor} खोज के पास इस चरण के लिए कोई उपयोगी क्रेडेंशियल नहीं है; फिर से साइन इन करें या {vendor} API कुंजी सहेजें।",
+  "web_search.native.access_plan": "प्लान साइन-इन / प्लान कुंजी",
+  "web_search.native.detail_plan": "{vendor} की अंतर्निहित वेब खोज, आपके {plan} में शामिल; कोई अतिरिक्त शुल्क नहीं",
+  "web_search.native.detail_search_api": "{vendor} का खोज API (कोई मॉडल टर्न नहीं); आपकी {vendor} कुंजी पर प्रति खोज छोटा शुल्क लगता है"
 }

@@ -97,4 +97,9 @@ WEB_SEARCH_PROVIDER_IDS: tuple[str, ...] = (
     "anthropic",
     "xai",
     "alibaba",
+    "google",
+    "kimi",
+    "zai",
+    "mistral",
+    "openrouter",
 )

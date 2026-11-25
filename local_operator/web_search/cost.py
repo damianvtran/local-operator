@@ -94,6 +94,11 @@ PROVIDER_USD_PER_SEARCH: dict[str, float | None] = {
     "anthropic": None,  # $10 / 1,000 searches + tokens
     "xai": None,  # $5 / 1,000 web_search calls + tokens
     "alibaba": None,  # Singapore $10 / 1,000 calls + tokens
+    "google": None,  # $14 / 1,000 grounded queries + tokens (after a monthly free allowance)
+    "kimi": None,  # $0.002 per non-empty search, no model turn
+    "zai": None,  # GLM Coding Plan quota: no cash
+    "mistral": None,  # $30 / 1,000 web_search calls + tokens
+    "openrouter": None,  # billed usage.cost (engine fee + tokens), read per response
 }
 
 #: Why a provider's number looks the way it does. Rendered next to the estimate
@@ -120,6 +125,14 @@ PROVIDER_PRICE_NOTES: dict[str, str] = {
     ),
     "xai": "$5 per 1,000 searches plus tokens",
     "alibaba": "$10 per 1,000 searches plus tokens (Singapore)",
+    "google": (
+        "$14 per 1,000 grounded queries plus tokens; Google's monthly free allowance "
+        "is not visible here, so the figure is an upper estimate"
+    ),
+    "kimi": "$0.002 per search that returns results; empty or failed searches are free",
+    "zai": "included in the GLM Coding Plan; moves no cash",
+    "mistral": "$30 per 1,000 searches plus tokens",
+    "openrouter": "billed by OpenRouter per response (search engine fee plus tokens)",
 }
 
 #: Basis strings, kept as constants so the display and the tests agree.

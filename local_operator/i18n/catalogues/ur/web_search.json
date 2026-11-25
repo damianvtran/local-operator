@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "API کلید / سائن اِن",
   "web_search.native.detail_key": "{vendor} کی بلٹ اِن ویب تلاش؛ آپ کے {vendor} کریڈینشل پر فی تلاش فیس اور ایک ماڈل ٹرن کا بل لگتا ہے",
   "web_search.native.detail_plan_key": "{vendor} کی بلٹ اِن ویب تلاش؛ پہلے آپ کا {plan} پلان آزمایا جاتا ہے، پھر آپ کی API کلید (فی تلاش فیس اور ایک ماڈل ٹرن)",
-  "web_search.native.no_credential": "{vendor} تلاش کے پاس اس مرحلے کے لیے کوئی قابلِ استعمال کریڈینشل نہیں؛ دوبارہ سائن اِن کریں یا {vendor} API کلید محفوظ کریں۔"
+  "web_search.native.no_credential": "{vendor} تلاش کے پاس اس مرحلے کے لیے کوئی قابلِ استعمال کریڈینشل نہیں؛ دوبارہ سائن اِن کریں یا {vendor} API کلید محفوظ کریں۔",
+  "web_search.native.access_plan": "پلان سائن اِن / پلان کلید",
+  "web_search.native.detail_plan": "{vendor} کی بلٹ اِن ویب تلاش، آپ کے {plan} میں شامل؛ کوئی اضافی رقم نہیں",
+  "web_search.native.detail_search_api": "{vendor} کا تلاش API (کوئی ماڈل ٹرن نہیں)؛ آپ کی {vendor} کلید پر فی تلاش معمولی فیس لگتی ہے"
 }

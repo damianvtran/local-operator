@@ -8,7 +8,11 @@ Three vendors serve native search through the same Responses shape
   (Alibaba) -- ``action.sources[]`` lists every page the search consulted;
 * the ``message`` item's ``output_text`` parts carry ``url_citation``
   annotations (``url``, ``title``) for the pages the answer actually cites;
-* xAI additionally returns a top-level ``citations`` list of URLs.
+* xAI additionally returns a top-level ``citations`` list of URLs;
+* OpenRouter's ``openrouter:web_search`` server tool names its call item
+  ``type: "openrouter:web_search"`` (same ``action.sources`` shape) and counts
+  searches at ``usage.server_tool_use_details.web_search_requests`` (live
+  capture 2026-11-24).
 
 SOURCE ORDER: cited pages first (they carry a title and are the ones the
 answer leaned on), then the remaining consulted pages in search order, deduped
@@ -35,6 +39,11 @@ from local_operator.web_search.models import SearchSource, SearchUsage
 #: The ``include`` entry that makes OpenAI return every consulted source on the
 #: ``web_search_call`` item (without it only cited pages are visible).
 SOURCES_INCLUDE = "web_search_call.action.sources"
+
+#: Output item types that carry one server-side search. ``openrouter:web_search``
+#: is OpenRouter's spelling of the same item (live capture 2026-11-24); without it
+#: the consulted pages on an OpenRouter response would be dropped.
+SEARCH_CALL_TYPES = frozenset({"web_search_call", "openrouter:web_search"})
 
 
 def _source(title: object, url: object) -> SearchSource | None:
@@ -81,7 +90,12 @@ def search_call_count(payload: dict[str, Any]) -> int:
         details = usage.get("server_side_tool_usage_details")
         if isinstance(details, dict) and isinstance(details.get("web_search_calls"), int):
             return int(details["web_search_calls"])
-    return sum(1 for item in _items(payload) if item.get("type") == "web_search_call")
+        # OpenRouter's count. Its docs warn not to add ``tool_calls_requested``
+        # to it (a server-orchestrated search is counted in both).
+        details = usage.get("server_tool_use_details")
+        if isinstance(details, dict) and isinstance(details.get("web_search_requests"), int):
+            return int(details["web_search_requests"])
+    return sum(1 for item in _items(payload) if item.get("type") in SEARCH_CALL_TYPES)
 
 
 def parse_responses_search(
@@ -102,7 +116,7 @@ def parse_responses_search(
     consulted: list[tuple[object, object]] = []
     for item in _items(payload):
         kind = item.get("type")
-        if kind == "web_search_call":
+        if kind in SEARCH_CALL_TYPES:
             action = item.get("action")
             sources = action.get("sources") if isinstance(action, dict) else None
             for entry in sources or []:

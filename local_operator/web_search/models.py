@@ -38,6 +38,11 @@ SearchProviderId = Literal[
     "anthropic",
     "xai",
     "alibaba",
+    "google",
+    "kimi",
+    "zai",
+    "mistral",
+    "openrouter",
 ]
 SearchStrategy = Literal["round_robin", "ordered"]
 #: Which automatic band a provider joins when it is NOT named in

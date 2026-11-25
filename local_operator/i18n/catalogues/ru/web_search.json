@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "API-ключ / вход",
   "web_search.native.detail_key": "Встроенный веб-поиск {vendor}; плата за каждый поиск плюс один ход модели списывается с вашей учётной записи {vendor}",
   "web_search.native.detail_plan_key": "Встроенный веб-поиск {vendor}; сначала используется ваш тариф {plan}, затем API-ключ (плата за поиск плюс один ход модели)",
-  "web_search.native.no_credential": "У поиска {vendor} нет пригодных учётных данных для этого шага; войдите снова или сохраните API-ключ {vendor}."
+  "web_search.native.no_credential": "У поиска {vendor} нет пригодных учётных данных для этого шага; войдите снова или сохраните API-ключ {vendor}.",
+  "web_search.native.access_plan": "вход по тарифу / ключ тарифа",
+  "web_search.native.detail_plan": "Встроенный веб-поиск {vendor}, входит в ваш {plan}; без дополнительной оплаты",
+  "web_search.native.detail_search_api": "API поиска {vendor} (без хода модели); небольшая плата за каждый поиск списывается с вашего ключа {vendor}"
 }

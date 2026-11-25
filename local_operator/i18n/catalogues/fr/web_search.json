@@ -26,5 +26,8 @@
   "web_search.native.access_key_signin": "clé API / connexion",
   "web_search.native.detail_key": "Recherche web intégrée de {vendor} ; facture des frais par recherche plus un tour de modèle sur votre identifiant {vendor}",
   "web_search.native.detail_plan_key": "Recherche web intégrée de {vendor} ; votre forfait {plan} est essayé en premier, puis votre clé API (frais par recherche plus un tour de modèle)",
-  "web_search.native.no_credential": "La recherche {vendor} n'a aucun identifiant utilisable pour cette étape ; reconnectez-vous ou enregistrez une clé API {vendor}."
+  "web_search.native.no_credential": "La recherche {vendor} n'a aucun identifiant utilisable pour cette étape ; reconnectez-vous ou enregistrez une clé API {vendor}.",
+  "web_search.native.access_plan": "connexion / clé du forfait",
+  "web_search.native.detail_plan": "Recherche web intégrée de {vendor}, incluse dans votre {plan} ; aucun frais supplémentaire",
+  "web_search.native.detail_search_api": "API de recherche de {vendor} (sans tour de modèle) ; facture de petits frais par recherche sur votre clé {vendor}"
 }
