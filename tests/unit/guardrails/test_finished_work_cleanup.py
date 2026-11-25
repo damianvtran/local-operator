@@ -2072,3 +2072,66 @@ def test_field_argv_ruff_cache_children_rank_low(home: Path, repo: Path, force: 
         session_id=ME,
     )
     assert ranked.risk is Risk.LOW, ranked.reasons
+
+
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [
+        # Q2: the operator's field tree — Finder metadata BESIDE the caches.
+        ("caches-ds", True),
+        # Q1: a person's file inside a tagged tool cache (base held these).
+        ("ruff-notes", False),
+        ("pytest-notes", False),
+        ("ruff-notes-ds", False),
+        # Kept held: a venv or symlink inside a tagged cache, metadata alone
+        # in a foreign tree (#4503 R1/Q1), a directory named ``.DS_Store``.
+        ("ruff-venv", False),
+        ("ruff-symlink", False),
+        ("ds-only", False),
+        ("ds-dir", False),
+    ],
+)
+def test_force_sheds_only_tool_shaped_caches(
+    home: Path, repo: Path, payload: str, shed: bool
+) -> None:
+    """PR #4590 QA round 1 (Q1, Q2), literal argv ``git -C <repo> worktree
+    remove --force <wt>`` on a finished, merged tree this session did not make.
+
+    Q1: a tag alone trusted ``.ruff_cache/notes.md`` and git deleted it (base:
+    HIGH). Q2: with ``.DS_Store`` beside the caches the field shape still read
+    "preservation check failed". Before the fix ``caches-ds`` was HIGH and the
+    three ``notes``/``ruff-venv`` rows were LOW.
+    """
+    name = f"force-shape-{payload}"
+    wt = _branch_tree(home, repo, name)
+    _git("merge", "--ff-only", f"fix/{name}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n.DS_Store\n")
+    if payload != "ds-only":
+        _tool_caches(wt, "caches")
+    (wt / ".pytest_cache" / "README.md").parent.mkdir(exist_ok=True)
+    (wt / ".pytest_cache" / "README.md").write_text("# pytest cache directory #\n\nThis...\n")
+    (wt / ".pytest_cache" / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+    if payload.endswith("-ds") or payload == "ds-only":
+        (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1" + os.urandom(64))
+    if payload == "ds-dir":
+        (wt / ".DS_Store").mkdir()
+        (wt / ".DS_Store" / "data").write_text("mine\n")
+    if payload.startswith("ruff-notes"):
+        (wt / ".ruff_cache" / "notes.md").write_text("hand-written notes\n")
+    if payload == "pytest-notes":
+        (wt / ".pytest_cache" / "notes.md").write_text("hand-written notes\n")
+    if payload == "ruff-venv":
+        (wt / ".ruff_cache" / "0.17.6" / "pyvenv.cfg").write_text("home = /x\n")
+    if payload == "ruff-symlink":
+        (wt / ".ruff_cache" / "0.17.6" / "123").symlink_to(home)
+    ranked = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert (ranked.risk is Risk.LOW) is shed, ranked.reasons
+    if not shed:
+        assert ranked.targets[0].cleanup_hold, ranked.reasons
+        return
+    # The LOW rank is for the command real Git then runs: it removes the tree.
+    _git("worktree", "remove", "--force", str(wt), cwd=repo)
+    assert not wt.exists()

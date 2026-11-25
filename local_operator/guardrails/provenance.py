@@ -2755,6 +2755,28 @@ def _finder_metadata_file(real: str, entry: str) -> bool:
     return parent == real or parent.startswith(real + os.sep)
 
 
+def _os_metadata_file(real: str, entry: str) -> bool:
+    """A regular-file ``.DS_Store``/``Thumbs.db``/``desktop.ini`` inside the tree.
+
+    The :func:`_finder_metadata_file` rules (``lstat`` regular file, parent
+    realpath inside the tree) for every :data:`_OS_METADATA_FILES` name; the
+    OS rewrites these on its own and they carry only folder view state.
+    """
+    name = os.path.basename(entry)
+    if name not in _OS_METADATA_FILES:
+        return False
+    if name == ".DS_Store":
+        return _finder_metadata_file(real, entry)
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
 def _ignored_symlink(real: str, entry: str) -> bool:
     """An ignored entry that is itself a symbolic link (by ``lstat``).
 
@@ -2837,7 +2859,7 @@ _PYCACHE_SCAN_LIMIT = 20000
 _TOOL_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
 
 
-def _verified_cache_dir(real: str, entry: str) -> bool:
+def _verified_cache_dir(real: str, entry: str, *, tool_shaped: bool = False) -> bool:
     """The ignored ``entry`` is, or lies inside, a content-verified cache.
 
     Exact basename only: the entry itself (any name, as before) or its
@@ -2845,9 +2867,22 @@ def _verified_cache_dir(real: str, entry: str) -> bool:
     :func:`_verified_cache_root`. A FILE under a cache name fails there
     (``lstat`` must be a directory), and the cache root's no-repository walk
     covers the child. Paths are relative and ``..``-free (``_cleanup_status_path``).
+
+    ``tool_shaped`` (the ``--force`` route, PR #4590 QA Q1): a cachedir.org tag
+    alone trusts a tagged cache's contents wholesale, so a hand-written
+    ``.ruff_cache/notes.md`` passed and ``git worktree remove --force`` deleted
+    it where base held. On that route the cache root must ALSO bear a
+    :data:`_TOOL_CACHE_DIRS` name and hold only what that tool writes
+    (:func:`_tool_shaped_cache`); any other tagged directory stays held there.
+    The plain route keeps its pre-existing tag trust (out of this PR's scope).
     """
     if _verified_cache_root(real, entry):
-        return True
+        if not tool_shaped:
+            return True
+        name = os.path.basename(entry.rstrip("/"))
+        return name in _TOOL_CACHE_DIRS and _tool_shaped_cache(
+            os.path.join(real, entry.rstrip("/")), name
+        )
     parts = [p for p in entry.rstrip("/").split("/") if p]
     if ".." in parts or os.path.isabs(entry):
         return False
@@ -2855,6 +2890,8 @@ def _verified_cache_dir(real: str, entry: str) -> bool:
         if parts[depth - 1] in _TOOL_CACHE_DIRS:
             root = "/".join(parts[:depth])
             if not _verified_cache_root(real, root):
+                return False
+            if tool_shaped and not _tool_shaped_cache(os.path.join(real, root), parts[depth - 1]):
                 return False
             # The child must stay inside that root after symlinks resolve.
             child = os.path.realpath(os.path.join(real, entry.rstrip("/")))
@@ -2918,6 +2955,103 @@ def _verified_cache_root(real: str, entry: str) -> bool:
         return _tagged_cache_has_no_repository(physical)
     except OSError:
         return False
+
+
+#: The version directories ruff (``0.17.6``) and mypy (``3.12``) key their
+#: caches by, and ruff's per-package result files (a decimal u64 hash).
+_CACHE_VERSION_DIR = re.compile(r"\d+\.\d+(\.\d+)?")
+_RUFF_RESULT_FILE = re.compile(r"\d+")
+#: First line of the README pytest writes into ``.pytest_cache``.
+_PYTEST_README_HEAD = b"# pytest cache directory #"
+
+
+def _self_ignore_file(path: str) -> bool:
+    """The ``.gitignore`` ruff, mypy and pytest write: comments plus ``*``."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode) or os.path.getsize(path) > 4096:
+            return False
+        with open(path, "rb") as fh:
+            lines = [ln.strip() for ln in fh.read().splitlines()]
+    except OSError:
+        return False
+    rules = [ln for ln in lines if ln and not ln.startswith(b"#")]
+    return rules == [b"*"]
+
+
+def _tool_shaped_cache(physical: str, name: str) -> bool:
+    """Does this tagged cache root hold ONLY the shapes its tool writes?
+
+    Why (PR #4590 QA Q1, reproduced with real ``git worktree remove --force``):
+    the ``--force`` route has no merged-tree name rule behind it, so the
+    content witness is the last line between a person's file and deletion.
+    The tag says "this directory is cache"; it does not say a person never
+    dropped ``notes.md`` into it. Measured layouts (2026-11-25, this machine's
+    real caches): ruff ``.gitignore``, ``CACHEDIR.TAG``, ``<x.y.z>/<u64>``;
+    pytest ``.gitignore``, ``CACHEDIR.TAG``, ``README.md``, ``v/…`` (plus the
+    ``d/`` its ``cache.mkdir`` API makes); mypy ``.gitignore``,
+    ``CACHEDIR.TAG``, ``<x.y>/…`` (``missing_stubs`` at the root).
+
+    Constraints: every entry by ``lstat`` (a symlink anywhere holds), no
+    ``pyvenv.cfg`` or ``.git`` at any depth (#4590 R1-m1), bounded by
+    :data:`_PYCACHE_SCAN_LIMIT`; any other name, type or read error holds.
+    """
+    if name == "__pycache__":
+        return True  # _verified_cache_root already proved ``*.pyc``-only
+    seen = 0
+
+    def _subtree(top: str, files_ok: Callable[[str], bool]) -> bool:
+        nonlocal seen
+        try:
+            with os.scandir(top) as it:
+                children = list(it)
+        except OSError:
+            return False
+        for child in children:
+            seen += 1
+            if seen > _PYCACHE_SCAN_LIMIT or child.name in (".git", "pyvenv.cfg"):
+                return False
+            if child.is_dir(follow_symlinks=False):
+                if name == ".ruff_cache" or not _subtree(child.path, files_ok):
+                    return False  # ruff's version dirs hold files only
+            elif not (child.is_file(follow_symlinks=False) and files_ok(child.name)):
+                return False
+        return True
+
+    try:
+        with os.scandir(physical) as it:
+            top = list(it)
+    except OSError:
+        return False
+    for child in top:
+        seen += 1
+        if seen > _PYCACHE_SCAN_LIMIT:
+            return False
+        is_dir = child.is_dir(follow_symlinks=False)
+        is_file = child.is_file(follow_symlinks=False)
+        if child.name == "CACHEDIR.TAG" and is_file:
+            continue  # signature already read by _verified_cache_root
+        if child.name == ".gitignore" and _self_ignore_file(child.path):
+            continue
+        if name == ".ruff_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
+            if _subtree(child.path, _RUFF_RESULT_FILE.fullmatch):
+                continue
+        elif name == ".mypy_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
+            if _subtree(child.path, lambda _n: True):
+                continue
+        elif name == ".mypy_cache" and is_file and child.name == "missing_stubs":
+            continue
+        elif name == ".pytest_cache" and is_dir and child.name in ("v", "d"):
+            if _subtree(child.path, lambda _n: True):
+                continue
+        elif name == ".pytest_cache" and is_file and child.name == "README.md":
+            try:
+                with open(child.path, "rb") as fh:
+                    if fh.read(len(_PYTEST_README_HEAD)) == _PYTEST_README_HEAD:
+                        continue
+            except OSError:
+                return False
+        return False
+    return True
 
 
 def _tagged_cache_has_no_repository(physical: str) -> bool:
@@ -3071,6 +3205,12 @@ def _interrupted_cleanup_state(
     if status is None:
         return "unknown"
     deleted = False
+    # PR #4590 QA Q2: the operator's field tree carries Finder ``.DS_Store``
+    # beside its caches, and ``--force`` on it stayed HIGH. OS folder metadata
+    # (regular files only, :func:`_os_metadata_file`) is accepted on this route
+    # only BESIDE a tool-shaped cache, so a metadata-only foreign tree keeps
+    # #4503 R1/Q1's base hold; an own tree sheds it via ``_own_tree_sheds``.
+    metadata_pending = cache_seen = False
     rows = status.split("\0")
     if facts is not None:
         facts["ignored"] = any(row.startswith("!! ") for row in rows)
@@ -3106,7 +3246,11 @@ def _interrupted_cleanup_state(
         # cache is a witness on every cleanup route, whoever made the tree,
         # so ``--force`` agrees with plain removal for caches; the walk inside
         # still refuses a nested repository, unreadable directory or overflow.
-        if _verified_cache_dir(real, entry):
+        if _verified_cache_dir(real, entry, tool_shaped=True):
+            cache_seen = True
+            continue
+        if _os_metadata_file(real, entry):
+            metadata_pending = True
             continue
         # 2026-11-24 field case: the ignored-symlink and ``next-env.d.ts``
         # witnesses are deliberately NOT added here for foreign trees, as with
@@ -3116,6 +3260,8 @@ def _interrupted_cleanup_state(
         # the owner's supported spelling.
         if own_regenerable and _own_tree_sheds(physical):
             continue
+        return "dirty"
+    if metadata_pending and not cache_seen and not own_regenerable:
         return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"
