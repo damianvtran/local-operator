@@ -4274,7 +4274,14 @@ class LoopConfig(BaseModel):
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)
     # Model-facing widget discovery is an input capability, not a new user
     # message. The host reads its current grant at each real request boundary.
-    get_inline_ui_hint: Callable[[], str | None] | None = Field(default=None, exclude=True)
+    # It receives the spec THIS request is built for (like ``get_system_blocks``),
+    # because where the hint goes depends on the model: on an Anthropic thinking
+    # wire it is a fixed head row bound into every signed thinking block's
+    # prefix, elsewhere it follows the live surface. A host re-reading its own
+    # current model could disagree with the request after a mid-call ``/model``.
+    get_inline_ui_hint: Callable[["ModelSpec"], str | None] | None = Field(
+        default=None, exclude=True
+    )
 
     # Required in practice: stream one assistant response. Providers implement
     # this; the loop only knows the signature.

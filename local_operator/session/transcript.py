@@ -108,6 +108,12 @@ ENTRY_MESSAGE = "message"
 #: ``details = {"untrusted": bool}``). Defined here, beside the journal, because
 #: a fork cut must treat it as prefix state (``fork_snapshot``).
 PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
+#: The conversation's latched inline-UI head row (``Session.
+#: _settle_inline_ui_head_latch``; ``details = {"text": str | None,
+#: "compaction_id": str | None}``). Defined here, beside the journal, for the
+#: same reason as :data:`PROFILE_TRUST_CUSTOM_TYPE`: a fork cut must drop the
+#: rows decided under compactions the child does not keep (``fork_snapshot``).
+INLINE_UI_HEAD_LATCH_CUSTOM_TYPE = "inline_ui_head_latch_v1"
 ENTRY_COMPACTION = "compaction"
 ENTRY_CUSTOM = "custom"
 
@@ -3686,6 +3692,27 @@ class Transcript:
                             continue
                         if later:
                             excluded.add(row.id)
+                    # THE HEAD-ROW LATCH IS COMPACTION STATE. On an Anthropic
+                    # thinking wire every signed thinking block is bound to ALL
+                    # content before it, including the latched head row at
+                    # ``messages[0]``; the latch is re-decided only at a
+                    # compaction that left no signed thinking. A row decided
+                    # under a marker this child drops describes history the
+                    # child does not replay: kept, it would outrank the row its
+                    # retained blocks were signed under, so every request
+                    # would rewrite their prefix (HTTP 400) and miss the
+                    # message cache. Drop those rows; ``latest_custom`` then
+                    # restores the newest surviving one, decided under the
+                    # governing marker or before it.
+                    dropped_markers = {row.id for row in compactions if row.id in excluded}
+                    excluded.update(
+                        row.id
+                        for row in self._entries
+                        if row.type == ENTRY_CUSTOM
+                        and row.payload.get("custom_type") == INLINE_UI_HEAD_LATCH_CUSTOM_TYPE
+                        and (row.payload.get("details") or {}).get("compaction_id")
+                        in dropped_markers
+                    )
                 if through_entry_id is not None:
                     # EPISODE FACTS ARE PREFIX STATE. A ``profile_trust`` row
                     # after the cut describes conversation the child does not
