@@ -3013,11 +3013,13 @@ class StatusLine:
             # 9.4:1 in the transcript).
             parts.append(
                 (
+                    # `! auto`, not a bare `!` (design D3): a clickable mark must
+                    # say what it is, and the word is the one the banner and
+                    # `/approvals` use. IN THE TEXT SLOT, not the icon slot: the
+                    # icon is painted `dim` (see the loop below), which rendered
+                    # the alarm grey (#979797) instead of danger — the exact
+                    # regression D1 is about, reintroduced from the other side.
                     "",
-                    # `! auto`, not a bare `!` (design D3): a clickable mark
-                    # must say what it is, and the word is the one the banner
-                    # and `/approvals` use. Five cells; still the narrowest
-                    # bounded rung, so its last-place argument holds.
                     f"{ICON_APPROVALS} auto" if self._alarm_with_word else ICON_APPROVALS,
                     # CLICKABLE: the one-click way back to "ask" (operator
                     # request, 2026-11-24 — "the mode should show somewhere

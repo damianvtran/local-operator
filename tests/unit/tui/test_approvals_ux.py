@@ -21,6 +21,7 @@ directly would pass with the list wired to nothing.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1396,6 +1397,10 @@ async def test_a_click_on_the_bands_auto_mark_switches_the_session_back_to_ask(
         assert _saved_mode(config_dir) is None
 
 
+@pytest.mark.skipif(
+    bool(os.environ.get("NO_COLOR")),
+    reason="a colour assertion: NO_COLOR strips every ink to the terminal default",
+)
 @pytest.mark.asyncio
 async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> None:
     """Design D1 (PR #4558 round 1): making `!` clickable greys it without this.
@@ -1435,6 +1440,10 @@ async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> Non
             seen.append((segment.text, ink))
         mark = [(text, ink) for text, ink in seen if "!" in text]
         assert mark, ("the band painted no alarm", seen)
-        assert any(ink == wanted for _text, ink in mark), (
+        # EVERY alarm cell must be danger: one segment, one ink. An earlier
+        # version of this assertion took "any" segment and passed while the
+        # word rode the icon slot, which the band paints `dim` — so the real
+        # frame was grey with a green test.
+        assert [ink for _text, ink in mark] == [wanted] * len(mark), (
             f"the alarm lost its danger ink: {mark} vs {wanted}"
         )
