@@ -880,6 +880,8 @@
   "wire.settings.web_fetch_timeout_seconds.label": "Timeout (s)",
   "wire.settings.web_search.description": "Providers and load balancing for the search tool.",
   "wire.settings.web_search.title": "Web search",
+  "wire.settings.web_search_claude_subscription_search.help": "Let a Claude sign-in serve web search; drawn from Claude extra usage, tried after Radient.",
+  "wire.settings.web_search_claude_subscription_search.label": "Claude sign-in search",
   "wire.settings.web_search_deepseek_evidence.help": "Adds a per-page quote and relevance score after a DeepSeek search.",
   "wire.settings.web_search_deepseek_evidence.label": "DeepSeek page evidence",
   "wire.settings.web_search_enabled.choice.false.description": "search disabled",

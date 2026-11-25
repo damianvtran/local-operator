@@ -880,6 +880,8 @@
   "wire.settings.web_fetch_timeout_seconds.label": "Délai (s)",
   "wire.settings.web_search.description": "Fournisseurs et équilibrage de charge pour l’outil search.",
   "wire.settings.web_search.title": "Recherche web",
+  "wire.settings.web_search_claude_subscription_search.help": "Autorise une connexion Claude à faire des recherches web ; décompté de l'usage supplémentaire Claude, essayé après Radient.",
+  "wire.settings.web_search_claude_subscription_search.label": "Recherche via connexion Claude",
   "wire.settings.web_search_deepseek_evidence.help": "Ajoute une citation et un score de pertinence par page après une recherche DeepSeek.",
   "wire.settings.web_search_deepseek_evidence.label": "Preuves par page DeepSeek",
   "wire.settings.web_search_enabled.choice.false.description": "recherche désactivée",

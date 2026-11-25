@@ -34,6 +34,10 @@ SearchProviderId = Literal[
     "parallel",
     "serpapi",
     "searxng",
+    "openai",
+    "anthropic",
+    "xai",
+    "alibaba",
 ]
 SearchStrategy = Literal["round_robin", "ordered"]
 #: Which automatic band a provider joins when it is NOT named in
@@ -212,6 +216,10 @@ class WebSearchSettings(BaseModel):
     #: source carries a verbatim quote and a relevance score. Off by default:
     #: it is a second model turn (~4-11s measured) on top of the search.
     deepseek_evidence: bool = False
+    #: Let a Claude sign-in (Anthropic OAuth) serve native search. Off by default
+    #: (operator decision 2026-11-24): plan use from a third-party harness is drawn
+    #: from Claude extra usage, so it is opt-in and ordered as a paid leg.
+    claude_subscription_search: bool = False
     #: Offer the ``web_read`` tool, which answers questions from pages a previous
     #: search already retrieved instead of fetching them again. On by default
     #: because it costs nothing until it is used, and it degrades to an explicit

@@ -86,6 +86,14 @@ PROVIDER_USD_PER_SEARCH: dict[str, float | None] = {
     # a normal response carries the billed amount and the transport records it.
     "radient": 0.01,
     "searxng": 0.0,  # self-hosted
+    # The native-search family prices ITSELF (``web_search.native.pricing``: the
+    # vendor's per-search fee plus the host turn's tokens) and always sets
+    # ``SearchResponse.cost``, so these are never read for a served search. None,
+    # not a fee: a flat number here would understate the token half.
+    "openai": None,  # $10 / 1,000 web_search calls + tokens; plan leg: no cash
+    "anthropic": None,  # $10 / 1,000 searches + tokens
+    "xai": None,  # $5 / 1,000 web_search calls + tokens
+    "alibaba": None,  # Singapore $10 / 1,000 calls + tokens
 }
 
 #: Why a provider's number looks the way it does. Rendered next to the estimate
@@ -105,6 +113,13 @@ PROVIDER_PRICE_NOTES: dict[str, str] = {
     "radient": "$0.01 per search from Radient credits (Tavily), billed by Radient",
     "serpapi": "subscription plans; ≈$15 per 1,000 searches",
     "searxng": "self-hosted; costs no money",
+    "openai": "$10 per 1,000 searches plus tokens on an API key; a ChatGPT plan moves no cash",
+    "anthropic": (
+        "$10 per 1,000 searches plus tokens; a Claude sign-in is priced as the API "
+        "equivalent and drawn from extra usage"
+    ),
+    "xai": "$5 per 1,000 searches plus tokens",
+    "alibaba": "$10 per 1,000 searches plus tokens (Singapore)",
 }
 
 #: Basis strings, kept as constants so the display and the tests agree.

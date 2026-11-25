@@ -55,6 +55,11 @@ def test_provider_argument_is_closed_to_supported_catalogue() -> None:
         "parallel",
         "serpapi",
         "searxng",
+        # The native-search family (web_search/native/), PR2.
+        "openai",
+        "anthropic",
+        "xai",
+        "alibaba",
     }
 
 

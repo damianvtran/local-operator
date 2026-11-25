@@ -224,3 +224,50 @@ async def _iter_sse_json(response: httpx.Response) -> AsyncIterator[dict[str, An
             continue
         if isinstance(data, dict):
             yield data
+
+
+async def post_responses(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    bearer: str,
+    body: dict[str, Any],
+    label: str,
+) -> tuple[dict[str, Any], str | None]:
+    """One non-streamed Responses call: ``(payload, request id)``; raises on HTTP failure.
+
+    Shared by every key-billed Responses vendor (OpenAI, xAI, Alibaba) so the
+    auth header, the error shape and the request-id capture cannot drift
+    between them. The bearer is never part of an error: the HTTP error carries
+    the vendor's own (bounded) body only.
+    """
+    from local_operator.web_search.native.base import error_text
+
+    response = await client.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json=body,
+    )
+    if not response.is_success:
+        raise error_text(label, response)
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise RuntimeError(f"{label} returned a non-JSON response") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} returned a non-object response")
+    request_id = str(response.headers.get("x-request-id") or "").strip() or None
+    return payload, request_id
+
+
+def search_prompt(query: str) -> str:
+    """The user turn every native vendor receives (DeepSeek's wording, kept identical).
+
+    One sentence that names the query and asks for a search: the hosted tool
+    is what returns the sources, so the prompt only has to make the model use it.
+    """
+    return f"Perform a web search for the query: {query}"

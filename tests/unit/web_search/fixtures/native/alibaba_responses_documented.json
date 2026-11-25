@@ -1,0 +1,56 @@
+{
+ "_note": "DOCUMENTED SHAPE, not a live capture (no credential on the probe machine 2026-11-24)",
+ "object": "response",
+ "output": [
+  {
+   "type": "web_search_call",
+   "id": "ws_REDACTED",
+   "status": "completed",
+   "action": {
+    "type": "search",
+    "query": "latest stable Python release",
+    "sources": [
+     {
+      "type": "url",
+      "url": "https://www.python.org/downloads/"
+     },
+     {
+      "type": "url",
+      "url": "https://www.python.org/downloads/release/python-3150/"
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "role": "assistant",
+   "content": [
+    {
+     "type": "output_text",
+     "text": "Python 3.15.0 is the latest stable release.",
+     "annotations": [
+      {
+       "type": "url_citation",
+       "url": "https://www.python.org/downloads/release/python-3150/",
+       "title": "Python Release Python 3.15.0",
+       "start_index": 0,
+       "end_index": 10
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": {
+  "input_tokens": 8000,
+  "input_tokens_details": {
+   "cached_tokens": 2000
+  },
+  "output_tokens": 120
+ },
+ "tool_usage": {
+  "web_search": {
+   "num_requests": 3
+  }
+ }
+}

@@ -23,7 +23,7 @@ from local_operator.web_search.native.base import NativeSearchVendor
 #: Vendor modules under this package, in registration order. Kept as names (not
 #: imports) so a vendor slice adds exactly one line here and nothing else in
 #: shared code needs to know the module exists.
-_VENDOR_MODULES: tuple[str, ...] = ()
+_VENDOR_MODULES: tuple[str, ...] = ("openai", "anthropic", "xai", "alibaba")
 
 
 def _load() -> dict[str, NativeSearchVendor]:

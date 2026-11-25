@@ -923,7 +923,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (radient native search chain, PR #4553): 193 -> 196 — the
     # ``radient`` provider id joins the rendered ``provider`` enum. The only
     # entry that moved; measured through this test's own printed table.
-    "web_search": 196,
+    # RE-MEASURED (native search vendors, PR #4569): 196 -> 208 — the
+    # ``provider`` enum gains openai/anthropic/xai/alibaba. Deliberate: a
+    # native vendor the model cannot force is not selectable at all.
+    "web_search": 208,
     "write": 137,
 }
 

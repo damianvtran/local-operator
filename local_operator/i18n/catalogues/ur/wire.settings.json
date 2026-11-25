@@ -870,6 +870,8 @@
   "wire.settings.web_fetch_timeout_seconds.label": "ٹائم آؤٹ (s)",
   "wire.settings.web_search.description": "تلاش ٹول کے پرووائیڈرز اور لوڈ بیلنسنگ۔",
   "wire.settings.web_search.title": "ویب تلاش",
+  "wire.settings.web_search_claude_subscription_search.help": "Claude سائن اِن کو ویب تلاش کرنے دیں؛ یہ Claude کے اضافی استعمال سے کٹتا ہے اور Radient کے بعد آزمایا جاتا ہے۔",
+  "wire.settings.web_search_claude_subscription_search.label": "Claude سائن اِن تلاش",
   "wire.settings.web_search_deepseek_evidence.help": "DeepSeek تلاش کے بعد فی صفحہ اقتباس اور مطابقت اسکور شامل کریں۔",
   "wire.settings.web_search_deepseek_evidence.label": "DeepSeek صفحہ کا ثبوت",
   "wire.settings.web_search_enabled.choice.false.description": "تلاش بند",

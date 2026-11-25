@@ -4905,6 +4905,20 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.web_search_deepseek_evidence_help()),
     ),
     Setting(
+        key="web_search.claude_subscription_search",
+        path=("web_search", "claude_subscription_search"),
+        section="web_search",
+        label=_t(_ws.web_search_claude_subscription_search_label()),
+        kind=Kind.BOOL,
+        default=False,
+        # Off by default (operator decision 2026-11-24): Anthropic draws a
+        # third-party harness's use of a Claude plan from EXTRA USAGE, so letting
+        # the sign-in serve search spends money the user never chose to spend on
+        # it. Even when on, the leg is ordered with the paid legs (after Radient).
+        # The Anthropic API-key leg is unaffected by this key.
+        help=_t(_ws.web_search_claude_subscription_search_help()),
+    ),
+    Setting(
         key="web_search.read_enabled",
         path=("web_search", "read_enabled"),
         section="web_search",

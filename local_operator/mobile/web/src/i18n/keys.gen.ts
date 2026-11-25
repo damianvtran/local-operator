@@ -2266,6 +2266,8 @@ export type MessageParams = {
   "wire.settings.web_fetch_timeout_seconds.label": undefined;
   "wire.settings.web_search.description": undefined;
   "wire.settings.web_search.title": undefined;
+  "wire.settings.web_search_claude_subscription_search.help": undefined;
+  "wire.settings.web_search_claude_subscription_search.label": undefined;
   "wire.settings.web_search_deepseek_evidence.help": undefined;
   "wire.settings.web_search_deepseek_evidence.label": undefined;
   "wire.settings.web_search_enabled.choice.false.description": undefined;

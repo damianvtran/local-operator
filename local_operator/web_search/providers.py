@@ -1982,6 +1982,13 @@ def provider_auth_mode(
     if provider_id == "searxng":
         endpoint = settings.searxng_endpoint
         return "self-hosted" if endpoint.startswith(("http://", "https://")) else ""
+    native_vendor = NATIVE_SEARCH_VENDORS.get(provider_id)
+    if native_vendor is not None:
+        # A family vendor's STRONGEST leg is its first mode (the vendor orders
+        # them). Without this the generic key probe below would report "" for a
+        # sign-in-only vendor whose legs are in the chain.
+        native_modes = native_vendor.modes(config_dir, settings)
+        return native_modes[0][0] if native_modes else ""
     definition = PROVIDERS[provider_id]
     return "api-key" if _credential(config_dir, *definition.credential_keys) else ""
 
