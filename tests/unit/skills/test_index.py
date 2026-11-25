@@ -296,15 +296,19 @@ class TestRenderBlock:
             ),
         ]
         assert render_block(skills) == (
-            "Skills provide domain-specific instructions and workflows. Read these selected "
-            "skills immediately before proceeding: `skill://alpha`, `skill://beta`. Do not search "
+            "Skills provide domain-specific instructions and workflows. Before proceeding, "
+            "read these selected skills unless their current, relevant instructions are already "
+            "available in context: `skill://alpha`, `skill://beta`. Do not search "
             "the filesystem or use bash/glob to locate skills — skills are virtual resources "
             "loaded only via `skill://`. The skill body ends with its reference files; read "
             "those with `skill://<name>/<path>`, never a raw filesystem path.\n"
             "<skills>\n"
             "- alpha: first skill\n"
             "- beta: second skill\n"
-            "</skills>"
+            "</skills>\n\n"
+            "Use direct `read` to bring instructions into context. A listing, partial "
+            "index, spill handle or nested call's status alone does not supply omitted "
+            "content; use the indicated range or spill handle for needed sections."
         )
 
     def test_selected_url_encodes_frontmatter_name_for_resolver(self) -> None:
@@ -342,7 +346,7 @@ class TestRenderBlock:
         assert line == (
             "- ops: Minerva operational API playbooks for support and tenant administration."
         )
-        assert "Read these selected skills immediately before proceeding: `skill://ops`" in block
+        assert "already available in context: `skill://ops`" in block
 
     def test_short_description_clips_on_a_word_with_an_ellipsis(self) -> None:
         text = "word " * 100

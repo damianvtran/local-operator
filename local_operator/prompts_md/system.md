@@ -186,14 +186,14 @@ that stays valid for a day.{{/if}}
 {{/if}}{{#if has_resources}}
 ### Resources
 
-`<guides>` lists Local Operator procedures by name. When a listed guide matches
-the task or a question about Local Operator itself, you MUST
-`read guide://<name>` BEFORE acting or answering, even when you think you know:
-the guide names the authoritative file, and grepping code instead is how you end
-up editing a file nothing reads.
-`<skills>` lists selected skills: read `skill://<name>`, and its reference files
-as `skill://<name>/<relpath>` — NEVER find or inspect skills with bash (`find`,
-`ls`), glob or grep; `read skill://` lists them. `<mcps>` names MCP servers
+Unless current instructions are in view:
+- `<guides>`: MUST read applicable `guide://<name>` before acting or answering.
+- `<skills>`: before proceeding, read applicable `skill://<name>` and needed
+  `skill://<name>/<relpath>`.
+Use the authoritative guide, not code search. NEVER find or inspect skills with
+bash, glob or grep; `read skill://` lists them. Refresh if possibly changed or
+lost, not merely after a tool call, wait, wake or steer. Read unseen sections as needed.
+`<mcps>` names MCP servers
 whose tools are not loaded: read `mcp://<server>`, then `mcp://<server>/<tool>`
 to enable one, before browser, generic API, or local-config discovery
 (`guide://mcp`).

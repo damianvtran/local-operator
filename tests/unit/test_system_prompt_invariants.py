@@ -131,8 +131,6 @@ def test_rules_restored_in_review_round_one(queued: str) -> None:
     assert "for an urgent one, delegate the question to a `task` subagent" in queued
     assert "before browser, generic API, or local-config discovery" in queued
     assert "never force-activate a tab or raise a window" in queued
-    assert "NEVER find or inspect skills with bash" in queued
-    assert "grepping code instead is how you end up editing a file nothing reads" in queued
 
 
 def test_a_finished_deliverable_is_named_and_never_denied(queued: str) -> None:
@@ -160,11 +158,22 @@ def test_peer_messaging_never_shells_out(queued: str) -> None:
 
 
 def test_guides_skills_and_mcp_are_read_through_their_schemes(queued: str) -> None:
-    assert "you MUST `read guide://<name>` BEFORE acting" in queued
-    assert "`skill://<name>`" in queued and "`skill://<name>/<relpath>`" in queued
-    assert "NEVER find or inspect skills with bash (`find`, `ls`), glob or grep" in queued
+    assert (
+        "Unless current instructions are in view: - `<guides>`: MUST read applicable "
+        "`guide://<name>` before acting or answering. - `<skills>`: before proceeding, "
+        "read applicable `skill://<name>` and needed `skill://<name>/<relpath>`."
+    ) in queued
+    assert "Use the authoritative guide, not code search." in queued
+    assert "NEVER find or inspect skills with bash, glob or grep" in queued
     assert "`mcp://<server>`" in queued and "`mcp://<server>/<tool>`" in queued
     assert "`tool://<name>`" in queued
+
+
+def test_resource_refresh_depends_on_the_instructions_not_continuation(queued: str) -> None:
+    assert (
+        "Refresh if possibly changed or lost, not merely after a tool call, wait, wake or steer."
+    ) in queued
+    assert "Read unseen sections as needed." in queued
 
 
 @pytest.mark.parametrize(
@@ -237,13 +246,11 @@ def test_condensed_wording_keeps_the_rules_it_leaned_on(queued: str) -> None:
     its "Condensed existing wording" section). Each cut was safe only because
     another sentence or the tool's own schema still carries the rule, so those
     carriers are pinned here: dropping "or deleting" from the overwrite caution
-    leans on the stricter delete rule; the intro's "read the matching guide
-    first" leans on the Resources MUST; the tags op list and the `i` example
+    leans on the stricter delete rule; the tags op list and the `i` example
     live in the tool schemas, leaving the rules themselves here."""
     assert (
         "Never delete or move a path you did not create this session unless the user named it"
     ) in queued
-    assert "you MUST `read guide://<name>` BEFORE acting or answering" in queued
     assert "Trust code and guides, not memory." in queued
     assert "Asking spends their attention on work they delegated." in queued
     assert "`assign` takes existing category NAMES only — create missing ones first" in queued

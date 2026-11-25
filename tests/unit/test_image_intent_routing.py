@@ -78,11 +78,11 @@ def test_followup_context_is_reconstructed_after_resume_or_failover():
 def test_nonimage_requests_keep_existing_routing():
     assert session_factory._image_routing_context(transcript(("Change a feature flag", 0))) is None
     skill = _skill("flag-targeting", "Change rollout targeting")
-    assert "Read these selected skills immediately" in render_block([skill])
+    assert "read these selected skills unless" in render_block([skill])
     assert "Read these selected skills immediately" not in render_block(
         [skill], conditional_skills=True
     )
-    assert "ignore unrelated matches" in render_block([skill], conditional_skills=True)
+    assert "Ignore unrelated matches" in render_block([skill], conditional_skills=True)
 
 
 def test_context_participates_in_cache_identity():
@@ -105,8 +105,8 @@ async def test_image_lane_never_mandates_an_unrelated_embedding_match():
     block = await session_factory._select_knowledge_block(
         hooks, "Blue lighting instead", task_id="fixture"
     )
-    assert "Read these selected skills immediately" not in block
-    assert "ignore unrelated matches" in block
+    assert "read these selected skills unless" not in block
+    assert "Ignore unrelated matches" in block
     assert "tool://generate_image" not in block  # An empty classifier cannot force a tool.
 
 
@@ -119,5 +119,5 @@ async def test_classifier_unavailable_still_preserves_image_lane():
     block = await session_factory._select_knowledge_block(
         hooks, "Blue lighting instead", task_id="fixture"
     )
-    assert "ignore unrelated matches" in block
+    assert "Ignore unrelated matches" in block
     assert "resource_recommendations" not in block

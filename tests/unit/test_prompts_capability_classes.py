@@ -62,7 +62,10 @@ _CLASS_GATED_MARKERS = (
     "`spill://` handle",
     "`scratchpad://`",
     "### Resources",
-    "`<guides>` lists Local Operator procedures",
+    # The Resources section's guide cue (reworded by the resource-reread PR:
+    # read-unless-in-view instead of an unconditional re-read).
+    "- `<guides>`: MUST read applicable `guide://<name>` before acting or answering.",
+    "`<skills>`: before proceeding, read applicable `skill://<name>`",
     "`web_search`/`web_fetch`",
     "delegate self-contained slices",
     # Wave 5: workspace-, shell- and subagent-specific prose.
