@@ -1326,6 +1326,8 @@ export type MessageParams = {
   "wire.session_status.answer_needed": undefined;
   "wire.session_status.approval_needed": undefined;
   "wire.session_status.attached": undefined;
+  "wire.session_status.booting": { "duration": string };
+  "wire.session_status.booting_not_answering": { "duration": string };
   "wire.session_status.complete": undefined;
   "wire.session_status.delegating_jobs": { "count": number };
   "wire.session_status.delegating_queued": { "count": number };

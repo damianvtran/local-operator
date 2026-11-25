@@ -417,10 +417,16 @@
           "path": "local_operator/i18n/duration_message.py",
           "symbol": "format_duration (render callback)",
           "note": "Shared four-branch duration selection immediately renders each generated key through the caller-owned callback and rejects non-string results. session/catalog.status_duration supplies _terminal_label with the config-owned locale; info/copy.info_duration supplies _duration_info_text with the active Info locale and actual source provenance. Both return finished strings, never envelope identities."
+        },
+        {
+          "path": "local_operator/resume.py",
+          "symbol": "session_row_state_words (render)",
+          "note": "Since PR #4588: a federated row that is stored plus a starting/not_responding boot claim selects booting / booting_not_answering (with format_duration through the same callback) and renders them immediately with the caller's render — tr(\"wire.session_status\") in the active locale for the `lop network sessions` CLI table (network/cli.py), english_status_render (messages.render, locale en) for the model-facing network tool listing (network/tool.py) and sessions tool state line (tools/builtin.py). Returns a finished str that is printed or embedded in tool text; no Msg, code or envelope leaves the function."
         }
       ],
       "references": {
         "i18n/duration_message.py": 5,
+        "resume.py": 2,
         "session/catalog.py": 28
       }
     },
