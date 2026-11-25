@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "relay.approvals",
+  "history_sha256": "3dbd5b49650a83a044bbd80519ecf2ca7e9e6e91627480b9008b795dd484a96c",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "relay.approvals",
+      "source_sha256": "da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767",
+      "translator": {
+        "agent": "lopdev coder (PR #4558 commit 5a4e48f406ee); identity not recorded in the commit",
+        "model": "unrecorded",
+        "fallback": "unknown (not recorded in the commit)",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "independent i18n/copy auditor (lopdev reviewer role, session 0d81b1544956; not the translator)",
+        "session": "0d81b1544956",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "PR #4558 approval-mode delta, independent copy audit 2026-11-24 by reviewer session 0d81b1544956 (anthropic/claude-opus-5-5, no fallback): 4 new/changed keys audited (always_ask, guardrails_still_apply, set_auto_all, set_auto_session) against en, en/relay.approvals.context.json, i18n/glossary.md and i18n/style-guides/ur.md — meaning (auto scoped to approval prompts; guardrail refusals and dangerous-delete review stated as still enforced, not softened), tone, glossary/catalogue terminology. Auditor fixes applied at audit: C3 guardrails_still_apply uses the catalogue guardrail term حفاظتی اصول (wire.settings) instead of the transliteration گارڈ ریل. Other keys byte-identical to base 7160d21268be, whose last row passed. Source da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767, target 52814d27847d559294a66470c3602613e3466c98a0fcafdfd8b213ba846efa46. Evidence: i18n/audits/evidence/ur/relay.approvals/apprmode-r1-0d81b1544956/record.json"
+    }
+  ]
+}

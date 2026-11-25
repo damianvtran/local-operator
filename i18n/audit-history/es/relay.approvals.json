@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "relay.approvals",
+  "history_sha256": "ae6a07cf2607e3fce1cfd9140749204b2c9fcbdae0b34469c210392d23111570",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "relay.approvals",
+      "source_sha256": "da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767",
+      "translator": {
+        "agent": "lopdev coder (PR #4558 commit 5a4e48f406ee); identity not recorded in the commit",
+        "model": "unrecorded",
+        "fallback": "unknown (not recorded in the commit)",
+        "date": "2026-11-24"
+      },
+      "auditor": {
+        "agent": "independent i18n/copy auditor (lopdev reviewer role, session 0d81b1544956; not the translator)",
+        "session": "0d81b1544956",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-24",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "PR #4558 approval-mode delta, independent copy audit 2026-11-24 by reviewer session 0d81b1544956 (anthropic/claude-opus-5-5, no fallback): 4 new/changed keys audited (always_ask, guardrails_still_apply, set_auto_all, set_auto_session) against en, en/relay.approvals.context.json, i18n/glossary.md and i18n/style-guides/es.md — meaning (auto scoped to approval prompts; guardrail refusals and dangerous-delete review stated as still enforced, not softened), tone, glossary/catalogue terminology. No changes needed. Other keys byte-identical to base 7160d21268be, whose last row passed. Source da37365002d12e8f8d5ebf73e8a39e51b2c44e3b0025c87755149ad722419767, target cfba5ecb53b4c5269397e600160ebad459f303bc2f0291d3777924159f44a8db. Evidence: i18n/audits/evidence/es/relay.approvals/apprmode-r1-0d81b1544956/record.json"
+    }
+  ]
+}
