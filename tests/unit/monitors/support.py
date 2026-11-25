@@ -92,3 +92,51 @@ async def wait_set(event: asyncio.Event, what: str) -> None:
         await asyncio.wait_for(event.wait(), DRAIN_BACKSTOP_S)
     except asyncio.TimeoutError:
         raise AssertionError(f"timed out after {DRAIN_BACKSTOP_S}s waiting for {what}") from None
+
+
+def seed_session_baseline(
+    root: Any, session_id: str, spec: Any, comparable: str, counters: dict[str, Any]
+) -> str:
+    """Leave the (hash, blob) pair a session's scheduler leaves after a baseline.
+
+    WHY (merge-gate fix 2, #4552). A quiet probe now ENGAGEs when the snapshot
+    blob is missing (round 1, R3) because, in production, a ``content_hash`` is
+    only ever committed AFTER ``MonitorScheduler._write_snapshot`` landed
+    (``_establish_baseline`` and the change path both write blob-first; arm
+    writes counters with no hash at all). A fixture that hand-writes only the
+    counters describes a state production never reaches. The blob is written
+    through the scheduler's OWN writer, so its size cap and truncation flag are
+    the real ones (a spilled MCP result is clipped exactly as in-session),
+    instead of a hand-made file that could drift from the format.
+
+    Returns the committed hash; ``counters`` gets it as ``content_hash``.
+    """
+    from pathlib import Path
+
+    from local_operator.monitors import state as monitor_state
+    from local_operator.monitors.scheduler import MonitorScheduler, check_hash
+    from local_operator.monitors.settings import read_monitor_settings
+
+    settings = read_monitor_settings()
+    normalized, new_hash = check_hash(str(comparable), spec, settings)
+    writer = MonitorScheduler(
+        now=lambda: 0,
+        config_dir=Path(root),
+        session_id=session_id,
+        settings=settings,
+        validate=lambda _tool, _args: None,
+        run_check=_never_run,
+        deliver=lambda _delivery: None,
+        persist=lambda _monitors: None,
+    )
+    try:
+        assert writer._write_snapshot(spec, normalized), "the scheduler's blob write failed"
+    finally:
+        writer.dispose()
+    counters["content_hash"] = new_hash
+    monitor_state.write_counters(Path(root), session_id, spec.id, counters)
+    return new_hash
+
+
+async def _never_run(_spec: Any) -> Any:
+    raise AssertionError("seed_session_baseline never runs a check")

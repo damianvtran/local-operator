@@ -320,6 +320,99 @@ async def test_mcp_tool_parity_through_a_real_stdio_server(
 
 
 @pytest.mark.asyncio
+async def test_glob_parity(stub_bin: SimpleNamespace) -> None:
+    """Glob, armed and checked the real way: quiet on the probe after the baseline.
+
+    Merge-gate fix 2 (#4552): R3 makes a quiet probe ENGAGE when the snapshot
+    blob is missing, so every kind must leave the blob the probe looks for.
+    Tick 1 being ``quiet`` proves the booted scheduler's baseline did.
+    """
+    from local_operator.tools import builtin
+
+    watched = stub_bin.cwd / "inbox"
+    watched.mkdir()
+    row = _row("glob", {"pattern": "*.txt", "path": str(watched)}, str(stub_bin.cwd))
+
+    def _set(names: str) -> None:
+        for old in watched.iterdir():
+            old.unlink()
+        for name in names.split():
+            (watched / name).write_text(name, encoding="utf-8")
+
+    decisions = await _drive(
+        stub_bin.root,
+        stub_bin.cwd,
+        row,
+        builtin.build_glob_tool(),
+        ["a.txt", "a.txt", "a.txt b.txt", "a.txt b.txt"],
+        _set,
+    )
+    assert decisions == _expected([False, False, True, False])
+
+
+@pytest.mark.asyncio
+async def test_a_spilled_mcp_baseline_leaves_the_blob_and_the_next_probe_is_quiet(
+    rig: SimpleNamespace,  # noqa: F811 — the imported fixture
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An MCP result over the 8 KiB spill threshold, checked the real way.
+
+    Merge-gate fix 2 (#4552): R3 makes a quiet probe ENGAGE when the snapshot
+    blob is missing. A spilled result also records a spill handle, so this pins
+    that the session's baseline still writes the (capped) blob R3 looks for:
+    the first probe engages (no baseline), the booted scheduler captures it,
+    and the next probe of the unchanged result is QUIET, not a heal boot.
+    Full counters parity is not asserted here: ``last_handle`` differs between
+    the paths for a spilled result (reported separately, pre-existing).
+    """
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.mcp.manager import McpManager
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    monkeypatch.setattr(random, "uniform", _zero)
+    big = "".join(f"reply {n}: " + "x" * 120 + "\n" for n in range(150))
+    assert len(big) > 8 * 1024
+    (rig.stub / "thread.txt").write_text(big, encoding="utf-8")
+    row = _row(MCP_TOOL, {"thread": "C1/1"}, str(rig.cwd))
+    spec = _spec(row)
+    monitor_store.write_entry(rig.root, PROBED, cwd=str(rig.cwd), monitors=[row])
+    manager = McpManager(str(rig.cwd), None, secret_base=rig.root)
+    clock = _Clock()
+    sink: list[Any] = []
+    try:
+        await manager.connect_configured_server("stub", interactive=False)
+        tool = next(t for t in manager.get_tools() if t.name == MCP_TOOL)
+        session = make_session(
+            rig.cwd / ".parity-session",
+            ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+            tools=[tool],
+        )
+        try:
+            first = await parked.probe_session(
+                rig.root, PROBED, now_ms=clock.now, cwd=str(rig.cwd), tier="keyfile"
+            )
+            assert first["verdict"] == "engage", first
+            booted = _scheduler(rig.root, PROBED, clock, session._run_monitor_check, sink)
+            try:
+                booted.load([spec])
+                await booted.pump(clock.now)
+                await drain_checks(booted)
+            finally:
+                booted.dispose()
+            assert monitor_state.snapshot_exists(rig.root, PROBED, "m1")
+            clock.now = NOW + EVERY
+            quiet = await parked.probe_session(
+                rig.root, PROBED, now_ms=clock.now, cwd=str(rig.cwd), tier="keyfile"
+            )
+            assert quiet == {"verdict": "quiet", "why": "unchanged", "checked": 1}, quiet
+        finally:
+            await session.dispose()
+    finally:
+        await manager.disconnect_all(in_task=True)
+    assert sink == [], "a baseline capture and a quiet tick deliver nothing"
+
+
+@pytest.mark.asyncio
 async def test_a_session_only_mcp_server_falls_back_to_booting(
     rig: SimpleNamespace,  # noqa: F811 — the imported fixture
 ) -> None:
