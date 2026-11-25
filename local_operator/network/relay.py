@@ -9914,16 +9914,20 @@ class RelayServer:
         """Check a live record's QUEUED claim against the owner's durable fold.
 
         A heartbeat can outlive the ask deadline (or a settle written before the
-        runtime republishes). A confirmed empty outstanding set clears the claim
-        in this read only. Never use viewer-filtered notices to infer that state:
+        runtime republishes). Only a complete owner journal that folds to known,
+        settled asks clears the claim in this read. Never use viewer-filtered notices:
         some viewers get no notices even while the queue is genuinely open.
         """
         from local_operator.asks import store as ask_store
 
         try:
-            events = ask_store.read_events(ask_store.session_dir(self.root, session_id), strict=True)
+            events = ask_store.read_complete_events(ask_store.session_dir(self.root, session_id))
+            if events is None:
+                return True
             records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
-            return any(ask_store.is_outstanding(record.get("status")) for record in records)
+            return not records or any(
+                ask_store.is_outstanding(row.get("status")) for row in records
+            )
         except Exception:  # noqa: BLE001 — an unknown read cannot disprove the live claim
             logger.debug("catalogue: queued ask state unreadable for %s", session_id, exc_info=True)
             return True

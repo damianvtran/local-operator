@@ -312,13 +312,34 @@ def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
         row = _catalog_row(link)
         assert "pending_queued" not in row
         assert _parks(row) == ["ask"]
+        _publish(pending="approval")
+        row = _catalog_row(link)
+        assert row["pending"] == "approval" and "pending_queued" not in row
+        assert _parks(row) == ["approval"]
     finally:
         link.close("test")
         child.kill()
         child.wait()
 
 
-@pytest.mark.parametrize("settle", ["answer", "withdraw", "expire"])
+@pytest.mark.parametrize(
+    "settle",
+    [
+        "answer",
+        "withdraw",
+        "expire",
+        "missing",
+        "empty",
+        "torn",
+        "unterminated",
+        "bad-json",
+        "bad-record",
+        "unknown-kind",
+        "orphan",
+        "bad-deadline",
+        "missing-deadline",
+    ],
+)
 def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, settle: str
 ) -> None:
@@ -381,6 +402,37 @@ def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
             _ask_event(owner, ask_store.EVENT_WITHDRAWN, "q-first", by="fixture")
         else:
             clock = deadline + 1
+        if settle not in {"answer", "withdraw", "expire"}:
+            # A settled historical ask must not mask corrupt evidence of a newer one.
+            _ask_event(owner, ask_store.EVENT_WITHDRAWN, "q-first", by="fixture")
+            assert_claim(None)
+            journal = ask_store.asks_log_path(ask_store.session_dir(owner.root, SID))
+            history = journal.read_bytes()
+            queue("q-new", clock + 1000)
+            assert_claim("q-new")
+            newest = journal.read_bytes()[len(history) :]
+            if settle == "missing":
+                journal.unlink()
+            else:
+                journal.write_bytes(
+                    {
+                        "empty": b"",
+                        "torn": history + newest[:30],
+                        "unterminated": history.rstrip(b"\n"),
+                        "bad-json": history + b"{broken}\n",
+                        "bad-record": history + b'{"v":1,"kind":"queued"}\n',
+                        "unknown-kind": history + newest.replace(b'"queued"', b'"future"'),
+                        "orphan": history + newest.replace(b'"queued"', b'"withdrawn"'),
+                        "bad-deadline": history
+                        + newest.replace(str(clock + 1000).encode(), b"true"),
+                        "missing-deadline": history
+                        + newest.replace(b'"expires_at":' + str(clock + 1000).encode() + b",", b""),
+                    }[settle]
+                )
+            row = _catalog_row(link)
+            assert row["state"] == "live"
+            assert row["pending"] == "ask" and row.get("pending_queued") is True
+            return
         assert_claim(None)
         if settle == "expire":
             _ask_event(owner, ask_store.EVENT_ANSWERED, "q-first", answers={"q0": "late"})
@@ -388,10 +440,9 @@ def test_catalogue_checks_a_queued_claim_against_the_owner_journal(
         queue("q-new", clock + 1000)
         assert_claim("q-new")
 
-        def unreadable(*_args: Any, **_kwargs: Any) -> Any:
-            raise OSError("synthetic ask journal read failure")
-
-        monkeypatch.setattr(ask_store, "read_events", unreadable)
+        journal = ask_store.asks_log_path(ask_store.session_dir(owner.root, SID))
+        journal.unlink()
+        journal.mkdir()  # A real read error for both the verifier and notice reader.
         row = _catalog_row(link)
         assert row["pending"] == "ask" and row.get("pending_queued") is True
         assert row["asks_unknown"] is True
