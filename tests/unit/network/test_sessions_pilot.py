@@ -2104,3 +2104,126 @@ def test_a_cold_slash_waits_for_publication_like_a_cold_send(
     assert f"still starting on {PEER}" in payload["message"]
     assert opened.owner.engaged == 1 and opened.owner.connects == []
     assert viewer.slashes == []
+
+
+def _deliver_after_the_real_bind(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
+    """Real ``_bind_under_lock``; only the dial and the act itself are observed.
+
+    ``_bind_to`` records the record the bind loop handed over (after the grace),
+    and the slash/steer seams refuse to run before it — so a green cell proves
+    the act was delivered over a BOUND runtime, never around the bind.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    seen: dict[str, list[Any]] = {"bound": [], "slashes": [], "steers": []}
+
+    async def bind_to(self: AttachedSession, record: Any, **_kwargs: Any) -> None:
+        seen["bound"].append(record)
+
+    async def slash(self: AttachedSession, command: str, args: str, images: Any = None) -> Any:
+        assert seen["bound"], "the slash ran before the bind dialled a record"
+        seen["slashes"].append((command, args))
+        return {"kind": "notice", "text": "team attached", "style": "info", "data": {}}
+
+    async def prompt(self: AttachedSession, text: str, images: Any = None, **_kw: Any) -> str:
+        assert seen["bound"], "the steer ran before the bind dialled a record"
+        seen["steers"].append(text)
+        return "steering queued"
+
+    monkeypatch.setattr(AttachedSession, "_bind_to", bind_to)
+    monkeypatch.setattr(AttachedSession, "route_shared_slash", slash)
+    monkeypatch.setattr(AttachedSession, "prompt", prompt)
+    monkeypatch.setattr(AttachedSession, "is_streaming", property(lambda self: True))
+    monkeypatch.setattr(AttachedSession, "display_history_window", lambda self: [])
+    return seen
+
+
+_LIVE_VERBS = pytest.mark.parametrize(
+    ("flag", "text"),
+    [("--slash", "/team lopdev"), ("--steer", "also check the CI")],
+    ids=["slash", "steer"],
+)
+
+
+@_LIVE_VERBS
+def test_a_live_rows_act_survives_a_transient_catalogue_miss(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    flag: str,
+    text: str,
+) -> None:
+    """The 2026-11-25 live-slash failure, at its seam.
+
+    ``lop network sessions --peer lop-remote-node-2 --slash <id> "/team lopdev"``
+    on a LIVE, published session (pid 2407612, fresh heartbeat) answered "could
+    not start a runtime for this session" at once, while 19 stored sessions took
+    the same command fine. ``RemoteOwner.locate`` reads ``peer_session_facts``,
+    which fanned out a full 232-row listing in 11.56 s of a 12 s budget: one
+    overrun is a locate miss, and a live row's bind had no publication grace, so
+    the first miss was final. Two misses here stand for that overrun; the act
+    must still be delivered exactly once, after one engage.
+    """
+    opened = _patch(monkeypatch, _FakeViewer(streaming=True), _remote_row(live_state="idle"))
+    owner = opened.owner
+    assert owner is not None
+    owner.records_after = 2
+    _use_real_cold_bind(monkeypatch, tmp_path, owner)
+    seen = _deliver_after_the_real_bind(monkeypatch)
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+
+    rc = _run(["sessions", "--json", "--peer", PEER, flag, SESSION, text])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "could not start a runtime" not in out
+    assert owner.engaged == 1 and owner.locates == 3
+    assert len(seen["bound"]) == 1
+    if flag == "--slash":
+        assert seen["slashes"] == [("team", "lopdev")]
+    else:
+        assert seen["steers"] == [text]
+
+
+@_LIVE_VERBS
+def test_a_live_rows_refused_engage_answers_at_once_without_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    flag: str,
+    text: str,
+) -> None:
+    """The grace only follows a SUCCESSFUL engage: a refusal keeps its own reason.
+
+    Giving every live verb the publication wait must not turn a genuinely
+    refused engage into a 30 s "still starting" — the refusal raises before any
+    locate, so the waiter never runs and the peer's sentence is the answer.
+    """
+    import time as _time
+
+    from local_operator.network.projection import ProjectionRefusal
+
+    opened = _patch(monkeypatch, _FakeViewer(streaming=True), _remote_row(live_state="idle"))
+    assert opened.owner is not None
+    opened.owner.engage_error = ProjectionRefusal("peer_refused", "runtime executable is missing")
+    opened.owner.records_after = 99
+    _use_real_cold_bind(monkeypatch, tmp_path, opened.owner)
+    seen = _deliver_after_the_real_bind(monkeypatch)
+    waited: list[Any] = []
+
+    async def _no_wait(*args: Any, **_kwargs: Any) -> Any:
+        waited.append(args)
+        raise AssertionError("the publication grace ran after a refused engage")
+
+    monkeypatch.setattr(net_cli, "_pilot_wait_for_runtime_record", _no_wait)
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+
+    started = _time.monotonic()
+    rc = _run(["sessions", "--json", "--peer", PEER, flag, SESSION, text])
+    elapsed = _time.monotonic() - started
+    payload = ok(capsys.readouterr().out)
+    assert rc == 1, payload
+    assert payload["code"] == "peer_refused"
+    assert payload["message"] == "runtime executable is missing"
+    assert opened.owner.locates == 0 and waited == []
+    assert seen["bound"] == [] and seen["slashes"] == [] and seen["steers"] == []
+    assert elapsed < 5.0, elapsed

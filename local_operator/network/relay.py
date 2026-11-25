@@ -9595,7 +9595,17 @@ class RelayServer:
         second must not become a scan storm. The rows carry no transcript content:
         an id, a name, a cwd, a model label and liveness, which is what a listing
         needs and nothing more.
+
+        ``session_id`` (``wire.REMOTE_CATALOG_SESSION_ID_V1``) narrows the answer
+        to that one session's row; see ``_one_session_catalog``. A frame without
+        it is answered exactly as before.
         """
+        if "session_id" in frame:
+            # BEFORE any other branch, and its own field: a paged listing
+            # (``limit``/``cursor``/``query``, PR #4592) is a different question,
+            # and folding the id into that vocabulary would make either merge
+            # order change what an existing pager receives.
+            return self._one_session_catalog(link, frame.get("session_id"))
         return {
             "complete": True,
             "device": {
@@ -9604,6 +9614,56 @@ class RelayServer:
             },
             "generated_at": time.time(),
             "sessions": self._rows_for_viewer(link),
+        }
+
+    def _one_session_catalog(self, link: PeerLink, raw_session_id: Any) -> dict[str, Any]:
+        """``net_catalog`` for ONE session: its row or none, same answer shape.
+
+        WHY: a viewer's ``peer_session_facts`` (``_ctl_peer_facts``) asks about
+        one session before every remote pilot bind, and answering it from the
+        full listing made the question cost the whole mesh — 232 rows took
+        11.56 s of the 12 s listing budget (2026-11-25), and one overrun made a
+        LIVE session read as unowned. The owner's own scan is cheap (233 rows in
+        0.47 s cold, 0.03 s warm, measured on the owner), so the rows are still
+        built by ``_rows_for_viewer`` — the SAME builder and the same per-viewer
+        attention stamping — and filtered: the one row is byte-identical to its
+        row in the full listing, so a viewer cannot tell which question it asked
+        from the row alone.
+
+        CONSTRAINT: a stored row beyond ``load_catalog``'s recency bound
+        (``CATALOG_SCAN_LIMIT``) is absent from the full listing and so absent
+        here too — the same reach ``_row_for`` has always had. Live rows are
+        never bounded, so a running session is always answerable.
+
+        THE AUTHORISER ANSWERS FIRST. A frame carrying ``session_id`` is
+        scope-checked like every session op (``authorizer`` ``_session_scope``):
+        an id this device does not own is refused ``not_authorised`` — and
+        audited as ``authorisation_refused`` — before this handler runs, which
+        the viewer's ``_peer_catalog_rows_for`` reads as no rows, i.e. the same
+        ``owned: False`` the full listing gave (traced on two real relays,
+        2026-11-25). So this handler only ever sees owned ids; the validation
+        below is defence in depth: an opaque storage component (no path syntax,
+        bounded length), else ``bad_frame`` like any malformed peer frame.
+        ``session_id`` is echoed so a reply can never be mistaken for an
+        unfiltered listing.
+        """
+        try:
+            session_id = store.safe_component(raw_session_id)
+        except MeshRefusal as exc:
+            raise MeshRefusal(
+                "bad_frame", "net_catalog session_id must be one bounded session id"
+            ) from exc
+        return {
+            "complete": True,
+            "device": {
+                "device_id": self.identity.device_id,
+                "name": self._own_label(),
+            },
+            "generated_at": time.time(),
+            "session_id": session_id,
+            "sessions": [
+                row for row in self._rows_for_viewer(link) if row.get("session_id") == session_id
+            ],
         }
 
     def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
@@ -16950,14 +17010,23 @@ class RelayServer:
         """
         peer = str(frame.get("peer") or "")
         session_id = str(frame.get("session_id") or "")
+        resolved = ""
         try:
             # The resolver takes an id OR a name, like every other entry point a
             # person drives; an unresolvable target is not an error here because
             # this op's answer is ``owned: false`` either way.
-            peer = self._resolve_peer(peer) if peer else ""
+            resolved = peer = self._resolve_peer(peer) if peer else ""
         except MeshRefusal:
             pass
-        _peers, sessions = self._fan_out_catalog()
+        if resolved:
+            # A NAMED OWNER IS ASKED ALONE. The full fan-out below dials every
+            # member and lists every row to answer about ONE session; on a
+            # 232-row mesh it took 11.56 s of its 12 s budget, and one overrun
+            # made a live session "unowned" — the 2026-11-25 live-slash failure.
+            sessions = self._peer_catalog_rows_for(peer, session_id)
+        else:
+            # No (resolvable) peer: today's mesh-wide search, unchanged.
+            _peers, sessions = self._fan_out_catalog()
         row = next(
             (
                 item
@@ -16976,6 +17045,80 @@ class RelayServer:
             "pid": pid or None,
             "record": row,
         }
+
+    def _peer_catalog_rows_for(self, device_id: str, session_id: str) -> list[dict[str, Any]]:
+        """``device_id``'s catalogue rows for ``session_id`` alone (0 or 1).
+
+        The targeted half of ``_ctl_peer_facts``: one membership, one link, one
+        ``net_catalog``, under the same ``LISTING_PROBE_BUDGET_S`` the fan-out
+        uses — so it can only be faster, never slower, than the answer it
+        replaces. The rows are stamped ``locality``/``peer`` with the SAME peer
+        block shape ``_fan_out_catalog`` builds, because ``_ctl_peer_facts``
+        returns the row verbatim as ``record`` and its readers expect that shape.
+
+        CAPABILITY-GATED: ``session_id`` rides only on a link advertising
+        ``wire.REMOTE_CATALOG_SESSION_ID_V1``. An older owner gets today's exact
+        frame and answers with all its rows; the filter below runs in BOTH cases,
+        so an owner that ignored the field can never put another session's row
+        into this answer. Any failure (no shared network, unreachable, no reply,
+        a refusal — including the owner's ``not_authorised`` for an id it does
+        not hold) is no rows — ``owned: False``, exactly what the fan-out said
+        for an unreachable owner or an absent row. ``_fan_out_catalog`` is deliberately left
+        untouched (PR #4592 pages it).
+        """
+        if not session_id:
+            # Nothing can match an empty id; never put a frame the owner would
+            # refuse as ``bad_frame`` on the wire for an answer already known.
+            return []
+        deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
+        for record in store.list_networks(self.root):
+            member = next(
+                (m for m in record.active_members() if m.device_id == device_id),
+                None,
+            )
+            if member is None or member.device_id == self.identity.device_id:
+                continue
+            # The first shared network only, as the fan-out does: the rows are
+            # the device's, not the network's.
+            link, unreachable_reason = self._ensure_link_with_reason(
+                device_id, probe_timeout_s=LISTING_PROBE_BUDGET_S
+            )
+            block = {
+                "device_id": member.device_id,
+                "name": member.name,
+                "network_id": record.network_id,
+                "reachable": link is not None,
+                "age_s": 0.0,
+                "endpoints": list(member.endpoints),
+                "reason": unreachable_reason,
+            }
+            if link is None:
+                return []
+            request: dict[str, Any] = {
+                "op": "net_catalog",
+                "req": self._next_relay_req(),
+                "locality": "remote",
+            }
+            if wire.REMOTE_CATALOG_SESSION_ID_V1 in link.capabilities:
+                request["session_id"] = session_id
+            reply = link.request(
+                request,
+                timeout=max(0.5, min(self.settings.op_wait_s, deadline - time.monotonic())),
+            )
+            if reply is None or reply.get("op") != "ack":
+                return []
+            raw_detail = reply.get("detail")
+            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+            rows: list[dict[str, Any]] = []
+            for row in detail.get("sessions") or ():
+                if not isinstance(row, dict) or row.get("session_id") != session_id:
+                    continue
+                item = dict(row)
+                item["locality"] = "remote"
+                item["peer"] = block
+                rows.append(item)
+            return rows
+        return []
 
     def _ctl_stream_send(self, frame: dict[str, Any]) -> dict[str, Any]:
         """The multiplexed form: one frame on one opened stream (§2.5).
