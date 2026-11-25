@@ -10127,12 +10127,17 @@ class Session:
             return
         now = time.monotonic()
         retry = self._pending_move_retry
-        if retry is not None and retry[0] == applied and now < retry[1]:
-            return
-        # An unchanged apply need not rewrite the index. Allow a later send to
-        # retry a transient failure, at the existing attachment refresh floor;
-        # a new apply always gets one immediate attempt of its own.
-        self._pending_move_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
+        if retry is not None and retry[0] == applied:
+            if now < retry[1]:
+                return
+            # Spend the one delayed retry before refreshing: a second transient
+            # failure must not leave this unchanged generation eligible again.
+            self._pending_move_apply_seen = applied
+            self._pending_move_retry = None
+        else:
+            # A new apply gets an immediate attempt and, if it fails transiently,
+            # one later send can retry it at the existing attachment refresh floor.
+            self._pending_move_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
         try:
             teams.refresh()
             agents = self.agent_registry

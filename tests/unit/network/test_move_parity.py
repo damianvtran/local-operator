@@ -929,6 +929,7 @@ class TestReresolveRefreshesBothRegistries:
             "different-definition",
             "different-brief",
             "transient-registry",
+            "persistent-registry",
             "transient-team-read",
             "transient-journal",
             "retiring",
@@ -1100,7 +1101,8 @@ class TestReresolveRefreshesBothRegistries:
                 assert updated is not None and updated.id == checked["id"]
                 assert updated.instructions == "Different brief."
 
-            if case in {"transient-registry", "transient-team-read", "transient-journal"}:
+            registry_failure = case in {"transient-registry", "persistent-registry"}
+            if registry_failure or case in {"transient-team-read", "transient-journal"}:
                 def_index = definitions.index_path(dest)
                 applied = def_index.stat()
                 attempts = 0
@@ -1108,33 +1110,64 @@ class TestReresolveRefreshesBothRegistries:
                 def unreadable(*args: Any, **kwargs: Any) -> None:
                     nonlocal attempts
                     attempts += 1
-                    if case == "transient-registry":
+                    if registry_failure:
                         raise ProfileRegistryUnavailable(count=1)
                     raise PermissionError("synthetic unreadable local authority")
 
                 with monkeypatch.context() as failing:
-                    if case == "transient-registry":
+                    if registry_failure:
                         failing.setattr(session.agent_registry, "refresh_now", unreadable)
                     elif case == "transient-team-read":
                         failing.setattr(session.team_registry, "get_team_by_name", unreadable)
                     else:
                         failing.setattr(move_team, "_write_local_binding", unreadable)
                     refusal = (
-                        ProfileRegistryUnavailable
-                        if case == "transient-registry"
-                        else AttachmentUnavailable
+                        ProfileRegistryUnavailable if registry_failure else AttachmentUnavailable
                     )
+                    clock = Mock(wraps=time)
+                    if case == "persistent-registry":
+                        clock.monotonic.return_value = time.monotonic()
+                        failing.setattr("local_operator.session.session.time", clock)
                     with pytest.raises(refusal):
                         await server._dispatch("prompt", frame)
                     with pytest.raises(AttachmentUnavailable):
                         await server._dispatch("prompt", frame)
                     assert attempts == 1  # Same failed generation, before the refresh floor.
+                    if case == "persistent-registry":
+                        # Keep the failure in place when the only delayed retry runs.
+                        clock.monotonic.return_value += session._ATTACHMENT_RERESOLVE_INTERVAL_S
+                        with pytest.raises(ProfileRegistryUnavailable):
+                            await server._dispatch("prompt", frame)
+                        assert attempts == 2
+                        for _ in range(2):
+                            clock.monotonic.return_value += session._ATTACHMENT_RERESOLVE_INTERVAL_S
+                            with pytest.raises(AttachmentUnavailable):
+                                await server._dispatch("prompt", frame)
+                            assert attempts == 2
+                        current = def_index.stat()
+                        assert (current.st_ino, current.st_mtime_ns, current.st_ctime_ns) == (
+                            applied.st_ino,
+                            applied.st_mtime_ns,
+                            applied.st_ctime_ns,
+                        )
+
+                        # An ordinary updated apply opens a new budget immediately,
+                        # even though the clock has not advanced since the last send.
+                        source_teams.update_team(team.id, TeamEditFields(instructions="New brief."))
+                        assert definitions.apply_bundle(
+                            dest, definitions.local_bundle(source), origin_device=author.device_id
+                        )["updated"]
+                        assert def_index.stat().st_ino != applied.st_ino
+                        with pytest.raises(ProfileRegistryUnavailable):
+                            await server._dispatch("prompt", frame)
+                        assert attempts == 3
                 assert session.active_team is None and stream.requests == []
                 assert not binding_file.exists()
                 assert not handle.has_admitted_command(frame["command_id"])
+                if case == "persistent-registry":
+                    return
                 # Advance just this session's refresh floor, without sleeping or
                 # changing the apply signal that the warm owner already saw.
-                clock = Mock(wraps=time)
                 clock.monotonic.side_effect = (
                     lambda: time.monotonic() + session._ATTACHMENT_RERESOLVE_INTERVAL_S
                 )
