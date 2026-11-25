@@ -119,6 +119,43 @@ export interface PendingEcho {
 	    `markPendingEchoWaking`. The row itself leaves on land (the projection
 	    answers it) or on a failed wake (the composer withdraws it). */
 	waking?: boolean;
+	/** `Date.now()` when `waking` was last turned ON (`markPendingEchoWaking`).
+	    WHY IT LIVES ON THE ROW (review round 5, M1 on PR #4522): the composer's
+	    wake tracker is a ref, and `SessionScreen` is keyed per route, so a
+	    session switch unmounts it while this module-level row survives. The
+	    remounted composer re-attaches its tracker from the row, and this stamp
+	    is the one fact it cannot rebuild from the stream: how long the wake has
+	    been running, which bounds when it MUST have settled (see
+	    `WAKE_SETTLED_BOUND_MS` in the composer). Cleared with the flag.
+
+	    Re-stamped on EVERY `waking` answer, not only the first (review round 1,
+	    m1 on PR #4584): a retry inside the bound after a failure nobody saw
+	    starts a NEW relay task with a fresh deadline, and the receipt cannot say
+	    whether it joined or restarted. Measuring from the latest receipt is the
+	    conservative reading: it can only delay a failure verdict, never fail a
+	    boot that is still running. */
+	wakingAt?: number;
+	/** The id of the projection's NEWEST transcript row when this wake was first
+	    answered `waking` (`""` for an empty transcript); absent on a row stamped
+	    before the field existed.
+
+	    WHY (review round 1, M1 on PR #4584): the composer's "did the message
+	    land?" check reads the projection, and the projection is the 80-row tail
+	    (`PROJECTION_TRANSCRIPT_LIMIT`, `mobile/types.py`). A wake that delivered
+	    and then ran a long turn pushes the user row out of that tail, so a
+	    remounted composer past the settled bound saw "no row, no owner" and
+	    reported a DELIVERED message as failed, inviting a resend. A failed wake
+	    writes nothing to the journal (`_publish_failed_wake` only re-serves the
+	    durable rebuild), so a tail whose newest row is no longer this one means
+	    the session wrote after the wake started: the message was delivered.
+
+	    Kept from the FIRST answer (not re-stamped like `wakingAt`): an earlier
+	    baseline only widens what counts as "moved", and moved means delivered.
+	    Why the tail and not `usage` or a turn count: a pid-0 durable rebuild
+	    carries no turn counter, and `usage` on a rebuild is not a contract;
+	    row ids are stable across rebuilds because the fold keys them on the
+	    journal's message ids (`fold_messages_to_entries`). */
+	wakingTailId?: string;
 }
 
 /** The kinds a row the USER authored can be written under, carrying the command
@@ -246,15 +283,46 @@ export function markPendingEchoAccepted(sessionId: string, commandId: string): v
  * echo is gone or the flag already reads that way: a landed row is retired by
  * the projection and a failed wake withdraws it, so both may race this call.
  */
-export function markPendingEchoWaking(sessionId: string, commandId: string, waking: boolean): void {
+export function markPendingEchoWaking(
+	sessionId: string,
+	commandId: string,
+	waking: boolean,
+	tailId?: string,
+): void {
 	const held = echoes.get(sessionId);
 	if (!held) return;
 	const index = held.findIndex((item) => item.commandId === commandId);
-	if (index === -1 || (held[index].waking ?? false) === waking) return;
+	if (index === -1) return;
+	const current = held[index];
+	/* Turning it OFF twice is the only no-op. Every ON answer re-stamps
+	   `wakingAt` (m1, see the field); the tail baseline keeps the first
+	   answer's value (M1, see `wakingTailId`). */
+	if (!waking && !(current.waking ?? false)) return;
 	const next = [...held];
-	next[index] = { ...next[index], waking };
+	next[index] = waking
+		? { ...current, waking, wakingAt: Date.now(), wakingTailId: current.wakingTailId ?? tailId }
+		: { ...current, waking, wakingAt: undefined, wakingTailId: undefined };
 	echoes.set(sessionId, next);
 	emit();
+}
+
+/** The id of a transcript's newest row, `""` when it has none: the baseline
+ *  `wakingTailId` is stamped with and compared against (M1 on PR #4584). */
+export function transcriptTailId(transcript: readonly TranscriptEntry[] | undefined): string {
+	const rows = transcript ?? [];
+	return rows.length > 0 ? rows[rows.length - 1].id : "";
+}
+
+/** The held echo for one command on one route, answered or not — `undefined`
+ *  once it has been withdrawn or retired.
+ *
+ * For the composer's mount-time reconciliation (review round 5, M1 on PR
+ * #4522): a remounted composer has lost its wake tracker, and the row's
+ * `waking`/`wakingAt` are what it rebuilds that tracker from. A read, not a
+ * hook: the composer asks once per settle pass and the store's own emit
+ * already re-renders the screen that owns the row. */
+export function pendingEchoFor(sessionId: string, commandId: string): PendingEcho | undefined {
+	return echoes.get(sessionId)?.find((item) => item.commandId === commandId);
 }
 
 /** Drop every echo this device holds, whatever the route.
@@ -262,9 +330,50 @@ export function markPendingEchoWaking(sessionId: string, commandId: string, waki
  * For `clearPrivateSessionStorage`: a signed-out user's echo shows text the
  * next person at this device must not see, on the one surface that renders it. */
 export function clearPendingEchoes(): void {
+	failedWakes.clear();
 	if (echoes.size === 0) return;
 	echoes.clear();
 	emit();
+}
+
+/** A wake this device SAW fail, kept past the composer that saw it.
+ *
+ * WHY (QA round 2, row 4 and Q2-2 on PR #4584). A composer mounted when the
+ * relay's one-shot `wake_failed` frame arrives turns the send into a failed
+ * send and withdraws the row — and with the row went the only durable fact a
+ * remount rebuilt its tracker from (`waking` on the held echo). Back on the
+ * route, the composer saw an envelope and nothing else, which is exactly what
+ * a reload or an ambiguous 504 leave, and showed the generic "may have been
+ * delivered" copy: the failure it had already reported was forgotten, and so
+ * was the moved-tail check that can still find a late delivery. This record is
+ * what the remount rebuilds a FAILED tracker from.
+ *
+ * Holds no message text (the envelope and the draft keep that), one entry per
+ * route (a route has one retained envelope), and is honoured only for the
+ * envelope's own id. Cleared on any new send attempt for the route and by
+ * `clearPendingEchoes` (sign-out). */
+export interface FailedWake {
+	commandId: string;
+	/** Settled as "couldn't confirm" (moved tail, id not found) rather than failed. */
+	unconfirmed: boolean;
+	/** The tracker's `startedAt` and `tailId`, so the rebuilt tracker keeps both. */
+	startedAt: number;
+	tailId?: string;
+}
+
+const failedWakes = new Map<string, FailedWake>();
+
+export function recordFailedWake(sessionId: string, wake: FailedWake): void {
+	failedWakes.set(sessionId, wake);
+}
+
+export function failedWakeFor(sessionId: string, commandId: string): FailedWake | undefined {
+	const wake = failedWakes.get(sessionId);
+	return wake?.commandId === commandId ? wake : undefined;
+}
+
+export function forgetFailedWake(sessionId: string): void {
+	failedWakes.delete(sessionId);
 }
 
 /** Whether the projection already carries the row for this command.

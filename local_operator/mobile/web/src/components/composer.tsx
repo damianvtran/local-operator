@@ -9,7 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { contentDir } from "../lib/content-direction";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
 import {
@@ -20,7 +20,7 @@ import {
 	setDeliveryMode,
 	type DeliveryMode,
 } from "../lib/delivery";
-import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
+import { getCommands, getHistory, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	QUEUED_DETAIL,
 	deferredSettingsFields,
@@ -50,8 +50,13 @@ import {
 import {
 	markPendingEchoAccepted,
 	markPendingEchoWaking,
+	failedWakeFor,
+	forgetFailedWake,
+	pendingEchoFor,
 	projectionCarriesCommand,
+	recordFailedWake,
 	registerPendingEcho,
+	transcriptTailId,
 	withdrawPendingEcho,
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
@@ -82,6 +87,7 @@ import {
 	type SendRecordingPhase,
 } from "../lib/composer-slots";
 import { stopTurn, useTurnStopping } from "../lib/turn-stop";
+import { firstHistoryCursor, projectionHeadPinned } from "../lib/history-cursor";
 import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -521,6 +527,20 @@ function DeliverySheet({
 }
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
+/* How long after a `waking` receipt the relay's wake has certainly settled
+   (review round 5, M1 on PR #4522). Invariant: the relay boots under
+   `PROMPT_WAKE_DEADLINE_S = 180` (`mobile/daemon.py`, set above the measured
+   engage max of 169.6 s, n=2845) and that task starts before the receipt, so
+   by 180 s after the receipt it has delivered or failed. +30 s covers the
+   relay's work outside that deadline: `engage_runtime` takes it only after
+   `_engage_and_publish`'s pre-engage durable fold, and the failure frame is
+   published after it expires. (Not clock skew: both stamps are this device's
+   `Date.now()`.) `composer.wake-bound.test.ts` reads the daemon constant and
+   fails if the two drift apart. Only gates a
+   failure the relay's one-shot `wake_failed` frame should already have
+   reported — a composer that missed it (unmounted, stream down). Exported
+   for the regression cells. */
+export const WAKE_SETTLED_BOUND_MS = 210_000;
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
@@ -530,6 +550,25 @@ const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 const RETAINED_RETRY_ERROR =
 	"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
 const RETRY_BUTTON_LABEL = "Retry earlier instruction";
+/* Review round 2, R2-M1 on PR #4584: past the wake bound the session wrote
+   something, but neither the tail nor the bounded history walk carries this
+   command's row. The tail can move for reasons other than our delivery (the
+   failed wake's runtime booting late, the wake supervisor, another surface, a
+   re-fold), so this is NOT a failure claim and NOT a delivery claim: it says
+   what the phone knows and points at the Retry, whose same-`command_id` replay
+   the session dedupes. A literal like its retained-retry siblings above (U5
+   vocabulary: "earlier instruction"), not a relay catalogue key. */
+const UNCONFIRMED_WAKE_ERROR =
+	"Couldn’t confirm your earlier instruction was delivered. Retry it to be sure — it won’t be sent twice.";
+/* How far back the moved-tail confirmation pages (R2-M1). The cap is what
+   keeps a remount after a long absence (the envelope lives up to 24 h) from
+   walking a whole long session's history on every mount. Missing the row
+   because it sits deeper than this is the SAFE direction: the user sees
+   UNCONFIRMED_WAKE_ERROR and a Retry the session dedupes by `command_id`, at
+   worst one extra boot, never a lost message. 3 pages of `getHistory`'s
+   default 80 rows = 240 rows past the 80-row tail. */
+const WAKE_CONFIRM_HISTORY_PAGES = 3;
+const WAKE_CONFIRM_PAGE_ROWS = 80;
 /* D11: the positive acknowledgement is a SUCCESS, not a failure — it renders in
    the neutral/success notice, never the danger alert container.
 
@@ -1012,7 +1051,25 @@ export function Composer({
 		   (another surface woke the session, or the retry joined), and that row
 		   must take the failure copy down with it. */
 		failed: boolean;
+		/* `Date.now()` of the LATEST `waking` answer for this id (review round 1,
+		   m1 on PR #4584: a retry re-stamps it, see `PendingEcho.wakingAt`). What
+		   `WAKE_SETTLED_BOUND_MS` is measured from. */
+		startedAt: number;
+		/* The projection's newest row id at the first `waking` answer, taken only
+		   from a pid-0 durable rebuild (see `PendingEcho.wakingTailId` and the
+		   settle effect). Undefined = no baseline: the bound then fails the send
+		   as before. */
+		tailId?: string;
+		/* Past the bound with a moved tail (R2-M1): the bounded search for this
+		   command's row. Undefined = not started; `"found"` = delivered;
+		   `"missing"` = unconfirmed (envelope and Retry kept). Per tracker, so a
+		   remount re-checks once. */
+		confirm?: "checking" | "found" | "missing";
 	} | null>(null);
+	/* Bumped by the tracker's deadline timer, so the settle effect re-runs
+	   when the wake's settled bound passes even if no frame arrives (a cold
+	   session whose wake failed while nobody watched publishes nothing more). */
+	const [wakeDeadlineTick, setWakeDeadlineTick] = useState(0);
 	const retryPending = retryEnvelope !== null;
 	/* Presentation is deliberately separate from the immutable retry envelope.
 	   Each occurrence is an object, even for identical copy: a queued close from
@@ -1418,8 +1475,61 @@ export function Composer({
 		   what clears every route's private state — not navigation. */
 		const pending = getPendingContinuation(pid);
 		setRetryEnvelope(pending);
-		setError(pending ? RETAINED_RETRY_ERROR : "");
+		/* A wake this device already reported as failed (or unconfirmed) keeps
+		   that copy across a remount (QA round 2, row 4 on PR #4584): the generic
+		   "may have been delivered" line is for an envelope whose fate nobody
+		   saw, and showing it here replaced a definite answer with a vaguer one.
+		   See `FailedWake`; the settle effect rebuilds the tracker from it. */
+		const failed = pending ? failedWakeFor(pid, pending.command_id) : undefined;
+		setError(
+			!pending
+				? ""
+				: failed
+					? failed.unconfirmed
+						? UNCONFIRMED_WAKE_ERROR
+						: messageRuntime.t("relay.health.ended_send_failed")
+					: RETAINED_RETRY_ERROR,
+		);
 	}, [pid]);
+
+	/* The wake confirmation's history walk, cancelled on UNMOUNT only (review
+	   round 3, R3-m2 on PR #4584) — not from the settle effect's per-frame
+	   cleanup, which runs on every SSE frame and would abort the walk it just
+	   started. `mounted` lets an aborted walk tell a real unmount (drop the
+	   result: the remount runs its own) from StrictMode's dev-only
+	   cleanup/re-run (restart the walk, or the tracker would sit at
+	   "checking" with nothing left to finish it). */
+	const confirmAbort = useRef<AbortController | null>(null);
+	const mounted = useRef(true);
+	const wakeDeadlineTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const clearWakeDeadline = useCallback(() => {
+		if (wakeDeadlineTimer.current === null) return;
+		clearTimeout(wakeDeadlineTimer.current);
+		wakeDeadlineTimer.current = null;
+	}, []);
+	/* Both a route remount and a fresh waking receipt can install the tracker.
+	   Scheduling is not settling: do not replay the last projection on a new
+	   receipt, as it may still carry the previous attempt's same-id failure. */
+	const armWakeDeadline = useCallback((tracker: NonNullable<typeof wakingCommand.current>) => {
+		clearWakeDeadline();
+		const remaining = tracker.startedAt + WAKE_SETTLED_BOUND_MS - Date.now();
+		if (!mounted.current || remaining <= 0) return;
+		const timer = setTimeout(() => {
+			if (wakeDeadlineTimer.current !== timer) return;
+			wakeDeadlineTimer.current = null;
+			if (wakingCommand.current === tracker) setWakeDeadlineTick((n) => n + 1);
+		}, remaining);
+		wakeDeadlineTimer.current = timer;
+	}, [clearWakeDeadline]);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+			clearWakeDeadline();
+			confirmAbort.current?.abort();
+			confirmAbort.current = null;
+		};
+	}, [clearWakeDeadline]);
 
 	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
 	   outcomes only the stream can report:
@@ -1443,22 +1553,195 @@ export function Composer({
 	   terminal frame it publishes for a failed wake, or — from a relay without
 	   the marker — `projection.ended` after a frame from a running owner. */
 	useEffect(() => {
+		/* RE-ATTACH A WAKE THIS COMPOSER DID NOT SEE START (review round 5, M1 on
+		   PR #4522). `SessionScreen` is keyed per route, so a session switch
+		   unmounts this composer and its tracker ref with it, while the pending
+		   row — module-level in `pending-echo.ts` — survives with `waking` set.
+		   Without a tracker this effect could never fail the send, and the row
+		   read "waking session…" until a land, a retry or a reload.
+
+		   Rebuilt from the two durable facts, both required: the retained
+		   envelope (the retry's body, same id) and a held row for THAT id still
+		   flagged waking. An envelope alone is not enough — an ambiguous 504 or a
+		   reload retains one too, and those keep their own retained-retry
+		   affordance rather than becoming a failed wake. `sawLive` restarts false
+		   (the frames since are unknown), which only ever delays the `ended`
+		   fallback; the marker and the bound below do not depend on it.
+
+		   Re-attaching rather than merely clearing the flag on unmount (the
+		   review's cheaper option): clearing would turn the caption back into
+		   `sending…` — the pre-#4522 stuck row — while a re-attached tracker
+		   lets the failure land as the ordinary failed send. */
+		if (wakingCommand.current === null || wakingCommand.current.pid !== pid) {
+			const envelope = getPendingContinuation(pid);
+			const held = envelope ? pendingEchoFor(pid, envelope.command_id) : undefined;
+			const failedWake = envelope && !held?.waking ? failedWakeFor(pid, envelope.command_id) : undefined;
+			if (envelope && held?.waking) {
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: false,
+					startedAt: held.wakingAt ?? Date.now(),
+					tailId: held.wakingTailId,
+				};
+			} else if (envelope && failedWake) {
+				/* A wake that FAILED while a composer watched (QA round 2, row 4
+				   and Q2-2 on PR #4584). Its row was withdrawn, so the waking row
+				   above is gone, but the failure is still the route's answer and a
+				   late delivery (the failed wake's runtime booting after all, a
+				   retry from another surface) must still take it down. Rebuilt
+				   FAILED, so nothing re-reports it; an unconfirmed one keeps its
+				   "missing" verdict, so a remount does not walk history again. */
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: true,
+					startedAt: failedWake.startedAt,
+					tailId: failedWake.tailId,
+					confirm: failedWake.unconfirmed ? "missing" : undefined,
+				};
+			}
+		}
 		const waking = wakingCommand.current?.pid === pid ? wakingCommand.current : null;
 		if (waking && projection.pid > 0 && projection.ended !== true) waking.sawLive = true;
+		/* THE WAKE HAS SETTLED BY NOW, WHETHER OR NOT ANYONE SAW IT. The relay's
+		   `wake_failed` marker rides ONE frame and is never stored, so a composer
+		   that was unmounted (or whose stream was down) when it was published
+		   never sees it, and a re-subscribed cold session serves only its pid-0
+		   disk rebuild — the same frame a running wake shows. What bounds the
+		   wait is the relay itself: the boot runs under `deadline_s =
+		   PROMPT_WAKE_DEADLINE_S` and the task started before this receipt. Past
+		   the bound, a frame with NO running owner and no row under the id means
+		   the wake ended without delivering, i.e. it failed. A frame from a
+		   running owner never trips this: the runtime is up (this wake or another
+		   surface's) and its `command_id` dedupe owns the message from there. */
+		const pastBound =
+			waking !== null &&
+			Date.now() - waking.startedAt >= WAKE_SETTLED_BOUND_MS &&
+			(projection.pid === 0 || projection.ended === true);
+		/* PAST THE BOUND, A MOVED TAIL STARTS A CONFIRMATION (review round 1, M1
+		   on PR #4584; narrowed by R2-M1 below). The projection is the 80-row tail, so a wake that delivered and
+		   then ran a long turn has pushed the user row out of it, and "no row
+		   under the id" stopped meaning "not delivered". A failed wake writes
+		   nothing to the journal, so a durable rebuild whose newest row is not
+		   the one it showed when the wake was answered means the session wrote
+		   after the wake started — something to check, not yet a delivery (see
+		   the next block). Only consulted past the bound with no running
+		   owner, i.e. once the wake has certainly settled: a live frame's
+		   transient notice rows could move the tail mid-boot, and before the
+		   bound the row's own arrival is the signal. Not the session list's
+		   activity time or a turn counter: neither rides the pid-0 rebuild this
+		   composer is served while the session is cold. */
+		const hasMovedColdTail =
+			waking !== null &&
+			/* The baseline is only ever stamped from a durable rebuild; an ended
+			   LIVE frame can end in a transient notice row no rebuild reproduces
+			   (review round 2, R2-m1). */
+			projection.pid === 0 &&
+			waking.tailId !== undefined &&
+			(projection.transcript?.length ?? 0) > 0 &&
+			transcriptTailId(projection.transcript) !== waking.tailId;
+		const movedPastBaseline = pastBound && hasMovedColdTail;
+		/* A MOVED TAIL IS NOT PROOF OF DELIVERY (review round 2, R2-M1). Something
+		   wrote, but it need not be our message: the failed wake's own runtime
+		   booting late, the wake supervisor, another surface's prompt, or a
+		   re-fold all move the newest id too. Treating that as delivered retired
+		   the row, the envelope and the Retry, and the message was gone from the
+		   phone. So the move only means "look": the command's own id is the proof,
+		   in the tail (the projection check below) or in a bounded walk of older
+		   history. Found settles as delivered; not found (or the walk errored)
+		   is unconfirmed — the failed-send affordances with neutral copy. A
+		   brand-new session's baseline is `""`, so its first row takes this path
+		   as well. */
+		const carriedInTail =
+			waking !== null && projectionCarriesCommand(projection.transcript, waking.commandId);
+		if (waking && movedPastBaseline && !carriedInTail && waking.confirm === undefined) {
+			const tracker = waking;
+			tracker.confirm = "checking";
+			/* A pinned opener has no history before it, and `carriedInTail` has
+			   already checked it. With `transcript_has_older` but no pin, the
+			   current daemon can send a contiguous, user-headed 80-row tail:
+			   skipping its head would spend one of our bounded older-row slots on
+			   overlap. Keep the shape fallback only for legacy projections without
+			   that signal, and don't change the transcript's own paging policy. */
+			const tail = projection.transcript ?? [];
+			const headPinned = projection.transcript_head_pinned ??
+				(projection.transcript_has_older === true ? false : undefined);
+			const oldest = firstHistoryCursor(tail, projectionHeadPinned(tail, headPinned));
+			confirmAbort.current?.abort();
+			const abort = new AbortController();
+			confirmAbort.current = abort;
+			void (async () => {
+				let found = false;
+				try {
+					let before = oldest;
+					for (let page = 0; page < WAKE_CONFIRM_HISTORY_PAGES && before; page++) {
+						const { entries, has_more } = await getHistory(pid, before, WAKE_CONFIRM_PAGE_ROWS, abort.signal);
+						if (projectionCarriesCommand(entries, tracker.commandId)) {
+							found = true;
+							break;
+						}
+						if (!has_more || entries.length === 0) break;
+						before = entries[0].id;
+					}
+				} catch {
+					/* Unreachable history is not evidence of delivery: unconfirmed. */
+				}
+				if (confirmAbort.current === abort) confirmAbort.current = null;
+				if (abort.signal.aborted) {
+					/* Unmounted: the remount runs its own walk. Still mounted (StrictMode's
+					   dev re-run): start again rather than sit at "checking". */
+					if (mounted.current && wakingCommand.current === tracker) {
+						tracker.confirm = undefined;
+						setWakeDeadlineTick((n) => n + 1);
+					}
+					return;
+				}
+				/* A newer tracker (a retry's) owns the outcome now. */
+				if (wakingCommand.current !== tracker) return;
+				tracker.confirm = found ? "found" : "missing";
+				setWakeDeadlineTick((n) => n + 1);
+			})();
+		}
+		const unconfirmed =
+			waking !== null &&
+			!waking.failed &&
+			movedPastBaseline &&
+			!carriedInTail &&
+			waking.confirm === "missing";
 		const wakeFailed =
 			waking !== null &&
 			!waking.failed &&
+			!movedPastBaseline &&
 			(projection.wake_failed === waking.commandId ||
-				(waking.sawLive && projection.ended === true));
+				(waking.sawLive && projection.ended === true) ||
+				pastBound);
 		const outcome = settleWakingContinuation(
 			pid,
-			(commandId) => projectionCarriesCommand(projection.transcript, commandId),
-			wakeFailed,
+			(commandId) =>
+				projectionCarriesCommand(projection.transcript, commandId) ||
+				(waking?.commandId === commandId && waking.confirm === "found"),
+			wakeFailed || unconfirmed,
 			waking?.commandId ?? null,
 		);
 		if (outcome === "delivered") {
 			wakingCommand.current = null;
-			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
+			forgetFailedWake(pid);
+			/* A row the tail no longer carries is never retired by the projection
+			   (`usePendingEchoes` filters on the tail), so a delivery read off the
+			   moved tail takes it down here, or it would sit at the bottom. */
+			/* A `found` verdict counts even when the bound no longer holds (review
+			   round 3, R3-m1): another surface may have booted the session during
+			   the walk, so `movedPastBaseline` is false, yet the row is still in
+			   older history, not the tail, and nothing else would retire it. */
+			if (waking && !carriedInTail && (movedPastBaseline || waking.confirm === "found")) {
+				withdrawPendingEcho(pid, waking.commandId);
+			}
+			else if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
 			   the user to wait for exactly this; leaving it up after the landing
 			   kept them waiting on nothing. Same success line as a plain retry. */
@@ -1466,11 +1749,21 @@ export function Composer({
 				setNoticeTone("success");
 				setNotice(RETRY_ACK_NOTICE);
 			}
+			/* The envelope is cleared, so the retained-retry affordance a remount
+			   restored for it is stale (M1 on PR #4584): a delivered message must
+			   not keep offering "Retry earlier instruction". */
+			setRetryEnvelope(null);
+			if (!waking?.failed) {
+				setErrorOccurrence((current) =>
+					current.message === RETAINED_RETRY_ERROR ? { message: "" } : current,
+				);
+			}
 			if (waking?.failed) {
 				const failedCopy = messageRuntime.t("relay.health.ended_send_failed");
-				setRetryEnvelope(null);
 				setErrorOccurrence((current) =>
-					current.message === failedCopy || current.message === RETAINED_RETRY_ERROR
+					current.message === failedCopy ||
+					current.message === RETAINED_RETRY_ERROR ||
+					current.message === UNCONFIRMED_WAKE_ERROR
 						? { message: "" }
 						: current,
 				);
@@ -1478,23 +1771,44 @@ export function Composer({
 				   the user typed over it is theirs. */
 				if (textRef.current.trim() === waking.text.trim()) clearDraft();
 			}
-		} else if (outcome === "failed" && waking && wakeFailed) {
+		} else if (outcome === "failed" && waking && (wakeFailed || unconfirmed)) {
 			waking.failed = true;
 			withdrawPendingEcho(pid, waking.commandId);
+			recordFailedWake(pid, {
+				commandId: waking.commandId,
+				unconfirmed,
+				startedAt: waking.startedAt,
+				tailId: waking.tailId,
+			});
 			if (textRef.current.trim() === "") {
 				provenanceRef.current = emptyProvenance();
 				setText(waking.text);
 				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(messageRuntime.t("relay.health.ended_send_failed"));
+			setError(unconfirmed ? UNCONFIRMED_WAKE_ERROR : messageRuntime.t("relay.health.ended_send_failed"));
 		} else if (outcome === null) {
 			/* Settled out from under the tracker (the envelope is gone): the row,
 			   if any is left, no longer knows a wake is running. */
 			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			wakingCommand.current = null;
+			forgetFailedWake(pid);
 		}
-	}, [pid, projection.transcript, projection.pid, projection.ended, projection.wake_failed]);
+		/* A quiet cold stream may never re-enter this effect. Even a watched
+		   failure needs the deadline callback if the cold seed already moved
+		   and history still needs checking. Don't re-arm after the deadline or
+		   a verdict, and leave the callback with the tracker that scheduled it. */
+		const tracked = wakingCommand.current;
+		if (tracked === null || tracked.pid !== pid ||
+			(tracked.failed && (!hasMovedColdTail || tracked.confirm !== undefined))) {
+			clearWakeDeadline();
+			return;
+		}
+		armWakeDeadline(tracked);
+	}, [
+		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
+		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick, armWakeDeadline, clearWakeDeadline,
+	]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -1969,6 +2283,9 @@ export function Composer({
 				   composer's current preference). `deliveryForSend` keeps `steer`,
 				   idle and unsupported sends byte-identical to the legacy frame. */
 				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
+				/* A new attempt supersedes any failure this route last reported: from
+				   here the receipt (or this send's own error) is the answer. */
+				forgetFailedWake(pid);
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -2026,6 +2343,9 @@ export function Composer({
 					   makes a later `ended` this boot's end (the settle effect). A retry
 					   that joins the same wake keeps what the stream already showed. */
 					const prior = wakingCommand.current;
+					/* M1's baseline, only from a durable rebuild: a live frame can end in
+					   a transient notice row whose id no rebuild reproduces. */
+					const coldTail = projection.pid === 0 ? transcriptTailId(projection.transcript) : undefined;
 					const joined =
 						prior !== null &&
 						prior.pid === pid &&
@@ -2039,9 +2359,20 @@ export function Composer({
 						text: receipt.envelope.text,
 						sawLive: joined?.sawLive ?? false,
 						failed: false,
+						/* EVERY `waking` answer restarts the clock (m1 on PR #4584), a
+						   joining one too: "joined" means same id and not failed, not
+						   same relay task. A retry after a failure nobody saw starts a
+						   new task with a fresh deadline, and the latest receipt is the
+						   conservative bound for either. */
+						startedAt: Date.now(),
+						/* The baseline stays the FIRST answer's (see `tailId`). */
+						tailId: joined ? joined.tailId : coldTail,
 					};
 					/* The row says the session is booting, not just "sending…" (D2). */
-					markPendingEchoWaking(pid, receipt.envelope.command_id, true);
+					markPendingEchoWaking(pid, receipt.envelope.command_id, true, wakingCommand.current.tailId);
+					/* A retry replaces the old timer even when the stream sends no
+					   subsequent frame (R5-M1 on PR #4584). */
+					armWakeDeadline(wakingCommand.current);
 					/* A NEW draft that rode along (R2-2): the send replayed the retained
 					   earlier instruction, which is still waking, and the composer kept
 					   what the user just typed. Say so — the tap otherwise looked dead. */

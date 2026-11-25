@@ -41,47 +41,13 @@ import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 import { rowKey } from "../lib/condense-records";
+import { firstHistoryCursor, projectionHeadPinned } from "../lib/history-cursor";
 import { UserText } from "./user-text";
 import { composeCondensedEntries, type CondenseEntry } from "../lib/condense-view";
 import { FoldBar, TurnBar } from "./condense-rows";
 import { listenForReducedMotion, revealRow, settleReveals } from "../lib/stream-reveal";
 
 const PAGE = 120;
-
-/* The daemon's ``PROJECTION_TRANSCRIPT_LIMIT`` (``local_operator/mobile/types.py``):
-   the projection is the pinned opener plus the newest 79 rows, so a transcript
-   this long is a CAPPED window whose head row is not the tail's chronological
-   neighbour. Mirrored rather than fetched because the rule is about the SHAPE of
-   what arrived, and ``agent-view.tsx`` mirrors the same number for the child
-   sheet. It was compared against ``PAGE`` (120) before — a number the daemon
-   never sends — so the pinned-opener branch never ran on a real projection and
-   the first cursor was the opener itself: the page came back as the opener's own
-   neighbour plus the journal BELOW the cut, and the turns in between were never
-   requested (measured with the S6 first-paint fixture: 22 user turns, 272 rows;
-   on S3, 28 turns and 839 rows). ``>=`` rather than ``===`` is safe because the
-   head row is already held either way — paging from the row after it cannot lose
-   it, only re-offer it to the merge's id de-dup. */
-const PROJECTION_ROWS = 80;
-
-/** Every row id the LIVE fold mints, which no journal row can ever match. The
- *  fold creates them for content that is not a journal entry: reasoning
- *  (`rz-`, never persisted), tool rows (`tc-`), notices (`nt-`, `rt-`, `err-`,
- *  `rej-`), compaction (`cx-`) and the peer families' `peer-`/`nonpeer-`
- *  fallbacks when a custom message carried no id — all timestamp- or
- *  call-keyed (`local_operator/mobile/projection.py`, the `id=f"<p>-…"`
- *  sites). The child sheet also synthesises a head row `prompt:<job_id>`
- *  (`agent-view.tsx`). A cursor naming any of these is answered as
- *  end-of-history. */
-const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "peer-", "nonpeer-", "prompt:"];
-
-/** Whether a rendered row's id can name a journal entry — the only kind a
- *  history cursor may use. Anything else is a cursor the daemon can only
- *  answer as end-of-history. */
-function journalAddressableRow(entry: TranscriptEntry | undefined): boolean {
-	return entry !== undefined
-		&& entry.kind !== "reasoning"
-		&& !LIVE_ONLY_ROW_PREFIXES.some((prefix) => entry.id.startsWith(prefix));
-}
 
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
@@ -847,7 +813,7 @@ export function Transcript({
 	   projection is treated as pinned in that fallback: the opener is held either
 	   way, so the cost of a false positive is one row of overlap in the next
 	   page, which the merge's rowKey de-dup discards. */
-	const pinnedHead = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
+	const pinnedHead = projectionHeadPinned(entries, headPinned);
 	/* CAPPED IS WIDER THAN PINNED (PR #4521 QA Q3). A compacted render opens at
 	   the marker and pins no opener, so a short kept window arrived as ~14 rows
 	   with neither signal: no slot, no mount fetch, and nothing to scroll for
@@ -907,7 +873,7 @@ export function Transcript({
 	const oldestId =
 		older.length > 0
 			? older[0].id
-			: merged.slice(cursorStart).find(journalAddressableRow)?.id ?? merged[0]?.id ?? null;
+			: firstHistoryCursor(merged, cursorStart === 1);
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
@@ -1428,8 +1394,18 @@ export function Transcript({
 
 				   Inline rather than a class for the reason `lib/column.ts` spells
 				   out: the vitest layer has no stylesheet, so only an inline style
-				   RESOLVES and a test can fail when the property is dropped. */
-				style={{ overscrollBehaviorY: "contain" }}
+				   RESOLVES and a test can fail when the property is dropped.
+
+				   `scrollbarGutter: stable` (design round 1, D2 on PR #4521): a
+				   classic (non-overlay) scrollbar appearing as the conversation
+				   outgrew the box took ~11 px from the content width, so the
+				   right-aligned user bubbles jumped sideways. Reserved HERE and not
+				   on every `.lo-scroll` (review round 1, m3 on PR #4584): the other
+				   scrollers (composer textarea, pending card, trays) never had the
+				   jump, and `pending-card.tsx` records a decision not to give up a
+				   gutter's line length at 360 px. A no-op where the bar is an
+				   overlay (phones). */
+				style={{ overscrollBehaviorY: "contain", scrollbarGutter: "stable" }}
 				className={cn(
 					/* overflow-x-hidden as the backstop: break-words on the rows should
 					   wrap everything, but a table or pre that still overflows scrolls
@@ -1465,6 +1441,26 @@ export function Transcript({
 						style={{ height: `${topInset}px` }}
 					/>
 				) : null}
+				{/* SHORT CONTENT SITS ON THE BOTTOM EDGE (design round 1, D1 on PR
+				    #4521). A transcript shorter than the viewport used to stack from the
+				    top, so the compacted seed's automatic earlier-page load pushed every
+				    row ~231 px down when it landed. This spacer takes the free space
+				    ABOVE the rows instead, the way the desktop UI and chat apps anchor:
+				    a prepend shrinks the spacer and the newest row does not move; past
+				    the viewport it is 0 px tall and the pinned/anchor-follow paths
+				    above own `scrollTop` exactly as before.
+
+				    WHY A SPACER and not `justify-content: flex-end` on the scroller: a
+				    flex-end column that overflows pushes its excess out of the START
+				    edge, where it cannot be scrolled to. And not `margin-top: auto` on
+				    the first row: the first child varies (slot, opener, seam, row,
+				    empty state). After the top-inset reserve so the reserve stays the
+				    first child (anything under the overlay is still reserved).
+				    `flex: 1 0 0` grows into free space only and never shrinks a row;
+				    the -0.5rem bottom margin cancels the scroller's `gap-2` so a long
+				    transcript's geometry is byte-for-byte what it was. Inline for the
+				    `lib/column.ts` reason: only an inline style resolves under vitest. */}
+				<div aria-hidden data-bottom-anchor="" style={{ flex: "1 0 0px", marginBottom: "-0.5rem" }} />
 				{/* History loads automatically as the user scrolls up. The slot below is the
 				   only chrome, and it is ONE height in every state (see `HistorySlot`):
 				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap

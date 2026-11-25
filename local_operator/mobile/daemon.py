@@ -258,6 +258,13 @@ PHONE_HANDOFF_S = 60.0
 #: the 15 s ``ACK_TIMEOUT_S`` this path used to share with the ack. 180 s sits
 #: above that observed max and matches ``wakes.supervisor.WAKE_DEADLINE_S``, the
 #: bound already in production for the same boot.
+#:
+#: The phone composer's ``WAKE_SETTLED_BOUND_MS``
+#: (``mobile/web/src/components/composer.tsx``) is derived from this value: it
+#: is how long after a ``waking`` receipt a composer that missed the one-shot
+#: ``wake_failed`` frame treats the wake as settled. Raise that bound with this
+#: one; ``composer.wake-bound.test.ts`` fails if it falls below this deadline
+#: plus its slack.
 PROMPT_WAKE_DEADLINE_S = 180.0
 
 #: How long ``/command`` holds a cold prompt open before answering "waking" when
