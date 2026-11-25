@@ -9191,7 +9191,11 @@ class DesktopSessions:
                 )
                 continue
             if detail.startswith("rehomed: "):
-                moved.append((expected, f"{provider}/{model_id}"))
+                # Read the landed ID from the owner: the requested ID can be
+                # omitted, and the receipt must show what actually switched.
+                _, _, landed = detail.partition(" → ")
+                if landed.startswith(f"{provider}/"):
+                    moved.append((expected, landed))
             elif detail == REHOME_BUSY_REPLY:
                 # The owner has already told the conversation itself; this is
                 # the count the sign-in's receipt names.

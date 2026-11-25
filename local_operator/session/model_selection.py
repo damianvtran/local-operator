@@ -301,6 +301,8 @@ class StoredModelSelection:
     #: predates the fix — the same defect one layer down. ``False`` is a real
     #: snapshot (the user turned it off), so the two spellings cannot collapse.
     fast: bool | None = None
+    # Unmarked rows, including old v2 snapshots, keep their literal ID.
+    auth_route_default: bool = False
 
     @property
     def selector(self) -> str:
@@ -314,6 +316,7 @@ def _selection(
     authoritative: bool = False,
     boot: Any = None,
     fast: Any = None,
+    auth_route_default: Any = None,
 ):
     if not isinstance(selector, str) or "/" not in selector:
         return None
@@ -363,6 +366,7 @@ def _selection(
         # says nothing this reader may act on, and the wire's own gate
         # (``supports_fast_mode``) is what decides whether it may ever be sent.
         fast=fast if isinstance(fast, bool) else None,
+        auth_route_default=authoritative and auth_route_default is True,
     )
 
 
@@ -384,6 +388,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 authoritative=version == SELECTION_VERSION,
                 boot=details.get("boot"),
                 fast=details.get("fast"),
+                auth_route_default=details.get("auth_route_default"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -543,6 +548,7 @@ def _settled_selection(directory: Path, *, read_only: bool = False) -> StoredMod
                     authoritative=True,
                     boot=details.get("boot"),
                     fast=details.get("fast"),
+                    auth_route_default=details.get("auth_route_default"),
                 )
                 if selected is not None:
                     return replace(selected, recovered=unusable)

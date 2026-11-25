@@ -877,6 +877,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     because both serve ids that legitimately begin with their own name
     (``openrouter/auto``; ``ollama/hf.co/...``).
     """
+    auth_route_default = isinstance(model_name, RouteDefaultModel)
     bare_name = _hosting_qualified_bare_id(hosting, model_name)
     if bare_name is not None:
         model_name = bare_name
@@ -1300,7 +1301,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
 
     return ModelSpec(
         provider=canonical,
-        model_id=model_name,
+        model_id=str(model_name),
+        auth_route_default=auth_route_default,
         bedrock_metadata=getattr(info, "bedrock_metadata", None),
         context_window=context_window,
         default_context_window=getattr(info, "default_context_window", None),
@@ -3441,8 +3443,6 @@ def configure_model(
         model_info = resolve_model_info(canonical, model_name, base=config_dir)
 
     spec = build_model_spec(canonical, model_name, model_info)
-    if isinstance(model_name, RouteDefaultModel):
-        spec = spec.model_copy(update={"auth_route_default": True})
     if definition.local_setup:
         from local_operator.providers.local import local_model_info
 

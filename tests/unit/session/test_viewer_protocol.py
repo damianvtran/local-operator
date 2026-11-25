@@ -1324,9 +1324,11 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # be signed (Touch ID) and, if so, decides it through the bearer path.
     # Facade-only — an in-process owner never signs. Declared in
     # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
-    assert len(viewer_only) == 82, (
+    # 82 → 83 is ``rehome_to_auth_default``: only a viewer must send an
+    # omitted selector over the wire; the owner already holds the selection.
+    assert len(viewer_only) == 83, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 82, and the aggregate floor is set at 40 against that number. A "
+        "says 83, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

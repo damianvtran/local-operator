@@ -766,6 +766,12 @@ def resolve_hosting_model_with_source(
             if not model:
                 raise ModelNotConfiguredError(_no_model_message(provider), provider)
             return provider, model, "flag"
+        if saved.auth_route_default:
+            from local_operator.model.defaults import RouteDefaultModel
+
+            # Keep the cold frame's provisional selector until dispatch knows
+            # the winning credential. This is not a literal user choice.
+            return saved.provider, RouteDefaultModel(saved.model_id), "resume"
         return saved.provider, saved.model_id, "resume"
 
     # NO usable stored selection. Fall back to the birth precedence — but first ask

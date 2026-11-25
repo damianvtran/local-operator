@@ -10894,6 +10894,15 @@ class AttachedSession:
         else:
             self._switch_on_owner(client, model, announce=True)
 
+    async def rehome_to_auth_default(self, expected: str, provider: str) -> None:
+        """Use the owner's guarded re-home, not the explicit set-model RPC."""
+        client = self._client
+        if client is not None:
+            try:
+                await client.rehome_if_current(expected, provider, "")
+            except Exception:  # noqa: BLE001 — an older/unreachable owner keeps its selection
+                logger.debug("automatic viewer re-home failed", exc_info=True)
+
     def _consume_settings_result(self, state: FrontendSessionState | PublicStateView) -> None:
         """Render OUR switch outcomes once: a refusal as an error, success silently.
 

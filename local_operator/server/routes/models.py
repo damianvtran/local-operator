@@ -9,7 +9,7 @@ import logging
 import os
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
@@ -143,7 +143,8 @@ async def _vertex_listing_credential(
     },
 )
 async def list_providers(
-    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+    request: Request,
+    response: Response,
 ) -> CRUDResponse[ProviderListResponse]:
     """
     List all available model providers with their details.
@@ -158,11 +159,27 @@ async def list_providers(
             stored_route_suggestion,
             suggested_model_for,
         )
+        from local_operator.server.desktop import require_desktop
+        from local_operator.server.routes.auth import get_desktop_auth
+
+        # This catalogue predates desktop pairing. Refusing desktop access
+        # removes account evidence, not access to the public catalogue.
+        provider_auth_store = None
+        try:
+            require_desktop(request)
+        except HTTPException:
+            pass
+        else:
+            provider_auth_store = (
+                await get_desktop_auth(request, get_config_manager(request))
+            ).store
+        # The same URL can return a private, account-derived suggestion.
+        response.headers["Cache-Control"] = "private, no-store"
 
         def with_suggestion(provider: ProviderDetail) -> ProviderDetail:
             suggested = (
                 stored_route_suggestion(provider.id, provider_auth_store)
-                if provider.id == "google-vertex"
+                if provider.id == "google-vertex" and provider_auth_store is not None
                 else suggested_model_for(provider.id)
             )
             if suggested is None:

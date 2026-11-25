@@ -8917,6 +8917,8 @@ class Session:
         if (
             previous.reasoning_effort == model.reasoning_effort
             and previous.fast_mode == model.fast_mode
+            # Picking the already displayed automatic ID is a real pin.
+            and previous.auth_route_default == model.auth_route_default
             and previous_choice == self._chosen_effort
         ):
             return
@@ -37759,6 +37761,9 @@ class Session:
         payload = {
             "version": 2,
             "selector": f"{model.provider}/{model.model_id}",
+            # A concrete ID keeps older readers compatible. Only a marked
+            # row says that ID is a preview rather than an explicit wire pin.
+            "auth_route_default": model.auth_route_default,
             # THE CHOICE FIRST (see ``_remember_effort_choice``): a route that
             # cannot express the chosen level carries ``None`` (or a clamp) on
             # its spec, and writing the spec's own level would let the trip
@@ -37787,10 +37792,12 @@ class Session:
             f"{current.provider}/{current.model_id}",
             self._chosen_effort or current.reasoning_effort,
             bool(current.fast_mode),
+            current.auth_route_default,
         ) == (
             payload["selector"],
             payload["effort"],
             payload["fast"],
+            payload["auth_route_default"],
         ):
             self._selected_model_dirty = False
         else:
@@ -37887,8 +37894,11 @@ class Session:
             # reopen — the same defect (ui#1266) through the new field. ``None``
             # is no evidence and leaves the incoming spec alone.
             dial = fast_dial_from_row(saved.fast, self._model)
-            if dial is not None:
-                self._model = self._model.model_copy(update={"fast_mode": dial})
+            if dial is not None or self._model.auth_route_default != saved.auth_route_default:
+                update = {"auth_route_default": saved.auth_route_default}
+                if dial is not None:
+                    update["fast_mode"] = dial
+                self._model = self._model.model_copy(update=update)
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -37942,6 +37952,8 @@ class Session:
         dial = fast_dial_from_row(saved.fast, spec)
         if dial is not None:
             spec = spec.model_copy(update={"fast_mode": dial})
+        if saved.auth_route_default:
+            spec = spec.model_copy(update={"auth_route_default": True})
         self._model = spec
         # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
         # withdrawal row now stores the TARGET's seed, so comparing it to the

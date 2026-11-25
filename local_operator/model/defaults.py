@@ -209,7 +209,7 @@ def _keyed_name(canonical: str, suggestion: SuggestedModel) -> str:
 
 def stored_route_suggestion(hosting: str, store: AuthStore) -> SuggestedModel | None:
     """Suggest for the eligible local OAuth tier without contacting the vendor."""
-    locations = store.fresh_oauth_locations_for_default(hosting)
+    locations = store.oauth_locations_for_default(hosting)
     return suggested_model_for(hosting, oauth=bool(locations), vertex_locations=locations)
 
 
@@ -217,8 +217,8 @@ def local_route_suggestion(hosting: str, config_dir: Path) -> SuggestedModel | N
     """Preview a new turn's route without refreshing a token or borrowing a key.
 
     Startup and the provider census need a useful local answer before a request
-    exists. A blocked or expired OAuth row isn't positive evidence of service;
-    when multiple fresh Cloud rows remain, don't guess which region will win.
+    exists. Exclude known unusable grants, but keep refreshable Cloud accounts;
+    when multiple eligible Cloud rows remain, don't guess which region wins.
     This is presentation only: dispatch has the actual credential winner.
     """
     canonical = _canonical(hosting)
@@ -239,9 +239,9 @@ def local_route_suggestion(hosting: str, config_dir: Path) -> SuggestedModel | N
 class RouteDefaultModel(str):
     """An omitted model's provisional display ID, not an explicit selection.
 
-    Startup passes a string pair through bootstrap and the session factory.
-    Keep omission distinguishable until configure_model builds the ModelSpec;
-    an identical string named by the caller must never be retargeted.
+    Startup, resume and re-home still pass string pairs through their model
+    selection APIs. Keep omission distinguishable until the shared spec
+    builder; an identical string named by the caller must not be retargeted.
     """
 
 

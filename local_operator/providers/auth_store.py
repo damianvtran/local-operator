@@ -6179,8 +6179,21 @@ class AuthStore:
             return [r for r in rows if r.id not in demoted or r.id in {sticky_id, tentative_id}]
         return rows
 
-    def fresh_oauth_locations_for_default(self, provider: str) -> tuple[str, ...]:
+    def oauth_locations_for_default(self, provider: str) -> tuple[str, ...]:
         """Local OAuth evidence for model previews; never refresh or move accounts."""
+
+        def can_refresh_vertex(data: dict[str, Any]) -> bool:
+            # Cloud access tokens typically expire between turns. A stored
+            # refresh path still identifies the tier; it does not prove the
+            # grant will refresh. Dispatch alone can make that decision.
+            if provider != "google-vertex":
+                return False
+            if data.get("auth_mode") == "service_account":
+                fields = (data.get("client_email"), data.get("private_key"))
+            else:
+                fields = (data.get("refresh") or data.get("refresh_token"),)
+            return all(isinstance(field, str) and bool(field.strip()) for field in fields)
+
         if self.override_keys(provider):
             return ()
         return tuple(
@@ -6188,7 +6201,7 @@ class AuthStore:
             for row in self._usable_key_rows(provider, "oauth", source=None)
             if not self._grant_dead_at(row.data)
             and not self._family_moved_at(row.data)
-            and not self._needs_refresh(row.data)
+            and (not self._needs_refresh(row.data) or can_refresh_vertex(row.data))
         )
 
     # -- the cascade ---------------------------------------------------------
