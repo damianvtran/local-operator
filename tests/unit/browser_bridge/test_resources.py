@@ -1053,11 +1053,7 @@ def test_handoff_reference_is_redacted_and_the_private_ref_keeps_the_url(
 ) -> None:
     resource = _owned_tab(tmp_path, "https://signin.example.test/login?code=SECRET#frag")
     ref = resource.handoff_reference()
-    assert ref == {
-        "origin": "https://signin.example.test",
-        "url": "https://signin.example.test/login",
-        "surface": "bridge:100",
-    }
+    assert ref == {"origin": "https://signin.example.test", "surface": "bridge:100"}
     resource.record_handoff_ref("a-1")
     assert resource.record[resources.HANDOFF_REFS_FIELD][0]["url"].endswith("?code=SECRET#frag")
 
@@ -1081,3 +1077,54 @@ def test_reopen_is_offered_only_with_no_live_tab_and_a_wanting_ask(tmp_path: Pat
     log.write_bytes(saved)
     _settle_ask(tmp_path, "a-1", "withdrawn")
     assert resource.reopenable_handoff() is None
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://alice:pw@Host.Example:8443/p?q=1#f", "https://host.example:8443"),
+        ("http://[::1]:9000/x", "http://[::1]:9000"),
+        ("https://user@host.example/", "https://host.example"),
+        ("not a url", ""),
+    ],
+)
+def test_url_origin_never_carries_userinfo(url: str, origin: str) -> None:
+    assert resources.url_origin(url) == origin
+
+
+def test_an_answered_ask_reopens_only_inside_the_short_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q4: an answered ask kept reopening its login page 30 days later."""
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-1", expires_in_ms=86_400_000)
+    resource.record_handoff_ref("a-1")
+    resource.remember("")
+    _settle_ask(tmp_path, "a-1", "answered")
+    assert resource.reopenable_handoff()["ask_status"] == "answered"
+    now = resources._now_ms()
+    monkeypatch.setattr(
+        resources, "_now_ms", lambda: now + resources.REOPEN_AFTER_ANSWER_MS + 1_000
+    )
+    assert resource.reopenable_handoff() is None
+
+
+@pytest.mark.asyncio
+async def test_a_hold_settled_by_its_ask_spends_the_reference_but_a_vanished_tab_keeps_it(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    tab_gone = BrowserResource(tmp_path, tmp_path.name)
+    tab_gone.initialize()
+    tab_gone.record[resources.HANDOFF_REFS_FIELD] = [
+        {"ask_id": "a-1", "url": SIGNIN, "origin": "https://signin.example.test", "host": "bridge"}
+    ]
+    bridge.recover_reply = {"state": "closed", "tab": ""}
+    await tab_gone.ensure_recovered()
+    # Ask still open, tab vanished: the reference survives for the floor.
+    assert tab_gone.reopenable_handoff()["ask_id"] == "a-1"
+    _settle_ask(tmp_path, "a-1", "withdrawn")
+    tab_gone.record["retention"] = "pending ask a-1"
+    tab_gone.record[resources.ASK_HANDOFFS_FIELD] = [{"ask_id": "a-1"}]
+    await tab_gone._refresh_ask_hold(may_add=False)
+    assert resources.HANDOFF_REFS_FIELD not in tab_gone.record

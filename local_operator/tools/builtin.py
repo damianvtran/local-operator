@@ -31652,6 +31652,11 @@ async def execute_browser(
 #: Actions that mean "continue in my tab" — the ones a vanished handoff tab
 #: turns into "no browser surface open". `open`/`goto`/`close` choose a page or
 #: an end themselves; `tabs` and the access/ownership verbs never need a page.
+#: The only actions replayed on a reopened page: they read it and change
+#: nothing. An ALLOWLIST, so a new mutating action is safe by default.
+_REOPEN_REPLAY_ACTIONS = frozenset(
+    {"read", "snapshot", "screenshot", "logs", "styles", "hit_test", "ancestors", "query"}
+)
 _REOPEN_EXEMPT_ACTIONS = frozenset(
     {
         "open",
@@ -31698,6 +31703,9 @@ async def _reopen_handoff_if_gone(
         return result
     if not ref:
         return result
+    # Deliberately an ORDINARY `open` of this session's own surface through the
+    # owned lane (review R2-6): site approval and the tab cap apply exactly as
+    # they would to an `open` the agent typed.
     backend = {"bridge": "extension", "ui": "ui"}.get(str(ref.get("host", "")), "")
     open_args: dict[str, Any] = {"action": "open", "url": ref["url"]}
     if backend:
@@ -31705,20 +31713,34 @@ async def _reopen_handoff_if_gone(
     reopened = await _execute_browser_owned(
         f"{tool_call_id}:reopen", open_args, signal, on_update, context
     )
+    # Only what is KNOWN is stated (review R2-3): the tab is gone, not why, and
+    # the reopened page may be a login wall or an approval prompt. The origin
+    # only, because a path or query can hold a token and transcripts travel.
+    origin = url_origin_for_copy(ref["url"])
     label = f"ask {ref['ask_id']} ({ref.get('ask_status')})"
     if reopened.is_error:
         return _append_result_text(
             result,
-            f"The tab for {label} was closed when an earlier runtime ended; reopening "
-            f"{redacted_url_for_copy(ref['url'])} failed: {reopened.text}",
+            f"The tab {label} pointed at is no longer open; reopening {origin} failed: "
+            f"{reopened.text}",
         )
     note = (
-        f"Reopened handoff: the tab for {label} was closed when an earlier runtime ended, "
-        f"so {redacted_url_for_copy(ref['url'])} was reopened in a new background tab of "
-        "this session. Continue there; this is not a fresh start."
+        f"Reopened handoff: the tab {label} pointed at is no longer open, so its page on "
+        f"{origin} was reopened in a new background tab of this session. This is the "
+        "earlier handoff, not a fresh start, but check what the page shows before acting."
     )
     if action == "recover":
         return _append_result_text(reopened, note)
+    if action not in _REOPEN_REPLAY_ACTIONS:
+        # NEVER replay a mutating action on a page nobody has looked at (review
+        # R2-2): on a consent or approval prompt a replayed `click` would grant
+        # it. The agent snapshots first, then acts on what it sees.
+        details = dict(reopened.details or {})
+        details.update(reopened_handoff=str(ref["ask_id"]), not_run=action)
+        return _append_result_text(
+            reopened.model_copy(update={"details": details}),
+            f"{note} Your '{action}' was NOT run on it: snapshot the page first, then act.",
+        )
     retried = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
     details = dict(retried.details or {})
     details["reopened_handoff"] = str(ref["ask_id"])
@@ -31728,11 +31750,11 @@ async def _reopen_handoff_if_gone(
     return _append_result_text(retried, note)
 
 
-def redacted_url_for_copy(url: str) -> str:
-    """The reopened page as the model reads it: no query or fragment."""
-    from local_operator.browser_bridge.resources import redacted_url
+def url_origin_for_copy(url: str) -> str:
+    """The reopened page as the model reads it: its origin only."""
+    from local_operator.browser_bridge.resources import url_origin
 
-    return redacted_url(url) or url
+    return url_origin(url) or "its recorded page"
 
 
 async def _browser_handed_close(
@@ -32026,9 +32048,12 @@ async def _execute_browser_owned(
                     # `_save` each release path below ends with.
                     from local_operator.browser_bridge.resources import (
                         ASK_HANDOFFS_FIELD,
+                        HANDOFF_REFS_FIELD,
                     )
 
                     resource.record.pop(ASK_HANDOFFS_FIELD, None)
+                    # ...and spends every reopen reference (review R2-4).
+                    resource.record.pop(HANDOFF_REFS_FIELD, None)
                 reason = str(args.get("text", "")).strip()
                 if action == "retain" and not reason:
                     # Caught HERE because `text` defaults to "", so omitting it

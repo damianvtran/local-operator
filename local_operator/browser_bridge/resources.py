@@ -114,26 +114,26 @@ SURFACE_ORIGIN_FIELD = "surface_origin"
 #: another session's, never focused — and reports it as a reopened handoff.
 #:
 #: Two copies, on purpose. The ask's own row (``asks.jsonl``, which travels
-#: with a moved session and is read by remote surfaces) carries only a
-#: REDACTED reference: origin, the URL without query/fragment, and the public
-#: tab label — never the capability handle, and never a query string that may
-#: hold a one-time code. The full URL stays in this private, device-local
-#: record (``HANDOFF_REFS_FIELD``), which is what the reopen uses.
+#: with a moved session and is read by remote surfaces) carries only the
+#: ORIGIN (hostname and port, never userinfo) and the public tab label: no
+#: path, query or fragment, any of which can carry a magic-link token, a
+#: session id (``;jsessionid=``) or a one-time code (review R2-1). The full
+#: URL stays in this private, device-local record (``HANDOFF_REFS_FIELD``),
+#: which is what the reopen uses.
+#:
+#: LIFETIME (review R2-4): a reference reopens while its ask is ``open``, or
+#: for ``REOPEN_AFTER_ANSWER_MS`` after it was answered — the answering turn,
+#: which in the incident began 0.6 s after the answer (15:04:02.598 answer,
+#: 15:04:02.644 turn start, ``turn-journal.json``). 30 minutes covers a turn
+#: queued behind a busy runtime without letting an old login page reopen days
+#: later. ``release``, a settled hold and the agent's own open/goto/close
+#: clear the references outright.
 SURFACE_URL_FIELD = "surface_url"
 HANDOFF_REFS_FIELD = "handoff_refs"
 #: Ask states in which a missing tab is still worth reopening: the user is
 #: being asked to act in it, or has just answered and the agent continues.
 _REOPENABLE_ASK_STATES = frozenset({"open", "answered"})
-
-
-def redacted_url(url: Any) -> str:
-    """``scheme://host[:port]/path`` of ``url``: no query, no fragment."""
-    from urllib.parse import urlsplit
-
-    origin = url_origin(url)
-    if not origin:
-        return ""
-    return origin + (urlsplit(str(url)).path or "/")
+REOPEN_AFTER_ANSWER_MS = 30 * 60 * 1000
 
 
 def _now_ms() -> int:
@@ -141,18 +141,27 @@ def _now_ms() -> int:
 
 
 def url_origin(url: Any) -> str:
-    """``scheme://host[:port]`` of ``url``, lower-cased; ``""`` when it has none."""
+    """``scheme://host[:port]`` of ``url``, lower-cased; ``""`` when it has none.
+
+    Built from ``hostname`` and ``port`` ONLY, never the raw authority: a URL
+    like ``https://alice:pw@host`` must not carry its userinfo into an origin
+    that is written to the ask row or compared as a key (review R2-1).
+    """
     from urllib.parse import urlsplit
 
     if not isinstance(url, str) or not url:
         return ""
     try:
         parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
     except ValueError:
         return ""
-    if not parts.scheme or not parts.netloc:
+    if not parts.scheme or not host:
         return ""
-    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+    if ":" in host:  # an IPv6 literal keeps its brackets
+        host = f"[{host}]"
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
 
 
 def open_ask_ids(directory: Path) -> set[str]:
@@ -1771,7 +1780,8 @@ class BrowserResource:
     def handoff_reference(self) -> dict[str, Any] | None:
         """The REDACTED reference for an ask queued now, or ``None`` (no live tab).
 
-        Safe for the ask row: no capability handle, no query or fragment.
+        Safe for the ask row: origin and public tab label only (see
+        ``HANDOFF_REFS_FIELD``).
         """
         from local_operator.browser_bridge.handoff import public_surface_label
 
@@ -1781,7 +1791,6 @@ class BrowserResource:
             return None
         return {
             "origin": url_origin(url),
-            "url": redacted_url(url),
             "surface": public_surface_label(surface),
         }
 
@@ -1827,12 +1836,22 @@ class BrowserResource:
             records = ask_store.fold(ask_store.read_events(self.directory, strict=True), _now_ms())
         except (OSError, ValueError):
             return None
-        status = {str(r.get("ask_id", "")): str(r.get("status", "")) for r in records}
-        for ref in reversed(refs):
-            if status.get(str(ref.get("ask_id", ""))) in _REOPENABLE_ASK_STATES and url_origin(
-                ref.get("url")
+        now = _now_ms()
+        wanting: dict[str, str] = {}
+        for r in records:
+            state = str(r.get("status", ""))
+            if state not in _REOPENABLE_ASK_STATES:
+                continue
+            answered_at = r.get("answered_at")
+            if state == "answered" and not (
+                isinstance(answered_at, int) and now - answered_at <= REOPEN_AFTER_ANSWER_MS
             ):
-                return {**ref, "ask_status": status[str(ref["ask_id"])]}
+                continue
+            wanting[str(r.get("ask_id", ""))] = state
+        for ref in reversed(refs):
+            ask_id = str(ref.get("ask_id", ""))
+            if ask_id in wanting and url_origin(ref.get("url")):
+                return {**ref, "ask_status": wanting[ask_id]}
         return None
 
     def consume_handoff_refs(self) -> None:
@@ -1911,6 +1930,21 @@ class BrowserResource:
             )
             self._save()
         elif current and not live:
+            if open_ids is not None:
+                # A hold that settled because its ask did spends that ask's
+                # reopen reference too (review R2-4): the ask it served is
+                # over, so its page must not come back later. A hold lifted
+                # only because the TAB vanished keeps the reference of a still
+                # open ask: that is exactly the case the reopen floor serves.
+                refs = [
+                    r
+                    for r in self.record.get(HANDOFF_REFS_FIELD, [])
+                    if isinstance(r, dict) and r.get("ask_id") in open_ids
+                ]
+                if refs:
+                    self.record[HANDOFF_REFS_FIELD] = refs
+                else:
+                    self.record.pop(HANDOFF_REFS_FIELD, None)
             await self._release_ask_hold()
 
     async def drop_ask_handoffs(self) -> None:

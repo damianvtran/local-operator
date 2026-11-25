@@ -1336,8 +1336,10 @@ async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
         for e in store.read_events(session._browser.resource.directory)
         if e.get("kind") == "queued" and e.get("ask_id") == ask_id
     ]
-    # The ask's own row carries the REDACTED reference only.
-    assert queued[0]["browser_ref"]["url"] == "https://signin.example.test/login"
+    # The ask's own row carries the origin and public tab label only: no path,
+    # query or fragment (review R2-1); the full URL stays device-local.
+    assert set(queued[0]["browser_ref"]) == {"origin", "surface"}
+    assert queued[0]["browser_ref"]["origin"] == "https://signin.example.test"
     # The public tab label (`host:tab`), never the capability handle's nonce.
     assert first_surface not in json.dumps(queued[0]["browser_ref"])
     assert first_surface.startswith(queued[0]["browser_ref"]["surface"])
@@ -1350,7 +1352,8 @@ async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
         snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
         assert not snap.is_error, snap.text
         assert snap.details["reopened_handoff"] == ask_id
-        assert "Reopened handoff" in snap.text and "not a fresh start" in snap.text
+        assert "Reopened handoff" in snap.text and "check what the page shows" in snap.text
+        assert "earlier runtime" not in snap.text and "Continue there" not in snap.text
         assert snap.details.get("reopened_url") == SIGNIN_URL
         assert successor._browser.surface_id and successor._browser.surface_id != first_surface
         assert _control(protocol_peer)["tabs"] == 1
@@ -1413,3 +1416,105 @@ async def test_another_session_never_reopens_this_sessions_handoff(
         assert _control(protocol_peer)["tabs"] == 0
     finally:
         await other.dispose()
+
+
+class _RpcSpy:
+    """Records every bridge RPC method the session sends (no behaviour change)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from local_operator.browser_bridge import backend
+
+        self.methods: list[str] = []
+        original = backend.HostClient.call
+
+        async def call(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.methods.append(method)
+            return await original(client, method, params)
+
+        monkeypatch.setattr(backend.HostClient, "call", call)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first",
+    [
+        {"action": "click", "selector": "button[type=submit]"},
+        {"action": "type", "selector": "input", "text": "x"},
+        {"action": "press", "key": "Enter"},
+    ],
+)
+async def test_a_mutating_first_action_is_not_replayed_on_a_reopened_page(
+    protocol_peer: tuple[int, str],
+    headless_tui_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, Any],
+) -> None:
+    """Review R2-2: on a consent prompt a replayed click would grant it."""
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    spy = _RpcSpy(monkeypatch)
+    successor = _asking_session(headless_tui_env)
+    try:
+        acted = await _tool(successor, "synthetic-act", "browser", first)
+        assert not acted.is_error, acted.text
+        assert acted.details["reopened_handoff"] == ask_id
+        assert acted.details["not_run"] == first["action"]
+        assert f"Your '{first['action']}' was NOT run" in acted.text
+        assert "snapshot the page first" in acted.text
+        assert "open" in spy.methods and first["action"] not in spy.methods, spy.methods
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_userinfo_never_reaches_the_ask_row_or_the_note(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """Review R2-1: `user:password@` survived into the origin."""
+    secret_url = (
+        "https://alice:hunter2pw@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, secret_url)
+        await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    row = (directory / "asks.jsonl").read_text()
+    for token in ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99"):
+        assert token not in row, token
+    assert '"origin":"https://signin.example.test:8443"' in row
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        for token in ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99"):
+            assert token not in snap.text, token
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_spends_the_reopen_reference(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+        await _tool(session, "synthetic-release", "browser", {"action": "release"})
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await successor.dispose()
