@@ -669,9 +669,27 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the relay's own sentence for the engage, rendered verbatim as the receipt",
     ),
-    ("local_operator/tools/builtin.py", "_sessions_stop_mesh", "detail"): (
+    # The idle-only remote stop: ``detail`` is the OWNER's ``StopOutcome.line``,
+    # the English fallback ``_sessions_receipt`` uses only when no keyed receipt
+    # matches the owner's ``method``/``reason``; ``reason`` is the owner's closed
+    # token (busy/wake/old_owner/unanswered) that picks that keyed receipt. The
+    # CLI's ``--stop-if-idle`` human line picks the same keyed sentence from
+    # ``reason`` (UX round 1 U5) and prints the owner's sentence otherwise.
+    ("local_operator/tools/builtin.py", "_sessions_stop_peer_idle", "detail"): (
         1,
-        "the stop ladder's own outcome sentence, rendered verbatim as the receipt",
+        "the owner's own idle-only stop sentence, the fallback when no keyed receipt matches",
+    ),
+    ("local_operator/tools/builtin.py", "_sessions_stop_peer_idle", "reason"): (
+        1,
+        "the owner's closed refusal token, which only selects a keyed wire.sessions receipt",
+    ),
+    ("local_operator/network/cli.py", "_stop_if_idle_line", "detail"): (
+        1,
+        "the owner's own idle-only stop sentence, the fallback when no keyed receipt matches",
+    ),
+    ("local_operator/network/cli.py", "_stop_if_idle_line", "reason"): (
+        1,
+        "the owner's closed refusal token, which only selects a keyed wire.sessions receipt",
     ),
     # The readiness report's own sentences. Capability rows are COMPOSED as prose in
     # ``readiness.py`` (the machine token rides ``code``, which no surface here

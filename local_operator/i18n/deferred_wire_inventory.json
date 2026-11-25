@@ -437,10 +437,29 @@
           "path": "local_operator/tools/builtin.py",
           "symbol": "tools.builtin (_sessions_copy)",
           "note": "sessions tool stop/park receipts, refusals and approval prompts; returned as ToolResult text and approval-prompt strings, never as a key"
+        },
+        {
+          "path": "local_operator/network/cli.py",
+          "symbol": "network.cli (_stop_if_idle_line)",
+          "note": "`lop network sessions --stop-if-idle` human refusal line, the same reason-keyed stop_refused_* sentences the sessions tool shows; printed as finished text to stdout, never as a key (--json keeps the owner's detail)"
         }
       ],
       "references": {
-        "tools/builtin.py": 19
+        "network/cli.py": 2,
+        "tools/builtin.py": 17
+      }
+    },
+    "wire.sessions_remote_stop": {
+      "reason": "sessions tool remote idle-only stop receipts and approval prompt rendered in-process by tools/builtin.py (_sessions_remote_stop_copy) and returned as finished tool text",
+      "render_points": [
+        {
+          "path": "local_operator/tools/builtin.py",
+          "symbol": "tools.builtin (_sessions_remote_stop_copy)",
+          "note": "remote idle-only stop receipts, refusals and its approval prompt; returned as ToolResult text and approval-prompt strings, never as a key"
+        }
+      ],
+      "references": {
+        "tools/builtin.py": 13
       }
     },
     "wire.operator_setup": {

@@ -1375,6 +1375,17 @@ export type MessageParams = {
   "wire.sessions.stop_refused_wake": { "name": string };
   "wire.sessions.stop_remote_refused": undefined;
   "wire.sessions.stop_self_refused": undefined;
+  "wire.sessions_remote_stop.approval_stop_peer_force": { "address": string; "peer": string };
+  "wire.sessions_remote_stop.approval_stop_peer_idle": { "address": string; "peer": string };
+  "wire.sessions_remote_stop.dormant_hint": { "peer": string; "address": string };
+  "wire.sessions_remote_stop.force_refused": undefined;
+  "wire.sessions_remote_stop.not_running": { "name": string; "peer": string };
+  "wire.sessions_remote_stop.not_served": { "peer": string };
+  "wire.sessions_remote_stop.pending": { "name": string; "peer": string; "seconds": string };
+  "wire.sessions_remote_stop.refused_unanswered": { "name": string; "peer": string };
+  "wire.sessions_remote_stop.relay_restart": undefined;
+  "wire.sessions_remote_stop.unconfirmed": { "peer": string };
+  "wire.sessions_remote_stop.unsupported": { "peer": string };
   "wire.settings.agents.description": undefined;
   "wire.settings.agents.title": undefined;
   "wire.settings.agents_auto_update_seeds.choice.false.description": undefined;

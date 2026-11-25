@@ -162,6 +162,16 @@ SESSION_MOVE_WORKSET_V1 = "session-move-workset-v1"
 #: Additive: older links omit this string, older readers ignore it, and no op
 #: or member grant changes shape.
 SESSION_MOVE_ATTEMPT_V1 = "session-move-attempt-v1"
+#: The idle-only remote stop (``net_session_stop_idle``; ``relay._op_session_stop_idle``).
+#: WHY A SEPARATE, NEGOTIATED NAME: the legacy ``net_session_stop`` runs the owner's
+#: full kill-switch ladder, whose rungs may SIGTERM and SIGKILL, so an agent tool that
+#: promises "idle-only, no signal" may never send it. This string says the far side
+#: serves the owner-local atomic idle latch (``control.stop_session(graceful_only=True)``)
+#: as its own op. A requester checks it on the LINK before sending anything (and on
+#: its own relay's record before asking that relay): an older owner never advertised
+#: it, so it is refused with nothing sent rather than handed a frame it cannot honour.
+#: Additive: no grant, role or op changes shape; the op reuses the ``stop`` capability.
+SESSION_STOP_IDLE_V1 = "session-stop-idle-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -218,6 +228,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # both and performs a real, ungated move — so a CLI newer than its relay must
     # refuse rather than send them. Additive: an older peer ignores the string.
     SESSION_MOVE_WORKSET_V1,
+    # The idle-only remote stop; see SESSION_STOP_IDLE_V1 above.
+    SESSION_STOP_IDLE_V1,
     # Owner-folded mobile history/projection; never infer this schema from a
     # legacy journal page whose entries use the desktop transcript vocabulary.
     "mobile-session-read-v1",

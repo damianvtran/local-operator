@@ -879,7 +879,18 @@ def test_describe_approval_sentences_are_pinned() -> None:
     )
     assert _describe_sessions_approval(
         {"op": "stop", "session": "s1", "peer": "cloud-node-1"}, "."
-    ) == ("stop session s1 on cloud-node-1: always refused on this build, nothing will be sent")
+    ) == (
+        "stop session s1 on cloud-node-1 if it is idle there: its device ends it only when "
+        "it confirms it idle, and never signals; refused while it is working"
+    )
+    # Force with a peer is refused before anything is sent, so its prompt must not
+    # promise the idle-only stop (UX round 1 U3 / QA QF2); the tier is unchanged.
+    forced_peer = {"op": "stop", "session": "s1", "peer": "cloud-node-1", "force": True}
+    assert _describe_sessions_approval(forced_peer, ".") == (
+        "stop session s1 on cloud-node-1 with force: always refused — force is never "
+        "sent to another device, so nothing will be sent"
+    )
+    assert _sessions_tier(forced_peer) == _sessions_tier({"op": "stop", "session": "s1"})
     assert _describe_sessions_approval({"op": "resume", "session": "abcdef123456"}, ".") == (
         "resume session abcdef123456: reopens its transcript headlessly"
     )
@@ -3193,8 +3204,18 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
             )
         if "--engage" in argv:
             return 0, {"ok": True, "engaged": True, "detail": "runtime joining"}, ""
-        if "--stop" in argv:
-            return 0, {"ok": True, "outcome": "stopped", "detail": "stopped (pid 4)"}, ""
+        if "--stop-if-idle" in argv:
+            return (
+                0,
+                {
+                    "ok": True,
+                    "intent": "stop_if_idle",
+                    "outcome": "stopped",
+                    "method": "socket",
+                    "detail": "stopped (pid 4)",
+                },
+                "",
+            )
         return 0, {"ok": True, "session_id": "s_new", "admitted": True}, ""
 
     monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
@@ -3221,6 +3242,8 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
     assert calls == [
         (["network", "sessions", "--json", "--peer", PEER, "--send", "s1", "--", "go"], 600.0),
         (["network", "sessions", "--json", "--peer", PEER, "--engage", "s1"], 180.0),
+        # The idle-only stop, never ``--stop`` (the owner's signalling ladder).
+        (["network", "sessions", "--json", "--peer", PEER, "--stop-if-idle", "s1"], 300.0),
         (
             [
                 "network",
@@ -3250,27 +3273,314 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
         _context(root),
     )
     assert result.is_error and "<provider>/<model-id>" in result.text
-    assert len(calls) == 3
+    assert len(calls) == 4
+
+
+def _remote_stop_capture(
+    monkeypatch: pytest.MonkeyPatch, answer: object
+) -> list[tuple[list[str], float]]:
+    """Fake the mesh child for a remote stop; ``answer`` is the document, or an
+    exception class the child raises. Records every argv so a test can prove
+    exactly what was (or was not) sent, and that it was sent once."""
+    calls: list[tuple[list[str], float]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        calls.append((argv, timeout))
+        if isinstance(answer, type) and issubclass(answer, BaseException):
+            raise answer()
+        return answer
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    return calls
 
 
 @pytest.mark.asyncio
-async def test_remote_stop_refuses_without_sending_weaker_stop(
+async def test_remote_stop_force_is_refused_with_nothing_sent(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The mesh transport cannot promise the new idle-only capability yet."""
+    """No remote force: ``force=true`` with ``peer`` never reaches the transport."""
 
     async def forbidden(*args, **kwargs):
-        raise AssertionError("remote stop must refuse before transport")
+        raise AssertionError("a forced remote stop must refuse before transport")
 
     monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", forbidden)
+    result = await execute_sessions(
+        "t",
+        {"op": "stop", "peer": PEER, "session": "s1", "force": True},
+        None,
+        None,
+        _context(root),
+    )
+    assert result.is_error
+    assert "nothing was sent" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_sends_only_the_idle_only_argv_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote stop drives ``--stop-if-idle`` and never ``--stop``."""
+    calls = _remote_stop_capture(
+        monkeypatch,
+        (
+            0,
+            {
+                "ok": True,
+                "intent": "stop_if_idle",
+                "outcome": "stopped",
+                "method": "socket",
+                "name": "s1",
+                "session_id": "s1",
+                "detail": 'stopped "s1" (pid 4) via its socket',
+                "wakes_dormant": 0,
+                "monitors_dormant": 0,
+            },
+            "",
+        ),
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert not result.is_error
+    assert [argv for argv, _ in calls] == [
+        ["network", "sessions", "--json", "--peer", PEER, "--stop-if-idle", "s1"]
+    ]
+    assert "--stop" not in calls[0][0]
+    assert result.details is not None
+    assert result.details["method"] == "socket" and result.details["intent"] == "stop_if_idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raised", [asyncio.TimeoutError, TimeoutError])
+async def test_remote_stop_timeout_is_unconfirmed_and_never_retried(
+    root: Path, monkeypatch: pytest.MonkeyPatch, raised: type[BaseException]
+) -> None:
+    """A fired bound after the request may have left is UNCONFIRMED — never
+    "nothing changed" — and the tool makes no second attempt."""
+    calls = _remote_stop_capture(monkeypatch, raised)
     result = await execute_sessions(
         "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
     )
     assert result.is_error
-    # Nothing was sent, and no command is offered: the tool cannot perform a
-    # remote stop at all on this build, so the operator stops it there.
-    assert "nothing was sent" in result.text
-    assert "--force" not in result.text
+    assert result.text.startswith("Unconfirmed")
+    assert f"sessions op=list peer={PEER}" in result.text
+    assert "nothing on this device was changed" not in result.text
+    assert len(calls) == 1
+    assert result.details is not None
+    assert result.details["outcome"] == "unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_unreadable_child_is_unconfirmed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that printed no document may have died after sending."""
+    calls = _remote_stop_capture(monkeypatch, (1, None, "boom"))
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error and result.text.startswith("Unconfirmed") and "boom" in result.text
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("stop_idle_unsupported", "runs a build without the idle-only stop"),
+        ("relay_restart_required", "`lop network restart`"),
+        ("stop_idle_unconfirmed", "Unconfirmed"),
+        ("stop_idle_not_served", "did not run the idle-only stop it was sent"),
+    ],
+)
+async def test_remote_stop_refusals_render_their_own_receipt(
+    root: Path, monkeypatch: pytest.MonkeyPatch, code: str, expected: str
+) -> None:
+    """Old peer / old local relay say nothing was sent; a lost reply says
+    unconfirmed. Each is one call, never retried, never a ``--stop``."""
+    calls = _remote_stop_capture(
+        monkeypatch, (1, {"ok": False, "code": code, "message": "relay sentence"}, "")
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error and expected in result.text
+    assert len(calls) == 1 and "--stop" not in calls[0][0]
+    if code in ("stop_idle_unsupported", "relay_restart_required"):
+        assert "nothing was sent" in result.text and "nothing was stopped" in result.text
+    if code == "stop_idle_not_served":
+        # SENT but not served: nothing stopped, and never "nothing was sent" (R2).
+        assert "nothing was stopped" in result.text and "nothing was sent" not in result.text
+    if code == "stop_idle_unconfirmed":
+        # The unknown is the EFFECT, not delivery (UX round 1 U4).
+        assert "may or may not have been stopped" in result.text
+    if code == "relay_restart_required":
+        assert "older than this lop" in result.text  # the CLI's wording (U8)
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_view_only_refusal_is_the_owner_sentence(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unauthorised caller reads the refusing party's own sentence."""
+    sentence = "your grant on cloud-node-1 is view-only, so it does not include stop"
+    _remote_stop_capture(
+        monkeypatch, (1, {"ok": False, "code": "not_authorised", "message": sentence}, "")
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error and result.text == sentence
+    assert result.details is not None
+    assert result.details["code"] == "not_authorised"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("busy", "is working right now"),
+        ("wake", "a scheduled wake is due"),
+        ("old_owner", "runs an older build"),
+        ("unanswered", "did not answer"),
+    ],
+)
+async def test_remote_stop_owner_refusal_uses_the_keyed_local_receipt(
+    root: Path, monkeypatch: pytest.MonkeyPatch, reason: str, expected: str
+) -> None:
+    """The owner's ``refused`` + closed ``reason`` picks the same receipt a
+    local idle-only stop would; no force hint (no remote force exists)."""
+    _remote_stop_capture(
+        monkeypatch,
+        (
+            1,
+            {
+                "ok": False,
+                "intent": "stop_if_idle",
+                "outcome": "refused",
+                "method": "refused",
+                "reason": reason,
+                "name": "worker",
+                "session_id": "s1",
+                "detail": "refused (English fallback)",
+            },
+            "",
+        ),
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error and expected in result.text
+    assert "force" not in result.text
+    assert result.details is not None
+    assert result.details["reason"] == reason
+    if reason == "unanswered":
+        # A local listing cannot show the owner's state (UX round 1 U2).
+        assert f"`sessions op=list peer={PEER}`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_pending_points_to_the_peer_listing(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accepted but not yet exited: the check is the PEER's listing (UX U2)."""
+    _remote_stop_capture(
+        monkeypatch,
+        (
+            1,
+            {
+                "ok": False,
+                "intent": "stop_if_idle",
+                "outcome": "unknown",
+                "method": "pending",
+                "name": "worker",
+                "session_id": "s1",
+                "detail": "pending (English fallback)",
+            },
+            "",
+        ),
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert not result.is_error
+    assert 'stop accepted by "worker" on ' + PEER in result.text
+    assert f"`sessions op=list peer={PEER}`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_dormant_note_names_reopen_not_park(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``park`` with a peer is refused, so the remote dormant note never suggests
+    it; it names the reopen that rearms them there (UX round 1 U1)."""
+    _remote_stop_capture(
+        monkeypatch,
+        (
+            0,
+            {
+                "ok": True,
+                "intent": "stop_if_idle",
+                "outcome": "stopped",
+                "method": "socket",
+                "name": "worker",
+                "session_id": "s1",
+                "detail": 'stopped "worker" — 2 wakes dormant until you reopen it',
+                "wakes_dormant": 2,
+                "monitors_dormant": 1,
+            },
+            "",
+        ),
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert not result.is_error
+    assert "park" not in result.text
+    assert f"`sessions op=resume session=s1 peer={PEER}`" in result.text
+    assert "DORMANT" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_stop_not_running_is_an_outcome(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _remote_stop_capture(
+        monkeypatch,
+        (
+            0,
+            {
+                "ok": True,
+                "intent": "stop_if_idle",
+                "outcome": "not_running",
+                "rung": "none",
+                "session_id": "s1",
+                "detail": "s1 is not running on cloud-node-1.",
+            },
+            "",
+        ),
+    )
+    result = await execute_sessions(
+        "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert not result.is_error
+    assert "is not running on" in result.text and "nothing to stop" in result.text
+
+
+@pytest.mark.asyncio
+async def test_remote_park_is_still_refused_with_nothing_sent(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Park with ``peer`` is out of this change's scope and stays refused."""
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("remote park must refuse before transport")
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", forbidden)
+    result = await execute_sessions(
+        "t", {"op": "park", "peer": PEER, "session": "s1"}, None, None, _context(root)
+    )
+    assert result.is_error and "nothing was sent" in result.text
 
 
 def test_mesh_field_refusals_name_the_local_route() -> None:

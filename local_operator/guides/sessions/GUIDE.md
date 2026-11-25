@@ -62,9 +62,16 @@ device) narrows the view. With no mesh, or a relay that is not answering,
 could be; a peer that did not answer is named. `info`, `peek`, `spawn`,
 `resume` and `stop` take `peer` (a device name or id) and act ON that device's
 runtime: `spawn` mints the session there; `resume` warms it, or with `prompt`
-drives a turn there and returns the owner's reply; `stop` is ALWAYS REFUSED for
-a `peer` target — an idle-only, no-signal remote stop is not on the wire yet, so
-nothing is sent and the operator stops it on that device. `peek` with `peer`
+drives a turn there and returns the owner's reply; `stop` with `peer` is the
+OWNER's idle-only stop — its runtime takes the same atomic idle latch a local
+`stop` does, so a working or wake-due session is refused and no signal is ever
+sent. It needs your drive grant on that device, and both this device's relay and
+the peer's build must offer the idle-only stop (`session-stop-idle-v1`); an older
+relay or peer is refused with nothing sent. `force` is never sent to a peer
+(refused, nothing sent): the operator force-stops it on that device. If the
+answer is lost after the request went out, the receipt says UNCONFIRMED — the
+stop may have landed — and nothing is retried; check `list` with that `peer`
+before asking again. `park` with `peer` is still refused. `peek` with `peer`
 takes every local window — `steps`, `head` (the original request),
 `before_id`/`around_id`, `query`/`regex`, `digest` — and the OWNER reads its
 own journal with the same readers and budgets as a local peek, so stored
@@ -133,7 +140,8 @@ is a new workstream, not an edit.
 signals and never cuts work: a session that is working (a turn, an approval, a
 subagent or a job), one due a wake inside the hold window, or an older owner
 that cannot promise an idle-only stop is REFUSED, and the refusal names which.
-Restart is two auditable calls (`stop` + `resume`).
+The same holds for a `peer` target: the owner decides idleness on its own device
+(see above). Restart is two auditable calls (`stop` + `resume`).
 
 `force=true` is the one escalation, for operator safety only: the operator asked
 for that session to be ended, or it is a memory runaway. It runs `lop stop

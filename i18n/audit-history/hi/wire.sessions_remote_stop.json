@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.sessions_remote_stop",
+  "history_sha256": "ade7adba45f15134956b1a7dcb445715eb9968545dae63fd3f6a8b0824caeb51",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.sessions_remote_stop",
+      "source_sha256": "e0712a4ec72b2717e58f211f5284978151b09e62e85c6b3701c207389685b959",
+      "context_sha256": "19bf290b0700ac2cc4bc833ce33e38bba9ea5e256d34a9ebcc89fb59f3e55e8e",
+      "target_sha256": "1153cb854ca896670013225bdeb3cbb3845dd78cc66005ebac826c159159de71",
+      "translator": {
+        "agent": "coder (lopdev team): original translation and round-1 review follow-up in jobs af5ca8310fa8 and 4848a5543052 (a5e6ebd59, d0a03a372), round-1 i18n audit remediation in job 3adbf2c63960 (991f1c9d1)",
+        "session": "af5ca8310fa8; 4848a5543052; 3adbf2c63960",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "fallback": "none (all three jobs), per the manager's brief to auditor A"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team member, task 4606 i18n audit A r2), FIRST independent i18n audit (auditor A, round 2) at the post-remediation bytes; distinct from the coder jobs that translated (af5ca8310fa8, 4848a5543052, 3adbf2c63960)",
+        "session": "a6df6a8099c3",
+        "model": "anthropic/claude-opus-5-5",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "fallback": "none: served as anthropic/claude-opus-5-5 per this session's own environment header; no route log inspected",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full semantic audit of all 11 rows of the namespace at PR #4606 head 991f1c9d1 (delta d0a03a372..991f1c9d1; round-1 audit A at d0a03a372, issuecomment-7172708309, carried as context). Round-1 fixes verified: I-A5 (“{name}”), I-A7 (समाप्त नहीं हुआ), I-A8 (redundant वहाँ dropped)"
+      },
+      "status": "passed",
+      "note": "FIRST independent audit (auditor A, round 2) at 991f1c9d1. hi wire.sessions_remote_stop: PASS, 0 BLOCKER/0 MAJOR (damianvtran/local-operator#4606, `### i18n audit A — round 2`), superseding the stale round-1 receipts (target bytes changed in every locale). Placeholders {address}/{peer}/{name}/{seconds} and backtick spans (`sessions op=resume …`, `sessions op=list peer={peer}`, `lop network restart`) byte-identical to en in order; safety meaning held (force always refused and never sent; idle-only decided by the other device, never signals; unconfirmed ≠ stopped, nothing retried; not_served says the request was sent). scripts/i18n/check.py rc=0 at that head. Safety copy still needs the SECOND independent audit (auditor B) per docs/I18N.md (Add or extend a locale, step 3), appended as its own receipt. Agent-independent only: auditor shares anthropic/claude-opus-5-5 with the translators. No native human review, no rendered frame."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.sessions_remote_stop",
+      "source_sha256": "e0712a4ec72b2717e58f211f5284978151b09e62e85c6b3701c207389685b959",
+      "context_sha256": "19bf290b0700ac2cc4bc833ce33e38bba9ea5e256d34a9ebcc89fb59f3e55e8e",
+      "target_sha256": "1153cb854ca896670013225bdeb3cbb3845dd78cc66005ebac826c159159de71",
+      "translator": {
+        "agent": "coder (lopdev team): translation jobs af5ca8310fa8 and 4848a5543052 (PR #4606 heads a5e6ebd59/d0a03a372), revised by job 3adbf2c63960 (round-1 i18n remediation 991f1c9d1)",
+        "session": "af5ca8310fa8; 4848a5543052; 3adbf2c63960",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "fallback": "none (all three jobs), per the manager's brief to auditor B and remediation comment 7172960768"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team), SECOND independent safety-copy i18n audit (auditor B, round 2); not the translators (af5ca8310fa8, 4848a5543052, 3adbf2c63960), not auditor A (2ca1ccd6b36e), not the round-1 auditor B (039df055454c); auditor A's round-2 output not read",
+        "session": "e817ee51025a",
+        "model": "anthropic/claude-opus-5-5",
+        "underlying_model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "fallback": "none: served as anthropic/claude-opus-5-5 per this session's own environment header; no route log inspected",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full semantic + safety audit of all 11 rows of wire.sessions_remote_stop (hi) at PR #4606 head 991f1c9d1 (remediation delta d0a03a372..991f1c9d1 word-diffed and every claimed fix verified: I-A8 (no redundant वहाँ), I-A7 (समाप्त नहीं हुआ), I-A5/I-B6 (“{name}”)), judged for what was stopped, what was sent, unconfirmed vs refused vs stopped, no implied force or retry, and verbatim {address}/{peer}/{name}/{seconds}, backtick tool/command spans and lop"
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit (auditor B, round 2) at 991f1c9d1 of hi wire.sessions_remote_stop, superseding the stale round-1 receipts (target bytes changed in the remediation); to be appended AFTER auditor A's round-2 first-audit receipt, re-reading history-sha at apply time. PASS, 0 BLOCKER/0 MAJOR: approval_stop_peer_force/force_refused always refused and nothing (will be/was) sent, no remote force and no command named; approval_stop_peer_idle keeps the other device deciding, idle-only, never signalling, refused while working; not_served says the request WAS sent and nothing stopped; unsupported/relay_restart say nothing sent and nothing stopped; unconfirmed is about whether the session stopped, nothing retried; pending/refused_unanswered say no signal sent and check first; dormant_hint resumes with peer= and suggests no park. Placeholders and code spans byte-identical to en in order, NFC, no bidi/zero-width controls, scripted style checks (negative-controlled on d0a03a372), check.py rc=0, all 11 rows rendered via tr() with synthetic ids, no en fallback (damianvtran/local-operator#4606, `### i18n audit B — round 2`). Agent-independent only: auditor shares anthropic/claude-opus-5-5 with the translators and auditor A. No native human review, no rendered frame."
+    }
+  ]
+}

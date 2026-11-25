@@ -1,0 +1,13 @@
+{
+  "wire.sessions_remote_stop.approval_stop_peer_force": "buộc dừng {address} trên {peer}: luôn bị từ chối — lệnh buộc dừng không bao giờ được gửi sang thiết bị khác, nên sẽ không có gì được gửi",
+  "wire.sessions_remote_stop.approval_stop_peer_idle": "dừng {address} trên {peer} nếu phiên đang rảnh ở đó: thiết bị đó chỉ kết thúc phiên khi xác nhận phiên rảnh và không bao giờ gửi tín hiệu; bị từ chối khi phiên đang làm việc",
+  "wire.sessions_remote_stop.dormant_hint": "Các lần thức dậy và giám sát của nó trên {peer} đang NGỦ ĐÔNG cho đến khi phiên được mở lại ở đó. Để kích hoạt lại chúng, hãy mở lại phiên bằng `sessions op=resume session={address} peer={peer}`.",
+  "wire.sessions_remote_stop.force_refused": "Từ đây, một phiên trên thiết bị khác chỉ có thể được dừng khi đang rảnh: lệnh buộc dừng không bao giờ được gửi sang thiết bị khác, nên không có gì được gửi. Người vận hành có thể buộc dừng nó trên thiết bị đó.",
+  "wire.sessions_remote_stop.not_running": "“{name}” không chạy trên {peer}, nên không có gì để dừng.",
+  "wire.sessions_remote_stop.not_served": "{peer} đã không thực hiện yêu cầu chỉ dừng khi rảnh được gửi tới, nên không có gì bị dừng. Hãy cập nhật thiết bị đó, hoặc nhờ người vận hành dừng phiên ở đó.",
+  "wire.sessions_remote_stop.pending": "“{name}” trên {peer} đã chấp nhận lệnh dừng, nhưng chưa thoát sau {seconds} s. Không có tín hiệu nào được gửi — hãy kiểm tra bằng `sessions op=list peer={peer}` trước khi thử lại.",
+  "wire.sessions_remote_stop.refused_unanswered": "“{name}” trên {peer} không trả lời, nên không thể xác nhận việc chỉ dừng khi phiên rảnh và không có tín hiệu nào được gửi. Hãy kiểm tra trước bằng `sessions op=list peer={peer}` — có thể phiên đã không còn.",
+  "wire.sessions_remote_stop.relay_restart": "Bộ chuyển tiếp của thiết bị này cũ hơn lop này và không thể gửi yêu cầu chỉ dừng khi rảnh, nên không có gì được gửi và không có gì bị dừng. Hãy khởi động lại nó bằng `lop network restart` rồi thử lại.",
+  "wire.sessions_remote_stop.unconfirmed": "Chưa xác nhận: phiên có thể đã hoặc chưa bị dừng trên {peer}, và không có gì được thử lại. Hãy kiểm tra bằng `sessions op=list peer={peer}` trước khi thử lại.",
+  "wire.sessions_remote_stop.unsupported": "{peer} chạy bản dựng không có tính năng chỉ dừng khi rảnh, nên không có gì được gửi và không có gì bị dừng. Hãy cập nhật thiết bị đó, hoặc nhờ người vận hành dừng phiên ở đó."
+}

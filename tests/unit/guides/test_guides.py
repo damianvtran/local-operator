@@ -769,16 +769,24 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     assert "the same readers and budgets as a local peek" in flat
     assert "stored sessions are readable" in flat
     assert "`query`/`regex`/`digest` stay local" not in flat
-    # THE REMOTE STOP IS A REFUSAL, NOT AN ESCALATION. This cell used to require
-    # the sentence naming `lop network sessions --stop <id> --force`; the tool
-    # answers `stop` with a `peer` target by refusing outright — no idle-only,
-    # no-signal remote stop exists on the wire — so the guide now states the
-    # refusal and names the remedy (the operator, on that device). The `--force`
-    # line is an ABSENCE on purpose: an escalation named here again is exactly the
-    # drift this test exists to catch, and the tool has no such path to agree
-    # with.
-    assert "`stop` is ALWAYS REFUSED for a `peer` target" in flat
-    assert "nothing is sent and the operator stops it on that device" in flat
+    # THE REMOTE STOP IS IDLE-ONLY AND NEGOTIATED, NEVER AN ESCALATION. It was a
+    # flat refusal until the wire grew `session-stop-idle-v1` (PR #4606): a peer
+    # advertising it runs the OWNER's idle latch, so a working session is refused
+    # and no signal is ever sent; an older relay or peer is refused with nothing
+    # sent; and `force` never crosses the mesh — the operator force-stops on that
+    # device. Each of the three halves is pinned, because dropping any one of them
+    # reads as "remote stop can cut work" or "remote stop silently no-ops". The
+    # `--force` line below is an ABSENCE on purpose: a remote escalation named
+    # here again is exactly the drift this test exists to catch, and the tool
+    # has no such path to agree with.
+    assert "`stop` with `peer` is the OWNER's idle-only stop" in flat
+    assert "a working or wake-due session is refused and no signal is ever sent" in flat
+    assert "the peer's build must offer the idle-only stop (`session-stop-idle-v1`)" in flat
+    assert "an older relay or peer is refused with nothing sent" in flat
+    assert "`force` is never sent to a peer (refused, nothing sent)" in flat
+    assert "the operator force-stops it on that device" in flat
+    # The old flat refusal must not linger beside the new contract.
+    assert "ALWAYS REFUSED for a `peer` target" not in flat
     # The REMOTE escalation stays absent: no mesh `--force` spelling may return.
     assert not re.search(r"network sessions[^.]*--force", flat)
     # ...and the LOCAL front door: an idle-only stop by default, plus ONE
