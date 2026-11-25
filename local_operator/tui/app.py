@@ -32875,11 +32875,7 @@ class OperatorApp(App[None]):
                 # the applied-and-unsaved sentence rather than "unchanged".
                 ok, saved = True, False
             else:
-                ok = (
-                    text.startswith(said)
-                    and "NOT saved" not in text
-                    and "NOT applied" not in text
-                )
+                ok = text.startswith(said) and "NOT saved" not in text and "NOT applied" not in text
         if not ok:
             failure = "NOT saved" in text or "NOT applied" in text
             card.show_setting_outcome(

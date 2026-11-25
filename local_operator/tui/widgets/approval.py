@@ -1503,9 +1503,7 @@ class ApprovalPrompt(AskPickerScreen):
         if scope == "session" and self._session_is_auto():
             callback = self._on_set_session_ask
         else:
-            callback = (
-                self._on_set_session_auto if scope == "session" else self._on_set_global_auto
-            )
+            callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
         if callback is None:
             return
         self._policy = replace(self._policy, saving=scope, status="", detail="")
@@ -1811,7 +1809,10 @@ class ApprovalPrompt(AskPickerScreen):
         back = self._session_is_auto()
         if width >= self._HANDLES_FULL_MIN:
             parts = [
-                ("Always ask this session [S]" if back else "Auto-approve this session [S]", "handle"),
+                (
+                    "Always ask this session [S]" if back else "Auto-approve this session [S]",
+                    "handle",
+                ),
                 ("  ·  ", "state"),
                 ("Auto-approve all sessions [G]", "handle"),
             ]
@@ -1841,9 +1842,7 @@ class ApprovalPrompt(AskPickerScreen):
                 # `[S]`/`S:session` are the SESSION forms; "sessions" also
                 # contains "session", so a substring test on the bare word
                 # mislabels the global destination.
-                scope = (
-                    "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
-                )
+                scope = "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         return parts, spans
@@ -1999,9 +1998,7 @@ class ApprovalPrompt(AskPickerScreen):
         spent = 0
         for text, kind in parts:
             if kind == "handle":
-                scope = (
-                    "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
-                )
+                scope = "session" if ("[S]" in text or text in ("S:session", "S:ask")) else "global"
                 spans.append((spent, spent + cell_len(text), scope))
             spent += cell_len(text)
         if spent > width:

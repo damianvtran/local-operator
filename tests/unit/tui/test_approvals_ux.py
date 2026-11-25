@@ -1411,8 +1411,9 @@ async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> Non
     COMPOSITED strip, because the override happens at widget render, not on the
     ``Text`` the StatusLine builds.
     """
-    from local_operator.tui import theme as theme_mod
     from rich.color import Color as RColor
+
+    from local_operator.tui import theme as theme_mod
 
     app = OperatorApp(lambda: _factory(GatedSession()))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -1426,6 +1427,7 @@ async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> Non
         y = band.region.y + band.region.height - 1
         strips = list(app.screen._compositor.render_strips())
         wanted = RColor.parse(theme_mod.semantic_color("danger")).get_truecolor().hex.lower()
+
         def _hex(value):  # type: ignore[no-untyped-def]
             if value is None:
                 return None
@@ -1444,6 +1446,6 @@ async def test_the_bands_auto_mark_keeps_its_danger_ink(config_dir: Path) -> Non
         # version of this assertion took "any" segment and passed while the
         # word rode the icon slot, which the band paints `dim` — so the real
         # frame was grey with a green test.
-        assert [ink for _text, ink in mark] == [wanted] * len(mark), (
-            f"the alarm lost its danger ink: {mark} vs {wanted}"
-        )
+        assert [ink for _text, ink in mark] == [wanted] * len(
+            mark
+        ), f"the alarm lost its danger ink: {mark} vs {wanted}"

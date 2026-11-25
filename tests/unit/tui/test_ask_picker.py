@@ -1290,7 +1290,7 @@ async def test_the_approval_cards_consequences_are_unchanged_by_the_wrap() -> No
         "     refuse this call; the turn continues",
         "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -6178,7 +6178,7 @@ async def test_the_cap_leaves_the_approval_gate_byte_identical() -> None:
         "     refuse this call; the turn continues",
         "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -7127,7 +7127,7 @@ async def test_the_approval_gate_is_byte_identical_with_the_thumb() -> None:
         "     refuse this call; the turn continues",
         "  A. Allow + auto-approve",
         "     this session; guardrails still apply",
-        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",
+        "Approvals: Ask — global default. Guardrail refusals and dangerous-delete review still apply.",  # noqa: E501 -- a frozen golden frame line
         "Auto-approve this session [S]  ·  Auto-approve all sessions [G]",
         "↑↓ move · enter answer · esc deny",
     ]
@@ -8077,7 +8077,9 @@ async def test_a_gate_without_the_labels_fit_hook_scrolls_a_label_off(
                 "without the hook the tall gate should window",
                 rendered,
             )
-            hidden = [label for label in ("n. Deny", "A. Allow + auto-approve") if label not in frame]
+            hidden = [
+                label for label in ("n. Deny", "A. Allow + auto-approve") if label not in frame
+            ]
             assert hidden, (
                 "no label scrolled off even with the hook disabled; the boot-gate"
                 " guard would not have caught the C3/D1 regression",
