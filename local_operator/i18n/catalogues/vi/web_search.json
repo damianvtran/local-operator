@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "theo thứ tự ưu tiên của bạn với gói miễn phí; khóa API của bạn được thử sau Radient",
   "web_search.marker.plan": "(gói)",
   "web_search.marker.credits": "(tín dụng)",
-  "web_search.marker.no_credits": "(hết tín dụng)"
+  "web_search.marker.no_credits": "(hết tín dụng)",
+  "web_search.native.access_key": "khóa API mô hình",
+  "web_search.native.access_plan_key": "đăng nhập gói / khóa API",
+  "web_search.native.access_key_signin": "khóa API / đăng nhập",
+  "web_search.native.detail_key": "Tìm kiếm web tích hợp của {vendor}; tính phí mỗi lần tìm kiếm cộng một lượt mô hình vào thông tin xác thực {vendor} của bạn",
+  "web_search.native.detail_plan_key": "Tìm kiếm web tích hợp của {vendor}; gói {plan} của bạn được thử trước, sau đó là khóa API (phí mỗi lần tìm kiếm cộng một lượt mô hình)",
+  "web_search.native.no_credential": "Tìm kiếm {vendor} không có thông tin xác thực dùng được cho chặng này; hãy đăng nhập lại hoặc lưu khóa API {vendor}."
 }

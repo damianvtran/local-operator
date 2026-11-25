@@ -19,7 +19,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, NamedTuple
+from typing import Any, Awaitable, Callable, Literal, NamedTuple, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -37,6 +37,11 @@ from local_operator.web_search.models import (
     SearchSource,
     SearchUsage,
     WebSearchSettings,
+)
+from local_operator.web_search.native import NATIVE_SEARCH_VENDORS
+from local_operator.web_search.native.anthropic_wire import (
+    messages_usage,
+    parse_messages_search,
 )
 from local_operator.web_search.pages import PAGE_CONTEXTS
 from local_operator.web_search.radient import (
@@ -753,90 +758,14 @@ _DEEPSEEK_BALANCE: tuple[float, bool] | None = None
 _DEEPSEEK_BALANCE_TASKS: set[asyncio.Task[None]] = set()
 
 
-def _deepseek_citation_snippets(blocks: list[Any]) -> dict[str, str]:
-    """Excerpts DeepSeek attaches to its answer text, keyed by source URL.
-
-    Empty in practice (see the module note above) but kept because it is the
-    only mechanism that can ever give this provider a snippet, and dropping it
-    would silently discard the field if DeepSeek starts emitting citations.
-    """
-    snippets: dict[str, str] = {}
-    for block in blocks:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            continue
-        for citation in block.get("citations") or []:
-            if not isinstance(citation, dict):
-                continue
-            url = str(citation.get("url") or "")
-            text = str(citation.get("cited_text") or "").strip()
-            if url and text and url not in snippets:
-                snippets[url] = text
-    return snippets
-
-
-def _deepseek_answer(blocks: list[Any]) -> str | None:
-    """The turn's prose, which is an answer summary and never a result list."""
-    parts = [
-        str(block.get("text") or "").strip()
-        for block in blocks
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    answer = "\n\n".join(part for part in parts if part).strip()
-    return answer or None
-
-
 def parse_deepseek_search(payload: object, limit: int) -> tuple[list[SearchSource], str | None]:
     """Normalize one Anthropic-format Messages response into sources + answer.
 
-    Dedupes by URL because a `max_uses > 1` request can surface the same page
-    from more than one server-side search; the DeepSeek harness normalizer does
-    the same for the same reason.
+    The parser moved to ``native.anthropic_wire`` so the Anthropic transport
+    reads the same wire with the same rules; this wrapper passes DeepSeek's
+    name, which keeps every error string byte-identical to before the move.
     """
-    if not isinstance(payload, dict):
-        raise RuntimeError("DeepSeek returned a non-object response")
-    blocks = payload.get("content")
-    if not isinstance(blocks, list):
-        raise RuntimeError("DeepSeek returned no content blocks")
-
-    snippets = _deepseek_citation_snippets(blocks)
-    sources: list[SearchSource] = []
-    seen: set[str] = set()
-    for block in blocks:
-        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
-            continue
-        items = block.get("content")
-        if not isinstance(items, list):
-            # Error-shaped tool results (a dict instead of a list) carry no
-            # sources; the transport's no-result check below turns a wholly
-            # failed search into the fallback trigger.
-            continue
-        for item in items:
-            if not isinstance(item, dict) or item.get("type") != "web_search_result":
-                continue
-            url = str(item.get("url") or "").strip()
-            if not url or url in seen:
-                continue
-            source = _source(
-                title=item.get("title"),
-                url=url,
-                snippet=snippets.get(url),
-                published_date=item.get("page_age"),
-            )
-            if source is None:
-                continue
-            seen.add(url)
-            sources.append(source)
-            if len(sources) >= limit:
-                break
-        if len(sources) >= limit:
-            break
-
-    if not sources:
-        raise RuntimeError(
-            "DeepSeek returned no web_search results; the request may not have "
-            "triggered native search"
-        )
-    return sources, _deepseek_answer(blocks)
+    return parse_messages_search(payload, limit, "DeepSeek")
 
 
 def _deepseek_login_present() -> bool:
@@ -1077,35 +1006,8 @@ async def resolve_deepseek_key(config_dir: Path | None) -> str:
 
 
 def _deepseek_usage(payload: object) -> SearchUsage:
-    """DeepSeek's billed tokens for one Messages call.
-
-    Token counts are what the vendor reports, which makes the DeepSeek cost an
-    estimate from a real measurement rather than a guess at a per-query rate.
-    The server-side search count comes from `server_tool_use` because that is the
-    work the turn actually did.
-    """
-    if not isinstance(payload, dict):
-        return SearchUsage()
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return SearchUsage()
-    server = usage.get("server_tool_use")
-    server_searches = None
-    if isinstance(server, dict):
-        value = server.get("web_search_requests")
-        if isinstance(value, int):
-            server_searches = value
-
-    def as_int(key: str) -> int | None:
-        value = usage.get(key)
-        return value if isinstance(value, int) else None
-
-    return SearchUsage(
-        input_tokens=as_int("input_tokens"),
-        output_tokens=as_int("output_tokens"),
-        cache_read_tokens=as_int("cache_read_input_tokens"),
-        server_searches=server_searches,
-    )
+    """DeepSeek's billed tokens for one Messages call (``anthropic_wire.messages_usage``)."""
+    return messages_usage(payload)
 
 
 async def _search_deepseek(
@@ -1896,6 +1798,34 @@ def _deepseek_native_modes(
 NATIVE_VENDORS: dict[str, NativeVendor] = {
     "deepseek": NativeVendor("deepseek", _deepseek_native_modes, fee_usd=0.0024),
 }
+
+
+def _register_native_search_vendors() -> None:
+    """Add every ``web_search.native`` vendor to ``PROVIDERS`` and ``NATIVE_VENDORS``.
+
+    The ONE place the vendor modules meet the chain: ``PROVIDERS`` gets the
+    transport and status copy, ``NATIVE_VENDORS`` the band view (modes, fee).
+    Nothing in the band code below reads a vendor id, so a vendor joins by
+    registering in ``web_search.native`` alone. A vendor id that is not a
+    ``SearchProviderId`` would be unreachable from config and the tool enum,
+    so it is refused here instead of registering a leg nobody can select.
+    """
+    for vendor in NATIVE_SEARCH_VENDORS.values():
+        if vendor.id not in PROVIDER_IDS:
+            raise RuntimeError(f"native search vendor {vendor.id!r} is not a SearchProviderId")
+        provider_id = cast("SearchProviderId", vendor.id)
+        PROVIDERS[provider_id] = ProviderDefinition(
+            provider_id,
+            vendor.label,
+            vendor.access,
+            vendor.detail,
+            vendor.credential_keys,
+            vendor.search,
+        )
+        NATIVE_VENDORS[vendor.id] = NativeVendor(vendor.id, vendor.modes, vendor.fee_usd)
+
+
+_register_native_search_vendors()
 
 
 @dataclass(frozen=True, slots=True)

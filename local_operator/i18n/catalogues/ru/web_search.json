@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "в вашем порядке приоритета на бесплатном тарифе; ваш API-ключ используется после Radient",
   "web_search.marker.plan": "(подписка)",
   "web_search.marker.credits": "(кредиты)",
-  "web_search.marker.no_credits": "(нет кредитов)"
+  "web_search.marker.no_credits": "(нет кредитов)",
+  "web_search.native.access_key": "API-ключ модели",
+  "web_search.native.access_plan_key": "вход по тарифу / API-ключ",
+  "web_search.native.access_key_signin": "API-ключ / вход",
+  "web_search.native.detail_key": "Встроенный веб-поиск {vendor}; плата за каждый поиск плюс один ход модели списывается с вашей учётной записи {vendor}",
+  "web_search.native.detail_plan_key": "Встроенный веб-поиск {vendor}; сначала используется ваш тариф {plan}, затем API-ключ (плата за поиск плюс один ход модели)",
+  "web_search.native.no_credential": "У поиска {vendor} нет пригодных учётных данных для этого шага; войдите снова или сохраните API-ключ {vendor}."
 }

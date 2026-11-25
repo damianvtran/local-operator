@@ -119,5 +119,38 @@
     "tone": "terse parenthetical",
     "note": "'(no credits)' = the Radient leg is skipped because the account is out of credits. Keep the parentheses.",
     "maxCells": 14
+  },
+  "web_search.native.access_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a model vendor's native search that bills a pay-as-you-go model API key",
+    "maxCells": 24
+  },
+  "web_search.native.access_plan_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search that serves through a subscription sign-in (plan) or an API key",
+    "maxCells": 24
+  },
+  "web_search.native.access_key_signin": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse label",
+    "note": "access column for a native search that accepts an API key or an OAuth sign-in, both billed",
+    "maxCells": 24
+  },
+  "web_search.native.detail_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search provider row. {vendor} is a brand name (OpenAI, Anthropic, xAI, Alibaba Cloud...), never translated."
+  },
+  "web_search.native.detail_plan_key": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "one-line description of a native search row with a plan leg and a key leg. {vendor} is a brand name; {plan} is a product plan name (ChatGPT), never translated."
+  },
+  "web_search.native.no_credential": {
+    "role": "web_search failure reason shown in the tool card and returned to the model (rendered in English for the model; translated for display)",
+    "tone": "plain, actionable",
+    "note": "{vendor} is a brand name, never translated."
   }
 }

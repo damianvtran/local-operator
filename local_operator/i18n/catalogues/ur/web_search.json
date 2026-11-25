@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "آپ کی ترجیحی ترتیب میں مفت درجے پر؛ آپ کی API کلید Radient کے بعد آزمائی جاتی ہے",
   "web_search.marker.plan": "(پلان)",
   "web_search.marker.credits": "(کریڈٹس)",
-  "web_search.marker.no_credits": "(کریڈٹس نہیں)"
+  "web_search.marker.no_credits": "(کریڈٹس نہیں)",
+  "web_search.native.access_key": "ماڈل API کلید",
+  "web_search.native.access_plan_key": "پلان سائن اِن / API کلید",
+  "web_search.native.access_key_signin": "API کلید / سائن اِن",
+  "web_search.native.detail_key": "{vendor} کی بلٹ اِن ویب تلاش؛ آپ کے {vendor} کریڈینشل پر فی تلاش فیس اور ایک ماڈل ٹرن کا بل لگتا ہے",
+  "web_search.native.detail_plan_key": "{vendor} کی بلٹ اِن ویب تلاش؛ پہلے آپ کا {plan} پلان آزمایا جاتا ہے، پھر آپ کی API کلید (فی تلاش فیس اور ایک ماڈل ٹرن)",
+  "web_search.native.no_credential": "{vendor} تلاش کے پاس اس مرحلے کے لیے کوئی قابلِ استعمال کریڈینشل نہیں؛ دوبارہ سائن اِن کریں یا {vendor} API کلید محفوظ کریں۔"
 }

@@ -45,6 +45,30 @@ def meaning_radient_refused() -> Msg:
     return Msg("web_search.meaning.radient_refused", {})
 
 
+def native_access_key() -> Msg:
+    return Msg("web_search.native.access_key", {})
+
+
+def native_access_key_signin() -> Msg:
+    return Msg("web_search.native.access_key_signin", {})
+
+
+def native_access_plan_key() -> Msg:
+    return Msg("web_search.native.access_plan_key", {})
+
+
+def native_detail_key(*, vendor: str) -> Msg:
+    return Msg("web_search.native.detail_key", {"vendor": vendor})
+
+
+def native_detail_plan_key(*, vendor: str, plan: str) -> Msg:
+    return Msg("web_search.native.detail_plan_key", {"vendor": vendor, "plan": plan})
+
+
+def native_no_credential(*, vendor: str) -> Msg:
+    return Msg("web_search.native.no_credential", {"vendor": vendor})
+
+
 def radient_access() -> Msg:
     return Msg("web_search.radient.access", {})
 

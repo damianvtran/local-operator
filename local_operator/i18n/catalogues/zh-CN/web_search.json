@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "按你的优先顺序使用免费层级；你的API密钥在Radient之后尝试",
   "web_search.marker.plan": "（套餐）",
   "web_search.marker.credits": "（额度）",
-  "web_search.marker.no_credits": "（无额度）"
+  "web_search.marker.no_credits": "（无额度）",
+  "web_search.native.access_key": "模型 API 密钥",
+  "web_search.native.access_plan_key": "套餐登录 / API 密钥",
+  "web_search.native.access_key_signin": "API 密钥 / 登录",
+  "web_search.native.detail_key": "{vendor} 内置网页搜索；每次搜索向你的 {vendor} 凭据收取一次搜索费用和一次模型调用费用",
+  "web_search.native.detail_plan_key": "{vendor} 内置网页搜索；先使用你的 {plan} 套餐，再使用你的 API 密钥（每次搜索费用加一次模型调用）",
+  "web_search.native.no_credential": "{vendor} 搜索在此环节没有可用的凭据；请重新登录或保存 {vendor} API 密钥。"
 }

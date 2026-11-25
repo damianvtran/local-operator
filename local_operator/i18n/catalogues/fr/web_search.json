@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "dans votre ordre de priorité, au niveau gratuit ; votre clé API est essayée après Radient",
   "web_search.marker.plan": "(forfait)",
   "web_search.marker.credits": "(crédits)",
-  "web_search.marker.no_credits": "(sans crédits)"
+  "web_search.marker.no_credits": "(sans crédits)",
+  "web_search.native.access_key": "clé API du modèle",
+  "web_search.native.access_plan_key": "connexion forfait / clé API",
+  "web_search.native.access_key_signin": "clé API / connexion",
+  "web_search.native.detail_key": "Recherche web intégrée de {vendor} ; facture des frais par recherche plus un tour de modèle sur votre identifiant {vendor}",
+  "web_search.native.detail_plan_key": "Recherche web intégrée de {vendor} ; votre forfait {plan} est essayé en premier, puis votre clé API (frais par recherche plus un tour de modèle)",
+  "web_search.native.no_credential": "La recherche {vendor} n'a aucun identifiant utilisable pour cette étape ; reconnectez-vous ou enregistrez une clé API {vendor}."
 }

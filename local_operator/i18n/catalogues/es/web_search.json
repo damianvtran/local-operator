@@ -20,5 +20,11 @@
   "web_search.meaning.enabled_then_key": "en tu orden de prioridad, con el nivel gratuito; tu clave de API se prueba después de Radient",
   "web_search.marker.plan": "(plan)",
   "web_search.marker.credits": "(créditos)",
-  "web_search.marker.no_credits": "(sin créditos)"
+  "web_search.marker.no_credits": "(sin créditos)",
+  "web_search.native.access_key": "clave API del modelo",
+  "web_search.native.access_plan_key": "plan con sesión / clave API",
+  "web_search.native.access_key_signin": "clave API / inicio de sesión",
+  "web_search.native.detail_key": "Búsqueda web integrada de {vendor}; cobra una tarifa por búsqueda más un turno del modelo a tu credencial de {vendor}",
+  "web_search.native.detail_plan_key": "Búsqueda web integrada de {vendor}; primero se usa tu plan {plan} y después tu clave API (tarifa por búsqueda más un turno del modelo)",
+  "web_search.native.no_credential": "La búsqueda de {vendor} no tiene una credencial utilizable para este tramo; vuelve a iniciar sesión o guarda una clave API de {vendor}."
 }
