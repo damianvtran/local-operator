@@ -4654,6 +4654,9 @@ class ServingSessionHandle(SessionHandle):
         registry = getattr(self._session, "agent_registry", None)
         complete = getattr(registry, "require_complete_metadata", None)
         try:
+            retry_bound_team = getattr(self._session, "_retry_bound_team_for_admission", None)
+            if retry_bound_team is not None:
+                retry_bound_team()
             if complete is not None and (
                 getattr(self._session, "active_agent", "")
                 or getattr(self._session, "active_team", None)
