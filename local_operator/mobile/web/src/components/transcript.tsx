@@ -1465,6 +1465,26 @@ export function Transcript({
 						style={{ height: `${topInset}px` }}
 					/>
 				) : null}
+				{/* SHORT CONTENT SITS ON THE BOTTOM EDGE (design round 1, D1 on PR
+				    #4521). A transcript shorter than the viewport used to stack from the
+				    top, so the compacted seed's automatic earlier-page load pushed every
+				    row ~231 px down when it landed. This spacer takes the free space
+				    ABOVE the rows instead, the way the desktop UI and chat apps anchor:
+				    a prepend shrinks the spacer and the newest row does not move; past
+				    the viewport it is 0 px tall and the pinned/anchor-follow paths
+				    above own `scrollTop` exactly as before.
+
+				    WHY A SPACER and not `justify-content: flex-end` on the scroller: a
+				    flex-end column that overflows pushes its excess out of the START
+				    edge, where it cannot be scrolled to. And not `margin-top: auto` on
+				    the first row: the first child varies (slot, opener, seam, row,
+				    empty state). After the top-inset reserve so the reserve stays the
+				    first child (anything under the overlay is still reserved).
+				    `flex: 1 0 0` grows into free space only and never shrinks a row;
+				    the -0.5rem bottom margin cancels the scroller's `gap-2` so a long
+				    transcript's geometry is byte-for-byte what it was. Inline for the
+				    `lib/column.ts` reason: only an inline style resolves under vitest. */}
+				<div aria-hidden data-bottom-anchor="" style={{ flex: "1 0 0px", marginBottom: "-0.5rem" }} />
 				{/* History loads automatically as the user scrolls up. The slot below is the
 				   only chrome, and it is ONE height in every state (see `HistorySlot`):
 				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap

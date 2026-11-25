@@ -542,6 +542,11 @@ html :focus-visible {
    `control` thumb there was the one hard line left once the chrome lost its
    borders. No JS activity tracker: touch scrollbars are already transient. */
 .lo-scroll {
+	/* Reserve the scrollbar's width before it is needed (design round 1, D2 on
+	   PR #4521): a classic (non-overlay) scrollbar appearing as content
+	   outgrew the box took ~11 px from the content width, so right-aligned user
+	   bubbles jumped sideways. A no-op where the bar is an overlay (phones). */
+	scrollbar-gutter: stable;
 	scrollbar-width: thin;
 	scrollbar-color: color-mix(in srgb, var(--color-control) 45%, transparent) transparent;
 }
