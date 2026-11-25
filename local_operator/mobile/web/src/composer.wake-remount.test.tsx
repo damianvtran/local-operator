@@ -366,6 +366,171 @@ describe("a waking row that outlived its composer (M1)", () => {
 		clock.mockRestore();
 	});
 
+	/* QA ROUND 2, Q2-1 (PR #4584): the search's first cursor was
+	   `transcript[0]`, which on a capped projection is the PINNED OPENER —
+	   history before it is empty, so a delivered wake read as unconfirmed.
+	   Expected RED on c94b2d5e (not yet run locally — host load gate; see PR evidence): first cursor `opener`, unconfirmed copy shown. */
+	it("pages from below a pinned opener, finding a delivery in the gap", async () => {
+		/* 85 rows after ours: the tail is the opener plus the newest 79, so our
+		   row and the 6 rows after it sit in the gap. */
+		const opener = userRow("opener", "the first message");
+		const after = filler(100, 85);
+		serveHistory([opener, ...filler(0, 20), userRow(COMMAND_ID, SENT), ...after]);
+		const tail = [opener, ...after.slice(-79)];
+		const { back, clock } = await backPastBound(tail, { transcript_head_pinned: true });
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(confirmCalls()[0]?.[1]).toBe("later-106");
+		expect(screen.queryByText(UNCONFIRMED_COPY)).toBeNull();
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe("");
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		clock.mockRestore();
+	});
+
+	it("reads the pinned opener itself as the command's row", async () => {
+		/* Our message opened the session: it IS the pinned head, no walk needed. */
+		const tail = [userRow(COMMAND_ID, SENT), ...filler(0, 79)];
+		const { back, clock } = await backPastBound(tail, { transcript_head_pinned: true });
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(confirmCalls()).toHaveLength(0);
+		expect(pendingRows(back)).toHaveLength(0);
+		clock.mockRestore();
+	});
+
+	/* REVIEW ROUND 3, R3-m3: an unreadable history is not a delivery. */
+	it("reads a failed history walk as unconfirmed, keeping the envelope", async () => {
+		vi.mocked(api.getHistory).mockRejectedValue(new Error("history unavailable"));
+		const { back, clock } = await backPastBound(filler(1000, 80));
+
+		expect(await screen.findByText(UNCONFIRMED_COPY)).toBeTruthy();
+		expect(confirmCalls()).toHaveLength(1);
+		expect(pendingRows(back)).toHaveLength(0);
+		expect((await composer()).value).toBe(SENT);
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	/* REVIEW ROUND 3, R3-m3: a retry that lands mid-walk owns the outcome; the
+	   stale walk's verdict must not touch it. */
+	it("ignores a walk's verdict once a retry has taken over", async () => {
+		let release: (page: { entries: TranscriptEntry[]; has_more: boolean }) => void = () => {};
+		vi.mocked(api.getHistory).mockImplementation(
+			(_sid, _before, limit) =>
+				limit === 80
+					? new Promise((resolve) => { release = resolve; })
+					: Promise.resolve({ entries: [], has_more: false }),
+		);
+		const { back, clock } = await backPastBound(filler(1000, 80));
+		await waitFor(() => expect(confirmCalls()).toHaveLength(1));
+
+		vi.mocked(api.sendCommand).mockResolvedValueOnce(WAKING);
+		fireEvent.click(await screen.findByRole("button", { name: "Retry earlier instruction" }));
+		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(pendingRows(back)[0]?.textContent).toContain("waking session…"));
+
+		release({ entries: filler(0, 80), has_more: false });
+		back.publish(frame({ version: 4, transcript: filler(1000, 80) }));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(screen.queryByText(UNCONFIRMED_COPY)).toBeNull();
+		expect(screen.queryByText(FAILED_COPY)).toBeNull();
+		expect(pendingRows(back)[0]?.textContent).toContain("waking session…");
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	/* REVIEW ROUND 3, R3-m1: the walk finds the row after another surface has
+	   booted the session (a live frame, so the bound no longer holds). The row
+	   lives in older history, not the tail, so only the composer can retire
+	   it. Expected RED on c94b2d5e (not yet run locally — host load gate; see PR evidence): the row stays on screen as "sending…". */
+	it("withdraws the row on a found verdict that resolves after the session went live", async () => {
+		const older = [userRow(COMMAND_ID, SENT), ...filler(0, 10)];
+		let release: () => void = () => {};
+		vi.mocked(api.getHistory).mockImplementation(
+			(_sid, _before, limit) =>
+				limit === 80
+					? new Promise((resolve) => { release = () => resolve({ entries: older, has_more: false }); })
+					: Promise.resolve({ entries: [], has_more: false }),
+		);
+		const tail = filler(1000, 80);
+		const { back, clock } = await backPastBound(tail);
+		await waitFor(() => expect(confirmCalls()).toHaveLength(1));
+
+		back.publish(frame({ version: 4, pid: 4242, kind: "tui", transcript: tail }));
+		release();
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		expect(pendingRows(back)).toHaveLength(0);
+		clock.mockRestore();
+	});
+
+	/* QA ROUND 2, row 4 and Q2-2 (PR #4584): a wake that failed while its
+	   composer WATCHED withdrew the waking row, and the row was the only fact a
+	   remount rebuilt the tracker from. Back on the route the composer saw a bare
+	   envelope and showed the generic retained-retry copy, and never ran the
+	   moved-tail check. Expected RED on c94b2d5e (not yet run locally — host load gate; see PR evidence): all three cells show
+	   "An earlier instruction may have been delivered…" and make 0 walks. */
+	const RETAINED_COPY =
+		"An earlier instruction may have been delivered. Retry that earlier instruction before sending your current draft.";
+	async function failWhileWatching(transcript: TranscriptEntry[]) {
+		const start = Date.now();
+		const view = mount(frame({ transcript }));
+		await sendWaking(view);
+		view.publish(frame({ version: 2, transcript, ended: true, wake_failed: COMMAND_ID }));
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+		expect(pendingRows(view)).toHaveLength(0);
+		const clock = vi.spyOn(Date, "now").mockReturnValue(start + WAKE_SETTLED_BOUND_MS + 60_000);
+		return { view, clock };
+	}
+
+	it("keeps a watched failure's copy across a remount when the tail is unchanged (row 4)", async () => {
+		const { view, clock } = await failWhileWatching([userRow("existing", "an older message")]);
+		const back = switchAway(view, frame({ version: 3 }));
+		back.publish(frame({ version: 4 }));
+
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+		expect(screen.queryByText(RETAINED_COPY)).toBeNull();
+		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
+		expect((await composer()).value).toBe(SENT);
+		expect(confirmCalls()).toHaveLength(0);
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	it("walks history for an empty-baseline session written to after a watched failure (Q2-2)", async () => {
+		const { view, clock } = await failWhileWatching([]);
+		/* A notice row lands; our row is nowhere. */
+		const tail = filler(0, 1);
+		serveHistory(tail);
+		const back = switchAway(view, frame({ version: 3, transcript: tail }));
+		back.publish(frame({ version: 4, transcript: tail }));
+
+		await waitFor(() => expect(confirmCalls()).toHaveLength(1));
+		expect(confirmCalls()[0]?.[1]).toBe("later-0");
+		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(FAILED_COPY));
+		expect(screen.queryByText(RETAINED_COPY)).toBeNull();
+		expect((await composer()).value).toBe(SENT);
+		expect(localStorage.getItem(STORAGE_KEY)).toContain(COMMAND_ID);
+		clock.mockRestore();
+	});
+
+	it("settles a watched failure as delivered when the walk finds the row after all", async () => {
+		/* The failed wake's runtime booted late and wrote our row, then a long turn. */
+		const { view, clock } = await failWhileWatching([]);
+		const tail = filler(0, 80);
+		serveHistory([userRow(COMMAND_ID, SENT), ...tail]);
+		const back = switchAway(view, frame({ version: 3, transcript: tail }));
+		back.publish(frame({ version: 4, transcript: tail }));
+
+		await waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBeNull());
+		await waitFor(() => expect(screen.queryByText(FAILED_COPY)).toBeNull());
+		expect(screen.queryByText(RETAINED_COPY)).toBeNull();
+		expect((await composer()).value).toBe("");
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		clock.mockRestore();
+	});
+
 	it("leaves a retained envelope with no waking row on its retained-retry path", async () => {
 		/* A reload (or an ambiguous 504) retains an envelope too; with no waking
 		   row there is no wake to settle, so the old affordance stands. */

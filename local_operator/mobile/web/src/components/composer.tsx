@@ -50,8 +50,11 @@ import {
 import {
 	markPendingEchoAccepted,
 	markPendingEchoWaking,
+	failedWakeFor,
+	forgetFailedWake,
 	pendingEchoFor,
 	projectionCarriesCommand,
+	recordFailedWake,
 	registerPendingEcho,
 	transcriptTailId,
 	withdrawPendingEcho,
@@ -84,6 +87,7 @@ import {
 	type SendRecordingPhase,
 } from "../lib/composer-slots";
 import { stopTurn, useTurnStopping } from "../lib/turn-stop";
+import { firstHistoryCursor, projectionHeadPinned } from "../lib/history-cursor";
 import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -1471,8 +1475,40 @@ export function Composer({
 		   what clears every route's private state — not navigation. */
 		const pending = getPendingContinuation(pid);
 		setRetryEnvelope(pending);
-		setError(pending ? RETAINED_RETRY_ERROR : "");
+		/* A wake this device already reported as failed (or unconfirmed) keeps
+		   that copy across a remount (QA round 2, row 4 on PR #4584): the generic
+		   "may have been delivered" line is for an envelope whose fate nobody
+		   saw, and showing it here replaced a definite answer with a vaguer one.
+		   See `FailedWake`; the settle effect rebuilds the tracker from it. */
+		const failed = pending ? failedWakeFor(pid, pending.command_id) : undefined;
+		setError(
+			!pending
+				? ""
+				: failed
+					? failed.unconfirmed
+						? UNCONFIRMED_WAKE_ERROR
+						: messageRuntime.t("relay.health.ended_send_failed")
+					: RETAINED_RETRY_ERROR,
+		);
 	}, [pid]);
+
+	/* The wake confirmation's history walk, cancelled on UNMOUNT only (review
+	   round 3, R3-m2 on PR #4584) — not from the settle effect's per-frame
+	   cleanup, which runs on every SSE frame and would abort the walk it just
+	   started. `mounted` lets an aborted walk tell a real unmount (drop the
+	   result: the remount runs its own) from StrictMode's dev-only
+	   cleanup/re-run (restart the walk, or the tracker would sit at
+	   "checking" with nothing left to finish it). */
+	const confirmAbort = useRef<AbortController | null>(null);
+	const mounted = useRef(true);
+	useEffect(() => {
+		mounted.current = true;
+		return () => {
+			mounted.current = false;
+			confirmAbort.current?.abort();
+			confirmAbort.current = null;
+		};
+	}, []);
 
 	/* SETTLE A RETAINED ENVELOPE FROM THE STREAM (prompt wake, R1-1). Two
 	   outcomes only the stream can report:
@@ -1518,6 +1554,7 @@ export function Composer({
 		if (wakingCommand.current === null || wakingCommand.current.pid !== pid) {
 			const envelope = getPendingContinuation(pid);
 			const held = envelope ? pendingEchoFor(pid, envelope.command_id) : undefined;
+			const failedWake = envelope && !held?.waking ? failedWakeFor(pid, envelope.command_id) : undefined;
 			if (envelope && held?.waking) {
 				wakingCommand.current = {
 					pid,
@@ -1527,6 +1564,24 @@ export function Composer({
 					failed: false,
 					startedAt: held.wakingAt ?? Date.now(),
 					tailId: held.wakingTailId,
+				};
+			} else if (envelope && failedWake) {
+				/* A wake that FAILED while a composer watched (QA round 2, row 4
+				   and Q2-2 on PR #4584). Its row was withdrawn, so the waking row
+				   above is gone, but the failure is still the route's answer and a
+				   late delivery (the failed wake's runtime booting after all, a
+				   retry from another surface) must still take it down. Rebuilt
+				   FAILED, so nothing re-reports it; an unconfirmed one keeps its
+				   "missing" verdict, so a remount does not walk history again. */
+				wakingCommand.current = {
+					pid,
+					commandId: envelope.command_id,
+					text: envelope.text,
+					sawLive: false,
+					failed: true,
+					startedAt: failedWake.startedAt,
+					tailId: failedWake.tailId,
+					confirm: failedWake.unconfirmed ? "missing" : undefined,
 				};
 			}
 		}
@@ -1547,13 +1602,14 @@ export function Composer({
 			waking !== null &&
 			Date.now() - waking.startedAt >= WAKE_SETTLED_BOUND_MS &&
 			(projection.pid === 0 || projection.ended === true);
-		/* PAST THE BOUND, A MOVED TAIL IS A DELIVERY (review round 1, M1 on PR
-		   #4584). The projection is the 80-row tail, so a wake that delivered and
+		/* PAST THE BOUND, A MOVED TAIL STARTS A CONFIRMATION (review round 1, M1
+		   on PR #4584; narrowed by R2-M1 below). The projection is the 80-row tail, so a wake that delivered and
 		   then ran a long turn has pushed the user row out of it, and "no row
 		   under the id" stopped meaning "not delivered". A failed wake writes
 		   nothing to the journal, so a durable rebuild whose newest row is not
 		   the one it showed when the wake was answered means the session wrote
-		   after the wake started. Only consulted past the bound with no running
+		   after the wake started — something to check, not yet a delivery (see
+		   the next block). Only consulted past the bound with no running
 		   owner, i.e. once the wake has certainly settled: a live frame's
 		   transient notice rows could move the tail mid-boot, and before the
 		   bound the row's own arrival is the signal. Not the session list's
@@ -1584,13 +1640,22 @@ export function Composer({
 		if (waking && movedPastBaseline && !carriedInTail && waking.confirm === undefined) {
 			const tracker = waking;
 			tracker.confirm = "checking";
-			const oldest = projection.transcript?.[0]?.id ?? null;
+			/* THE TRANSCRIPT'S OWN FIRST-CURSOR RULE (QA round 2, Q2-1 on PR
+			   #4584). `transcript[0]` is the pinned opener on exactly the capped
+			   projections this search exists for; history before it is empty, so
+			   a delivered wake read as unconfirmed. The opener itself is not
+			   lost by skipping it: `carriedInTail` already read every tail row. */
+			const tail = projection.transcript ?? [];
+			const oldest = firstHistoryCursor(tail, projectionHeadPinned(tail, projection.transcript_head_pinned));
+			confirmAbort.current?.abort();
+			const abort = new AbortController();
+			confirmAbort.current = abort;
 			void (async () => {
 				let found = false;
 				try {
 					let before = oldest;
 					for (let page = 0; page < WAKE_CONFIRM_HISTORY_PAGES && before; page++) {
-						const { entries, has_more } = await getHistory(pid, before, WAKE_CONFIRM_PAGE_ROWS);
+						const { entries, has_more } = await getHistory(pid, before, WAKE_CONFIRM_PAGE_ROWS, abort.signal);
 						if (projectionCarriesCommand(entries, tracker.commandId)) {
 							found = true;
 							break;
@@ -1600,6 +1665,16 @@ export function Composer({
 					}
 				} catch {
 					/* Unreachable history is not evidence of delivery: unconfirmed. */
+				}
+				if (confirmAbort.current === abort) confirmAbort.current = null;
+				if (abort.signal.aborted) {
+					/* Unmounted: the remount runs its own walk. Still mounted (StrictMode's
+					   dev re-run): start again rather than sit at "checking". */
+					if (mounted.current && wakingCommand.current === tracker) {
+						tracker.confirm = undefined;
+						setWakeDeadlineTick((n) => n + 1);
+					}
+					return;
 				}
 				/* A newer tracker (a retry's) owns the outcome now. */
 				if (wakingCommand.current !== tracker) return;
@@ -1630,10 +1705,17 @@ export function Composer({
 		);
 		if (outcome === "delivered") {
 			wakingCommand.current = null;
+			forgetFailedWake(pid);
 			/* A row the tail no longer carries is never retired by the projection
 			   (`usePendingEchoes` filters on the tail), so a delivery read off the
 			   moved tail takes it down here, or it would sit at the bottom. */
-			if (waking && movedPastBaseline && !carriedInTail) withdrawPendingEcho(pid, waking.commandId);
+			/* A `found` verdict counts even when the bound no longer holds (review
+			   round 3, R3-m1): another surface may have booted the session during
+			   the walk, so `movedPastBaseline` is false, yet the row is still in
+			   older history, not the tail, and nothing else would retire it. */
+			if (waking && !carriedInTail && (movedPastBaseline || waking.confirm === "found")) {
+				withdrawPendingEcho(pid, waking.commandId);
+			}
 			else if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			/* Design round 1, D1 (QA round 3, Q1): the "still sending" line told
 			   the user to wait for exactly this; leaving it up after the landing
@@ -1667,6 +1749,12 @@ export function Composer({
 		} else if (outcome === "failed" && waking && (wakeFailed || unconfirmed)) {
 			waking.failed = true;
 			withdrawPendingEcho(pid, waking.commandId);
+			recordFailedWake(pid, {
+				commandId: waking.commandId,
+				unconfirmed,
+				startedAt: waking.startedAt,
+				tailId: waking.tailId,
+			});
 			if (textRef.current.trim() === "") {
 				provenanceRef.current = emptyProvenance();
 				setText(waking.text);
@@ -1679,6 +1767,7 @@ export function Composer({
 			   if any is left, no longer knows a wake is running. */
 			if (waking) markPendingEchoWaking(pid, waking.commandId, false);
 			wakingCommand.current = null;
+			forgetFailedWake(pid);
 		}
 		/* Re-run once the bound passes: a cold session publishes nothing after a
 		   failed wake, so without this timer a quiet stream would never re-enter
@@ -2164,6 +2253,9 @@ export function Composer({
 				   composer's current preference). `deliveryForSend` keeps `steer`,
 				   idle and unsupported sends byte-identical to the legacy frame. */
 				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
+				/* A new attempt supersedes any failure this route last reported: from
+				   here the receipt (or this send's own error) is the answer. */
+				forgetFailedWake(pid);
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,

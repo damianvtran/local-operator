@@ -330,9 +330,50 @@ export function pendingEchoFor(sessionId: string, commandId: string): PendingEch
  * For `clearPrivateSessionStorage`: a signed-out user's echo shows text the
  * next person at this device must not see, on the one surface that renders it. */
 export function clearPendingEchoes(): void {
+	failedWakes.clear();
 	if (echoes.size === 0) return;
 	echoes.clear();
 	emit();
+}
+
+/** A wake this device SAW fail, kept past the composer that saw it.
+ *
+ * WHY (QA round 2, row 4 and Q2-2 on PR #4584). A composer mounted when the
+ * relay's one-shot `wake_failed` frame arrives turns the send into a failed
+ * send and withdraws the row — and with the row went the only durable fact a
+ * remount rebuilt its tracker from (`waking` on the held echo). Back on the
+ * route, the composer saw an envelope and nothing else, which is exactly what
+ * a reload or an ambiguous 504 leave, and showed the generic "may have been
+ * delivered" copy: the failure it had already reported was forgotten, and so
+ * was the moved-tail check that can still find a late delivery. This record is
+ * what the remount rebuilds a FAILED tracker from.
+ *
+ * Holds no message text (the envelope and the draft keep that), one entry per
+ * route (a route has one retained envelope), and is honoured only for the
+ * envelope's own id. Cleared on any new send attempt for the route and by
+ * `clearPendingEchoes` (sign-out). */
+export interface FailedWake {
+	commandId: string;
+	/** Settled as "couldn't confirm" (moved tail, id not found) rather than failed. */
+	unconfirmed: boolean;
+	/** The tracker's `startedAt` and `tailId`, so the rebuilt tracker keeps both. */
+	startedAt: number;
+	tailId?: string;
+}
+
+const failedWakes = new Map<string, FailedWake>();
+
+export function recordFailedWake(sessionId: string, wake: FailedWake): void {
+	failedWakes.set(sessionId, wake);
+}
+
+export function failedWakeFor(sessionId: string, commandId: string): FailedWake | undefined {
+	const wake = failedWakes.get(sessionId);
+	return wake?.commandId === commandId ? wake : undefined;
+}
+
+export function forgetFailedWake(sessionId: string): void {
+	failedWakes.delete(sessionId);
 }
 
 /** Whether the projection already carries the row for this command.

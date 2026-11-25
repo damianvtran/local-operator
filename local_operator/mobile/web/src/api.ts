@@ -1032,12 +1032,17 @@ export async function getHistory(
 	sessionId: string,
 	before: string | null,
 	limit = 80,
+	/* Optional so every existing caller is unchanged; the composer's wake
+	   confirmation passes one so an unmount stops its walk (review round 3,
+	   R3-m2 on PR #4584). */
+	signal?: AbortSignal,
 ): Promise<TranscriptPage> {
 	const q = new URLSearchParams({ limit: String(limit) });
 	if (before) q.set("before", before);
 	q.set("inline_ui", "1");
 	const { inline_ui, ...page } = await request<Omit<TranscriptPage, "inline_ui"> & { inline_ui?: unknown }>(
 		`/api/sessions/${encodeURIComponent(sessionId)}/history?${q}`,
+		signal ? { signal } : undefined,
 	);
 	const messages = inline_ui !== undefined && Array.isArray(page.entries)
 		? readInlineUiMessages(inline_ui, page.entries) : undefined;
