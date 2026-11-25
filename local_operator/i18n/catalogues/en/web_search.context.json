@@ -143,6 +143,11 @@
     "tone": "terse, factual",
     "note": "one-line description of a native search provider row. {vendor} is a brand name (OpenAI, Anthropic, xAI, Alibaba Cloud...), never translated."
   },
+  "web_search.native.detail_claude_signin_off": {
+    "role": "`lop search list` / TUI `/search` provider listing",
+    "tone": "terse, factual",
+    "note": "Anthropic row detail shown when a Claude sign-in is stored but the opt-in setting is off, so the row cannot serve. It must name the setting by its exact label (wire.settings.web_search_claude_subscription_search.label) and where it lives (/settings → the Web search section title). {vendor} is a brand name, never translated."
+  },
   "web_search.native.detail_plan_key": {
     "role": "`lop search list` / TUI `/search` provider listing",
     "tone": "terse, factual",

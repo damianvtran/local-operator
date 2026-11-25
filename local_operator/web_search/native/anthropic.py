@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from local_operator.i18n.keys import web_search as web_search_copy
+from local_operator.i18n.messages import Msg
 from local_operator.web_search.models import SearchResponse, WebSearchSettings
 from local_operator.web_search.native import anthropic_wire, credentials, pricing
 from local_operator.web_search.native.base import (
@@ -74,6 +75,25 @@ def _modes(config_dir: Path | None, settings: WebSearchSettings) -> list[tuple[s
     if settings.claude_subscription_search and credentials.has_oauth_row(NAMESPACE):
         modes.append((SUBSCRIPTION_MODE, "key"))
     return modes
+
+
+def _status_detail(config_dir: Path | None, settings: WebSearchSettings) -> Msg | None:
+    """Name the opt-in when a Claude sign-in is stored but cannot serve.
+
+    With the toggle off (the default) a signed-in user with no API key saw
+    ``needs setup`` and was told to get ``ANTHROPIC_API_KEY``; nothing pointed at
+    the setting that would let the grant they already hold serve (PR #4569
+    design round 1, D2). Only that case changes: a stored key makes the row
+    servable, and its static detail already carries the cost. The store is read
+    only after the cheap settings/env checks, like ``_modes``.
+    """
+    if settings.claude_subscription_search:
+        return None
+    if credentials.has_api_key(NAMESPACE, config_dir, ENV_KEY):
+        return None
+    if not credentials.has_oauth_row(NAMESPACE):
+        return None
+    return web_search_copy.native_detail_claude_signin_off(vendor=LABEL)
 
 
 def _request_body(query: str, *, subscription: bool) -> dict[str, Any]:
@@ -164,4 +184,7 @@ VENDOR = NativeSearchVendor(
     search=search,
     fee_usd=FEE_USD,
     credential_keys=(ENV_KEY,),
+    # ``login anthropic`` is the Claude sign-in; the API-key login is its own id.
+    setup_command="`local-operator login anthropic-key`",
+    status_detail=_status_detail,
 )

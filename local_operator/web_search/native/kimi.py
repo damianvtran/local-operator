@@ -199,4 +199,6 @@ VENDOR = NativeSearchVendor(
     search=search,
     fee_usd=FEE_USD,
     credential_keys=(ENV_KEY,),
+    # ``login kimi`` is the Kimi Code sign-in; the search API bills the platform key.
+    setup_command="`local-operator credential update KIMI_API_KEY`",
 )

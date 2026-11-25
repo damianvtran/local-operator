@@ -61,6 +61,10 @@ def native_access_plan_key() -> Msg:
     return Msg("web_search.native.access_plan_key", {})
 
 
+def native_detail_claude_signin_off(*, vendor: str) -> Msg:
+    return Msg("web_search.native.detail_claude_signin_off", {"vendor": vendor})
+
+
 def native_detail_key(*, vendor: str) -> Msg:
     return Msg("web_search.native.detail_key", {"vendor": vendor})
 

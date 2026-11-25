@@ -2213,6 +2213,13 @@ def provider_state_code(status: ProviderStatus) -> str:
         return "enabled (best-effort)" if status.tier == "fallback" else "enabled"
     if status.tier == "radient":
         return "auto radient"
+    if status.tier == "metered" and status.id in NATIVE_SEARCH_VENDORS:
+        # A model vendor's key-class native leg sits in the API-key band (after
+        # Radient), but it is still the vendor's OWN search: printing `auto paid`
+        # broke the `auto native (plan)` / `auto native (paid)` pair the plan rows
+        # use and left the paid word unused at runtime (PR #4569 design round 1,
+        # D5). DeepSeek predates the native registry and keeps `auto paid`.
+        return "auto native paid"
     if status.tier == "native":
         if status.legs and all(leg.cost_class == "plan" for leg in status.legs):
             return "auto native plan"
@@ -2327,6 +2334,15 @@ def provider_setup_hint(provider_id: SearchProviderId) -> str:
         # DeepSeek search has no search-specific secret: it bills the model key, and
         # `login` is where that key lives. `search setup` says so too.
         return f"`local-operator login deepseek` (or `local-operator search setup {provider_id}`)"
+    native_vendor = NATIVE_SEARCH_VENDORS.get(provider_id)
+    if native_vendor is not None:
+        # Native vendors bill the MODEL key, which `login` (or the credential
+        # store) owns; `search setup <vendor>` has no branch for them and stored
+        # nothing (PR #4569 review round 1, C-MINOR-2). The env names stay in the
+        # hint because an exported key also unlocks the leg.
+        command = native_vendor.setup_command or f"`local-operator login {provider_id}`"
+        keys = native_vendor.credential_keys
+        return f"{command} ({', '.join(keys)})" if keys else command
     # `.get`, not `PROVIDERS[...]`: this runs on the REFUSAL path, and an id that is
     # not in the catalogue must produce a sentence rather than a KeyError inside the
     # error message (round-2 N6 -- the validation that keeps bad ids out lives at the
@@ -2544,6 +2560,13 @@ def _provider_detail(
     """
     if provider_id == "radient" and provider_available(provider_id, config_dir, settings):
         return web_search_copy.radient_detail_signed_in()
+    native_vendor = NATIVE_SEARCH_VENDORS.get(provider_id)
+    if native_vendor is not None and native_vendor.status_detail is not None:
+        # A vendor can explain why a credential the user holds still leaves the
+        # row unservable (the Claude sign-in opt-in, PR #4569 design round 1, D2).
+        override = native_vendor.status_detail(config_dir, settings)
+        if override is not None:
+            return override
     return PROVIDERS[provider_id].detail
 
 

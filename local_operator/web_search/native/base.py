@@ -43,6 +43,9 @@ NativeSearch = Callable[
     Awaitable[SearchResponse],
 ]
 NativeModes = Callable[[Path | None, WebSearchSettings], list[tuple[str, NativeClass]]]
+#: Optional per-install override of the row's ``detail`` (None keeps the static
+#: one). Same contract as ``NativeModes``: cheap and side-effect free.
+NativeStatusDetail = Callable[[Path | None, WebSearchSettings], "Msg | None"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,15 @@ class NativeSearchVendor:
     #: Env/store key names that also unlock the key leg (shown by `search list`
     #: setup hints). Empty for a vendor that only signs in.
     credential_keys: tuple[str, ...] = ()
+    #: The command that stores THIS vendor's pay-as-you-go key, for refusal and
+    #: landing copy. ``search setup`` has no branch for native vendors (their key
+    #: is the model key, which ``login`` owns), so pointing there sent users to a
+    #: command that stored nothing (PR #4569 review round 1, C-MINOR-2). Empty
+    #: falls back to ``local-operator login <id>``.
+    setup_command: str = ""
+    #: See :data:`NativeStatusDetail`. Lets a vendor explain WHY a credential the
+    #: user holds does not make the row servable (the Claude sign-in opt-in).
+    status_detail: NativeStatusDetail | None = None
 
 
 def leg_mode(vendor: str, available: list[tuple[str, NativeClass]]) -> str:

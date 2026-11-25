@@ -329,3 +329,122 @@ def test_row12b_listing_a_paid_leg_first_never_lifts_it_past_radient(tmp_path, m
         providers=["mistral", "radient", "zai"],
     )
     assert chain == [*DEFAULT_FREE, "zai", *_key_bands(["radient"], [], ["mistral", "kimi"])]
+
+
+# -- PR #4569 round-1 remediation -------------------------------------------------
+
+
+def test_model_key_native_legs_sit_after_radient_by_operator_decision() -> None:
+    # Operator decision 2026-11-24: plan-class native legs run BEFORE Radient,
+    # model-key native legs AFTER it. The matrix rows read this constant through
+    # `_key_bands` by design, so this is the one explicit pin (review C-NIT-1).
+    from local_operator.web_search.providers import NATIVE_MODEL_KEY_BAND
+
+    assert NATIVE_MODEL_KEY_BAND == "metered"
+
+
+@pytest.mark.asyncio
+async def test_alibaba_reads_the_qwen3_billed_count_under_usage_x_tools(monkeypatch) -> None:
+    # One `web_search_call` item but three billed searches: counting items is
+    # what Alibaba says NOT to do, and it under-recorded the fee (C-MINOR-1).
+    from local_operator.web_search.native import responses_wire
+
+    _creds(monkeypatch, keys={"alibaba"})
+    payload = _fixture("alibaba_responses_x_tools_documented.json")
+    assert sum(1 for item in payload["output"] if item["type"] == "web_search_call") == 1
+    assert responses_wire.search_call_count(payload) == 3
+    response, _seen = await _run("alibaba", lambda _r: httpx.Response(200, json=payload))
+    assert response.usage is not None and response.usage.server_searches == 3
+    assert response.cost is not None and response.cost.usd == pytest.approx(0.03)
+
+
+def test_native_setup_hints_name_a_command_that_stores_the_model_key() -> None:
+    # `search setup <vendor>` has no branch for native vendors and stored
+    # nothing; the hint must name the login (or credential) that does (C-MINOR-2).
+    from local_operator.web_search.native import NATIVE_SEARCH_VENDORS
+    from local_operator.web_search.providers import provider_setup_hint
+
+    expected = {
+        "openai": "`local-operator login openai-api-key` (OPENAI_API_KEY)",
+        "anthropic": "`local-operator login anthropic-key` (ANTHROPIC_API_KEY)",
+        "kimi": "`local-operator credential update KIMI_API_KEY` (KIMI_API_KEY)",
+        "google": "`local-operator login google` (GOOGLE_AI_STUDIO_API_KEY)",
+        "zai": "`local-operator login zai` (ZAI_API_KEY)",
+    }
+    for vendor_id in NATIVE_SEARCH_VENDORS:
+        hint = provider_setup_hint(vendor_id)  # type: ignore[arg-type]
+        assert "search setup" not in hint, (vendor_id, hint)
+        if vendor_id in expected:
+            assert hint == expected[vendor_id]
+
+
+def _statuses(monkeypatch, tmp_path, *, modes=None, settings=None, **creds):
+    from local_operator.web_search import radient as radient_module
+    from local_operator.web_search.providers import provider_statuses
+
+    radient_module.reset_radient_credit_cache_for_tests()
+    _modes(monkeypatch, {**FREE_MODES, **(modes or {})})
+    _creds(monkeypatch, **creds)
+    rows = provider_statuses(settings or WebSearchSettings(), tmp_path)
+    return {row.id: row for row in rows}
+
+
+def test_key_class_native_rows_read_auto_native_paid(tmp_path, monkeypatch) -> None:
+    # The plan rows say `auto native (plan)`; their paid twins said `auto paid`,
+    # so the pair never read as a pair (design D5). DeepSeek keeps `auto paid`.
+    from local_operator.web_search.providers import (
+        provider_state_code,
+        provider_state_label,
+    )
+
+    rows = _statuses(
+        monkeypatch, tmp_path, modes={"deepseek": "api-key"}, keys={"openrouter", "mistral"}
+    )
+    for vendor_id in ("openrouter", "mistral"):
+        assert provider_state_code(rows[vendor_id]) == "auto native paid"
+        assert provider_state_label(rows[vendor_id]) == "auto native (paid)"
+    assert provider_state_code(rows["deepseek"]) == "auto paid"
+
+
+def test_a_signed_in_claude_user_is_pointed_at_the_opt_in(tmp_path, monkeypatch) -> None:
+    # Grant stored, toggle off (default): the row used to say only `needs setup`
+    # with the API-key detail, never naming the setting (design D2).
+    from local_operator.web_search.providers import PROVIDERS, provider_copy
+
+    static = provider_copy(PROVIDERS["anthropic"].detail)
+    off = _statuses(monkeypatch, tmp_path, oauth={"anthropic"})["anthropic"]
+    assert not off.available
+    assert "Claude sign-in search (paid)" in off.detail and "/settings" in off.detail
+    assert off.detail != static
+    on = _statuses(
+        monkeypatch,
+        tmp_path,
+        oauth={"anthropic"},
+        settings=WebSearchSettings(claude_subscription_search=True),
+    )["anthropic"]
+    assert on.detail == static
+    keyed = _statuses(monkeypatch, tmp_path, oauth={"anthropic"}, keys={"anthropic"})["anthropic"]
+    assert keyed.detail == static
+    nothing = _statuses(monkeypatch, tmp_path)["anthropic"]
+    assert nothing.detail == static
+
+
+def test_claude_toggle_copy_names_the_cost_and_fits_80_columns() -> None:
+    # The opt-in is where a user decides to spend money; "sign-in" alone read as
+    # "included in my plan" and the help clipped at 80 columns (design D1).
+    from rich.cells import cell_len
+
+    from local_operator.i18n.catalogues import load_catalogue
+    from local_operator.i18n.resolve import SUPPORTED_LOCALES
+
+    prefix = "wire.settings.web_search_claude_subscription_search"
+    en = load_catalogue("en", "wire.settings")
+    # "(paid)", not the ledger's "(billed)": 30 cells clipped the cost word at the
+    # page's 29-cell label budget in the rendered frame.
+    assert en[f"{prefix}.label"].endswith("(paid)")
+    assert en[f"{prefix}.help"].startswith("Bills ")
+    for locale in SUPPORTED_LOCALES:
+        catalogue = load_catalogue(locale, "wire.settings")
+        assert cell_len(catalogue[f"{prefix}.label"]) <= 29, locale
+        assert cell_len(catalogue[f"{prefix}.help"]) <= 80, locale
+        assert "Radient" in catalogue[f"{prefix}.help"], locale

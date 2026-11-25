@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "00b1f77e1c840db956acbf4ace52e2bf9177b3e4ec4410e4588a0555c9a2c140",
+  "history_sha256": "fe092af377bd1a46971151254dd59015c0ed256008c0ef13c00e1a527a90f408",
   "entries": [
     {
       "locale": "zh-CN",
@@ -7572,6 +7572,42 @@
       },
       "status": "passed",
       "note": "Independent audit of PR #4540 (branch feat/mcp-result-shaping, stacked on #4525), 2026-11-24, at head 7a06565cdbd7 against en wire.settings sha256 2a696ee73589: the 2 NEW keys wire.settings.mcp_result_text_rendering.{label,help}, judged against the en source + context sidecar (claims: MCP search results and fetched pages go to the agent as plain text instead of JSON; every field kept; off = stays JSON), i18n/glossary.md (agent), i18n/style-guides/<locale>.md and neighbouring wire.settings keys (off-state word, MCP/JSON kept Latin). Checks run by the auditor: no ICU arguments in source or target; key parity 2/2; scripted proof that this locale's file at the PR base fc780867 equals its last passed receipt's target_sha256 (and that receipt's source equals the base en hash), and that the head file = base + exactly the 2 new keys, 0 removed, 0 changed. rich.cells.cell_len label 17/29, help 85/188. Label/help accurate, all three claims carried; full-width ，。 used. 1 finding, MINOR, FIXED in the audit commit: spaces between Han and Latin runs (MCP, JSON) violated the zh-CN guide's no-space rule (namespace: 484 unspaced vs 20 spaced boundaries); the 5 spaces were removed, no wording change. target_sha256 is the corrected file."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "1dd2cd29f99c4d4f3e4be4a39629ea4b9cca86bc2cebf2689f0702d609eed500",
+      "context_sha256": "411b73622dddb59bb1cce4168da16176b2874da60b6f4a2f3386f61cb6d78887",
+      "target_sha256": "bf8966bd6da6980cdcc642956c24575e9672c48e432cd81bae74636b707d20dd",
+      "round": "r1",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "PR #4569 implementer (commits 523db30d3a5a, 8e0671d8b692, bc579643fd8c)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commits or the audit brief",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-audit, independent of the translator; did not write PR #4569)",
+        "session": "3312bdd83ac9",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "the 2 new keys wire.settings.web_search_claude_subscription_search.{label,help} plus the web_search.* settings neighbours; all 917 PR1 keys byte-unchanged vs 95055bbc785f, placeholder/bidi parity scanned across all 919 against en + context sidecar, i18n/glossary.md, the locale style guide and shipped corpus usage; placeholders rendered through i18n.runtime.render_message with real vendor/plan values; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "minor: CJK/Latin spacing around Claude/Radient against the guide.",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
     }
   ]
 }

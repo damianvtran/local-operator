@@ -203,4 +203,6 @@ VENDOR = NativeSearchVendor(
     search=search,
     fee_usd=FEE_USD,
     credential_keys=(ENV_KEY,),
+    # ``login openai`` is the ChatGPT sign-in; the API-key login is its own id.
+    setup_command="`local-operator login openai-api-key`",
 )

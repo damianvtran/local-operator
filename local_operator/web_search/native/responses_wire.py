@@ -76,7 +76,8 @@ def search_call_count(payload: dict[str, Any]) -> int:
     """How many server-side searches ran: the vendor's own count, else the call items.
 
     Alibaba reports the BILLED count at ``tool_usage.web_search.num_requests``
-    (its docs: the number of output items is not a billing count); xAI reports
+    (``qwen4-max``) or ``usage.x_tools.web_search.count`` (Qwen3.x) -- its docs:
+    the number of output items is not a billing count; xAI reports
     ``usage.server_side_tool_usage_details.web_search_calls``. Otherwise each
     ``web_search_call`` item is one search.
     """
@@ -87,6 +88,15 @@ def search_call_count(payload: dict[str, Any]) -> int:
             return int(web["num_requests"])
     usage = payload.get("usage")
     if isinstance(usage, dict):
+        # Alibaba's Qwen3.x Responses models (the shipped ``qwen3.8-flash`` host)
+        # report the billed count HERE, not at top-level ``tool_usage`` (which
+        # its docs give for ``qwen4-max``); missing it fell through to counting
+        # output items, which Alibaba says is not a billing count, and
+        # under-recorded multi-search turns (PR #4569 review round 1, C-MINOR-1).
+        x_tools = usage.get("x_tools")
+        web = x_tools.get("web_search") if isinstance(x_tools, dict) else None
+        if isinstance(web, dict) and isinstance(web.get("count"), int):
+            return max(0, int(web["count"]))
         details = usage.get("server_side_tool_usage_details")
         if isinstance(details, dict) and isinstance(details.get("web_search_calls"), int):
             return int(details["web_search_calls"])

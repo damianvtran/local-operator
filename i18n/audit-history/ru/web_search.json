@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "web_search",
-  "history_sha256": "c946ece295f394dee01b811dbc11f4f72a63bff05d8e6d9a27428ea747c6b981",
+  "history_sha256": "dc07cc2efd324dbd94231eeb2beed9617989104e5774e0485835a7290cf76702",
   "entries": [
     {
       "locale": "ru",
@@ -72,6 +72,42 @@
       },
       "status": "passed",
       "note": "Round 2, PR #4553 head 2bf8d18177b4d78caaac7f813c012f07d6b4b9df (scope b54c8d96aeca..2bf8d18177b4). Supersedes the round-1 receipt for the old source hash 9db6805bb0f3; minor/nit fixes applied later change target_sha256 without voiding this pass."
+    },
+    {
+      "locale": "ru",
+      "namespace": "web_search",
+      "source_sha256": "ebbcfc79868d250a58d0f560c5c38369e2d3b8b5614506ca5c2d346f0757924d",
+      "context_sha256": "3e17d0767419ec5a0b6ceb480f5b86804efc35929dcc05d842c4fc4617dee49d",
+      "target_sha256": "ce1a9a0912a0c9c230e99da9a019bf548a016193dc94d1a1e988e176b3579d1c",
+      "round": "r1",
+      "keys_audited": 31,
+      "translator": {
+        "agent": "PR #4569 implementer (commits 523db30d3a5a, 8e0671d8b692, bc579643fd8c)",
+        "session": null,
+        "session_kind": "not provided to the auditor",
+        "model": null,
+        "model_kind": "unknown — not recorded in the commits or the audit brief",
+        "date": "2026-11-24",
+        "fallback": "unknown to the auditor"
+      },
+      "auditor": {
+        "agent": "i18n auditor (task pr4569-i18n-audit, independent of the translator; did not write PR #4569)",
+        "session": "3312bdd83ac9",
+        "session_kind": "auditor's own lop session id",
+        "model": "anthropic/claude-opus-5-5",
+        "model_kind": "served model per the auditor session's system prompt",
+        "date": "2026-11-24",
+        "fallback": "none observed by the auditor",
+        "result": "pass",
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 4 minor, 0 nit",
+        "independent_from_translator": true,
+        "scope": "full namespace (31 keys: 22 PR1 byte-unchanged vs 95055bbc785f, 9 new web_search.native.*) against en + context sidecar, i18n/glossary.md, the locale style guide and shipped corpus usage; placeholders rendered through i18n.runtime.render_message with real vendor/plan values; widths by rich.cells.cell_len",
+        "namespace_finding_detail": "minor: plan -> 'тариф' in 3 new keys vs PR1 'подписка' in the same listing (marker.plan, state.auto_native_plan); leg -> 'шага' vs PR1 'звеньев'; detail_key renders credential as 'учётной записи' (account) vs glossary 'учётные данные'; access_plan_key 25/24 and access_plan 28/24 over maxCells, with shorter forms proposed.",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Round 1, PR #4569 head e91c217dff524f8933ce9bb7325256aa7da7cff8 (scope 95055bbc785f..e91c217dff52). target_sha256 is the audited file; corrected strings for the minor findings are in the auditor's report (PR comment). Minor/nit fixes applied later change target_sha256 without voiding this pass; a changed source_sha256 does."
     }
   ]
 }
