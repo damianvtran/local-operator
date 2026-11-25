@@ -204,7 +204,9 @@ async def test_a_closed_card_leaves_the_locale_refresh_registry(tmp_path) -> Non
         async with app.run_test(size=(100, 30)) as pilot:
             await _boot(pilot, app)
             view = await _open(pilot, app)
-            target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+            target = SendTarget(
+                kind="session", session_id="s1", label="work", state="live", live=True
+            )
             view._send_targets = lambda: [target]  # type: ignore[method-assign]
             await pilot.press("m")
             await pilot.pause()
