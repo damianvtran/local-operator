@@ -1769,13 +1769,15 @@ class _NoProgressGuard:
 # new per-call decision in ``_model_turn`` rather than adding another branch.
 
 
-def _inline_ui_hint_for(config: LoopConfig) -> str | None:
+def _inline_ui_hint_for(config: LoopConfig, model: "ModelSpec") -> str | None:
     """This call's request-only discovery hint, re-resolved per provider call.
 
     Resolved per call, not per run: a folded steer can change the input
-    surface between requests (see ``LoopConfig.get_inline_ui_hint``).
+    surface between requests (see ``LoopConfig.get_inline_ui_hint``). Resolved
+    for ``model``, the spec the request is built with, so head-row placement
+    (bound into signed thinking on Anthropic) cannot tear from the request.
     """
-    return config.get_inline_ui_hint() if config.get_inline_ui_hint else None
+    return config.get_inline_ui_hint(model) if config.get_inline_ui_hint else None
 
 
 def _provider_turn_start(
@@ -4992,7 +4994,7 @@ class AgentLoop:
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
                 same_route_retry=same_route_retry,
-                inline_ui_hint=_inline_ui_hint_for(config),
+                inline_ui_hint=_inline_ui_hint_for(config, model),
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets

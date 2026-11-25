@@ -351,6 +351,7 @@ from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
+    INLINE_UI_HEAD_LATCH_CUSTOM_TYPE,
     PROFILE_TRUST_CUSTOM_TYPE,
     Transcript,
     context_cut_index,
@@ -497,11 +498,12 @@ INPUT_SURFACE_KEY = "lop_input_surface"
 #: non-mobile, which errs quiet on the phone.
 INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
 
-#: Custom transcript entry holding the conversation's latched inline-UI head row
-#: (``Session._settle_inline_ui_head_latch``). A full snapshot per change, like
-#: ``system_prefix``: ``latest_custom`` restores it on resume. Small by design:
-#: the hint text plus the compaction marker it was decided under.
-INLINE_UI_HEAD_LATCH_CUSTOM_TYPE = "inline_ui_head_latch_v1"
+#: ``INLINE_UI_HEAD_LATCH_CUSTOM_TYPE`` (imported from the transcript module, so
+#: ``fork_snapshot`` can see it) is the custom entry holding the conversation's
+#: latched inline-UI head row (``Session._settle_inline_ui_head_latch``). A full
+#: snapshot per change, like ``system_prefix``: ``latest_custom`` restores it on
+#: resume. Small by design: the hint text plus the compaction marker it was
+#: decided under.
 
 
 def _input_surface(value: object, default: str = "tui") -> str:
@@ -24621,8 +24623,13 @@ class Session:
                 # bypass this loop config and must keep the exact system prefix.
                 # On an Anthropic thinking wire the per-conversation latch
                 # wins over the live value (``_settle_inline_ui_head_latch``).
-                get_inline_ui_hint=lambda: self._inline_ui_head_hint(
-                    self._model, self._live_inline_ui_hint()
+                # Placement follows the REQUEST's model, which the loop passes
+                # in: ``self._model`` can move under a ``/model`` landing
+                # between the settle and the request build, and a thinking
+                # request answered as non-thinking would get the live hint at
+                # its head instead of the row its signed blocks were bound to.
+                get_inline_ui_hint=lambda model: self._inline_ui_head_hint(
+                    model, self._live_inline_ui_hint()
                 ),
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),

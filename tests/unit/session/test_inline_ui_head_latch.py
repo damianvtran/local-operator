@@ -13,8 +13,9 @@ stream parser and body builder (an ``httpx.MockTransport``, no network) and
 require every request's messages to extend the previous request's messages
 byte-for-byte, cache markers aside.
 
-Each one fails on 36ebe8c2 (head placement, per-request hint): proven in the
-PR #4582 remediation round 1 comment.
+Placing the hint at the head while still following the live value per request
+breaks each request-sequence test here; the compaction tests pin the one point
+where the latch may legitimately change.
 """
 
 from __future__ import annotations
@@ -38,7 +39,10 @@ from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.providers.clients import AnthropicClient
 from local_operator.session.inline_ui import INSTRUCTIONS
 from local_operator.session.session import Session
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import (
+    INLINE_UI_HEAD_LATCH_CUSTOM_TYPE,
+    Transcript,
+)
 from tests.unit.providers.test_anthropic_thinking_replay import (
     KEY,
     _signed_tool_step,
@@ -260,3 +264,103 @@ async def test_an_aside_sends_the_turns_head_row(tmp_path):
     after = _without_cache_control(aside["messages"])
     assert after[0] == HEAD_ROW
     assert after[: len(before)] == before
+
+
+async def _latch_then_compact(tmp_path, wire: AnthropicWire) -> tuple[Session, str]:
+    """A latched conversation (signed thinking in history) plus a new compaction.
+
+    The marker is appended directly: what is under test is the settle's
+    decision at a NEW compaction boundary, not the compactor's choice of what
+    to keep, which each test then states by setting the kept messages.
+    """
+    session = _session(tmp_path, wire)
+    await session.prompt("go")
+    assert session._inline_ui_head_latch == INSTRUCTIONS
+    assert session._inline_ui_head_latch_compaction_id is None
+    first = session._transcript.entries()[0]
+    marker = await session._transcript.append_compaction(
+        summary="SUMMARY", first_kept_entry_id=first.id, tokens_before=10
+    )
+    # A later run with no surface (a wake): the live hint is now None, so a
+    # re-decision would visibly change the head row.
+    session._run_input_surface = "remote"
+    assert session._live_inline_ui_hint() is None
+    return session, marker.id
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeping_signed_thinking_holds_the_latch(tmp_path):
+    """Turns kept verbatim still carry blocks signed under the old head row."""
+    wire = AnthropicWire([_signed_tool_step(0), _signed_answer(1)])
+    session, _ = await _latch_then_compact(tmp_path, wire)
+    try:
+        await session._settle_inline_ui_head_latch(THINKING_SPEC)
+    finally:
+        await session.dispose()
+
+    assert session._inline_ui_head_latch == INSTRUCTIONS
+    assert session._inline_ui_head_latch_compaction_id is None
+    # Held, not rewritten: still the one row the first call latched.
+    latch_rows = [
+        row
+        for row in Transcript(tmp_path / "sess").entries()
+        if row.payload.get("custom_type") == INLINE_UI_HEAD_LATCH_CUSTOM_TYPE
+    ]
+    assert [row.payload["details"] for row in latch_rows] == [
+        {"text": INSTRUCTIONS, "compaction_id": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compaction_dropping_all_signed_thinking_redecides_the_latch(tmp_path):
+    """Nothing signed survives the marker, so the live value is adopted, durably."""
+    wire = AnthropicWire([_signed_tool_step(0), _signed_answer(1)])
+    session, marker_id = await _latch_then_compact(tmp_path, wire)
+    try:
+        # The compactor kept only unsigned rows (the summary and a user turn).
+        session._context.messages = [Message.user("go")]
+        await session._settle_inline_ui_head_latch(THINKING_SPEC)
+    finally:
+        await session.dispose()
+
+    assert session._inline_ui_head_latch is None
+    assert session._inline_ui_head_latch_compaction_id == marker_id
+    # Durable, so a resumed runtime sends the same (now absent) head row.
+    reloaded = Transcript(tmp_path / "sess")
+    assert reloaded.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) == {
+        "text": None,
+        "compaction_id": marker_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_head_row_follows_the_requests_model_across_a_model_switch(tmp_path):
+    """A ``/model`` landing after the settle must not move a thinking request's head.
+
+    The loop snapshots the model before it settles the latch and builds the
+    request with that snapshot; the hint must be placed for the same spec. Here
+    the switch (to the same model, thinking off) lands while the request's
+    history renders, on a wake run whose live hint is None: placed for the
+    live ``self._model`` the hint is the live None, and the thinking request
+    drops the head row its earlier signed blocks were bound to.
+    """
+    wire = AnthropicWire([_signed_tool_step(0), _signed_answer(1), _signed_answer(2)])
+    session = _session(tmp_path, wire)
+    try:
+        await session.prompt("go")
+        render = session._render_for_request
+
+        def switch_mid_build(messages):
+            session._model = THINKING_SPEC.model_copy(update={"reasoning_effort": None})
+            return render(messages)
+
+        session._render_for_request = switch_mid_build  # type: ignore[method-assign]
+        await session._prompt_messages([_wake("the reminder you asked for")])
+    finally:
+        await session.dispose()
+
+    assert len(wire.bodies) == 3
+    # The request was still built for the thinking snapshot.
+    assert wire.requests[2].model.reasoning_effort == "medium"
+    _assert_each_body_extends_the_last(wire.bodies)
+    assert all(body["messages"][0] == HEAD_ROW for body in wire.bodies)
