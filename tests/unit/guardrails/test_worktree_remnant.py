@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.guardrails.classify import _removed_worktree_remnant
+from local_operator.guardrails.provenance import CwdEntry
 
 ENV = {**os.environ, "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
 
@@ -467,7 +468,7 @@ def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(repo: Path) -
 
 @pytest.mark.parametrize("inventory", [None, ((42, None),)], ids=["unavailable", "hidden-cwd"])
 def test_orphan_with_unknown_cwd_inventory_keeps_the_rank(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: tuple | None
+    repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: tuple[CwdEntry, ...] | None
 ) -> None:
     from local_operator.guardrails import provenance as prov
     from local_operator.guardrails.classify import Risk

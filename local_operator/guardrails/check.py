@@ -1378,14 +1378,23 @@ _BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
 _DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
 
 
-def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
+def _exact_firm_ask(
+    ask: Any,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None,
+    compatible_parent: Sequence[str] | None = None,
+) -> bool:
     """Verify a trusted deletion proposition and its literal path in the same question.
 
     A generic yes to keeping or backing up a path is not authority to delete it.
     Read the folded question/pick pair, not the concatenated text of all answers:
     a deletion pick for one question cannot authorize another question's paths.
     Qualified wording fails closed (``_APPROVAL_VETO``); brace expansion still
-    names concrete leaves, never globs or parents.
+    names concrete leaves, never globs or parents. Only the contrary-decision
+    check asks for a compatible parent instead; that match cannot grant exact
+    authority. It uses the same protected boundaries as the ask's reach.
     """
     from local_operator.asks import store
     from local_operator.guardrails import provenance as prov
@@ -1457,8 +1466,15 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
                         continue
                     if any(part in (".", "..") for part in word.split("/")):
                         continue
-                    if prov._expand_word(word, home, cwd) == path:
-                        return True
+                    if compatible_parent is None:
+                        if prov._expand_word(word, home, cwd) == path:
+                            return True
+                    else:
+                        hit = prov.ask_reach(
+                            word, path, home=home, cwd=cwd, protected=compatible_parent
+                        )
+                        if hit is not None and hit[0] == "under":
+                            return True
                 return False
 
             # SEC-R2-B2: an option the operator did NOT pick that names this
@@ -1469,7 +1485,15 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
                 for o in (q.get("options") or [])
                 if isinstance(o, Mapping) and str(o.get("label") or "").strip() != label
             ]
-            if any(names(text) for text in unpicked):
+            if any(
+                names(text)
+                or (
+                    compatible_parent is not None
+                    and prov.ask_reach(text, path, home=home, cwd=cwd, protected=compatible_parent)
+                    is not None
+                )
+                for text in unpicked
+            ):
                 continue
             # A pick that names paths authorises exactly those. Only a pick
             # that names none ("Approve removing all 33 ...", "Remove them",
@@ -1620,6 +1644,7 @@ def cleanup_consent_fresh(before: Verdict, verdict: Verdict, ctx: CallContext) -
 class _PathAskDecision:
     exact: Any = None
     contrary: Any = None
+    vetoed_exact: bool = False
 
     def permits(self, words: Any) -> bool:
         # A citation cannot do what the veto could not: only the verified
@@ -1656,8 +1681,14 @@ def _path_ask_decision(
             and prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop) is not None
             and (
                 a.answer is None
-                or newest is not None
                 or not prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop)
+                # Coverage alone can describe keeping the directory. Only a
+                # verified deletion of a parent is compatible with an older
+                # exact deletion decision, and it never becomes that decision.
+                or (
+                    newest is not None
+                    and not _exact_firm_ask(a, path, home=home, cwd=cwd, compatible_parent=stop)
+                )
             )
         ),
         key=lambda a: a.answered_at,
@@ -1666,7 +1697,7 @@ def _path_ask_decision(
     # Effective answer time (revision or answer), not card creation. Ties
     # retain the veto: there is no proof the approval came later.
     if newest is not None and contrary is not None and contrary.answered_at >= newest.answered_at:
-        newest = None
+        return _PathAskDecision(contrary=contrary, vetoed_exact=True)
     return _PathAskDecision(newest, contrary)
 
 
@@ -1741,6 +1772,11 @@ def _ask_block(
             continue
         reach = prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop)
         if reach is None:
+            continue
+        if decision.vetoed_exact and a is decision.contrary and a.answer is not None:
+            # An incompatible affirmative is not silence, but its generic
+            # path coverage must not undo the veto used by citation validation.
+            judge_only = judge_only or (a, False)
             continue
         if prov.ask_consents(a, path, home=home, cwd=cwd, protected=stop):
             continue  # firm approval only (``UnansweredAsk.approved``)
