@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ from local_operator.team_bridge.store import (
 from local_operator.team_bridge.types import (
     CONVERSATION_FEED_KIND,
     CONVERSATION_FEED_TYPE,
+    CONVERSATION_ID_PATTERN,
     is_conversation_message_id,
     parse_conversation_ref_value,
 )
@@ -68,6 +70,10 @@ _SCREENING_KIND = frozenset(
 #: outcome (``refused:<code>``) is shown as ``refused``. ``pending`` is the
 #: only non-final one: the local terminal is final for the person's purposes.
 _OUTCOME_WORDS = frozenset({"pending", "admitted", "rejected", OWNER_RELEASE_LOCAL_TERMINAL})
+
+#: One desktop audit page, like the adjacent owner-audit lists (max 100).
+#: Bounds signature checks and response size, not persistence or hold expiry.
+_HISTORY_LIMIT = 100
 
 
 class HoldRefused(Exception):
@@ -182,7 +188,7 @@ def _iso(seconds: float | None) -> str | None:
 
 
 def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dict[str, Any]:
-    """``GET …/holds``: every conversation hold on this machine, metadata only."""
+    """``GET …/holds``: active conversation holds and recent signed decisions."""
 
     store = Store(config_dir)
     now = time.time() if now is None else float(now)
@@ -304,11 +310,95 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 "decision": _decision_view(release),
             }
         )
+    history = _hold_history(
+        store,
+        owner,
+        live_decision_ids=tuple(item["message_id"] for item in items if item["decision"]),
+    )
+    # The connector can settle and retire a hold between these two reads. A
+    # verified connector-terminal history row wins over the earlier live scan;
+    # a local-only discard deliberately still has its old hold alongside it.
+    settled = {
+        item["message_id"]
+        for item in history
+        if item["decision"]["outcome"] in ("admitted", "rejected", "refused")
+    }
     return {
         "enabled": enabled,
         "key_protection": hr.key_protection(config_dir),
-        "items": items,
+        "items": [item for item in items if item["message_id"] not in settled],
+        "history": history,
     }
+
+
+def _hold_history(
+    store: Store, owner: Any, *, live_decision_ids: tuple[str, ...] = ()
+) -> list[dict[str, Any]]:
+    """Project the signed decision, never another delivery or discard capability.
+
+    The signature binds the owner, conversation, message and decision, not the
+    connector's outcome; the latter is a closed local-store status, not proof
+    of hub delivery. The release does not bind a thread, sequence or original
+    hold time. Do not reconstruct those from unverified refs or guess them.
+    """
+
+    releases = store.owner_release_history(
+        owner, limit=_HISTORY_LIMIT, live_decision_ids=live_decision_ids
+    )
+    if not releases:
+        return []
+    spki, _ = hr.anchor_spki(store.config_dir)
+    if spki is None:
+        return []
+    items: list[dict[str, Any]] = []
+    for release in releases:
+        bare = str(release["message_id"])
+        conversation_id = str(release["conversation_id"])
+        code = str(release["hold_code"])
+        word = release["word"]
+        outcome = _outcome_word(release)
+        if (
+            not is_conversation_message_id(bare)
+            or re.fullmatch(CONVERSATION_ID_PATTERN, conversation_id) is None
+            or code not in hr.RELEASABLE_HOLD_CODES
+            # Either click can still be pending or be refused. Only a matching
+            # signed word may be paired with a successful terminal outcome.
+            or word not in ("deliver", "discard")
+            or (outcome == "admitted" and word != "deliver")
+            or (outcome in ("rejected", OWNER_RELEASE_LOCAL_TERMINAL) and word != "discard")
+        ):
+            continue
+        try:
+            if not hr.verify_row(release, spki):
+                continue
+            decided_at = _iso(release["decided_at"])
+        except (ValueError, TypeError, OverflowError, OSError):
+            # Damaged rows have no projection, even when other history is valid.
+            continue
+        items.append(
+            {
+                "message_id": bare,
+                "conversation_id": conversation_id,
+                "seq": None,
+                "thread_root_id": None,
+                "held_at": None,
+                "first_held_at": None,
+                "kind": "owner_decision",
+                "hold_code": code,
+                "releasable": False,
+                "can_deliver": False,
+                "can_discard": False,
+                "actionable": False,
+                "unscreened": not release["screener_model"] and not release["screener_verdict"],
+                "deliver_until": None,
+                "decision": {
+                    "word": word,
+                    "decided_at": decided_at,
+                    "outcome": outcome,
+                },
+            }
+        )
+    return items
 
 
 def _outcome_word(release: dict[str, Any]) -> str:

@@ -4722,7 +4722,9 @@ def _raise_hold(code: str) -> NoReturn:
     raise HTTPException(status, {"code": code, "message": message})
 
 
-async def _hold_owner(config_manager: ConfigManager, expected_account_id: str) -> Any:
+async def _hold_owner(
+    config_manager: ConfigManager, expected_account_id: str, *, wire: Any = None
+) -> Any:
     """The committed owner the captured account names, or the read slice's refusal."""
 
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
@@ -4733,7 +4735,7 @@ async def _hold_owner(config_manager: ConfigManager, expected_account_id: str) -
 
     try:
         context = await resolve_read_context(
-            config_manager.config_dir, expected_account_id=expected_account_id
+            config_manager.config_dir, expected_account_id=expected_account_id, wire=wire
         )
     except BridgeSignInRequired as exc:
         _raise_sign_in(exc)
@@ -4762,10 +4764,25 @@ async def list_holds(
         expected_account_id or ""
     ):
         _raise_read("invalid_request")
-    owner = await _hold_owner(config_manager, str(expected_account_id))
     from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        recheck_read_owner,
+        wire_for,
+    )
 
+    wire = wire_for(config_manager.config_dir)
+    owner = await _hold_owner(config_manager, str(expected_account_id), wire=wire)
     payload = await asyncio.to_thread(holds.list_holds, config_manager.config_dir, owner)
+    try:
+        await recheck_read_owner(config_manager.config_dir, owner, wire=wire)
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
     return reply(payload)
 
 
