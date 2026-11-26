@@ -23,6 +23,7 @@ from local_operator.harness.types import ToolContext
 from local_operator.providers.auth_store import AuthStore
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import TeamBridgeClient
+from local_operator.team_bridge.host import admit_bridge_runtime
 from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
 from local_operator.team_bridge.tool import (
     BridgeRuntime,
@@ -41,6 +42,7 @@ TENANT = "tnt_roster"
 OWNER = "acc_roster_owner"
 COS = "sess_roster_cos"
 LIST_PATH = "/v1/messaging/conversations"
+STATUS_PATH = "/v1/messaging/status"
 logger = logging.getLogger(__name__)
 
 
@@ -160,6 +162,180 @@ async def roster(runtime: BridgeRuntime, channel_id: str = ROOM) -> dict[str, An
 async def list_rooms(runtime: BridgeRuntime) -> None:
     outcome = await execute_bridge(runtime, {"op": "channels"})
     assert outcome["ok"], outcome
+
+
+def status_result(runtime: BridgeRuntime) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "msg": "ok",
+            "result": {
+                "api_version": "1",
+                "tenants": [
+                    {
+                        "tenant_id": runtime.tenant_id,
+                        "eligible": True,
+                        "endpoint": {"id": runtime.owner.endpoint_id, "state": "active"},
+                    }
+                ],
+            },
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("challenge", [False, True])
+async def test_designated_channels_recovers_after_offline_boot(runtime, hub, challenge):
+    rt, auth = runtime
+    rt.admission = "pending"
+    retry_started, reply_ready = asyncio.Event(), asyncio.Event()
+    status_calls = 0
+
+    async def answer(req: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        if req.url.path != STATUS_PATH:
+            return hub.answer(req)
+        assert req.method == "GET" and req.headers["Authorization"] == "Bearer fixture-only"
+        status_calls += 1
+        if status_calls == 1:
+            raise httpx.ConnectError("fixture offline at boot", request=req)
+        retry_started.set()
+        await reply_ready.wait()
+        if challenge and status_calls == 2:
+            return httpx.Response(401)
+        return status_result(rt)
+
+    rt.client = TeamBridgeClient(
+        rt.config_dir,
+        base_url=hub.base,
+        credential_id=1,
+        store=auth,
+        transport=httpx.MockTransport(answer),
+    )
+    assert await admit_bridge_runtime(rt) == "pending"
+    assert rt.admission_note == "unreachable" and status_calls == 1
+    assert (await roster(rt))["code"] == "conversation_not_found"
+    assert status_calls == 1 and hub.calls == []  # detail never starts a retry or list
+
+    cos_context = ToolContext(bridge_runtime=rt, session_id=COS)
+    child_context = ToolContext(
+        bridge_runtime=rt, session_id=COS, ancestor_session_ids=("sess_parent",)
+    )
+    cos_tool, child_tool = build_bridge_tool(cos_context), build_bridge_tool(child_context)
+    assert cos_tool is not None and child_tool is not None
+    boot_task = rt._admission_task
+    for inherited in (child_tool, cos_tool):
+        refused = await inherited.execute(
+            "child-list", {"op": "channels"}, None, None, child_context
+        )
+        assert refused.details is not None and refused.details["code"] == "bridge_not_ready"
+        assert rt._admission_task is boot_task and status_calls == 1
+
+    refused = await cos_tool.execute("cos-list", {"op": "channels"}, None, None, cos_context)
+    assert refused.details is not None and refused.details["code"] == "bridge_not_ready"
+    attempt = rt._admission_task
+    assert attempt is not None and not attempt.done()  # the op edge re-arms the boot slot
+    try:
+        await asyncio.wait_for(retry_started.wait(), timeout=5)
+        for _ in range(3):
+            assert (await execute_bridge(rt, {"op": "channels"}))["code"] == "bridge_not_ready"
+            assert rt._admission_task is attempt
+        assert status_calls == 2 and hub.calls == [] and rt.roster_discovery is None
+    finally:
+        reply_ready.set()
+        await attempt
+
+    assert rt.admission == "admitted"
+    assert status_calls == (3 if challenge else 2)
+    assert auth.refresh_calls == [(1, False), (1, False)] + ([(1, True)] if challenge else [])
+    assert hub.calls == [] and rt.roster_discovery is None  # status is not a room read
+    await list_rooms(rt)
+    assert rt.roster_discovery is not None and ROOM in rt.roster_discovery.room_kinds
+    assert [call[1] for call in hub.calls] == [LIST_PATH]
+    assert (await roster(rt))["ok"]
+    assert [call[1] for call in hub.calls] == [LIST_PATH, f"{LIST_PATH}/{ROOM}"]
+
+
+@pytest.mark.asyncio
+async def test_pending_roster_never_schedules_even_with_a_classified_room(runtime, hub):
+    rt, auth = runtime
+    await list_rooms(rt)
+    rt.admission = "pending"
+
+    assert (await roster(rt))["code"] == "bridge_not_ready"
+    assert rt._admission_task is None
+    assert [call[1] for call in hub.calls] == [LIST_PATH]
+    assert auth.refresh_calls == [(1, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["consent", "different_base", "different_pin", "account"])
+async def test_pending_channels_with_invalid_binding_does_not_schedule(
+    runtime, hub, monkeypatch, drift
+):
+    rt, auth = runtime
+    rt.admission = "pending"
+    code = "bridge_not_ready"
+    if drift == "consent":
+        with Store(rt.config_dir)._connect() as conn:
+            conn.execute("UPDATE enrollments SET consent_version=NULL, consent_ref=NULL")
+        code = "consent_revoked"
+    elif drift == "account":
+        auth.rows[0].data["account_id"] = "acc_wrong"
+    else:
+        # An otherwise allowed origin and a same-account sibling pin are not
+        # the enrollment's actual destination and credential.
+        monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda _: True)
+        base = "https://alternate.fixture.test/v1" if drift == "different_base" else hub.base
+        auth.rows.append(FakeRow(2, data=dict(auth.rows[0].data)))
+        rt.client = TeamBridgeClient(
+            rt.config_dir,
+            base_url=base,
+            credential_id=2 if drift == "different_pin" else 1,
+            store=auth,
+            transport=httpx.MockTransport(hub.answer),
+        )
+        if drift == "different_base":
+            code = "bridge_destination_refused"
+    assert (await execute_bridge(rt, {"op": "channels"}))["code"] == code
+    assert rt._admission_task is None
+    assert rt.admission == "pending" and rt.roster_discovery is None
+    assert hub.calls == [] and auth.refresh_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,drift", [(401, "consent"), (200, "designation"), (200, "account")])
+async def test_pending_channels_discards_status_after_binding_changes(runtime, hub, status, drift):
+    rt, auth = runtime
+    rt.admission = "pending"
+    status_calls = 0
+
+    def answer(req: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        assert req.method == "GET" and req.url.path == STATUS_PATH
+        status_calls += 1
+        if drift == "consent":
+            with Store(rt.config_dir)._connect() as conn:
+                conn.execute("UPDATE enrollments SET consent_version=NULL, consent_ref=NULL")
+        elif drift == "designation":
+            Store(rt.config_dir).update_designated_session(rt.owner, "sess_other_cos")
+        else:
+            auth.rows[0].data["account_id"] = "acc_wrong"
+        return httpx.Response(401) if status == 401 else status_result(rt)
+
+    rt.client = TeamBridgeClient(
+        rt.config_dir,
+        base_url=hub.base,
+        credential_id=1,
+        store=auth,
+        transport=httpx.MockTransport(answer),
+    )
+    assert (await execute_bridge(rt, {"op": "channels"}))["code"] == "bridge_not_ready"
+    attempt = rt._admission_task
+    assert attempt is not None
+    await attempt
+    assert rt.admission == "pending" and rt.roster_discovery is None
+    assert status_calls == 1 and auth.refresh_calls == [(1, False)]  # no forced refresh/retry
 
 
 @pytest.mark.asyncio

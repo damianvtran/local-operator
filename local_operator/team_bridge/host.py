@@ -73,7 +73,8 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
-from .tool import BridgeRuntime
+from .client import BridgeRefusal, BridgeSignInRequired, RosterReadBinding, TeamBridgeClient
+from .tool import BridgeRuntime, _RosterReadRefused
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ __all__ = [
     "admission_refusal",
     "admit_bridge_runtime",
     "admit_soon",
+    "admit_channels_soon",
     "bridge_runtime_for_session",
     "owner_fence_refusal",
     "outbound_tool_fence",
@@ -247,7 +249,7 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
     """The ONE in-flight fetch: fence → GET → fence → settle."""
 
     from .authority import outbound_authority_fence
-    from .client import BridgeRefusal, BridgeSignInRequired, BridgeUnreachable
+    from .client import BridgeUnreachable
 
     if outbound_authority_fence(runtime) is not None:
         return  # revoked between scheduling and the GET: zero traffic
@@ -283,7 +285,23 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
     runtime.admission_note = note
 
 
-def _ensure_admission_task(runtime: BridgeRuntime) -> "asyncio.Task[None] | None":
+async def _channels_admission_fetch(
+    runtime: BridgeRuntime, client: TeamBridgeClient, binding: RosterReadBinding
+) -> None:
+    # The client fences the exact enrollment before freshness, on dispatch and
+    # on a 401 retry. Settle only an answered status for that same live binding;
+    # a lost binding or failed probe cannot admit anything or trigger pin healing.
+    try:
+        payload = await client.status(roster_binding=binding)
+        client._roster_pinned_row(binding)
+    except (BridgeRefusal, BridgeSignInRequired, _RosterReadRefused):
+        return
+    runtime.admission, runtime.admission_note = _admission_from_payload(payload, binding.owner)
+
+
+def _ensure_admission_task(
+    runtime: BridgeRuntime, *, channels_binding: RosterReadBinding | None = None
+) -> "asyncio.Task[None] | None":
     """The ONE shared task: return a live one, else create it (or nothing)."""
 
     task = runtime._admission_task
@@ -293,7 +311,12 @@ def _ensure_admission_task(runtime: BridgeRuntime) -> "asyncio.Task[None] | None
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None  # no running loop: nothing to schedule here
-    runtime._admission_task = task = loop.create_task(_admission_fetch(runtime))
+    fetch = (
+        _admission_fetch(runtime)
+        if channels_binding is None
+        else _channels_admission_fetch(runtime, runtime.client, channels_binding)
+    )
+    runtime._admission_task = task = loop.create_task(fetch)
     task.add_done_callback(_swallow_admission_result)
     return task
 
@@ -322,6 +345,18 @@ def admit_soon(runtime: BridgeRuntime) -> None:
         _cancel_inflight_admission(runtime)  # off/drifted: zero traffic
         return
     _ensure_admission_task(runtime)
+
+
+def admit_channels_soon(runtime: BridgeRuntime, binding: RosterReadBinding) -> None:
+    """Re-arm CoS channels without borrowing the ordinary outbound fence."""
+
+    # Don't queue work (or touch an existing slot) for an invalid roster edge.
+    # The client must still check again after this synchronous scheduling edge.
+    try:
+        runtime.client._roster_pinned_row(binding)
+    except (BridgeRefusal, BridgeSignInRequired, _RosterReadRefused):
+        return
+    _ensure_admission_task(runtime, channels_binding=binding)
 
 
 def _swallow_admission_result(task: "asyncio.Task[Any]") -> None:

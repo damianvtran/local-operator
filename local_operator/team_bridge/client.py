@@ -2116,8 +2116,8 @@ _DIRECTORY_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 class RosterReadBinding:
     """The enrollment and live local authority for a roster-certified human GET.
 
-    Only roster detail and the CoS discovery that certifies it use this binding.
-    Ordinary conversations keep their existing account and refresh semantics.
+    Only roster detail, its CoS discovery and that discovery's admission retry
+    use this binding. Ordinary calls keep their account and refresh semantics.
     """
 
     owner: OwnerSnapshot
@@ -2861,10 +2861,13 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         pre_http_guard: Callable[[], None] | None = None,
+        roster_binding: RosterReadBinding | None = None,
     ) -> dict[str, Any]:
-        """Eligibility, optionally fenced to the owner commissioning a file send."""
+        """Eligibility; a CoS discovery retry uses the same binding as its list."""
 
         extra: dict[str, Any] = {}
+        if roster_binding is not None:
+            extra["roster_binding"] = roster_binding
         if expected_account_id is not None:
             extra["expected_account_id"] = expected_account_id
         if pre_http_guard is not None:

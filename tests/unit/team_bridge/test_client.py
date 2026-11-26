@@ -656,8 +656,12 @@ class _LateSwitchStore(FakeStore):
     A's bearer to B; the one-snapshot client never re-reads.
     """
 
-    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
-        data = await super().ensure_oauth_fresh_or_raise(credential_id, force=force)
+    async def ensure_oauth_fresh_or_raise(
+        self, credential_id: int, *, force: bool = False, row_guard=None
+    ):
+        data = await super().ensure_oauth_fresh_or_raise(
+            credential_id, force=force, row_guard=row_guard
+        )
         self.rows = [FakeRow(credential_id, data={"access": "token-2", "account_id": "acc_b"})]
         return data
 
