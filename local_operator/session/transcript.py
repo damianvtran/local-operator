@@ -923,9 +923,13 @@ class TranscriptEntry:
         return json.dumps(row, separators=(",", ":"))
 
     @staticmethod
-    def from_json(line: str) -> "TranscriptEntry | None":
+    def from_json(line: str, *, warn_malformed: bool = True) -> "TranscriptEntry | None":
         """Parse one line; malformed lines are dropped individually (a corrupt
-        row must never destroy the whole replay)."""
+        row must never destroy the whole replay).
+
+        Speculative readers may inspect rows replay would never reach. They
+        suppress the payload-bearing warning without changing replay's parser.
+        """
         try:
             raw = json.loads(line)
             return TranscriptEntry(
@@ -939,7 +943,8 @@ class TranscriptEntry:
                 inline_ui_source_blocks=_read_inline_ui_blocks(raw.get("inline_ui_source_blocks")),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("dropping malformed transcript line: %.120s", line)
+            if warn_malformed:
+                logger.warning("dropping malformed transcript line: %.120s", line)
             return None
 
 
@@ -2682,14 +2687,14 @@ def _recover_cold_checkpoint(
     spend: dict[str, Any] | None,
     stats: dict[str, Any] | None,
 ) -> tuple[int | None, tuple[dict[str, Any], int, int] | None]:
-    """The oldest complete-row needle offset, plus a recovery if rows prove it.
+    """The newest complete-row needle's file offset, plus recovery if rows prove it.
 
     One byte window sees both writer spellings without per-chunk overlap or a
     second read. As in the bounded tail walker, discard the fragment at a
     non-BOF floor: it might be the end of an arbitrarily large older row.
     """
     started = time.monotonic() if stats is not None else 0.0
-    read = rows = 0
+    read = rows = candidates = 0
     outcome = "unreadable"
     try:
         floor = max(0, low - max_bytes)
@@ -2701,52 +2706,87 @@ def _recover_cold_checkpoint(
         # The trailing newline above guarantees a delimiter even if the
         # entire window is the trailing fragment of a single oversized row.
         complete = window.find(b"\n") + 1 if floor else 0
-        oldest = min((hit for n in needles if (hit := window.find(n, complete)) >= 0), default=-1)
-        if oldest < 0:
+        hits = [window.rfind(needle, complete) for needle in needles]
+        newest = max(hits, default=-1)
+        if newest < 0:
             outcome = "no_spelling"
             return None, None
 
-        hit_offset = floor + oldest
+        # A reused absence witness covers a prefix. Only the newest hit can
+        # rule out absence in the remaining suffix; use its absolute BYTE
+        # position, not the candidate's row start or a window-relative index.
+        hit_offset = floor + newest
         if spend is not None and SessionSpend.from_details(spend) is None:
             outcome = "invalid_spend"
             return hit_offset, None
 
-        # Eager's order is an exact 1-based parsed-row index. Count every row
-        # through the match, including shrinks, but do not feed these rows to
-        # the seed. There is no reason to parse older than the oldest candidate
-        # row if all the spellings in the window are false presences.
-        pos = read - 1  # trailing newline; no synthetic empty EOF row
-        while pos > oldest:
-            left = window.rfind(b"\n", complete, pos) + 1
-            left = max(complete, left)
-            raw = window[left:pos]
-            pos = left - 1
-            if not raw.strip():
-                continue
+        def parse(raw: bytes) -> TranscriptEntry:
+            nonlocal rows
             rows += 1
-            try:
-                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
-                if entry is None or not isinstance(
-                    entry.payload.get("provider_payload") or {}, dict
-                ):
+            entry = TranscriptEntry.from_json(raw.decode("utf-8"), warn_malformed=False)
+            if entry is None or not isinstance(entry.payload.get("provider_payload") or {}, dict):
+                raise ValueError  # Decline, including on rows eager may never reach.
+            return entry
+
+        def is_checkpoint(entry: TranscriptEntry) -> bool:
+            return entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == name
+
+        # A spelling inside another row (e.g. nested details) buys no order
+        # walk. Check whole candidate rows newest-first and consume every hit
+        # on that line together. Keep each needle's position so a sparse or
+        # absent spelling doesn't rescan the same prefix for every candidate.
+        rejected: set[int] = set()
+        hit = newest
+        try:
+            while hit >= 0:
+                left = max(complete, window.rfind(b"\n", complete, hit) + 1)
+                right = window.index(b"\n", hit)
+                candidates += 1
+                candidate = parse(window[left:right])
+                if is_checkpoint(candidate):
                     break
-                if entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == name:
-                    details = dict(entry.payload.get("details", {}))
-                    outcome = "matched"
-                    return hit_offset, (details, rows, read)
-            except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
-                break
-        else:
-            outcome = "not_checkpoint"
+                rejected.add(left)
+                for index, needle in enumerate(needles):
+                    if hits[index] >= left:
+                        hits[index] = window.rfind(needle, complete, left)
+                hit = max(hits)
+            else:
+                outcome = "not_checkpoint"
+                return hit_offset, None
+
+            # Eager's ordinal counts every newer parsed row, including shrinks.
+            # Don't seed from this walk, and don't decode known non-matches or
+            # the candidate twice. An alternate writer can hide a newer actual
+            # checkpoint in the gap without either byte spelling: still let
+            # that row win, just as eager does.
+            order = 1
+            pos = read - 1
+            while pos > right:
+                start = window.rfind(b"\n", left, pos) + 1
+                if start not in rejected:
+                    raw = window[start:pos]
+                    if not raw.strip():
+                        pos = start - 1
+                        continue
+                    entry = parse(raw)
+                    if is_checkpoint(entry):
+                        candidate = entry
+                        break
+                order += 1
+                pos = start - 1
+            details = dict(candidate.payload.get("details", {}))
+        except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
+            # Damage could affect the ordinal (eager replaces bad UTF-8 and
+            # skips malformed JSON). Leave the canonical facts to that reader.
+            outcome = "malformed"
             return hit_offset, None
-        # Damage could affect the eager row count (its UTF-8 decode replaces
-        # bytes). Leave the canonical facts to that parser, not this proof.
-        outcome = "malformed"
-        return hit_offset, None
+        outcome = "matched"
+        return hit_offset, (details, order, read)
     finally:
         if stats is not None:
             stats["lookup_bytes"] = read
-            stats["lookup_rows"] = rows
+            stats["lookup_rows"] = rows  # Actual continuation decode attempts, not the ordinal.
+            stats["lookup_candidates"] = candidates
             stats["lookup_ms"] = round((time.monotonic() - started) * 1000, 3)
             stats["lookup_outcome"] = outcome
 

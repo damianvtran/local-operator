@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import Message, TextContent, Usage
-from local_operator.session import cold_metadata, replay_cache
+from local_operator.session import cold_metadata, open_trace, replay_cache, tail_anchor
 from local_operator.session import transcript as transcript_module
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
@@ -211,10 +211,10 @@ def test_desktop_checkpoint_recovery_matrix(
         calls.append(needles)
         return original_absence(handle, start, end, needles)
 
-    def count_parse(line: str) -> TranscriptEntry | None:
+    def count_parse(line: str, *, warn_malformed: bool = True) -> TranscriptEntry | None:
         nonlocal parses
         parses += 1
-        return original_parse(line)
+        return original_parse(line, warn_malformed=warn_malformed)
 
     monkeypatch.setattr(transcript_module, "_spellings_absent", count_absence)
     monkeypatch.setattr(TranscriptEntry, "from_json", count_parse)
@@ -228,7 +228,8 @@ def test_desktop_checkpoint_recovery_matrix(
         # The cold tail parses 256 rows as before. The dense continuation adds
         # bytes, not even one parse or a second prefix scan.
         assert parses == 256
-        assert stats["lookup_rows"] == 0 and stats["lookup_bytes"] == 4 << 20
+        assert stats["lookup_rows"] == stats["lookup_candidates"] == 0
+        assert stats["lookup_bytes"] == 4 << 20
         assert stats["lookup_outcome"] == "no_spelling"
         assert stats["proof_mode"] == "declined"
         assert calls == [front if met_spend else front + spend]
@@ -286,16 +287,176 @@ def test_desktop_recovery_declines_uncertain_facts_without_writes(
     assert replay_cache.cached_replay(key) is None and journal.read_bytes() == old
 
 
-def test_false_presence_stops_at_the_oldest_possible_row(tmp_path: Path) -> None:
-    directory, _ = _raw_journal(
-        tmp_path, _CHECKPOINT + _DENSE_LINE * 75_000 + _LOOKALIKE + _FILLER + _SPEND + _RECEIPT
+@pytest.mark.parametrize("dense_rows", [0, 49_849], ids=["near", "far"])
+def test_false_presence_decodes_only_the_candidate(tmp_path: Path, dense_rows: int) -> None:
+    # Two writer spellings in one unrelated row are still only one candidate.
+    quoted = json.dumps(WANTED[0]).encode()
+    foreign = _LOOKALIKE.replace(
+        b'"details":{', b'"other":{"custom_type": ' + quoted + b'},"details":{'
     )
+    # Keep the anchor eligible: the foreign spelling is itself a false byte
+    # presence to the anchor builder, so test that spelling separately below.
+    long = _encoded("long", "message", role="user", text="x" * (1025 << 10))
+    lookalike = _LOOKALIKE if dense_rows else foreign
+    tip = (
+        _encoded("compact", "compaction", first_kept_entry_id="s")
+        + _SPEND.replace(b'"id":"custom"', b'"id":"s"')
+        + _RECEIPT
+    )
+    # 63-byte writer-format rows fit the review's 49,849-row gap inside 4 MiB.
+    filler = _encoded("f", "message", role="user") * dense_rows
+    data = lookalike + filler + long + tip
+    assert len(data) <= 4 << 20
+    directory, _ = _raw_journal(tmp_path, data)
+    if dense_rows:
+        anchor = tail_anchor.build_anchor(directory)
+        assert anchor is not None and tail_anchor.write_anchor(directory, anchor)
+        assert tail_anchor.proves_absent(directory)
+        eager = read_replay_suffix(
+            directory, checkpoint_types=WANTED[:1], opportunistic_types=WANTED[1:]
+        )
+        assert [entry.id for entry in eager.entries] == ["compact", "s", "receipt"]
     stats: dict[str, Any] = {}
     key = _desktop_key(directory)
     result = replay_cache.build_cold_tail_metadata(key, tmp_path / "meta", stats)
     assert result is None
     assert stats["lookup_outcome"] == "not_checkpoint"
-    assert stats["lookup_rows"] == 3  # two rows below the cold tail, plus the lookalike
+    assert stats["lookup_rows"] == 1, "a nested needle must not make us decode the gap"
+    assert stats["lookup_candidates"] == 1
+
+
+@pytest.mark.parametrize("shape", ["false-newer", "real-newer", "alternate-writer"])
+def test_only_newer_rows_can_change_checkpoint_order(tmp_path: Path, shape: str) -> None:
+    # Distinct IDs let us assert both the winning row and its eager ordinal.
+    real = _custom_row(WANTED[0], {"checkpoint_id": "compact"}, id_="real")
+    if shape == "false-newer":
+        prefix = real + _LOOKALIKE
+        candidates, order, expected = 2, 261, "compact"
+    elif shape == "real-newer":
+        prefix = _LOOKALIKE + real
+        candidates, order, expected = 1, 260, "compact"
+    else:
+        # The candidate admits the walk, not the answer. A newer valid row
+        # written with different whitespace still wins by eager's rule.
+        alternate = _custom_row(WANTED[0], {"checkpoint_id": "alternate"}, id_="alt")
+        alternate = alternate.replace(b'"custom_type":', b'"custom_type" : ')
+        prefix = real + alternate
+        candidates, order, expected = 1, 260, "alternate"
+    directory, _ = _raw_journal(
+        tmp_path, prefix + b"\n \t\n" + _SHRINK + _FILLER + _SPEND + _RECEIPT
+    )
+    eager = eager_facts(directory)
+    assert eager["checkpoint"] == {"checkpoint_id": expected}
+    assert eager["order"] == {WANTED[0]: order, WANTED[1]: 2}
+    stats: dict[str, Any] = {}
+    key = _desktop_key(directory)
+    actual = replay_cache.build_cold_tail_metadata(key, tmp_path / "meta", stats)
+    assert actual is not None and actual.checkpoint == eager["checkpoint"]
+    assert actual.order == eager["order"] and actual.checkpoints[WANTED[1]] == eager["spend"]
+    assert actual.seed_usage is not None
+    assert actual.seed_usage.model_dump(mode="json") == eager["seed"]
+    assert stats["lookup_candidates"] == candidates
+    assert stats["lookup_rows"] == order - 256 + (shape == "alternate-writer")
+    assert stats["lookup_outcome"] == "matched" and stats["absence_scan_bytes"] == 0
+
+
+def test_lookup_uses_absolute_newest_hit_in_prior_absence_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    front = _custom_type_spellings(WANTED[0])
+    spend = _custom_type_spellings(WANTED[1])
+    assert front is not None and spend is not None
+    prefix = _DENSE_LINE * 50
+    before_tail = prefix + _LOOKALIKE + _DENSE_LINE + _LOOKALIKE
+    directory, journal = _raw_journal(tmp_path, before_tail + _RECEIPT)
+    with journal.open("rb") as handle:
+        offset, result = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(before_tail),
+            max_bytes=512,
+            name=WANTED[0],
+            needles=front,
+            spend=None,
+            stats=None,
+        )
+    assert result is None and offset == before_tail.rindex(front[0])
+
+    def unexpected_scan(*args: Any) -> bool:
+        pytest.fail("the newest byte hit already invalidates the reusable absence range")
+
+    monkeypatch.setattr(transcript_module, "_spellings_absent", unexpected_scan)
+    # Simulate a proof boundary at the newest row; the older hit is outside
+    # this scan, and cannot justify skipping the fallback on its own.
+    prior = (len(before_tail) - len(_LOOKALIKE), frozenset(front + spend))
+    key = _desktop_key(directory)
+    stats: dict[str, Any] = {}
+    suffix = read_cold_tail(
+        directory,
+        checkpoint_types=WANTED,
+        max_rows=1,
+        max_bytes=512,
+        known_absent=prior,
+        desktop_source=(key.inode, key.size, key.mtime_ns, key.ctime_ns),
+        stats=stats,
+    )
+    assert suffix is None
+    assert stats["decline_reason"] == "below_tail_presence" and stats["lookup_rows"] == 2
+
+
+@pytest.mark.parametrize("trace", [False, True], ids=["off", "on"])
+@pytest.mark.parametrize("site", ["false-then-malformed", "candidate", "order"])
+def test_recovery_does_not_log_speculative_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    trace: bool,
+    site: str,
+) -> None:
+    canary = "synthetic-private-text-outside-eager-window"
+    raw = canary.encode() + b"\n"
+    if site == "candidate":
+        raw = raw.rstrip() + b" " + _CHECKPOINT  # byte hit in malformed JSON
+    elif site == "order":
+        raw = _CHECKPOINT + raw  # genuine older candidate, malformed newer order row
+    else:
+        raw = _LOOKALIKE + raw
+    long = _encoded("long", "message", role="user", text="x" * (1200 << 10))
+    compact = _encoded("compact", "compaction", first_kept_entry_id="receipt")
+    directory, _ = _raw_journal(tmp_path, raw + long + compact + _SPEND + _RECEIPT)
+    key = _desktop_key(directory)
+    # The anchored eager negative never reaches the malformed row. With a real
+    # checkpoint, eager *does* reach it and must still log the usual warning.
+    if site != "order":
+        anchor = tail_anchor.build_anchor(directory)
+        assert anchor is not None and tail_anchor.write_anchor(directory, anchor)
+        assert tail_anchor.proves_absent(directory)
+    caplog.clear()  # The independent anchor producer is not part of either open.
+    trace_path = tmp_path / "open.jsonl"
+    monkeypatch.setattr(open_trace, "_PATH", trace_path if trace else None)
+    span = open_trace.ColdOpenTrace("synthetic") if open_trace.enabled() else None
+    stats = span.fields if span is not None else None
+    target = tmp_path / "meta"
+    assert replay_cache.build_cold_tail_metadata(key, target, stats) is None
+    assert not target.exists() and not replay_cache.absence_proof_path(target).exists()
+    assert canary not in caplog.text
+    if span is not None:
+        span.finish("synthetic")
+        trace_data = trace_path.read_text()
+        assert canary not in trace_data
+        assert json.loads(trace_data)["lookup_outcome"] == (
+            "not_checkpoint" if site == "false-then-malformed" else "malformed"
+        )
+    else:
+        assert not trace_path.exists()
+    eager = read_replay_suffix(
+        directory, checkpoint_types=WANTED[:1], opportunistic_types=WANTED[1:]
+    )
+    if site == "order":
+        assert f"dropping malformed transcript line: {canary}" in caplog.text
+        assert eager.checkpoint == {"checkpoint_id": "newest"}
+    else:
+        assert canary not in caplog.text
+        assert [entry.id for entry in eager.entries] == ["compact", "custom", "receipt"]
 
 
 @pytest.mark.parametrize("complete", [False, True], ids=["partial-floor", "crosses-chunk"])

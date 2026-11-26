@@ -36,6 +36,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from starlette import types as asgi
 
 from local_operator.config import ConfigManager
 from local_operator.harness.types import Message, TextContent, ToolCall, Usage
@@ -537,7 +538,7 @@ async def _first_sse_records(app: FastAPI, path: str) -> tuple[int, list[dict[st
     pending = b""
     records: list[dict[str, Any]] = []
 
-    async def receive() -> dict[str, Any]:
+    async def receive() -> asgi.Message:
         nonlocal requested
         if not requested:
             requested = True
@@ -545,7 +546,7 @@ async def _first_sse_records(app: FastAPI, path: str) -> tuple[int, list[dict[st
         await disconnected.wait()
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: asgi.Message) -> None:
         nonlocal status, pending
         if message["type"] == "http.response.start":
             status = message["status"]
@@ -560,7 +561,7 @@ async def _first_sse_records(app: FastAPI, path: str) -> tuple[int, list[dict[st
             if not message.get("more_body"):
                 disconnected.set()
 
-    scope = {
+    scope: asgi.Scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1",
@@ -585,6 +586,11 @@ async def test_recovered_checkpoint_preserves_first_records_on_both_routes(
     monkeypatch.setattr(open_trace, "_PATH", trace_path)
     directory = await _seed(root, turns=0)
     writer = Transcript(directory)
+    # A real writer can store a nested byte lookalike newer than the checkpoint.
+    # Keep it below the row bound so both the candidate and order phases run.
+    await writer.append_custom(
+        "unrelated.synthetic", {"custom_type": FRONTEND_CHECKPOINT_CUSTOM_TYPE}
+    )
     for i in range(270):
         await writer.append_message(
             Message(id=f"u{i}", role="user", content=[TextContent(text=f"question {i}")])
@@ -617,11 +623,18 @@ async def test_recovered_checkpoint_preserves_first_records_on_both_routes(
             ) as client:
                 auth = {"Authorization": f"Bearer {TOKEN}"}
                 unauth = await client.get(route + "/history", params={"open_frame": 1})
+                forbidden = await client.get(
+                    route + "/history",
+                    params={"open_frame": 1},
+                    headers={**auth, "Origin": "https://wrong-origin.invalid"},
+                )
                 invalid = await client.get(
                     route + "/history", params={"open_frame": -1}, headers=auth
                 )
-                assert (unauth.status_code, invalid.status_code) == (401, 422)
+                statuses = (unauth.status_code, forbidden.status_code, invalid.status_code)
+                assert statuses == (401, 403, 422)
                 assert not metadata_path.exists() and _replay_calls == 0
+                assert not replay_cache.absence_proof_path(metadata_path).exists()
                 # The control forces only the established eager branch; routing,
                 # auth, disk reads, the stream and persisted facts are real in both.
                 control = (
@@ -644,7 +657,8 @@ async def test_recovered_checkpoint_preserves_first_records_on_both_routes(
                 assert "Article search rollout" in str(wire[-1])
                 digest = hashlib.sha256(json.dumps(wire[-1], sort_keys=True).encode()).hexdigest()
                 print(
-                    f"{arm}: unauthorized={unauth.status_code} invalid={invalid.status_code} "
+                    f"{arm}: unauthorized={unauth.status_code} forbidden={forbidden.status_code} "
+                    f"invalid={invalid.status_code} "
                     f"page={page.status_code} events={status}/open,snapshot "
                     f"eager_replays={_replay_calls} canonical_sha256={digest}"
                 )
@@ -664,11 +678,13 @@ async def test_recovered_checkpoint_preserves_first_records_on_both_routes(
         _reset_replay_calls()
     assert wire[0] == wire[1] and saved_records[0] == saved_records[1]
     [recovered] = [
-        row for row in map(json.loads, trace_path.read_text().splitlines())
+        row
+        for row in map(json.loads, trace_path.read_text().splitlines())
         if row.get("proof_mode") == "recovered"
     ]
     assert recovered["stage"] == "cold.summary" and recovered["metadata_record"] == "miss"
     assert recovered["lookup_outcome"] == "matched" and recovered["lookup_rows"] > 0
+    assert recovered["lookup_candidates"] == 2
     assert 0 < recovered["lookup_bytes"] <= 4 << 20 and recovered["lookup_ms"] >= 0
     assert recovered["absence_scan_bytes"] == 0
     assert "Article search rollout" not in trace_path.read_text()
