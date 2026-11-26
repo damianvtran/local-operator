@@ -33,6 +33,7 @@ from local_operator.team_bridge.card_projection import (
     EXCERPTS_PER_CARD,
     PENDING_CARD,
     ExcerptMemo,
+    _keyed,
     attach_history_excerpts,
     bounded_excerpt,
     model_card_text,
@@ -1691,11 +1692,14 @@ def test_the_memo_round_trips_through_its_file(tmp_path: Path, monkeypatch) -> N
 
     restored = ExcerptMemo.load(_memo_path(tmp_path))
     assert set(restored) == set(live) and len(restored) == len(context)
+    secret = DisplayBodyStore(tmp_path).memo_key(key)
+    assert secret is not None
     for card_id, decided in live.items():
         again = restored[card_id]
         assert again.made_for(decided.text)
+        # On disk a row digest is keyed (review R1-1); in memory it is plain.
         assert {mid: s.body_sha256 for mid, s in again.excerpts.items()} == {
-            mid: s.body_sha256 for mid, s in decided.excerpts.items()
+            mid: _keyed(secret, s.body_sha256) for mid, s in decided.excerpts.items()
         }
     assert list(restored["entry0001"].excerpts) == ["bcmsg_00000001"]
 
@@ -1780,7 +1784,9 @@ def test_revocation_and_compaction_clear_remove_the_file(tmp_path: Path, monkeyp
         "{not json",
         "[]",
         json.dumps({"version": 99, "cards": {}}),
-        json.dumps({"version": 1, "cards": []}),
+        json.dumps({"version": 2, "cards": []}),
+        # Version 1 held PLAIN body digests: never trusted as keyed ones.
+        json.dumps({"version": 1, "cards": {"e": {"text_sha256": "a" * 64, "excerpts": {}}}}),
     ],
 )
 def test_a_missing_or_corrupt_file_is_a_fresh_memo(tmp_path: Path, content: str | None) -> None:
@@ -1789,7 +1795,7 @@ def test_a_missing_or_corrupt_file_is_a_fresh_memo(tmp_path: Path, content: str 
         path.write_text(content, encoding="utf-8")
     memo = ExcerptMemo.load(path)
     assert memo == {}
-    memo.persist()  # nothing changed: nothing written over the bad file
+    memo.persist(lambda: None)  # nothing changed: nothing written over the bad file
     assert path.exists() == (content is not None)
 
 
@@ -1799,7 +1805,7 @@ def test_a_malformed_entry_leaves_only_that_card_undecided(tmp_path: Path) -> No
     path.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "cards": {
                     "good": good,
                     "bad_sha": {"text_sha256": "nope", "excerpts": {}},
@@ -1838,6 +1844,8 @@ def test_the_file_never_holds_body_or_card_text(tmp_path: Path, monkeypatch) -> 
         for value in [entry["text_sha256"], *entry["excerpts"].values()]
     ]
     assert leaves and all(len(value) == 64 for value in leaves)
+    # ...and never the guessable plain digest of the body (review R1-1).
+    assert hashlib.sha256(b"SECRET-BODY-ONE settled early").hexdigest() not in raw
     assert stat.S_IMODE(os.stat(_memo_path(tmp_path)).st_mode) == 0o600
 
 
@@ -1855,7 +1863,7 @@ def test_the_session_loads_its_persisted_memo(tmp_path: Path) -> None:
     path = _memo_path(tmp_path)
     path.write_text(
         json.dumps(
-            {"version": 1, "cards": {"entry0001": {"text_sha256": "a" * 64, "excerpts": {}}}}
+            {"version": 2, "cards": {"entry0001": {"text_sha256": "a" * 64, "excerpts": {}}}}
         ),
         encoding="utf-8",
     )
@@ -1870,3 +1878,192 @@ def test_the_session_loads_its_persisted_memo(tmp_path: Path) -> None:
     assert isinstance(memo, ExcerptMemo) and list(memo) == ["entry0001"]
     memo.clear()
     assert not path.exists()
+
+
+# -- round 1 remediation (PR #4629) --------------------------------------------
+
+
+def _purge_by_opt_out(root: Path, key: str) -> None:
+    # The one-click Turn off and every ``team_bridge.enabled`` write.
+    from local_operator.team_bridge.display_bodies import purge_if_bridge_off
+
+    (root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"team_bridge": {"enabled": False}}})
+    )
+    assert purge_if_bridge_off(root) > 0
+
+
+def _purge_by_consent_revoke(root: Path, key: str) -> None:
+    # What ``Session._bridge_history_transform`` runs when the fence refuses.
+    DisplayBodyStore(root).purge()
+
+
+def _purge_by_sign_out(root: Path, key: str) -> None:
+    _purge_at_sign_out(root, key, "")
+
+
+def _purge_by_account_switch(root: Path, key: str) -> None:
+    # The exact call another namespace's enrollment commit makes (``store.py``).
+    DisplayBodyStore(root).purge(keep_owner_key=_owner_key(_owner("acc_other")))
+
+
+def _expire_memo_key(root: Path, key: str) -> None:
+    # The key ages out at the row TTL, like the rows it digests.
+    import sqlite3
+
+    from local_operator.team_bridge.display_bodies import TTL_SECONDS
+
+    with sqlite3.connect(display_db_path(root)) as conn:
+        conn.execute(
+            "UPDATE excerpt_memo_keys SET created_at = ?", (time.time() - TTL_SECONDS - 60,)
+        )
+
+
+@pytest.mark.parametrize(
+    "purge",
+    [
+        _purge_by_opt_out,
+        _purge_by_consent_revoke,
+        _purge_by_sign_out,
+        _purge_by_account_switch,
+        _expire_memo_key,
+    ],
+    ids=["opt_out", "consent_revoke", "sign_out", "account_switch", "ttl"],
+)
+def test_every_purge_leaves_the_memo_file_unguessable(tmp_path: Path, monkeypatch, purge) -> None:
+    """REGRESSION (PR #4629 review R1-1): the file kept ``sha256(body)`` after
+    every display purge, in every session never resumed, and a short body
+    ("ok") can be confirmed by guessing. The digests are keyed now, and each
+    purge (and the TTL) destroys the key, so the leftover file proves nothing."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "ok")
+    context = [_numbered_card(n) for n in range(1, 2 + EXCERPT_CARD_WINDOW + 1)]
+    host = _persisted_host(tmp_path)
+    _rendered(host, context[:1])
+    assert "untrusted excerpt" in _rendered(host, context)[0], "precondition"
+    raw = _memo_path(tmp_path).read_text(encoding="utf-8")
+    assert hashlib.sha256(b"ok").hexdigest() not in raw
+    store = DisplayBodyStore(tmp_path)
+    old_key = store.memo_key(key)
+    assert old_key is not None
+    assert _keyed(old_key, hashlib.sha256(b"ok").hexdigest()) in raw
+
+    purge(tmp_path, key)
+    assert store.memo_key(key) is None, "the purge must destroy the key"
+    assert _memo_path(tmp_path).read_text(encoding="utf-8") == raw, "file untouched"
+
+    # Worst case: the very same body is admitted again under the same id. The
+    # old digest still cannot verify, so a restarted session drops the excerpt.
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "ok")
+    restarted = _persisted_host(tmp_path)
+    assert "untrusted excerpt" not in _rendered(restarted, context)[0]
+    assert restarted._bridge_excerpt_memo["entry0001"].excerpts == {}
+    # Nothing left to digest, so no key was minted; a later one is a fresh key.
+    assert store.memo_key(key) is None
+    new_key = store.memo_key(key, create=True)
+    assert new_key is not None and new_key != old_key
+
+
+def test_a_failed_clear_unlink_keeps_the_memo_dirty(tmp_path: Path, monkeypatch) -> None:
+    """Review R1-2: a failed unlink left the pre-clear decisions on disk with
+    nothing dirty, so a restart before the next change brought them back."""
+    path = _memo_path(tmp_path)
+    path.write_text(
+        json.dumps(
+            {"version": 2, "cards": {"entry0001": {"text_sha256": "a" * 64, "excerpts": {}}}}
+        ),
+        encoding="utf-8",
+    )
+    memo = ExcerptMemo.load(path)
+    assert list(memo) == ["entry0001"]
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    memo.clear()
+    monkeypatch.undo()
+    assert path.exists(), "precondition: the unlink failed"
+    memo.persist(lambda: None)
+    assert ExcerptMemo.load(path) == {}, "the next persist overwrote the stale file"
+
+
+def test_an_ids_only_card_stays_ids_only_when_its_body_arrives_after_restart(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Review R1-3a: the ``PendingTurn._record_display_body`` sibling of the
+    incident, across a restart: the card went out ids-only, its body settles
+    while the runtime is down, and the relaunch must not add an excerpt."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context: list[Any] = [_numbered_card(1)]
+    before = _rendered(_persisted_host(tmp_path), context)
+    assert "body not retained" in before[0]
+    raw = _memo_path(tmp_path).read_text(encoding="utf-8")
+
+    _record_turn_body(tmp_path, key, "bcmsg_00000001", "LATE-BODY settled after restart")
+    assert _rendered(_persisted_host(tmp_path), context) == before
+    # Review R1-4: an identical first render after restart rewrites nothing.
+    assert _memo_path(tmp_path).read_text(encoding="utf-8") == raw
+
+    # Control: an empty memo shows the late body, the cache-breaking change.
+    cold = _rendered(_memo_host(tmp_path), context)
+    assert "LATE-BODY" in cold[0]
+
+
+def test_a_restored_excerpt_drops_when_its_body_is_rewritten(tmp_path: Path, monkeypatch) -> None:
+    """Review R1-3b: same id, new body (a refill UPDATE in place) after restart."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    host = _persisted_host(tmp_path)
+    _rendered(host, context[:1])
+    assert "SECRET-BODY-ONE" in _rendered(host, context)[0]
+
+    _rewrite_in_place(tmp_path, key, "bcmsg_00000001")
+    restarted = _persisted_host(tmp_path)
+    shown = _rendered(restarted, context)[0]
+    assert "untrusted excerpt" not in shown and "rewritten body" not in shown
+    assert restarted._bridge_excerpt_memo["entry0001"].excerpts == {}
+
+
+def test_an_intact_restored_excerpt_rewrites_nothing(tmp_path: Path, monkeypatch) -> None:
+    """Review R1-4: rebuilding a restored excerpt that fully re-verifies is the
+    same decision the file already holds, so the file is not rewritten."""
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    host = _persisted_host(tmp_path)
+    _rendered(host, context[:1])
+    before = _rendered(host, context)
+    path = _memo_path(tmp_path)
+    raw, stamp = path.read_text(encoding="utf-8"), path.stat().st_mtime_ns
+
+    writes: list[Path] = []
+    from local_operator import atomic_files
+
+    real = atomic_files.atomic_write_text
+    monkeypatch.setattr(
+        atomic_files,
+        "atomic_write_text",
+        lambda target, *a, **k: (writes.append(Path(target)), real(target, *a, **k))[1],
+    )
+    restarted = _persisted_host(tmp_path)
+    assert _rendered(restarted, context) == before
+    assert writes == [] and path.stat().st_mtime_ns == stamp
+    assert path.read_text(encoding="utf-8") == raw
+    # The rebuilt entry carries the plain digest, so the next render still hits.
+    assert _rendered(restarted, context) == before and writes == []

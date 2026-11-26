@@ -13,6 +13,7 @@ reconstruction.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
 if TYPE_CHECKING:
+    from .display_bodies import DisplayBodyStore
     from .types import ConversationFeedRef
 
 logger = logging.getLogger(__name__)
@@ -193,8 +195,10 @@ class _HistoryExcerpt:
     excerpts: Mapping[str, _Shown]
     #: Set ONLY on a decision restored from :data:`EXCERPT_MEMO_NAME`, which
     #: holds digests and never text: the sha256 of the card text it was made
-    #: for. ``text`` and every ``_Shown.text`` are then empty until the first
-    #: render rebuilds them from the display store (``attach_history_excerpts``).
+    #: for. ``text`` and every ``_Shown.text`` are then empty, and every
+    #: ``_Shown.body_sha256`` holds the file's KEYED digest (:func:`_keyed`),
+    #: until the first render rebuilds them from the display store
+    #: (``attach_history_excerpts``).
     text_sha256: str | None = None
 
     def made_for(self, text: str) -> bool:
@@ -208,11 +212,18 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _keyed(key: bytes, body_sha256: str) -> str:
+    """The memo file's form of a row digest: HMAC-SHA256 under the owner's memo key."""
+    return hmac.new(key, body_sha256.encode("ascii"), hashlib.sha256).hexdigest()
+
+
 #: The session-directory file the excerpt memo is mirrored to
 #: (``<session dir>/bridge-excerpt-memo.json``). Device-local: its digests
 #: point into THIS device's display-body store (``network.sync`` excludes it).
 EXCERPT_MEMO_NAME = "bridge-excerpt-memo.json"
-_EXCERPT_MEMO_VERSION = 1
+#: 2: body digests are keyed (:func:`_keyed`). A version-1 file held plain
+#: sha256 digests and is read as a fresh memo.
+_EXCERPT_MEMO_VERSION = 2
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
@@ -227,12 +238,19 @@ class ExcerptMemo(MutableMapping[str, _HistoryExcerpt]):
     moving bytes deep in history (measured on one chief-of-staff session: 24
     of 25 message-level cache misses, each a 206k-282k token rewrite).
 
-    WHAT IS STORED: card id -> sha256 of the card text, and shown message id ->
-    the ``body_sha256`` of the display row the excerpt was cut from. No body or
-    card text, so the file adds no copy of retained content; the excerpt text
-    is rebuilt with :func:`bounded_excerpt` from the row whose digest still
-    matches, and a row deleted or rewritten since drops exactly as it does for
-    an in-memory decision.
+    WHAT IS STORED: card id -> sha256 of the card text (the card itself is in
+    the transcript beside this file), and, for each message the card showed an
+    excerpt of, message id -> HMAC-SHA256 of that display row's
+    ``body_sha256`` under the owner's memo key
+    (``DisplayBodyStore.memo_key``). No body or card text. A plain digest of a
+    short body ("ok") could be confirmed by guessing; the key lives in the
+    display store and every purge of it (opt-out, consent revoke, sign-out,
+    account switch) deletes the key, which also expires at the row TTL. A file
+    left in a session that never resumes then holds digests nothing can test
+    a guess against (review R1-1 on PR #4629). The excerpt text is rebuilt
+    with :func:`bounded_excerpt` from the row whose keyed digest still
+    matches; a row deleted or rewritten since, or a key purged since, drops
+    the excerpt exactly as a deleted row does for an in-memory decision.
 
     Persistence is best effort: an unreadable, corrupt or unwritable file is a
     fresh memo (today's restart behaviour), never a failed request. ``clear``
@@ -291,10 +309,29 @@ class ExcerptMemo(MutableMapping[str, _HistoryExcerpt]):
             try:
                 self._path.unlink(missing_ok=True)
             except OSError:
+                # The stale file would bring the pre-clear decisions back at
+                # the next restart; staying dirty makes the next ``persist``
+                # overwrite it with this empty memo (review R1-2).
+                self._dirty = True
                 logger.debug("bridge: excerpt memo not removed", exc_info=False)
 
-    def persist(self) -> None:
-        """Write the memo if it changed since the last write; never raises."""
+    def rebuilt(self, key: str, value: _HistoryExcerpt) -> None:
+        """Swap a restored entry for its rebuilt form WITHOUT a rewrite.
+
+        Only for a restored decision every excerpt of which re-verified under
+        the live memo key: the file already holds exactly this decision, so
+        rewriting it would be the same bytes (review R1-4).
+        """
+        self._entries[key] = value
+
+    def persist(self, memo_key: Callable[[], bytes | None]) -> None:
+        """Write the memo if it changed since the last write; never raises.
+
+        ``memo_key`` yields the owner's HMAC key, asked only when an entry has
+        excerpts to digest. Without one, such an entry is left out (undecided
+        after a restart, the pre-persistence behaviour): a plain body digest
+        is never written.
+        """
         path = self._path
         if not self._dirty or path is None:
             return
@@ -305,13 +342,28 @@ class ExcerptMemo(MutableMapping[str, _HistoryExcerpt]):
             return
         from local_operator.atomic_files import atomic_write_text
 
-        cards = {
-            key: {
+        needs_key = any(
+            entry.excerpts and entry.text_sha256 is None for entry in self._entries.values()
+        )
+        secret = memo_key() if needs_key else None
+        cards: dict[str, dict[str, Any]] = {}
+        for key, entry in self._entries.items():
+            if entry.text_sha256 is not None:
+                # Still as restored (never re-rendered): its digests are already
+                # the file's keyed form, so they go back verbatim.
+                excerpts = {mid: shown.body_sha256 for mid, shown in entry.excerpts.items()}
+            elif not entry.excerpts:
+                excerpts = {}
+            elif secret is None:
+                continue
+            else:
+                excerpts = {
+                    mid: _keyed(secret, shown.body_sha256) for mid, shown in entry.excerpts.items()
+                }
+            cards[key] = {
                 "text_sha256": entry.text_sha256 or _sha256(entry.text),
-                "excerpts": {mid: shown.body_sha256 for mid, shown in entry.excerpts.items()},
+                "excerpts": excerpts,
             }
-            for key, entry in self._entries.items()
-        }
         try:
             atomic_write_text(
                 path,
@@ -524,11 +576,10 @@ def attach_history_excerpts(
             # The text check keeps a re-coalesced card (same id, new text) from
             # reusing a decision made for different bytes.
             if decided is not None and decided.made_for(details.get("text", "")):
+                # A restored ids-only decision needs nothing rebuilt and stays
+                # as loaded, so it costs no rewrite (review R1-4).
                 if decided.excerpts:
                     frozen.append((index, key, locator, decided))
-                elif decided.text_sha256 is not None:
-                    # A restored ids-only decision: nothing to rebuild.
-                    memo[key] = _HistoryExcerpt(text=details.get("text", ""), excerpts={})
                 continue
             if seen > EXCERPT_CARD_WINDOW:
                 # First rendered outside the window: decided now, without one.
@@ -542,12 +593,20 @@ def attach_history_excerpts(
         # never rendered again, so its decision has nothing left to protect.
         for stale in [key for key in memo if key not in live_keys]:
             del memo[stale]
+    store = DisplayBodyStore(config_dir)
     if not picks and not frozen:
-        _persist(memo)
+        _persist(memo, store, owner_key)
         return out
     wanted = [mid for _, loc in picks for mid in loc.message_ids[: EXCERPTS_PER_CARD * 4]]
     wanted += [mid for _, _, _, decided in frozen for mid in decided.excerpts]
-    rows = DisplayBodyStore(config_dir).bodies(owner_key, wanted)
+    rows = store.bodies(owner_key, wanted)
+    # A restored decision's digests are keyed; no live key (purged, expired)
+    # means none of them can verify, so they all drop.
+    memo_key = (
+        store.memo_key(owner_key)
+        if any(decided.text_sha256 is not None for _, _, _, decided in frozen)
+        else None
+    )
     for index, key, locator, decided in frozen:
         restored = decided.text_sha256 is not None
         # Only ever a SUBSET of what was sent: survivors keep their exact
@@ -555,19 +614,29 @@ def attach_history_excerpts(
         # decision's text is rebuilt here exactly as ``_decide_excerpts`` cut
         # it: the store verifies ``body_sha256`` is the body's digest on write,
         # so a matching row is the same body and ``bounded_excerpt`` the same
-        # bytes.
-        surviving = {
-            mid: (
-                _Shown(bounded_excerpt(str(row["body"])), shown.body_sha256) if restored else shown
-            )
-            for mid, shown in decided.excerpts.items()
-            if _is_turn_row(row := rows.get(mid), locator.conversation_id)
-            and row is not None
-            and str(row.get("body_sha256")) == shown.body_sha256
-        }
-        if restored or len(surviving) != len(decided.excerpts):
+        # bytes. The rebuilt ``_Shown`` carries the row's PLAIN digest, the
+        # in-memory form every later render compares.
+        surviving: dict[str, _Shown] = {}
+        for mid, shown in decided.excerpts.items():
+            row = rows.get(mid)
+            if row is None or not _is_turn_row(row, locator.conversation_id):
+                continue
+            row_sha = str(row.get("body_sha256"))
+            if not restored:
+                if row_sha == shown.body_sha256:
+                    surviving[mid] = shown
+            elif memo_key is not None and hmac.compare_digest(
+                _keyed(memo_key, row_sha), shown.body_sha256
+            ):
+                surviving[mid] = _Shown(bounded_excerpt(str(row["body"])), row_sha)
+        intact = len(surviving) == len(decided.excerpts)
+        if restored or not intact:
             decided = _HistoryExcerpt(text=out[index].details.get("text", ""), excerpts=surviving)
-            if memo is not None:  # always true for a frozen entry; narrows the type
+            if restored and intact and isinstance(memo, ExcerptMemo):
+                # Every keyed digest verified under the LIVE key, so the file
+                # already says exactly this.
+                memo.rebuilt(key, decided)
+            elif memo is not None:  # always true for a frozen entry; narrows the type
                 memo[key] = decided
         if surviving:
             out[index] = _with_excerpt(out[index], decided)
@@ -582,15 +651,17 @@ def attach_history_excerpts(
             memo[key] = excerpt
         if excerpt.excerpts:
             out[index] = _with_excerpt(original, excerpt)
-    _persist(memo)
+    _persist(memo, store, owner_key)
     return out
 
 
-def _persist(memo: MutableMapping[str, _HistoryExcerpt] | None) -> None:
+def _persist(
+    memo: MutableMapping[str, _HistoryExcerpt] | None, store: DisplayBodyStore, owner_key: str
+) -> None:
     # Only the Session's own memo persists; the read-only path hands in a plain
     # ``dict`` copy, so an auxiliary request never writes the file.
     if isinstance(memo, ExcerptMemo):
-        memo.persist()
+        memo.persist(lambda: store.memo_key(owner_key, create=True))
 
 
 def _with_excerpt(original: Any, excerpt: _HistoryExcerpt) -> Any:

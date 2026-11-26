@@ -90,6 +90,16 @@ _SCHEMA = (
     "sender_kind TEXT NOT NULL, admitted_at REAL NOT NULL, source TEXT NOT NULL, "
     "PRIMARY KEY (owner_key, message_id))"
 )
+#: The per-owner key ``card_projection.ExcerptMemo`` HMACs its body digests
+#: with. It lives HERE, beside the bodies, so whatever ends a body's retention
+#: ends the key too: ``purge`` deletes it with the rows, and it expires at the
+#: same TTL as a row. A memo file left in a session directory then holds
+#: digests no one can test a guessed body against (review R1-1 on PR #4629).
+_MEMO_KEY_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS excerpt_memo_keys ("
+    "owner_key TEXT PRIMARY KEY, key BLOB NOT NULL, created_at REAL NOT NULL)"
+)
+_MEMO_KEY_BYTES = 32
 
 
 def display_db_path(config_dir: Path) -> Path:
@@ -195,6 +205,7 @@ class DisplayBodyStore:
         try:
             conn.row_factory = sqlite3.Row
             conn.execute(_SCHEMA)
+            conn.execute(_MEMO_KEY_SCHEMA)
             with conn:
                 yield conn
         finally:
@@ -290,6 +301,7 @@ class DisplayBodyStore:
     @staticmethod
     def _prune(conn: sqlite3.Connection, now: float) -> None:
         conn.execute("DELETE FROM display_bodies WHERE admitted_at < ?", (now - TTL_SECONDS,))
+        conn.execute("DELETE FROM excerpt_memo_keys WHERE created_at < ?", (now - TTL_SECONDS,))
         total = conn.execute(
             "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM display_bodies"
         ).fetchone()[0]
@@ -339,14 +351,57 @@ class DisplayBodyStore:
                     return 0
                 if keep_owner_key is None:
                     cursor = conn.execute("DELETE FROM display_bodies")
+                    conn.execute("DELETE FROM excerpt_memo_keys")
                 else:
                     cursor = conn.execute(
                         "DELETE FROM display_bodies WHERE owner_key != ?", (keep_owner_key,)
+                    )
+                    conn.execute(
+                        "DELETE FROM excerpt_memo_keys WHERE owner_key != ?", (keep_owner_key,)
                     )
                 return int(cursor.rowcount or 0)
         except (sqlite3.Error, OSError) as failure:
             logger.debug("bridge display: purge failed (%s)", type(failure).__name__)
             return 0
+
+    def memo_key(self, owner_key: str, *, create: bool = False) -> bytes | None:
+        """The owner's live excerpt-memo HMAC key, or None. Never creates the file.
+
+        ``create`` mints a key when none is live, but only inside an existing
+        store: no store means no retained body, so nothing to digest.
+        """
+
+        now = time.time()
+        try:
+            with self._connect(create=False) as conn:
+                if conn is None:
+                    return None
+                # Read with the TTL applied, as ``bodies`` does: a key ``_prune``
+                # has not reached yet is already expired.
+                row = conn.execute(
+                    "SELECT key FROM excerpt_memo_keys WHERE owner_key = ? AND created_at >= ?",
+                    (owner_key, now - TTL_SECONDS),
+                ).fetchone()
+                if row is not None:
+                    return bytes(row["key"])
+                if not create:
+                    return None
+                # Replace only an EXPIRED key, then read back: two runtimes
+                # minting at once agree on one key instead of the later one
+                # silently invalidating the other's memo file.
+                conn.execute(
+                    "INSERT INTO excerpt_memo_keys (owner_key, key, created_at) VALUES (?,?,?) "
+                    "ON CONFLICT(owner_key) DO UPDATE SET key = excluded.key, "
+                    "created_at = excluded.created_at WHERE excerpt_memo_keys.created_at < ?",
+                    (owner_key, os.urandom(_MEMO_KEY_BYTES), now, now - TTL_SECONDS),
+                )
+                row = conn.execute(
+                    "SELECT key FROM excerpt_memo_keys WHERE owner_key = ?", (owner_key,)
+                ).fetchone()
+                return None if row is None else bytes(row["key"])
+        except (sqlite3.Error, OSError) as failure:
+            logger.debug("bridge display: memo key failed (%s)", type(failure).__name__)
+            return None
 
     def delete(self, owner_key: str, message_ids: Sequence[str]) -> int:
         """Drop specific rows (a hub ``deleted`` answer)."""
