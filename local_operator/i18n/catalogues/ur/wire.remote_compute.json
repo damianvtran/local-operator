@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "ریموٹ رن {run_id} مکمل ہوا: ناکام۔",
   "wire.remote_compute.finished_succeeded": "ریموٹ رن {run_id} مکمل ہوا: کامیاب۔",
   "wire.remote_compute.finished_unknown": "ریموٹ رن {run_id} اب چل نہیں رہا، لیکن Radient نے کوئی ایسا نتیجہ نہیں بتایا جسے یہ بلڈ پڑھ سکے۔",
+  "wire.remote_compute.hosting_radient_only": "ریموٹ رن Radient کی ہوسٹنگ پر چلتے ہیں، اس لیے --hosting {hosting} کو --remote کے ساتھ استعمال نہیں کیا جا سکتا: --hosting چھوڑ دیں، یا --hosting radient پاس کریں۔",
   "wire.remote_compute.interrupted": "رن {run_id} کی نگرانی روک دی گئی؛ یہ اب بھی ریموٹ طور پر چل رہا ہے۔ اسے منسوخ کرنے کے لیے: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient نے درخواست غلط قرار دے کر مسترد کر دی۔ یہ اس کلائنٹ کا بگ ہے، دوبارہ لکھنے سے حل نہیں ہوگا۔",
   "wire.remote_compute.key_empty": "خالی --idempotency-key کو نئی کلید سے بدلنے کے بجائے مسترد کیا جاتا ہے: نئی کلید بنوانے کے لیے اختیار نہ دیں، یا جس رن کی دوبارہ کوشش کر رہے ہیں اسی کی کلید دیں۔",

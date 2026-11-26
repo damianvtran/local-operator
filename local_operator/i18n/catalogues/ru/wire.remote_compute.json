@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "Удалённый запуск {run_id} завершён: с ошибкой.",
   "wire.remote_compute.finished_succeeded": "Удалённый запуск {run_id} завершён: успешно.",
   "wire.remote_compute.finished_unknown": "Удалённый запуск {run_id} больше не выполняется, но Radient не сообщил результата, который эта сборка умеет читать.",
+  "wire.remote_compute.hosting_radient_only": "Удалённые запуски выполняются на хостинге Radient, поэтому --hosting {hosting} нельзя использовать вместе с --remote: не указывайте --hosting или укажите --hosting radient.",
   "wire.remote_compute.interrupted": "Отслеживание запуска {run_id} остановлено; он всё ещё выполняется удалённо. Отменить: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient отклонил запрос как некорректный. Это ошибка в этом клиенте, а не повод вводить всё заново.",
   "wire.remote_compute.key_empty": "Пустой --idempotency-key отклоняется, а не заменяется новым ключом: не передавайте параметр, чтобы получить новый ключ, или укажите ключ повторяемого запуска.",

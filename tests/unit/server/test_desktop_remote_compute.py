@@ -162,20 +162,31 @@ class Api:
     app: FastAPI
     store: AuthStore
 
-    def configure(self, *, enabled: bool = True, model: bool = True) -> None:
+    def configure(
+        self,
+        *,
+        enabled: bool = True,
+        model: bool = True,
+        hosting: str = "openrouter",
+        model_name: str = "example/model",
+    ) -> None:
         """Write this device's config, the way the TUI or the CLI would.
 
         The manager is rebuilt because ``is_enabled`` reads the file LIVE (that is
         the point of the switch) while the manager a route is handed is the app's
         own object — replacing it is what makes a config edit visible to a route
-        that resolves the model pair through ``get_config_value``.
+        that reads the file per request.
+
+        ``hosting``/``model_name`` describe what THIS MACHINE runs locally. They
+        are the device state a remote run must not inherit, so the tests that
+        assert the submitted body set a different pair and expect it ignored.
         """
         # THE `values:` WRAPPER IS THE STORE'S FORMAT, not decoration: a top-level
         # key is one the store does not read, and a test that wrote one would be
         # exercising a config nothing else can produce.
         lines = ["values:", "  remote_compute:", f"    enabled: {'true' if enabled else 'false'}"]
         if model:
-            lines += ["  hosting: openrouter", "  model_name: example/model"]
+            lines += [f"  hosting: {hosting}", f"  model_name: {model_name}"]
         (self.root / "config.yml").write_text("\n".join(lines) + "\n")
         self.app.state.config_manager = ConfigManager(self.root)
 
@@ -1277,8 +1288,10 @@ async def test_create_submits_the_repository_and_records_the_run(api: Api) -> No
     assert sent["prompt"] == "fix the failing test"
     assert sent["size"] == "l"
     assert sent["max_hours"] == 1
-    assert sent["hosting"] == "openrouter"
-    assert sent["model"] == "example/model"
+    # THE DEVICE'S CONFIG IS NOT AN INPUT: ``api.configure`` set this machine to
+    # hosting ``openrouter`` / ``example/model``, and neither may reach the run.
+    assert sent["hosting"] == "radient"
+    assert sent["model"] == "auto"
     # The minted key is the one that travelled.
     assert api.radient.calls[-1].headers["Idempotency-Key"] == body["idempotency_key"]
 
@@ -1504,23 +1517,61 @@ async def test_a_device_with_no_network_is_refused_before_the_repository_read(
 
 
 @pytest.mark.asyncio
-async def test_an_unconfigured_model_pair_is_refused_with_the_resolvers_sentence(
-    api: Api,
-) -> None:
-    api.configure(model=False)
+async def test_a_device_configured_for_another_provider_still_sends_radient(api: Api) -> None:
+    """The reported bug, on the desktop surface.
+
+    This machine runs ``anthropic``/``claude-opus-5-5`` locally; a remote run
+    declares Radient hosting and leaves the model to the far end. Filling either
+    field from this config is what made Radient answer 400 ``invalid_request``.
+    """
+    api.configure(hosting="anthropic", model_name="claude-opus-5-5")
     directory = _repository(api.root)
     _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(status="pending")}},
+    )
 
     answer = await api.client.post(
         "/v1/desktop/remote-compute/runs",
         json={"directory": str(directory), "prompt": "p", "tier": "cloud_run"},
     )
 
-    assert answer.status_code == 409, answer.text
-    error = answer.json()["error"]
-    assert error["code"] == "not_configured"
-    assert error["message"] == "Hosting platform is not configured."
-    assert api.radient.calls == []
+    assert answer.status_code == 201, answer.text
+    sent = api.radient.last_body()
+    assert (sent["hosting"], sent["model"]) == ("radient", "auto")
+
+
+@pytest.mark.asyncio
+async def test_a_device_with_no_model_configured_can_still_start_a_remote_run(
+    api: Api,
+) -> None:
+    """Nothing local needs configuring: the run borrows no provider from here.
+
+    The old behaviour refused this with 409 ``not_configured`` — a device that had
+    never run a local session was told to pick a hosting platform it does not need
+    for work it is not doing.
+    """
+    api.configure(model=False)
+    directory = _repository(api.root)
+    _network(api.root)
+    api.radient.add(
+        "POST",
+        "/v1/remote-compute/runs",
+        status=201,
+        payload={"msg": "submitted", "result": {"run": _run(status="pending")}},
+    )
+
+    answer = await api.client.post(
+        "/v1/desktop/remote-compute/runs",
+        json={"directory": str(directory), "prompt": "p", "tier": "cloud_run"},
+    )
+
+    assert answer.status_code == 201, answer.text
+    sent = api.radient.last_body()
+    assert (sent["hosting"], sent["model"]) == ("radient", "auto")
 
 
 @pytest.mark.asyncio

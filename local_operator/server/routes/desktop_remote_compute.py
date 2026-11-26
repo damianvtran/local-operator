@@ -119,6 +119,7 @@ from local_operator.remote_compute.errors import (
     UnsafeArchive,
     UnusableRepo,
 )
+from local_operator.remote_compute.hosting import remote_hosting_model
 from local_operator.remote_compute.messages import refusal_message
 from local_operator.remote_compute.request import RunCreateRequest
 from local_operator.remote_compute.resolve import is_active_member
@@ -928,10 +929,13 @@ async def create_run(
        built from, so a device in no network (or in two) is told that before any
        work is addressed to a host;
     5. the repository — ``repo.detect_repo`` reads the https origin and HEAD, and
-       refuses an ssh-only origin or an unpushed commit;
-    6. the model pair — a run does not inherit this device's provider keys, so the
-       far end must be told which model to run, resolved through the same ladder a
-       local exec uses.
+       refuses an ssh-only origin or an unpushed commit.
+
+    THE MODEL PAIR IS NOT A REFUSAL HERE. A run does not inherit this device's
+    provider keys, and this device's local provider config is not an input to it
+    either: the pair comes from :func:`remote_compute.hosting.remote_hosting_model`
+    — Radient hosting, and the far end's ``auto`` model — so a device with no local
+    provider configured can still start a remote run.
 
     THE IDEMPOTENCY KEY IS THE CALLER'S WHEN IT SENDS ONE, and minted here (once per
     request) when it does not. The key exists for the retry, and the retry that
@@ -968,12 +972,11 @@ async def create_run(
         # so it answers a coded refusal instead of the unclassified-failure 500 the
         # blanket handler would otherwise produce (PR #4200 review round 2, Q3).
         raise ClientRefusal(400, CODE_DIRECTORY_UNUSABLE, DIRECTORY_UNUSABLE_MESSAGE) from None
-    try:
-        hosting, model = await asyncio.to_thread(_hosting_model, manager)
-    except ValueError as failure:
-        # The resolver's own sentence (``bootstrap.resolve_hosting_model``): a lower
-        # layer's reason travels verbatim rather than being reworded here.
-        raise ClientRefusal(409, "not_configured", str(failure)) from None
+    # THIS DEVICE'S CONFIG IS NOT READ: a remote run declares Radient hosting and
+    # this device's local provider config is not an input to it. The surface has
+    # no hosting field to refuse — see ``remote_compute.hosting`` for why the
+    # hosting is Radient's whenever a run leaves this machine.
+    hosting, model = remote_hosting_model()
     spec = build_spec(
         prompt=body.prompt,
         repo=repository,
@@ -1514,19 +1517,6 @@ async def _active_runs(root: Path, credential_id: int) -> list[dict[str, Any]]:
             continue
         active.append(_published_run(run))
     return active
-
-
-def _hosting_model(manager: ConfigManager) -> tuple[str, str]:
-    """The model pair a run is submitted with, through the product's one resolver.
-
-    ``bootstrap.resolve_hosting_model`` is the resolver
-    ``resolve_model_configuration`` delegates the pair to, and it takes the config
-    manager a surface already holds: re-deriving "hosting then model from config"
-    here would be a second copy of a precedence ladder four call sites share.
-    """
-    from local_operator.bootstrap import resolve_hosting_model
-
-    return resolve_hosting_model(manager, None, None, None)
 
 
 __all__ = [

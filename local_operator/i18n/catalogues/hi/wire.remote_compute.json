@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "रिमोट रन {run_id} पूरा हुआ: विफल।",
   "wire.remote_compute.finished_succeeded": "रिमोट रन {run_id} पूरा हुआ: सफल।",
   "wire.remote_compute.finished_unknown": "रिमोट रन {run_id} अब नहीं चल रहा, पर Radient ने ऐसा कोई परिणाम नहीं बताया जिसे यह संस्करण पढ़ सके।",
+  "wire.remote_compute.hosting_radient_only": "रिमोट रन Radient होस्टिंग पर चलते हैं, इसलिए --hosting {hosting} को --remote के साथ इस्तेमाल नहीं किया जा सकता: --hosting छोड़ दें, या --hosting radient पास करें।",
   "wire.remote_compute.interrupted": "रन {run_id} की निगरानी रोक दी गई; यह अभी भी रिमोट पर चल रहा है। इसे रद्द करने के लिए: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient ने अनुरोध को अमान्य बताकर अस्वीकार किया। यह इस क्लाइंट में बग है, इसे दोबारा टाइप करने की बात नहीं।",
   "wire.remote_compute.key_empty": "खाली --idempotency-key को नई कुंजी से बदलने के बजाय अस्वीकार किया जाता है: नई कुंजी चाहिए तो विकल्प छोड़ दें, या जिस रन को दोबारा भेज रहे हैं उसकी कुंजी दें।",

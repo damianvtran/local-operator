@@ -80,6 +80,10 @@ def finished_unknown(*, run_id: str) -> Msg:
     return Msg("wire.remote_compute.finished_unknown", {"run_id": run_id})
 
 
+def hosting_radient_only(*, hosting: str) -> Msg:
+    return Msg("wire.remote_compute.hosting_radient_only", {"hosting": hosting})
+
+
 def interrupted(*, run_id: str) -> Msg:
     return Msg("wire.remote_compute.interrupted", {"run_id": run_id})
 

@@ -161,7 +161,9 @@ def _run(command: list[str], monkeypatch: pytest.MonkeyPatch) -> int:
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE = ["exec", "--remote", "--repo", "https://example.invalid/repo.git", "--sha", SHA]
-HOSTING = ["--hosting", "openai", "--model", "gpt-5"]
+#: The operator's model choice. Only ``--model`` can steer a remote run: the
+#: hosting is always Radient's, and this device's config feeds neither field.
+MODEL = ["--model", "gpt-5"]
 
 #: Sentinels for the pod's secrets. A create returns them once, for the pod, and
 #: nothing on this side may print, log or store them.
@@ -390,7 +392,7 @@ def test_a_sha_that_is_not_a_full_commit_is_refused_locally(
 ) -> None:
     """SE4 — a ref or a short hash is resolved later, by the far end, out of sight."""
     command = ["exec", "--remote", "--repo", "https://example.invalid/repo.git", "--sha", sha]
-    assert _run(command + HOSTING + ["do it"], monkeypatch) == 1
+    assert _run(command + MODEL + ["do it"], monkeypatch) == 1
     assert "full 40-character commit SHA" in capsys.readouterr().err
     assert origin.requests == []
 
@@ -408,7 +410,7 @@ def test_a_repo_the_far_end_cannot_clone_is_refused_locally(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    command = ["exec", "--remote", "--repo", repo, "--sha", SHA, *HOSTING, "do it"]
+    command = ["exec", "--remote", "--repo", repo, "--sha", SHA, *MODEL, "do it"]
     assert _run(command, monkeypatch) == 1
     assert "clones the repository from the far end" in capsys.readouterr().err
     assert origin.requests == []
@@ -423,7 +425,7 @@ def test_an_empty_idempotency_key_is_refused_not_replaced(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """E2 — the operator asked for a collision with an earlier submission."""
-    assert _run(BASE + HOSTING + ["--detach", "--idempotency-key", "", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "--idempotency-key", "", "do it"], monkeypatch) == 1
     assert "refused rather than replaced" in capsys.readouterr().err
     assert origin.requests == []
 
@@ -439,7 +441,7 @@ def test_a_key_outside_printable_ascii_is_refused_locally(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """E3 — a control byte is not a header value, and no request is composed."""
-    assert _run(BASE + HOSTING + ["--detach", "--idempotency-key", key, "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "--idempotency-key", key, "do it"], monkeypatch) == 1
     assert "printable ASCII" in capsys.readouterr().err
     assert origin.requests == []
 
@@ -452,7 +454,7 @@ def test_the_key_is_validated_before_the_credential_is_read(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """E8 — no ``signed_in`` fixture: the key refusal must come FIRST."""
-    assert _run(BASE + HOSTING + ["--detach", "--idempotency-key", "", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "--idempotency-key", "", "do it"], monkeypatch) == 1
     err = capsys.readouterr().err
     assert "refused rather than replaced" in err
     assert "lop login radient" not in err
@@ -499,7 +501,7 @@ def test_detach_prints_the_run_and_the_key_and_sends_the_contract(
     assert (
         _run(
             BASE
-            + HOSTING
+            + MODEL
             + ["--detach", "--size", "l", "--max-hours", "3", "--budget-usd", "4", "do it"],
             monkeypatch,
         )
@@ -518,7 +520,7 @@ def test_detach_prints_the_run_and_the_key_and_sends_the_contract(
     body = json.loads(sent.content)
     assert body["network_id"] == network.network_id
     assert (body["size"], body["max_hours"], body["budget_usd"]) == ("l", 3.0, 4.0)
-    assert (body["hosting"], body["model"]) == ("openai", "gpt-5")
+    assert (body["hosting"], body["model"]) == ("radient", "gpt-5")
     assert body["prompt"] == "do it"
     assert sent.headers["idempotency-key"]
 
@@ -531,7 +533,7 @@ def test_an_oversize_idempotency_key_is_refused_before_the_request(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert _run(BASE + HOSTING + ["--idempotency-key", "x" * 129, "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--idempotency-key", "x" * 129, "do it"], monkeypatch) == 1
     assert "128 bytes" in capsys.readouterr().err
     assert origin.requests == []
 
@@ -544,10 +546,103 @@ def test_the_defaults_are_size_m_and_two_hours(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 0
     body = json.loads(origin.requests[0].content)
     assert (body["size"], body["max_hours"]) == ("m", 2.0)
     assert "budget_usd" not in body
+
+
+# ---------------------------------------------------------------------------
+# The declared hosting and model (the 400 ``invalid_request`` bug)
+# ---------------------------------------------------------------------------
+#
+# A REMOTE RUN NEVER BORROWS THIS DEVICE'S MODEL CONFIG. Radient admits only the
+# ``radient`` hosting, because the run token it issues is presented to a host it
+# operates; a device configured for ``anthropic`` used to fill ``hosting``/
+# ``model`` from ``config.yml`` and the far end refused the body. These four
+# tests all fail on the code before the fix, which is the point of them.
+
+
+def _device_config(isolated_roots: Path, *, hosting: str, model: str) -> None:
+    """This device's local model config, in the shape ``lop config edit`` writes."""
+    (isolated_roots / "config.yml").write_text(
+        "values:\n"
+        "  remote_compute:\n"
+        "    enabled: true\n"
+        f"  hosting: {hosting}\n"
+        f"  model_name: {model}\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_declared_pair_ignores_this_devices_model_config(
+    isolated_roots: Path,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device set to anthropic/claude-opus-5-5 sends radient/auto, not its own pair."""
+    _device_config(isolated_roots, hosting="anthropic", model="claude-opus-5-5")
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+
+    assert _run(BASE + ["--detach", "do it"], monkeypatch) == 0
+
+    body = json.loads(origin.requests[0].content)
+    assert (body["hosting"], body["model"]) == ("radient", "auto")
+
+
+def test_an_explicit_model_travels_beside_the_radient_hosting(
+    isolated_roots: Path,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--model`` is the operator's choice and reaches the far end unchanged."""
+    _device_config(isolated_roots, hosting="anthropic", model="claude-opus-5-5")
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+
+    assert _run(BASE + ["--model", "gpt-5", "--detach", "do it"], monkeypatch) == 0
+
+    body = json.loads(origin.requests[0].content)
+    assert (body["hosting"], body["model"]) == ("radient", "gpt-5")
+
+
+def test_the_radient_hosting_spelling_is_accepted_and_keeps_the_auto_model(
+    isolated_roots: Path,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--hosting radient`` is the same run, and still does not borrow the model."""
+    _device_config(isolated_roots, hosting="anthropic", model="claude-opus-5-5")
+    origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
+
+    assert _run(BASE + ["--hosting", "radient", "--detach", "do it"], monkeypatch) == 0
+
+    body = json.loads(origin.requests[0].content)
+    assert (body["hosting"], body["model"]) == ("radient", "auto")
+
+
+def test_a_non_radient_hosting_is_refused_before_the_credential_is_read(
+    enabled: None,
+    network: NetworkRecord,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refused locally, with no request and — note — no sign-in in this fixture.
+
+    The missing ``signed_in`` is the assertion: this device cannot even reach the
+    credential read, so the operator is told the flag is wrong rather than being
+    sent to log in for a run that was never going to be composed.
+    """
+    assert _run(BASE + ["--hosting", "anthropic", "do it"], monkeypatch) == 1
+
+    assert _t(_wr.hosting_radient_only(hosting="anthropic")) in capsys.readouterr().err
+    assert origin.requests == []
 
 
 def test_a_given_idempotency_key_is_reused(
@@ -558,7 +653,7 @@ def test_a_given_idempotency_key_is_reused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
-    _run(BASE + HOSTING + ["--detach", "--idempotency-key", KEY, "do it"], monkeypatch)
+    _run(BASE + MODEL + ["--detach", "--idempotency-key", KEY, "do it"], monkeypatch)
     assert origin.requests[0].headers["idempotency-key"] == KEY
 
 
@@ -582,7 +677,7 @@ def test_a_created_run_is_not_announced_as_a_replay(
             _poll(_stopped(network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     assert "matched an earlier submission" not in captured.err
     assert "matched an earlier submission" not in captured.out
@@ -608,7 +703,7 @@ def test_a_200_replay_says_the_key_matched_and_the_watch_goes_on(
             _poll(_stopped(network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["--idempotency-key", KEY, "do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["--idempotency-key", KEY, "do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     # The line is about the run, on stderr, and it says both things the operator
     # needs: the key matched, and no new run was created.
@@ -631,7 +726,7 @@ def test_a_200_replay_with_detach_keeps_stdout_the_run_id_alone(
 ) -> None:
     """The replay sentence must not become part of a capturable stdout."""
     origin.responses.append(httpx.Response(200, json=_submitted(network.network_id)))
-    assert _run(BASE + HOSTING + ["--detach", "--idempotency-key", KEY, "do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["--detach", "--idempotency-key", KEY, "do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     assert captured.out.strip() == RUN_ID
     assert "matched an earlier submission" in captured.err
@@ -656,7 +751,7 @@ def test_polling_prints_transitions_until_a_terminal_status(
             _poll(_stopped(network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 0
     out = capsys.readouterr().out
     assert out.split().count("status:") == 3
     assert "status: pending" in out and "status: running" in out and "status: stopped" in out
@@ -682,7 +777,7 @@ def test_a_failed_run_exits_non_zero(
             _poll(_stopped(network.network_id, "failed", exit_code=127)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 1
     out = capsys.readouterr().out
     assert f"Remote run {RUN_ID} finished: failed." in out
     assert "exit code: 127" in out
@@ -707,7 +802,7 @@ def test_ctrl_c_stops_watching_without_cancelling(
             _poll(_wire_run("running", network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 130
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 130
     captured = capsys.readouterr()
     assert f"lop exec --remote-cancel {RUN_ID}" in captured.out
     assert "still running remotely" in captured.out
@@ -731,7 +826,7 @@ def test_a_run_from_another_network_is_never_reported_as_this_one(
 ) -> None:
     """SE1 — a receipt may only claim what the server confirmed."""
     origin.responses.append(httpx.Response(201, json=_submitted("n_" + "b" * 24)))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert "another network" in captured.err
     assert captured.out.strip() == ""
@@ -755,7 +850,7 @@ def test_a_poll_from_another_network_stops_the_watch(
             _poll(_wire_run("running", "n_" + "c" * 24)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 1
     assert "another network" in capsys.readouterr().err
 
 
@@ -812,7 +907,7 @@ def test_the_watch_stops_at_the_bound_and_says_how_to_check_the_run(
             _poll(_wire_run("running", network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["--max-hours", "3", "do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["--max-hours", "3", "do it"], monkeypatch) == 0
     out = capsys.readouterr().out
     assert "still running past the 1-hour limit Radient reported" in out
     assert f"lop exec --remote-status {RUN_ID}" in out
@@ -841,7 +936,7 @@ def test_an_unknown_status_is_printed_once_and_does_not_end_the_watch(
             _poll(_stopped(network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 0
     out = capsys.readouterr().out
     assert out.count("not a status this build knows") == 1
     assert f"Remote run {RUN_ID} finished: succeeded." in out
@@ -1003,7 +1098,7 @@ def test_a_conflict_names_the_key_flag(
     # a 409 with no code could be a run limit or a busy lease, and telling that
     # operator to change the key was the bug M3a fixes.
     origin.responses.append(httpx.Response(409, json={"code": "idempotency_conflict"}))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     assert "--idempotency-key" in capsys.readouterr().err
 
 
@@ -1022,7 +1117,7 @@ def test_an_envelope_this_build_cannot_read_names_the_format_change(
         "trace_id": "t_1",
     }
     origin.responses.append(httpx.Response(201, json=body))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "response format has changed" in captured.err
@@ -1045,7 +1140,7 @@ def test_capacity_and_credit_have_their_own_sentences(
         monkeypatch.setattr(
             remote_cli, "_http_client", lambda o=origin_: httpx.AsyncClient(transport=o.transport)
         )
-        assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+        assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
         assert sentence in capsys.readouterr().err
 
 
@@ -1059,7 +1154,7 @@ def test_a_403_says_the_preview_does_not_cover_this_account(
 ) -> None:
     """403 is the server-side preview allowlist, and the body never reaches the user."""
     origin.responses.append(httpx.Response(403, json={"error": "acct_not_allowlisted"}))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "not enabled for this Radient account yet (preview)" in captured.err
@@ -1089,7 +1184,7 @@ def test_an_override_warns_once_and_leaves_stdout_to_the_run_id(
     monkeypatch.setattr(config_module, "_announced", set())
     monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "http://127.0.0.1:8123")
     origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     assert captured.out == RUN_ID + "\n"
     assert _WARNING.format(host="127.0.0.1:8123") in captured.err.splitlines()
@@ -1144,7 +1239,7 @@ def test_an_unusable_override_refuses_and_sends_nothing(
 ) -> None:
     """A refusal, not a silent fall back to production."""
     monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", "http://staging.example.invalid")
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "LOP_REMOTE_COMPUTE_API_URL" in captured.err
@@ -1180,7 +1275,7 @@ def test_a_base_refused_at_parse_time_reaches_the_operator_as_the_typed_sentence
     origin must see no request at all.
     """
     monkeypatch.setenv("LOP_REMOTE_COMPUTE_API_URL", override)
-    assert _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["--detach", "do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == _t(_wr.api_override_invalid()) + "\n"
@@ -1208,7 +1303,7 @@ def test_a_real_lop_process_refuses_an_undecodable_alabel_and_says_only_why(
     env = {key: value for key, value in os.environ.items() if not key.startswith(("CMUX_", "LOP_"))}
     env["LOP_REMOTE_COMPUTE_API_URL"] = "https://xn--a.example"
     result = subprocess.run(
-        [sys.executable, "-c", _LOP_ENTRY, *BASE, *HOSTING, "--detach", "do it"],
+        [sys.executable, "-c", _LOP_ENTRY, *BASE, *MODEL, "--detach", "do it"],
         capture_output=True,
         text=True,
         timeout=300,
@@ -1420,7 +1515,7 @@ def _detach(
     capsys: pytest.CaptureFixture[str],
 ) -> tuple[int, str, str]:
     origin.responses.append(httpx.Response(201, json=_submitted_with_secrets(network.network_id)))
-    code = _run(BASE + HOSTING + ["--detach", "do it"], monkeypatch)
+    code = _run(BASE + MODEL + ["--detach", "do it"], monkeypatch)
     captured = capsys.readouterr()
     return code, captured.out, captured.err
 
@@ -1467,7 +1562,7 @@ def test_the_watch_path_never_prints_the_create_secrets(
             _poll(_stopped(network.network_id)),
         ]
     )
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 0
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 0
     captured = capsys.readouterr()
     assert f"Remote run {RUN_ID} finished: succeeded." in captured.out
     for sentinel in (RUN_TOKEN, CLOUDFLARED_TOKEN, ORIGIN_AUTH):
@@ -1489,7 +1584,7 @@ def _watched(
     monkeypatch.setattr(remote_cli, "_sleep", no_sleep)
     origin.responses.append(httpx.Response(201, json=_submitted(network.network_id)))
     origin.responses.extend(_poll(poll) for poll in polls)
-    code = _run(BASE + HOSTING + ["do it"], monkeypatch)
+    code = _run(BASE + MODEL + ["do it"], monkeypatch)
     return code, capsys.readouterr().out
 
 
@@ -1632,7 +1727,7 @@ def test_a_conflict_says_which_conflict_it_was(
 ) -> None:
     """The bug this replaces: a run limit reported as an idempotency conflict."""
     origin.responses.append(httpx.Response(status, json=body))
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 1
     assert expected in capsys.readouterr().err
 
 
@@ -1645,7 +1740,7 @@ def test_the_idempotency_sentence_is_not_used_for_a_run_limit(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     origin.responses.append(httpx.Response(409, json={"code": "run_limit"}))
-    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert _run(BASE + MODEL + ["do it"], monkeypatch) == 1
     err = capsys.readouterr().err
     assert _t(_wr.run_limit()) in err
     assert _t(_wr.conflict()) not in err

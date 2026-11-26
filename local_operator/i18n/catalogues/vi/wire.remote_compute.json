@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "Lần chạy từ xa {run_id} đã kết thúc: thất bại.",
   "wire.remote_compute.finished_succeeded": "Lần chạy từ xa {run_id} đã kết thúc: thành công.",
   "wire.remote_compute.finished_unknown": "Lần chạy từ xa {run_id} không còn chạy nữa, nhưng Radient không báo kết quả nào mà bản dựng này đọc được.",
+  "wire.remote_compute.hosting_radient_only": "Lần chạy từ xa dùng hosting của Radient, nên không thể dùng --hosting {hosting} với --remote: hãy bỏ --hosting hoặc truyền --hosting radient.",
   "wire.remote_compute.interrupted": "Đã dừng theo dõi lần chạy {run_id}; lần chạy vẫn đang chạy từ xa. Hủy bằng: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient từ chối yêu cầu vì không hợp lệ. Đây là lỗi ở phía client này, không phải việc phải gõ lại.",
   "wire.remote_compute.key_empty": "--idempotency-key rỗng bị từ chối thay vì được thay bằng khóa mới: hãy bỏ tùy chọn này để tạo khóa mới, hoặc truyền khóa của lần chạy bạn đang chạy lại.",
