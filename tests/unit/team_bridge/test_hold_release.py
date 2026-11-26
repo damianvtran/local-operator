@@ -1053,7 +1053,47 @@ def test_routes_keep_a_signed_click_when_its_hold_disappears(api, monkeypatch, o
         assert call("GET", path, params=params).json()["result"]["history"] == []
 
 
-def test_routes_refuse_a_reused_oauth_pin_for_another_account(api, monkeypatch) -> None:
+def test_routes_prefer_verified_refusal_settled_after_the_live_scan(api, monkeypatch) -> None:
+    config_dir, store, owner, call = api
+    server, wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    params = {"expected_account_id": owner.account_id}
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    assert call("POST", f"{HOLDS}/{MESSAGE_ID}/deliver", json=_body()).status_code == 200
+    before = call("GET", HOLDS, params=params).json()["result"]
+    assert [(r["message_id"], r["decision"]["outcome"]) for r in before["items"]] == [
+        (MESSAGE_ID, "pending")
+    ]
+    assert before["history"] == []
+
+    read_history = Store.owner_release_history
+
+    def settle_then_read(self, owner, **kwargs):
+        # The production query receives IDs from the live scan. Settle only
+        # once that scan demonstrably saw this click as still pending.
+        assert kwargs["live_decision_ids"] == (MESSAGE_ID,)
+        _setting(config_dir, False)
+        assert run()["action"] == "rejected"
+        assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "refused:hold_release_off"
+        return read_history(self, owner, **kwargs)
+
+    with monkeypatch.context() as race:
+        race.setattr(Store, "owner_release_history", settle_then_read)
+        response = call("GET", HOLDS, params=params)
+    assert response.status_code == 200
+    during = response.json()["result"]
+    assert [(r["message_id"], r["decision"]["outcome"]) for r in during["history"]] == [
+        (MESSAGE_ID, "refused")
+    ]
+    assert during["items"] == []
+    assert [r["verdict"] for r in server.admits] == ["reject"] and not wakes
+    after = call("GET", HOLDS, params=params).json()["result"]
+    assert (after["items"], after["history"]) == ([], during["history"])
+
+
+@pytest.mark.parametrize("during_read", [False, True], ids=["at-entry", "during-read"])
+def test_routes_refuse_a_reused_oauth_pin_for_another_account(
+    api, monkeypatch, during_read
+) -> None:
     from contextlib import closing
 
     from httpx import MockTransport
@@ -1108,6 +1148,32 @@ def test_routes_refuse_a_reused_oauth_pin_for_another_account(api, monkeypatch) 
         before = call("GET", path, params=current)
         assert before.status_code == 200
         assert [r["message_id"] for r in before.json()["result"]["history"]] == [MESSAGE_ID]
+
+        if during_read:
+            from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+            worker_read = holds.list_holds
+            worker_history = []
+
+            def read_then_swap(config_dir, captured_owner):
+                payload = worker_read(config_dir, captured_owner)
+                worker_history.extend(r["message_id"] for r in payload["history"])
+                sign_in("acc_other")
+                assert store.active_owner_readonly() == owner
+                return payload
+
+            with monkeypatch.context() as race:
+                race.setattr(holds, "list_holds", read_then_swap)
+                refused = call("GET", path, params=current)
+            assert worker_history == [MESSAGE_ID]
+            assert refused.status_code == 409 and "result" not in refused.json()
+            assert MESSAGE_ID not in refused.text
+            assert refused.json()["detail"]["code"] == "history_context_unavailable"
+            sign_in(owner.account_id)
+            restored = call("GET", path, params=current)
+            assert restored.status_code == 200
+            assert restored.json()["result"]["history"] == before.json()["result"]["history"]
+            return
 
         active = "bcmsg_abcdef02"
         _screen(config_dir, owner, Runner(NEW_WORK), item=_item(message_id=active))

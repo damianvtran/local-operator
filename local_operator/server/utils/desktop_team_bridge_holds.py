@@ -310,15 +310,24 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 "decision": _decision_view(release),
             }
         )
+    history = _hold_history(
+        store,
+        owner,
+        live_decision_ids=tuple(item["message_id"] for item in items if item["decision"]),
+    )
+    # The connector can settle and retire a hold between these two reads. A
+    # verified connector-terminal history row wins over the earlier live scan;
+    # a local-only discard deliberately still has its old hold alongside it.
+    settled = {
+        item["message_id"]
+        for item in history
+        if item["decision"]["outcome"] in ("admitted", "rejected", "refused")
+    }
     return {
         "enabled": enabled,
         "key_protection": hr.key_protection(config_dir),
-        "items": items,
-        "history": _hold_history(
-            store,
-            owner,
-            live_decision_ids=tuple(item["message_id"] for item in items if item["decision"]),
-        ),
+        "items": [item for item in items if item["message_id"] not in settled],
+        "history": history,
     }
 
 

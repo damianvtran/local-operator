@@ -513,6 +513,29 @@ def _recheck(context: ReadContext, store: Store) -> None:
         raise ReadRefused("consent_revoked")
 
 
+def _access_matches_owner(access: Any, owner: OwnerSnapshot) -> bool:
+    return (
+        getattr(access, "kind", None) == "oauth"
+        and getattr(access, "account_id", None) == owner.account_id
+        and getattr(access, "credential_id", None) == owner.credential_id
+    )
+
+
+async def recheck_read_owner(config_dir: Path, owner: OwnerSnapshot, *, wire: Any) -> None:
+    """Refuse to publish local history if its OAuth identity or enrollment moved.
+
+    An auth-only restore can reuse a numeric pin without touching enrollment.
+    Re-read the OAuth row after the history worker and check the same committed
+    enrollment after that await, not merely the presence of some new owner.
+    """
+
+    access = await wire.current_access()
+    if not _access_matches_owner(access, owner) or (
+        _read_state(Store(config_dir).active_owner_readonly) != owner
+    ):
+        raise ReadRefused("history_context_unavailable")
+
+
 async def resolve_read_context(
     config_dir: Path, *, expected_account_id: str, wire: Any = None
 ) -> ReadContext:
@@ -540,9 +563,7 @@ async def resolve_read_context(
     owner = _read_state(store.active_owner_readonly)
     if owner is None:
         raise ReadRefused("history_context_unavailable")
-    if account_id != owner.account_id or int(getattr(access, "credential_id", -1)) != int(
-        owner.credential_id
-    ):
+    if not _access_matches_owner(access, owner):
         # An auth-only restore can reuse a numeric credential ID for another
         # account. Neither a matching pin nor a current capture authorizes
         # that account to read or act on the old enrollment.
@@ -930,6 +951,7 @@ __all__ = [
     "inbox_view",
     "read_inbox_page",
     "read_message_detail",
+    "recheck_read_owner",
     "resolve_read_context",
     "wire_for",
 ]
