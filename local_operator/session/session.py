@@ -1876,21 +1876,44 @@ def _todo_rows(phases: list[dict[str, Any]]) -> Iterator[tuple[_TodoKey, dict[st
             yield (*name_text, occurrence), item
 
 
+_TODO_QUOTED_TITLE = re.compile(r'(?<!\w)(?:"[^"“”]*"|“[^"“”]*”)(?!\w)')
+_TODO_STRAIGHT_QUOTES = str.maketrans("“”", '""')
+
+
 def _todo_purpose_matches(purposes: tuple[str, ...], task: str, condition: str) -> bool:
-    # A reference cannot give a receipt a purpose. Both complete phrases must
-    # appear in the producer's own prose, in one field (one question for Ask).
-    # Keep interior punctuation literal and ignore case, whitespace and the
-    # condition's sentence ending so it can be used naturally in a question.
+    # Word boundaries alone make "deploy schema" a prefix of another title
+    # and let a word inside the blocker stand in for a task mention. Require a
+    # whole title in ordinary paired double quotes (straight or curly), and the
+    # literal blocker at a separate span in the same field (one Ask question).
+    # Ignore case, whitespace, double-quote style and the blocker's terminal
+    # sentence punctuation, but preserve other punctuation in both phrases.
     task = " ".join(task.casefold().split())
-    condition = todo_condition_phrase(condition)
+    condition = todo_condition_phrase(condition).translate(_TODO_STRAIGHT_QUOTES)
     if not task or not condition or task == condition:
         return False
-    task_phrase = re.compile(rf"(?<!\w){re.escape(task)}(?!\w)")
-    condition_phrase = re.compile(rf"(?<!\w){re.escape(condition)}(?!\w)")
+    condition_phrase = re.compile(rf"(?<!\w)(?=({re.escape(condition)})(?!\w))")
     for purpose in purposes:
         body = " ".join(purpose.casefold().split())
-        if task_phrase.search(body) and condition_phrase.search(body):
-            return True
+        titles = list(_TODO_QUOTED_TITLE.finditer(body))
+        # Do not guess at nested, mixed or unpaired double quotes; apostrophes
+        # (including single quotation marks) aren't a second title delimiter.
+        if len(titles) * 2 != sum(body.count(quote) for quote in '"“”'):
+            continue
+        # Compare typography after checking the pairing; translation preserves
+        # offsets. Lookahead finds even overlapping occurrences so a repeated
+        # blocker cannot supply a title that only appears inside that blocker.
+        blockers = [
+            match.span(1)
+            for match in condition_phrase.finditer(body.translate(_TODO_STRAIGHT_QUOTES))
+        ]
+        for title in titles:
+            if title[0][1:-1].strip() != task:
+                continue
+            start, end = title.span()
+            if any(left <= start and end <= right for left, right in blockers):
+                continue
+            if any(right <= start or end <= left for left, right in blockers):
+                return True
     return False
 
 
@@ -1973,11 +1996,12 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
             "its condition still holds. Resume only if it has cleared and the work is "
             "still authorized. Never retry a refused action or resume an intentional hold. "
             "If the decision is the user's, use `ask` when available; for an external "
-            "condition, use a relevant wake or monitor when appropriate. Write a readable "
-            "question, wake message, or monitor description using both the exact task label "
-            "and exact blocker in the same question or message. Do not copy harness "
-            "bookkeeping into it. Link only "
-            "a receipt created for that task and condition: re-block with `[ask:<id>]`, "
+            "condition, use a relevant wake or monitor when appropriate. When safe to share, "
+            "quote the exact task title in ordinary double quotation marks and state the exact "
+            "blocker separately in the same natural question, wake message, or monitor "
+            "description. Do not copy this reminder, private data, IDs, or harness bookkeeping "
+            "into that prose. Link only a receipt created for that task and condition: "
+            "re-block with `[ask:<id>]`, "
             "`[wake:<id>]`, or `[monitor:<id>]` followed by the exact blocker. If there is "
             "no safe next action, leave the item blocked and "
             "explain what remains unresolved in your own words if a reply is appropriate."
