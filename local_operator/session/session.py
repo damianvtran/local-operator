@@ -378,6 +378,8 @@ from local_operator.supplements.trigger import (
 from local_operator.tools.builtin import (
     TODO_BLOCK_REF,
     restore_todos,
+    todo_block_condition,
+    todo_condition_phrase,
     todo_fingerprint,
     todo_snapshot,
 )
@@ -1874,14 +1876,33 @@ def _todo_rows(phases: list[dict[str, Any]]) -> Iterator[tuple[_TodoKey, dict[st
             yield (*name_text, occurrence), item
 
 
-def _todo_condition(reason: str) -> str:
-    return TODO_BLOCK_REF.sub("", reason.strip(), count=1).strip()
+def _todo_purpose_matches(purposes: tuple[str, ...], task: str, condition: str) -> bool:
+    # A reference cannot give a receipt a purpose. Both complete phrases must
+    # appear in the producer's own prose, in one field (one question for Ask).
+    # Keep interior punctuation literal and ignore case, whitespace and the
+    # condition's sentence ending so it can be used naturally in a question.
+    task = " ".join(task.casefold().split())
+    condition = todo_condition_phrase(condition)
+    if not task or not condition or task == condition:
+        return False
+    task_phrase = re.compile(rf"(?<!\w){re.escape(task)}(?!\w)")
+    condition_phrase = re.compile(rf"(?<!\w){re.escape(condition)}(?!\w)")
+    for purpose in purposes:
+        body = " ".join(purpose.casefold().split())
+        if task_phrase.search(body) and condition_phrase.search(body):
+            return True
+    return False
 
 
-def _todo_scope(key: _TodoKey, condition: str) -> str:
-    # This exact standalone line must live on the *producer* receipt. A todo
-    # reason can point at a receipt but cannot give that receipt a new purpose.
-    return "Todo follow-up: " + json.dumps([*key, condition], ensure_ascii=False)
+def _todo_binding_for_condition(incarnation: str, condition: str) -> str:
+    from hashlib import sha256
+
+    # A phase-wide block may replace a row's reason without attributing a new
+    # receipt to it. Keep the incarnation prefix for reuse detection, but do
+    # not let a retained binding prove coverage of a different condition.
+    prefix, purpose_digest = incarnation.rsplit(":", 1)
+    digest = sha256(f"{purpose_digest}:{todo_condition_phrase(condition)}".encode()).hexdigest()
+    return f"{prefix}:{digest}"
 
 
 def _todo_block_ref(reason: str) -> tuple[str, str] | None:
@@ -1952,16 +1973,16 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
             "its condition still holds. Resume only if it has cleared and the work is "
             "still authorized. Never retry a refused action or resume an intentional hold. "
             "If the decision is the user's, use `ask` when available; for an external "
-            "condition, use a relevant wake or monitor when appropriate. Link only a "
-            "receipt actually created for this exact condition. Copy its Todo follow-up "
-            "line below as a standalone line in the wake message, monitor description, "
-            "or Ask question, then re-block with `[ask:<id>]`, `[wake:<id>]`, or "
-            "`[monitor:<id>]` followed by the exact condition. Do not tag unrelated "
-            "receipts. If there is no safe next action, leave the item blocked and "
+            "condition, use a relevant wake or monitor when appropriate. Write a readable "
+            "question, wake message, or monitor description using both the exact task label "
+            "and exact blocker in the same question or message. Do not copy harness "
+            "bookkeeping into it. Link only "
+            "a receipt created for that task and condition: re-block with `[ask:<id>]`, "
+            "`[wake:<id>]`, or `[monitor:<id>]` followed by the exact blocker. If there is "
+            "no safe next action, leave the item blocked and "
             "explain what remains unresolved in your own words if a reply is appropriate."
         )
-    scopes = [item["scope"] for item in blocked if item.get("scope")]
-    body = "\n".join([*rows, *paragraphs, *scopes])
+    body = "\n".join([*rows, *paragraphs])
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
@@ -29834,8 +29855,10 @@ class Session:
         else:
             timer.add_done_callback(finish)
 
-    def _live_todo_receipt(self, kind: str, handle: str, now: int) -> tuple[str, set[str]] | None:
-        """The incarnation and purpose asserted on a live owner-local receipt."""
+    def _live_todo_receipt(
+        self, kind: str, handle: str, now: int
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """The incarnation and original purpose fields of a live owner-local receipt."""
         from hashlib import sha256
 
         created_at = 0
@@ -29898,22 +29921,21 @@ class Session:
         # A purpose edit or handle reuse invalidates a binding without copying
         # the durable receipt into each todo snapshot.
         digest = sha256(subject.encode()).hexdigest()
-        scopes = {line.strip() for text in purposes for line in text.splitlines()}
-        return f"{kind}:{handle}:{created_at}:{digest}", scopes
+        return f"{kind}:{handle}:{created_at}:{digest}", tuple(purposes)
 
-    def _bind_todo_block(self, phase: str, text: str, occurrence: int, reason: str) -> str | None:
+    def _bind_todo_block(self, text: str, reason: str) -> str | None:
         ref = _todo_block_ref(reason)
-        condition = _todo_condition(reason)
+        condition = todo_block_condition(reason)
         if ref is None or not condition:
             return None
         receipt = self._live_todo_receipt(*ref, int(time.time() * 1000))
-        if receipt is not None and _todo_scope((phase, text, occurrence), condition) in receipt[1]:
-            return receipt[0]
+        if receipt is not None and _todo_purpose_matches(receipt[1], text, condition):
+            return _todo_binding_for_condition(receipt[0], condition)
         return None
 
     def _todo_state(self) -> tuple[_TodoPending, dict[_TodoKey, _TodoBlock]]:
         now = int(time.time() * 1000)
-        receipts: dict[tuple[str, str], tuple[str, set[str]] | None] = {}
+        receipts: dict[tuple[str, str], tuple[str, tuple[str, ...]] | None] = {}
         pending: list[_TodoKey] = []
         blocks: dict[_TodoKey, _TodoBlock] = {}
         for key, item in _todo_rows(todo_snapshot(self._session_id)):
@@ -29926,10 +29948,11 @@ class Session:
                 if ref is not None and ref not in receipts:
                     receipts[ref] = self._live_todo_receipt(*ref, now)
                 receipt = receipts.get(ref) if ref is not None else None
+                condition = todo_block_condition(reason)
                 covered = bool(
                     receipt
-                    and receipt[0] == binding
-                    and _todo_scope(key, _todo_condition(reason)) in receipt[1]
+                    and _todo_binding_for_condition(receipt[0], condition) == binding
+                    and _todo_purpose_matches(receipt[1], key[1], condition)
                 )
                 blocks[key] = (reason, binding, covered)
         # Membership, not display order, decides if the model made progress.
@@ -29978,16 +30001,10 @@ class Session:
         pending: _TodoPending,
         blocks: dict[_TodoKey, _TodoBlock],
     ) -> CustomMessage:
-        blocked = []
-        for key, (reason, _, _) in blocks.items():
-            condition = _todo_condition(reason)
-            blocked.append(
-                {
-                    "text": key[1],
-                    "reason": condition,
-                    "scope": _todo_scope(key, condition) if condition else "",
-                }
-            )
+        blocked = [
+            {"text": key[1], "reason": todo_block_condition(reason)}
+            for key, (reason, _, _) in blocks.items()
+        ]
         return CustomMessage(
             custom_type=TODO_REMINDER_MESSAGE_TYPE,
             attribution="system",

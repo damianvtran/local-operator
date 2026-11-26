@@ -15547,6 +15547,17 @@ TODO_BLOCK_REF = re.compile(r"^\[(wake|monitor|ask):([A-Za-z0-9_-]+)\](?:\s|$)")
 TodoItem = dict[str, str]  # {"text", "status"[, "reason", "block_binding"]}
 TodoPhase = dict[str, Any]  # {"name": str, "items": list[TodoItem]}
 
+
+def todo_block_condition(reason: str) -> str:
+    """The blocker itself; a producer handle is not part of its purpose."""
+    return TODO_BLOCK_REF.sub("", reason.strip(), count=1).strip()
+
+
+def todo_condition_phrase(condition: str) -> str:
+    """Compare whole blockers without case, wrapping or sentence endings."""
+    return " ".join(condition.casefold().split()).rstrip(".!?。！？").rstrip()
+
+
 #: The sentinel name of the implicit phase a flat ``init`` (or a bare ``add``)
 #: writes into. The panel special-cases exactly this single-phase case to stay
 #: headerless, so the constant is the one place that spelling lives.
@@ -16167,30 +16178,44 @@ async def execute_todo(
         scoped = target == "blocked" and TODO_BLOCK_REF.match(reason) is not None
         bindings: dict[int, str] = {}
         if scoped and bind is not None:
-            # Count all occurrences (even resolved rows) before matching or
-            # mutating anything. The producer, not the order of blocked rows,
-            # is the authority on which duplicate the model meant.
-            counts: dict[tuple[str, str], int] = {}
-            for phase in phases:
-                for row in phase["items"]:
-                    key = (phase["name"], row["text"])
-                    occurrence = counts[key] = counts.get(key, 0) + 1
-                    if row["status"] not in ("pending", "blocked"):
-                        continue
-                    binding = bind(key[0], key[1], occurrence, reason)
-                    old = row.get("block_binding", "")
-                    if binding and (
-                        not old
-                        or old.split(":", 2)[:2] != binding.split(":", 2)[:2]
-                        or old.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
-                    ):
-                        bindings[id(row)] = binding
+            open_by_text: dict[str, list[TodoItem]] = {}
+            for row in current:
+                if row["status"] in ("pending", "blocked"):
+                    open_by_text.setdefault(row["text"], []).append(row)
+            condition = todo_condition_phrase(todo_block_condition(reason))
+            for text, candidates in open_by_text.items():
+                if len(candidates) > 1:
+                    # Prose can name a task and its blocker, not an occurrence.
+                    # Disambiguate against the pre-write conditions, before an
+                    # incarnation check could mask an otherwise ambiguous row.
+                    candidates = [
+                        row
+                        for row in candidates
+                        if todo_condition_phrase(todo_block_condition(row.get("reason", "")))
+                        == condition
+                    ]
+                if len(candidates) != 1:
+                    continue
+                (row,) = candidates
+                binding = bind(text, reason)
+                old = row.get("block_binding", "")
+                if binding and (
+                    not old
+                    or old.split(":", 2)[:2] != binding.split(":", 2)[:2]
+                    or old.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
+                ):
+                    bindings[id(row)] = binding
+
+        rejected_scope = False
 
         def select_scoped(candidates: list[TodoItem]) -> list[TodoItem]:
+            nonlocal rejected_scope
             matches = [item for item in candidates if id(item) in bindings]
-            # Never silently fall back to the first same-text row on a stale
-            # selector or a producer claiming scope for multiple occurrences.
-            return matches if len(matches) == 1 else []
+            # Never fall back to the first duplicate on an ambiguous or stale
+            # selector, even in a call that names other, unique task texts.
+            if not matches:
+                rejected_scope = True
+            return matches
 
         def resolve_item(item: TodoItem) -> None:
             item["status"] = target
@@ -16228,9 +16253,8 @@ async def execute_todo(
             matched = [
                 item for item in named["items"] if item.get("status") in ("pending", "blocked")
             ]
-            if scoped and len(matched) > 1:
-                if not (matched := select_scoped(matched)):
-                    return _todo_miss_error(tool_call_id, params.op, [], [params.phase], current)
+            # An explicit phase selects the state change for every open row.
+            # The receipt decides coverage per row, never phase membership.
             for item in matched:
                 resolve_item(item)
             if not matched:
@@ -16251,6 +16275,8 @@ async def execute_todo(
         matched, missing = _match_todos(
             current, params.items, target=target, select_scoped=select_scoped if scoped else None
         )
+        if rejected_scope:
+            return _todo_miss_error(tool_call_id, params.op, [], missing, current)
         for item in matched:
             resolve_item(item)
         if matched:
