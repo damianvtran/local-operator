@@ -77,12 +77,12 @@ teams. `esc` stops the agent, `/help` lists commands, `lop update` upgrades.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./static/ui-desktop-app-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="./static/ui-desktop-app-light.webp">
-    <img src="./static/ui-desktop-app-light.webp" alt="The Local Operator desktop app with a navigation rail, two workspace tabs in the title bar, a release checklist conversation, and an inset message composer." width="720">
+    <source media="(prefers-color-scheme: dark)" srcset="./static/team-run-hero-2x-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="./static/team-run-hero-2x-light.webp">
+    <img src="./static/team-run-hero-2x-light.webp" alt="Local Operator desktop demo: the sidebar lists the Product team and its agents, the manager coordinates checkout recovery, and a draft is open in the inset composer." width="720">
   </picture>
 </p>
-<p align="center"><i>Local Operator v0.64.8 with a sample conversation.</i></p>
+<p align="center"><i>Staged desktop UI demo: the Product team’s manager splits checkout recovery work among UX, design, and coding agents.</i></p>
 
 <p align="center">
   <img src="./static/tui-welcome.png" alt="The Local Operator terminal UI welcome screen with tips and the composer ready for a first prompt" width="860">
