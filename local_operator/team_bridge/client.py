@@ -4074,6 +4074,7 @@ class TeamBridgeClient:
         scope: Literal["account"] | None = None,
         status: Literal["open", "archived"] | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """One page of the caller's conversations, newest activity first.
 
@@ -4107,7 +4108,11 @@ class TeamBridgeClient:
         if status:
             params["status"] = status
         return await self._send(
-            "GET", "/messaging/conversations", params=params or None, access=access
+            "GET",
+            "/messaging/conversations",
+            params=params or None,
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def conversation(
@@ -4116,12 +4121,19 @@ class TeamBridgeClient:
         *,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """One conversation with its members and the caller's read state."""
 
         params = {"tenant_id": tenant_id} if tenant_id else None
         return await self._send(
-            "GET", f"/messaging/conversations/{conversation_id}", params=params, access=access
+            "GET",
+            f"/messaging/conversations/{conversation_id}",
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
 
     async def create_conversation(

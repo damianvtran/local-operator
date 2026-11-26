@@ -162,6 +162,15 @@ tell whose it is.
 **`dm` binds replies** like `channel_post`: after a run has received bridge
 input, a post needs `in_reply_to_message_id` or a deliberate `new_post: true`.
 
+## Read a room roster
+
+In the designated chief-of-staff session, run `bridge(op="channels")` and use
+an exact `channel_id` from that page with `bridge(op="channel_members")`. This
+reads the current active and pending members of an open group or channel where
+the bound account is an active human member. DMs, built-ins, and rooms not on
+the latest page are not available through this operation. It cannot change
+membership.
+
 ## Finding a room: by name, never by creating one
 
 A task session cannot list rooms — `channels` is the chief of staff's and

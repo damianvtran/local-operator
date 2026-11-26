@@ -37,6 +37,9 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   child arm's ratchet had 2 tokens of headroom when this was decided, so the
   field cannot ship without first paying for it elsewhere. The desktop
   ``/conversations?status=archived`` route is the human's view of archives.
+- **channel_members** — the designated chief of staff can read active and pending
+  membership for a group/channel on its latest ``channels`` page by exact
+  ``channel_id``. This never changes membership or lists a DM or built-in.
 - **channel_create** — a group or channel created by the agent identity. The
   creator agent member is added automatically (the server requires it); the
   human owner is added ONLY when named explicitly, because an agent-created
@@ -205,7 +208,13 @@ from local_operator.harness.types import (
 )
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
-from .client import ATTACHMENT_MAX_COUNT, BridgeRefusal, TeamBridgeClient
+from .client import (
+    ACCOUNT_MISMATCH_CODE,
+    ATTACHMENT_MAX_COUNT,
+    BridgeRefusal,
+    BridgeSignInRequired,
+    TeamBridgeClient,
+)
 from .emoji_names import ACCEPTED_FORMS_HINT, normalize_reaction_emoji
 from .inline_data import bound_inline_data_payload, bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
@@ -227,6 +236,7 @@ from .types import (
     NameResolution,
     RecipientNameRefused,
     decode_recipient_argument,
+    is_account_id,
     is_conversation_message_id,
     resolve_member_by_name,
     sender_class,
@@ -253,7 +263,16 @@ CHANNEL_OPS: tuple[str, ...] = (
 #: ``directory`` is read-only METADATA about the organization (who is on the
 #: team, each person's chief-of-staff endpoint and its current name). It acts
 #: as nobody, so unlike the channel ops it needs no agent endpoint.
-BRIDGE_OPS: tuple[str, ...] = ("take_up", "ack", "send", "reply", "directory", *CHANNEL_OPS)
+_CHANNEL_MEMBERS_OP = "channel_members"
+BRIDGE_OPS: tuple[str, ...] = (
+    "take_up",
+    "ack",
+    "send",
+    "reply",
+    "directory",
+    *CHANNEL_OPS,
+    _CHANNEL_MEMBERS_OP,
+)
 #: Words a model might invent for B4b's owner release. Refused by name, never
 #: accepted: like ``decide``, release authority is the human's (DESIGN §4).
 RELEASE_WORDS: frozenset[str] = frozenset({"release", "deliver", "discard"})
@@ -292,6 +311,7 @@ READ_OPS: tuple[str, ...] = (
     "directory",
     "shared_conversations",
     "shared_history",
+    _CHANNEL_MEMBERS_OP,
 )
 
 #: The server caps a conversation page at 100 (contract §10.1); bounding here
@@ -493,6 +513,10 @@ class BridgeRuntime:
     #: a later boundary may re-admit it once the local gates hold (§36).
     admission: str = "pending"
     admission_note: str = ""
+    # Only IDs/kinds from the last explicit, owner-pinned `channels` page. This
+    # proves immutable room type before a detail GET, which can write on a
+    # built-in ID. It never proves current membership or retains any roster.
+    roster_room_kinds: dict[str, str] = field(default_factory=dict)
     # Run-local dispatch evidence, never inferred from persisted conversation
     # text. Remains true after owed cards clear; the session resets at boundaries.
     bridge_input_presented: bool = False
@@ -625,6 +649,7 @@ class BridgeToolParams(BaseModel):
         "channel_thread",
         "directory",
         "dm",
+        "channel_members",
         "shared_conversations",
         "shared_history",
     ]
@@ -2111,6 +2136,140 @@ def _shared_read_fence(runtime: "BridgeRuntime") -> dict[str, Any] | None:
     return None
 
 
+def _roster_room_kinds(page: Mapping[str, Any], tenant_id: str) -> dict[str, str]:
+    """Only immutable classification from the existing human list, never roster data."""
+
+    rows = page.get("conversations")
+    if not isinstance(rows, list):
+        return {}
+    return {
+        row["id"]: row["kind"]
+        for row in rows
+        if isinstance(row, dict)
+        and isinstance(row.get("id"), str)
+        and _CONVERSATION_ID.fullmatch(row["id"])
+        and row.get("tenant_id") == tenant_id
+        and row.get("kind") in ("group", "channel")
+        and "builtin" not in row  # omitted on ordinary rooms by BridgeConversationView
+    }
+
+
+def _roster_not_found() -> dict[str, Any]:
+    # Do not distinguish an absent room, a private non-member, a foreign id or
+    # an out-of-scope room. No guessing built-in ids (they use the same grammar).
+    return _error(
+        "room roster unavailable; use the room id from the latest channels page",
+        code="conversation_not_found",
+    )
+
+
+async def _channel_members(
+    runtime: BridgeRuntime, conversation_id: str, kind: str
+) -> dict[str, Any]:
+    account_id = runtime.owner.account_id
+
+    class DispatchRefused(Exception):
+        def __init__(self, outcome: dict[str, Any]) -> None:
+            self.outcome = outcome
+
+    def pre_http_guard() -> None:
+        # The initial fence protects credential resolution. Its conclusion can
+        # go stale while OAuth is awaited; recheck before each physical GET.
+        refused = _shared_read_fence(runtime)
+        if refused is not None:
+            raise DispatchRefused(refused)
+
+    try:
+        view = await runtime.client.conversation(
+            conversation_id,
+            tenant_id=runtime.tenant_id,
+            expected_account_id=account_id,
+            pre_http_guard=pre_http_guard,
+        )
+    except DispatchRefused as failure:
+        return failure.outcome
+    except BridgeSignInRequired:
+        return _error("sign in to read a room roster", code="bridge_signin_required")
+    except BridgeRefusal as failure:
+        if failure.code in ("conversation_not_found", "not_a_member") or failure.http_status in (
+            403,
+            404,
+        ):
+            return _roster_not_found()
+        if failure.code == ACCOUNT_MISMATCH_CODE:
+            return _error(
+                "sign in as the enrolled account to read a room roster", code=failure.code
+            )
+        return _error("could not read the room roster", code="list_failed")
+    # An in-flight GET cannot be retracted; a designation change still keeps
+    # its answer from reaching the former chief of staff's transcript.
+    refused = _shared_read_fence(runtime)
+    if refused is not None:
+        return refused
+    # The kind/ID/tenant receipt prevents built-in lookup side effects. It does
+    # NOT authorize disclosure: only this fresh human Get and its active caller
+    # row do. No raw conversation data (labels can even be emails) reaches the model.
+    if (
+        view.get("id") != conversation_id
+        or view.get("tenant_id") != runtime.tenant_id
+        or view.get("kind") != kind
+        or "builtin" in view
+        or view.get("status") != "open"
+        or view.get("member") is not True
+        or view.get("discoverable") is not False
+    ):
+        return _roster_not_found()
+    rows = view.get("members")
+    if not isinstance(rows, list):
+        return _roster_not_found()
+    members = []
+    caller_active = False
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return _roster_not_found()
+        state = row.get("state")
+        if state in ("left", "removed"):
+            continue
+        member_kind, role = row.get("kind"), row.get("role")
+        account, endpoint = row.get("account_id"), row.get("endpoint_id", "")
+        if (
+            state not in ("active", "invited")
+            or member_kind not in ("human", "agent")
+            or role not in ("owner", "member")
+            or not isinstance(account, str)
+            or not is_account_id(account)
+            or not isinstance(endpoint, str)
+            or (member_kind == "agent" and re.fullmatch(r"bep_[0-9a-z]+", endpoint) is None)
+            or (member_kind == "human" and endpoint != "")
+        ):
+            return _roster_not_found()
+        # The hub keys humans by account and agents by endpoint. Do not merge
+        # a human with their agent or return two states for one identity.
+        member_key = (member_kind, endpoint or account)
+        if member_key in seen:
+            return _roster_not_found()
+        seen.add(member_key)
+        caller_active |= member_kind == "human" and account == account_id and state == "active"
+        member = {
+            "account_id": account,
+            "kind": member_kind,
+            "role": role,
+            "state": "pending" if state == "invited" else "active",
+        }
+        if endpoint:
+            member["endpoint_id"] = endpoint
+        members.append(member)
+    if not caller_active:
+        return _roster_not_found()
+    return {
+        "ok": True,
+        "state": "ok",
+        "conversation_id": conversation_id,
+        "content": json.dumps({"conversation_id": conversation_id, "members": members}),
+    }
+
+
 async def _shared_conversations(
     runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
 ) -> dict[str, Any]:
@@ -3352,9 +3511,26 @@ async def execute_bridge(
     # fence; the mailbox ops and the owner-shared reads keep the strict one, so
     # a colleague's task session can reach teammates without ever acquiring the
     # owner's inbox or their shared conversations.
-    fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
-    if fence is not None:
-        return _error(fence["error"], code=fence["code"])
+    roster_room_kind = ""
+    if op == _CHANNEL_MEMBERS_OP:
+        fence = _shared_read_fence(runtime)
+        if fence is not None:
+            return fence
+        conversation_id = args.get("channel_id")
+        if not isinstance(conversation_id, str) or not _CONVERSATION_ID.fullmatch(conversation_id):
+            return _error(
+                "channel_members requires an exact bcv_ channel_id", code="invalid_request"
+            )
+        # Never run List as a preflight: it may provision/reconcile all built-ins.
+        # Without classification already learned by `channels`, stop before even
+        # scheduling admission I/O or resolving credentials for Get.
+        roster_room_kind = runtime.roster_room_kinds.get(conversation_id, "")
+        if not roster_room_kind:
+            return _roster_not_found()
+    else:
+        fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
+        if fence is not None:
+            return _error(fence["error"], code=fence["code"])
     # After the fence (a drifted runtime refuses before reading any argument) and
     # before every op-specific step, so reply resolution, the outbox intent and
     # the wire body all see the one canonical field. Local and network-free.
@@ -3685,7 +3861,16 @@ async def execute_bridge(
             ),
         }
 
+    if params.op == _CHANNEL_MEMBERS_OP:
+        return await _channel_members(runtime, params.channel_id, roster_room_kind)
+
     if params.op == "channels":
+        from local_operator.aida.state import is_aida_session
+
+        capture_roster_scope = is_aida_session(runtime.config_dir, runtime.session_id)
+        # A replacement page is not evidence until it has arrived under the
+        # same account pin. Only CoS pages qualify; other lists stay unchanged.
+        runtime.roster_room_kinds.clear()
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
             return _error(f"channels limit must be 1..{CONVERSATION_PAGE_MAX}")
         try:
@@ -3696,11 +3881,18 @@ async def execute_bridge(
                 tenant_id=runtime.tenant_id,
                 limit=int(params.limit),
                 cursor=params.cursor or None,
+                **(
+                    {"expected_account_id": runtime.owner.account_id}
+                    if capture_roster_scope
+                    else {}
+                ),
             )
         except Exception as failure:
             return _error(
                 f"could not list conversations: {_failure_text(failure)}", code="list_failed"
             )
+        if capture_roster_scope:
+            runtime.roster_room_kinds = _roster_room_kinds(result, runtime.tenant_id)
         # Pass-through, deliberately: ``discoverable``/``member``/``member_count``
         # are the server's answer for a caller who may not be a human member, and
         # re-deriving them here would be a second, wrong authorization opinion.
@@ -5237,6 +5429,18 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             is_error=True,
         )
 
+    from local_operator.aida.state import is_aida_session
+
+    schema = BridgeToolParams.model_json_schema()
+    # The enum word is billed only where usable, not in the child schema. As
+    # with other bridge ops, advertising an op is not the call-time fence.
+    if (
+        context.ancestor_session_ids
+        or not context.session_id
+        or context.session_id != getattr(runtime, "session_id", None)
+        or not is_aida_session(runtime.config_dir, context.session_id)
+    ):
+        schema["properties"]["op"]["enum"].remove(_CHANNEL_MEMBERS_OP)
     return AgentTool(
         name="bridge",
         label="Team Bridge",
@@ -5266,7 +5470,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         ),
         # Byte-identical while the community is dark; the two community op
         # words join the enum only when it is enabled (``extend_bridge_schema``).
-        parameters=extend_bridge_schema(BridgeToolParams.model_json_schema()),
+        parameters=extend_bridge_schema(schema),
         approval_tier="write",
         call_approval_tier=lambda args: (
             community_approval_tier(str(args.get("op")))
