@@ -62664,14 +62664,8 @@ class OperatorApp(App[None]):
             # waiting for the ~1 s restate painted ✗ danger over a cut that is
             # warning ink everywhere else. Every other errored end keeps the
             # error tier.
-            from local_operator.incidents import TODO_INCOMPLETE_CAUSE
-
-            todo_warning = message.cut_off_cause == TODO_INCOMPLETE_CAUSE
-            live_tier = (
-                "warning" if todo_warning or message.cut_off_cause == "runtime-retired" else "error"
-            )
-            error = message.error if todo_warning else self._with_recovery_hint(message.error)
-            notice = NoticeBlock(error, live_tier)
+            live_tier = "warning" if message.cut_off_cause == "runtime-retired" else "error"
+            notice = NoticeBlock(self._with_recovery_hint(message.error), live_tier)
             self._append_block(notice)
             # HELD for the same reason `_finalize_turn` holds the interrupted
             # row: the attention poller reads the same durable outcome back a

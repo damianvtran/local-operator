@@ -4405,15 +4405,7 @@ class AgentLoop:
                 # (the repeated-error recovery notice's shape below), not an
                 # invisible injection, so exactly one AgentEndEvent still ends
                 # the run and a resumed transcript explains the continuation.
-                # A contract certifies the completed turn, not just parseable
-                # text. Never put a success payload on the wire for unfinished work.
-                terminal_cut_off = config.terminal_cut_off
-                cut_off_cause = (
-                    OUTPUT_LIMIT_CAUSE
-                    if length_silent_cut_off or length_answer_cut_off
-                    else terminal_cut_off(context.quiet_candidate) if terminal_cut_off else ""
-                )
-                if config.final_response_gate is not None and not cut_off_cause:
+                if config.final_response_gate is not None:
                     gate = config.final_response_gate
                     final_response_attempts += 1
                     # None means no assistant message at all ("" is a value:
@@ -4462,11 +4454,12 @@ class AgentLoop:
             # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
             yield AgentEndEvent(
                 messages=new_messages,
-                aborted=bool(cut_off_cause),
-                cut_off_cause=cut_off_cause,
+                aborted=length_silent_cut_off or length_answer_cut_off,
+                cut_off_cause=(
+                    OUTPUT_LIMIT_CAUSE if (length_silent_cut_off or length_answer_cut_off) else ""
+                ),
                 generation=generation,
-                # The candidate only requests silence at a genuinely clean end.
-                quiet_requested=context.quiet_candidate and not cut_off_cause,
+                quiet_requested=context.quiet_candidate,
             )
         finally:
             context.quiet_request_roots.clear()

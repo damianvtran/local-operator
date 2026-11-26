@@ -15542,6 +15542,8 @@ def build_grep_tool() -> AgentTool:
 #: dict once a phase's ``items`` list is in hand. A flat ``init`` becomes ONE
 #: implicit phase named ``"Todos"`` (rendered headerless, so an existing
 #: caller sees the identical panel it saw before phases existed).
+# The marker identifies a producer receipt, not an arbitrary handle in prose.
+TODO_BLOCK_REF = re.compile(r"^\[(wake|monitor|ask):([A-Za-z0-9_-]+)\](?:\s|$)")
 TodoItem = dict[str, str]  # {"text", "status"[, "reason", "block_binding"]}
 TodoPhase = dict[str, Any]  # {"name": str, "items": list[TodoItem]}
 
@@ -15982,7 +15984,11 @@ def _find_or_create_phase(phases: list[TodoPhase], name: str) -> TodoPhase:
 
 
 def _match_todos(
-    current: list[dict[str, str]], texts: list[str], *, target: str
+    current: list[TodoItem],
+    texts: list[str],
+    *,
+    target: str,
+    select_scoped: Callable[[list[TodoItem]], list[TodoItem]] | None = None,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Resolve item texts to items: ``(matched, missing_texts)``.
 
@@ -15997,6 +16003,8 @@ def _match_todos(
     missing: list[str] = []
     for text in texts:
         candidates = [item for item in current if item["text"] == text]
+        if select_scoped is not None and len(candidates) > 1:
+            candidates = select_scoped(candidates)
         if not candidates:
             missing.append(text)
             continue
@@ -16156,37 +16164,42 @@ async def execute_todo(
         target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
         verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
         bind = context.bind_todo_block if context is not None else None
-        # Index every occurrence, not just the blocked rows: a phase-wide
-        # block can address two same-text items and each needs its own scope.
-        occurrences: dict[int, tuple[str, int]] = {}
-        if bind is not None and target == "blocked" and reason.startswith("["):
+        scoped = target == "blocked" and TODO_BLOCK_REF.match(reason) is not None
+        bindings: dict[int, str] = {}
+        if scoped and bind is not None:
+            # Count all occurrences (even resolved rows) before matching or
+            # mutating anything. The producer, not the order of blocked rows,
+            # is the authority on which duplicate the model meant.
             counts: dict[tuple[str, str], int] = {}
             for phase in phases:
                 for row in phase["items"]:
                     key = (phase["name"], row["text"])
                     occurrence = counts[key] = counts.get(key, 0) + 1
-                    occurrences[id(row)] = (phase["name"], occurrence)
+                    if row["status"] not in ("pending", "blocked"):
+                        continue
+                    binding = bind(key[0], key[1], occurrence, reason)
+                    old = row.get("block_binding", "")
+                    if binding and (
+                        not old
+                        or old.split(":", 2)[:2] != binding.split(":", 2)[:2]
+                        or old.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
+                    ):
+                        bindings[id(row)] = binding
+
+        def select_scoped(candidates: list[TodoItem]) -> list[TodoItem]:
+            matches = [item for item in candidates if id(item) in bindings]
+            # Never silently fall back to the first same-text row on a stale
+            # selector or a producer claiming scope for multiple occurrences.
+            return matches if len(matches) == 1 else []
 
         def resolve_item(item: TodoItem) -> None:
             item["status"] = target
             if target == "blocked":
-                scope = occurrences.get(id(item))
-                binding = (
-                    bind(scope[0], item["text"], scope[1], reason)
-                    if bind is not None and scope is not None
-                    else None
-                )
+                binding = bindings.get(id(item))
                 old_binding = item.get("block_binding", "")
                 item["reason"] = reason
                 if binding is not None:
-                    # Rephrasing a wait is not permission to give a reused ID
-                    # the old item's meaning. Deliberately select a new ref.
-                    if (
-                        not old_binding
-                        or old_binding.split(":", 2)[:2] != binding.split(":", 2)[:2]
-                        or old_binding.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
-                    ):
-                        item["block_binding"] = binding
+                    item["block_binding"] = binding
                 elif not reason.startswith(f"[{':'.join(old_binding.split(':', 2)[:2])}]"):
                     item.pop("block_binding", None)
             else:
@@ -16215,6 +16228,9 @@ async def execute_todo(
             matched = [
                 item for item in named["items"] if item.get("status") in ("pending", "blocked")
             ]
+            if scoped and len(matched) > 1:
+                if not (matched := select_scoped(matched)):
+                    return _todo_miss_error(tool_call_id, params.op, [], [params.phase], current)
             for item in matched:
                 resolve_item(item)
             if not matched:
@@ -16232,7 +16248,9 @@ async def execute_todo(
 
         # Text form: search across ALL phases (the flat ``current`` view), so a
         # model echoing a text need not know which phase holds it.
-        matched, missing = _match_todos(current, params.items, target=target)
+        matched, missing = _match_todos(
+            current, params.items, target=target, select_scoped=select_scoped if scoped else None
+        )
         for item in matched:
             resolve_item(item)
         if matched:

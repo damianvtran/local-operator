@@ -3938,9 +3938,6 @@ class FrontendSessionState(BaseModel):
     #: made). Additive; ``""`` is the old-runtime value and means "no reason
     #: was recorded", which is exactly what it is.
     last_turn_cut_off: str = ""
-    #: Rebind settles the latest quiet activity without replaying the older
-    #: warning still held in the two outcome fields above.
-    last_turn_retained_outcome: bool = False
     activity_started_at: float | None = None
     #: Which kind of work the working line is naming, and when that kind began.
     #:
@@ -9519,12 +9516,11 @@ class FrontendStateStore:
                 streaming=False,
                 activity_started_at=None,
                 active_duration_s=duration,
-                last_turn_retained_outcome=event.retains_prior_outcome,
+                last_turn_outcome=outcome,
+                # Empty for every non-cut-off end, which is what clears a
+                # previous turn's reason as the new outcome lands.
+                last_turn_cut_off=str(getattr(event, "cut_off", "") or ""),
             )
-            if not event.retains_prior_outcome:
-                # A passive no-work wake retires activity without replacing
-                # the owner-visible warning for the unfinished work.
-                changes.update(last_turn_outcome=outcome, last_turn_cut_off=event.cut_off)
             # Reconcile the whole turn once. Per-call receipts are retained so a
             # mixed-provider aggregate never loses which call owned which price.
             usages = [

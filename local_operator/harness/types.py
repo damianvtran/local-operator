@@ -3351,9 +3351,6 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
-    #: A no-work quiet wake closes its activity but does not supersede the
-    #: previously reported unfinished work in the owner's/viewer's snapshot.
-    retains_prior_outcome: bool = False
     #: WHICH model produced ``error``, as ``provider/model``, and the selector
     #: the request started from when the failure came from a DIFFERENT target.
     #:
@@ -4448,9 +4445,6 @@ class LoopConfig(BaseModel):
     get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(
         default=None, exclude=True
     )
-    #: Before final output validation, the host can veto success with a named
-    #: outcome. The flag is the loop's trusted quiet candidate.
-    terminal_cut_off: Callable[[bool], str] | None = Field(default=None, exclude=True)
 
     # Gates and hooks.
     before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(

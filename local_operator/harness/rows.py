@@ -1850,16 +1850,6 @@ def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]
         # this row's one-line budget goes to the fact.
         return retired_notice_text(), "warning"
     if kind == "error":
-        from local_operator.incidents import (
-            TODO_INCOMPLETE_CAUSE,
-            cause_from_reason,
-            todo_incomplete_notice,
-        )
-
-        if cause_from_reason(reason) == TODO_INCOMPLETE_CAUSE:
-            # Preserve the durable non-success classification and the same
-            # truthful warning (not crash wording) on reopen and mobile.
-            return todo_incomplete_notice(reason), "warning"
         text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
         return text, "error"
     if kind == "interrupted":
