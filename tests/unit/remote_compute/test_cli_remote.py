@@ -1904,6 +1904,75 @@ def test_a_legacy_server_gets_the_delete_advice_and_the_listing(
     assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
 
 
+def test_a_full_page_of_settled_runs_proves_nothing_and_gets_no_advice(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A saturated page may hide a counting run: the sentence alone, no listing.
+
+    The page is the newest rows only. With every row it shows settled, a counting
+    run just past the page is exactly what it cannot show — and a current server
+    would then be told to delete history that frees no slot.
+    """
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(
+                *[
+                    _settled(network_id, id=f"run_{n:03d}", name=f"run{n}")
+                    for n in range(remote_cli.RUN_LIMIT_PAGE)
+                ]
+            ),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit()) in captured.err
+    assert _t(_wr.run_limit_legacy()) not in captured.out
+    assert _t(_wr.slot_heading()) not in captured.out
+    assert "lop exec --remote-delete" not in captured.out
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
+
+
+def test_a_short_page_of_settled_runs_still_gets_the_advice(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One row short of full is a page the server finished, so the legacy reading stands.
+
+    The boundary is the completeness of the evidence, not caution for its own
+    sake: suppressing the advice on a page that could not have hidden anything
+    would leave a legacy server's stuck account with no remedy at all.
+    """
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(
+                *[
+                    _settled(network_id, id=f"run_{n:03d}", name=f"run{n}")
+                    for n in range(remote_cli.RUN_LIMIT_PAGE - 1)
+                ]
+            ),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit_legacy()) in captured.out
+    assert _t(_wr.slot_heading()) in captured.out
+    assert captured.out.count("lop exec --remote-delete run_") == 5
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
+
+
 def test_a_current_server_gets_no_delete_advice_and_no_listing(
     enabled: None,
     network: NetworkRecord,
@@ -2009,6 +2078,47 @@ def test_the_legacy_listing_is_capped_at_five(
     )
     assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
     assert capsys.readouterr().out.count("lop exec --remote-delete run_") == 5
+
+
+def test_counting_counts_every_status_but_deleted_and_a_settled_stop() -> None:
+    """The counting arms spelled out against the server's own predicate.
+
+    The server counts ``status != deleted AND NOT (status == stopped AND
+    settled_at != null)``, so every status that is not an explicit deletion or a
+    settled stop holds a slot — including the ones this build cannot act on and
+    the ones it does not recognise. An unreadable row counting is the fail-safe:
+    calling it finished could recommend tearing down live work.
+    """
+    network_id = "n_" + "a" * 24
+    settled = {"settled_at": "2026-11-25T00:00:00Z"}
+    cases: dict[str, dict[str, Any]] = {
+        "pending": _wire_run("pending", network_id),
+        "reconciling": _wire_run("reconciling", network_id),
+        "running": _wire_run("running", network_id),
+        "stopping": _wire_run("stopping", network_id),
+        "revoking": _wire_run("revoking", network_id),
+        # ``error`` is retried by the server, so it still holds the slot.
+        "error": _wire_run("error", network_id),
+        # A token this build cannot read counts rather than being dropped.
+        "some_new_state": _wire_run("some_new_state", network_id),
+        # ``stopped`` alone is not finished: only the settlement releases the slot.
+        "stopped, unsettled": _stopped(network_id),
+        "stopped, settled": _stopped(network_id, **settled),
+        "deleted": _wire_run("deleted", network_id),
+    }
+    counted = {case: remote_cli._counting(run) for case, run in cases.items()}
+    assert counted == {
+        "pending": True,
+        "reconciling": True,
+        "running": True,
+        "stopping": True,
+        "revoking": True,
+        "error": True,
+        "some_new_state": True,
+        "stopped, unsettled": True,
+        "stopped, settled": False,
+        "deleted": False,
+    }
 
 
 # ---------------------------------------------------------------------------

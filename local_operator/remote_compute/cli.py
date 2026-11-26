@@ -220,11 +220,28 @@ def _report_run_limit(failure: RunLimitReached, credential: int) -> int:
     listing leaves the sentence as the whole answer — for that server there is no
     accounting evidence either, so no delete advice is the safe outcome — because
     the refusal is the reason the command failed, not the listing.
+
+    A FULL PAGE IS INCONCLUSIVE, NOT EVIDENCE. The listing is the newest page,
+    not the account's history, so a counting run older than it is invisible
+    exactly when the page is saturated — and that is the account state where the
+    inference would do the most damage: it would offer to destroy history that
+    frees nothing while the slot stays held.
     """
     code = _report(failure)
     try:
         runs = asyncio.run(_list_runs(credential))
     except (ValueError, OSError):
+        return code
+    # THE LENGTH IS THE ONLY COMPLETENESS SIGNAL THERE IS, AND A FULL PAGE HAS
+    # NONE. The server applies the requested limit verbatim (the page default is
+    # 20 and the ceiling 200, both outside the 50 asked for here) and its list
+    # query sets that limit on the read, so a SHORT page is exhausted history
+    # while a full one means "at least this many" — the envelope carries no
+    # has-more field and ``list_runs`` returns only the runs, so nothing better
+    # than the count is available at this call. Paging on at refusal time to
+    # justify a destructive recommendation is the wrong trade; the safe outcome
+    # is the lead sentence alone.
+    if len(runs) >= RUN_LIMIT_PAGE:
         return code
     if any(_counting(run) for run in runs):
         return code
