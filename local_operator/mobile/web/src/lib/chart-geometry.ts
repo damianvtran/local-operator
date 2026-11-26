@@ -37,10 +37,24 @@ export function decimalsOf(value: number): number {
 
 export type Ticks = { min: number; max: number; step: number; values: number[]; decimals: number };
 
-/** Target tick count from the plot height: clamp(3, floor(h / 48), 6). */
+/**
+ * Target tick count from the plot height: clamp(4, floor(h / 48), 6).
+ *
+ * The spec's floor was 3; the cross-surface remediation (X1) raised it to 4
+ * because at the 180px phone plot a target of 3 forced step 50 on the
+ * operator's 84–154 USD series (`50…200`), leaving the data in half the plot.
+ * With 4 the same series gets `80…160` at 180px, as it does at 240.
+ */
 export function tickTarget(height: number): number {
-	return Math.min(6, Math.max(3, Math.floor(height / 48)));
+	return Math.min(6, Math.max(4, Math.floor(height / 48)));
 }
+
+/**
+ * Strip float noise from a tick (3 × 0.1 → 0.3) at ANY magnitude. Rounding
+ * with toFixed(decimals) collapsed sub-1e-20 ticks to 0, since decimals cap
+ * at 20 (R7); 12 significant digits is well past any nice step's precision.
+ */
+const roundTick = (value: number) => Number(value.toPrecision(12));
 
 const tickCount = (lo: number, hi: number, step: number) =>
 	Math.ceil(hi / step - 1e-9) - Math.floor(lo / step + 1e-9) + 1;
@@ -61,7 +75,7 @@ export function niceTicks(lo: number, hi: number, target: number): Ticks {
 			const last = Math.ceil(hi / step - 1e-9);
 			const decimals = decimalsOf(step);
 			const values = [];
-			for (let i = first; i <= last; i++) values.push(Number((i * step).toFixed(decimals)));
+			for (let i = first; i <= last; i++) values.push(roundTick(i * step));
 			return { min: values[0], max: values[values.length - 1], step, values, decimals };
 		}
 	}
@@ -111,7 +125,7 @@ export function alignedTicks(lo: number, hi: number, count: number): Ticks {
 			const first = Math.floor(lo / step + 1e-9);
 			if ((first + intervals) * step < hi - 1e-9) continue;
 			const decimals = decimalsOf(step);
-			const values = Array.from({ length: count }, (_, i) => Number(((first + i) * step).toFixed(decimals)));
+			const values = Array.from({ length: count }, (_, i) => roundTick((first + i) * step));
 			return { min: values[0], max: values[count - 1], step, values, decimals };
 		}
 	}
@@ -129,12 +143,38 @@ export const snap = (value: number) => Math.round(value) + 0.5;
 
 // ---- number and unit format ------------------------------------------------
 
-/** Tick formatter: compact (12K, 1.5M) when the domain reaches |10 000|. */
+/** Steps below this print in scientific notation (R7): 1e-21 would otherwise
+ * need 21 decimals, past Intl's 20-digit cap, and every tick read `0.000…`. */
+const SCIENTIFIC_BELOW = 1e-6;
+
+/**
+ * Tick formatter: compact (12K, 1.5M) when the domain reaches |10 000|,
+ * scientific for sub-micro steps, else standard with the step's decimals.
+ *
+ * Compact and scientific labels take the FEWEST decimals (0–3) that keep
+ * every tick on the axis distinct (X3): one fixed decimal printed 10,050–
+ * 10,300 as `10.1K` five times and 1,000,000–1,004,000 as `1M` five times,
+ * an axis that says nothing. When even 3 decimals collide, fall back to full
+ * grouped numbers, which are distinct by construction of the nice step.
+ */
 export function tickFormatter(locale: string, ticks: Ticks, suffix = "") {
+	const standard = new Intl.NumberFormat(locale, { minimumFractionDigits: ticks.decimals, maximumFractionDigits: ticks.decimals });
 	const compact = Math.max(Math.abs(ticks.min), Math.abs(ticks.max)) >= 10_000;
-	const format = new Intl.NumberFormat(locale, compact
-		? { notation: "compact", maximumFractionDigits: 1 }
-		: { minimumFractionDigits: ticks.decimals, maximumFractionDigits: ticks.decimals });
+	const scientific = !compact && ticks.step > 0 && ticks.step < SCIENTIFIC_BELOW;
+	let format = standard;
+	if (compact || scientific) {
+		const notation = compact ? "compact" : "scientific";
+		for (let digits = 0; digits <= 3; digits++) {
+			const candidate = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: digits, maximumFractionDigits: digits });
+			const texts = ticks.values.map((v) => candidate.format(v));
+			if (new Set(texts).size === texts.length) { format = candidate; break; }
+		}
+		// Sub-micro steps have no sane standard rendering: keep scientific at
+		// 3 decimals rather than 20+ zeros, even if two ticks still collide.
+		if (format === standard && scientific) {
+			format = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: 3, maximumFractionDigits: 3 });
+		}
+	}
 	return (value: number) => `${format.format(value)}${suffix}`;
 }
 
@@ -168,6 +208,17 @@ export function shareText(locale: string, fraction: number): string {
 	return new Intl.NumberFormat(locale, { style: "percent", minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(fraction);
 }
 
+/**
+ * Donut share (X9): whole percent everywhere a slice's share shows — ring,
+ * outside labels, legend, "Also:" list, centre readout and tooltip — so the
+ * three surfaces print the same number, and `<1%` for a share under 0.5%,
+ * which whole-percent rounding would otherwise print as a misleading `0%`.
+ */
+export function pieShareText(locale: string, fraction: number): string {
+	const format = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 });
+	return fraction > 0 && fraction < 0.005 ? `<${format.format(0.01)}` : format.format(fraction);
+}
+
 // ---- x labels ----------------------------------------------------------------
 
 /** Axis text is the part before the first ` · ` (`Nov 24 · rollout` → `Nov 24`). */
@@ -176,18 +227,42 @@ export function axisLabel(label: string): string {
 	return cut === -1 ? label : label.slice(0, cut);
 }
 
-export type ShownLabel = { index: number; text: string; anchor: "start" | "middle" | "end" };
+/**
+ * One drawn x label. `x` is where the renderer puts the text with
+ * `text-anchor = anchor`; `left`/`right` is its measured box at that anchor.
+ */
+export type ShownLabel = { index: number; text: string; anchor: "start" | "middle" | "end"; x: number; left: number; right: number };
+
+/** Minimum clear space between two shown x-label boxes (X2). */
+export const LABEL_GAP = 4;
 
 /**
- * Which x labels to draw (spec §2 "X labels"): stride
- * k = ceil((maxLabelW + 12) / slotW), indices 0, k, 2k… plus always the last;
- * when the last collides with the previous shown one, the previous is dropped.
- * `edgeAnchored` (line/scatter) anchors the first label at its start and the
- * last at its end, so neither hangs off the plot. Labels never rotate; one
- * longer than k·slotW − 8 is truncated with an ellipsis.
+ * Which x labels to draw, and where (spec §2 "X labels", tightened by X2).
+ *
+ * Every decision is made on each label's REAL box at its ACTUAL anchor:
+ * start-anchored first label and end-anchored last label on line/scatter
+ * (`edgeAnchored`), centred otherwise, centred boxes shifted inside `bounds`
+ * so none hangs off the SVG. The round-1 version reasoned about the stride
+ * with centred boxes only, so a start-anchored `Oct 25` ran into the next
+ * label (QA Q1); this one checks every adjacent shown pair.
+ *
+ * - Stride: start at k = ceil((maxLabelW + 12) / slot); show 0, k, 2k… and
+ *   always the last (dropping the one before it when they collide); if any
+ *   adjacent pair is closer than LABEL_GAP, or a box leaves the bounds, try
+ *   the next k. Middle labels therefore show whole or not at all.
+ * - When no stride fits, only the first and last remain. The first keeps its
+ *   full width (capped to the bounds) and the last is truncated with `…` to
+ *   the space it actually has; if not even a one-glyph `X…` fits there, the
+ *   first gives up that room. Labels never rotate.
+ *
+ * Guarantee: shown boxes are pairwise ≥ LABEL_GAP apart for any width, any
+ * label length and n ≤ 32, provided the first and last anchors leave room for
+ * two one-glyph truncations.
  *
  * @param positions the x of each category's mark, in px
- * @param measure   text width in px at the label font
+ * @param measure   text width in px at the label font — pass the renderer's
+ *                  own measurer so the boxes here are the boxes on screen
+ * @param bounds    the horizontal extent labels must stay inside (the SVG)
  */
 export function thinLabels(
 	labels: readonly string[],
@@ -195,40 +270,94 @@ export function thinLabels(
 	slot: number,
 	measure: (text: string) => number,
 	edgeAnchored: boolean,
+	bounds: readonly [number, number] = [-Infinity, Infinity],
 ): ShownLabel[] {
 	const n = labels.length;
 	if (n === 0) return [];
+	const [lo, hi] = bounds;
 	const texts = labels.map(axisLabel);
 	const widths = texts.map(measure);
-	const stride = Math.max(1, Math.ceil((Math.max(...widths) + 12) / Math.max(slot, 1)));
-	const indices: number[] = [];
-	for (let i = 0; i < n; i += stride) indices.push(i);
 	const anchorOf = (i: number): ShownLabel["anchor"] =>
 		!edgeAnchored || n === 1 ? "middle" : i === 0 ? "start" : i === n - 1 ? "end" : "middle";
-	let budget = stride * slot - 8;
-	const fit = (i: number) => truncate(texts[i], widths[i], budget, measure);
-	const box = (i: number) => {
-		const w = Math.min(widths[i], Math.max(budget, 0));
+	const place = (i: number, text: string, w: number): ShownLabel => {
 		const anchor = anchorOf(i);
-		const left = anchor === "start" ? positions[i] : anchor === "end" ? positions[i] - w : positions[i] - w / 2;
-		return [left, left + w] as const;
-	};
-	if (indices[indices.length - 1] !== n - 1) {
-		const previous = indices[indices.length - 1];
-		if (box(previous)[1] + 4 > box(n - 1)[0]) {
-			if (indices.length > 1) indices.pop();
-			// Only the first label is left to drop, and the first must stay: share
-			// the span between them instead, so both ends show and never touch.
-			else budget = Math.max(0, (positions[n - 1] - positions[0]) / (edgeAnchored ? 2 : 1) - 8);
+		let x = positions[i];
+		let left = anchor === "start" ? x : anchor === "end" ? x - w : x - w / 2;
+		if (anchor === "middle" && w <= hi - lo) {
+			// Shift a centred box inside the bounds rather than clip it.
+			const shift = Math.max(lo - left, Math.min(0, hi - (left + w)));
+			left += shift;
+			x += shift;
 		}
-		indices.push(n - 1);
+		return { index: i, text, anchor, x, left, right: left + w };
+	};
+	/** The label at `i`, truncated to at most `budget` px, placed at its anchor. */
+	const fitTo = (i: number, budget: number): ShownLabel => {
+		const cut = truncate(texts[i], widths[i], budget, measure);
+		return place(i, cut, cut === texts[i] ? widths[i] : measure(cut));
+	};
+	const whole = (i: number) => place(i, texts[i], widths[i]);
+	const clear = (a: ShownLabel, b: ShownLabel) => b.left - a.right >= LABEL_GAP - 1e-6;
+	const inside = (label: ShownLabel) => label.left >= lo - 0.5 && label.right <= hi + 0.5;
+	const withinBounds = (i: number) => (w: number) => inside(place(i, "", w));
+
+	if (n === 1) return [fitTo(0, widthWhere(widths[0], withinBounds(0)))];
+
+	const k0 = Math.max(1, Math.ceil((Math.max(...widths) + 12) / Math.max(slot, 1)));
+	for (let k = k0; k < n - 1; k++) {
+		const indices: number[] = [];
+		for (let i = 0; i < n - 1; i += k) indices.push(i);
+		const last = whole(n - 1);
+		// The last always shows: drop the stride label just before it if they touch.
+		if (indices.length > 1 && !clear(whole(indices[indices.length - 1]), last)) indices.pop();
+		const shown = [...indices.map(whole), last];
+		if (shown.every(inside) && shown.every((label, j) => j === 0 || clear(shown[j - 1], label))) return shown;
 	}
-	return indices.map((index) => ({ index, text: fit(index), anchor: anchorOf(index) }));
+
+	// Only the two ends are left. Keep the first whole (within the bounds) and
+	// give the last whatever room remains: "the space it actually has".
+	const lastMin = minimalWidth(texts[n - 1], widths[n - 1], measure);
+	let first = fitTo(0, widthWhere(widths[0], withinBounds(0)));
+	const lastFits = (w: number) => {
+		const box = place(n - 1, "", w);
+		return box.left - first.right >= LABEL_GAP && inside(box);
+	};
+	let room = widthWhere(widths[n - 1], lastFits);
+	if (room < lastMin) {
+		// Not even `X…` fits beside a whole first label: the first yields.
+		const lastBox = place(n - 1, "", lastMin);
+		first = fitTo(0, widthWhere(widths[0], (w) => withinBounds(0)(w) && lastBox.left - place(0, "", w).right >= LABEL_GAP));
+		room = lastMin;
+	}
+	return [first, fitTo(n - 1, room)];
 }
 
-/** Truncate to `budget` px with a trailing ellipsis (binary search on length). */
+/** Widest w in [0, max] for which `ok(w)` holds (ok is monotone: true → false). */
+function widthWhere(max: number, ok: (w: number) => boolean): number {
+	if (ok(max)) return max;
+	let a = 0;
+	let b = max;
+	for (let step = 0; step < 24; step++) {
+		const mid = (a + b) / 2;
+		if (ok(mid)) a = mid; else b = mid;
+	}
+	return a;
+}
+
+/** Narrowest truncation of a label: its first glyph and `…` (or itself). */
+function minimalWidth(text: string, width: number, measure: (text: string) => number): number {
+	const chars = Array.from(text);
+	if (chars.length <= 1) return width;
+	return Math.min(width, measure(`${chars[0]}…`));
+}
+
+/**
+ * Truncate to `budget` px with a trailing ellipsis (binary search on length).
+ * A budget too small for any glyph yields a bare `…`, never the whole text:
+ * returning the full label there was how an over-long label overlapped.
+ */
 export function truncate(text: string, width: number, budget: number, measure: (text: string) => number): string {
-	if (width <= budget || budget <= 0) return text;
+	if (width <= budget) return text;
 	const chars = Array.from(text);
 	let lo = 0;
 	let hi = chars.length;

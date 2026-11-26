@@ -24,8 +24,12 @@ export type Mark = { c: number; s: number };
 export type TipRow = { swatch?: string; label?: string; value: string };
 export type Tip = { heading?: string; rows: TipRow[]; notes?: string[] };
 
-/** Tooltip anchor in plot px: `y` is the mark's top, `below` its bottom. */
-export type Anchor = { x: number; y: number; below?: number };
+/**
+ * Tooltip anchor in plot px: `y` is the mark's top, `below` its bottom.
+ * With `side`, the tooltip sits beside `x` instead (its near edge at `x`),
+ * vertically centred on `y` — the wide donut's placement (X5).
+ */
+export type Anchor = { x: number; y: number; below?: number; side?: "left" | "right" };
 
 /** Every series/slice colour, as Tailwind classes so they are emitted. */
 export const FILL = ["fill-chart-1", "fill-chart-2", "fill-chart-3", "fill-chart-4", "fill-chart-5", "fill-chart-6", "fill-chart-7"];
@@ -63,36 +67,72 @@ function useWidth() {
 	return [ref, width] as const;
 }
 
+/** One shared canvas for every chart's text measurement; contexts are cheap
+ * to reuse and a canvas per chart would be one more allocation per render. */
+let sharedContext: CanvasRenderingContext2D | null = null;
+function measuringContext(): CanvasRenderingContext2D | null {
+	// Only a real context is cached: a null (no canvas yet, or a test engine
+	// without one) is retried by the next chart instead of pinning every chart
+	// to the estimate for the page's lifetime.
+	if (sharedContext) return sharedContext;
+	try {
+		sharedContext = typeof document === "undefined" ? null : document.createElement("canvas").getContext("2d");
+	} catch {
+		sharedContext = null;
+	}
+	return sharedContext;
+}
+
+/** Builds a cached measurer for one font; the estimate when there is no canvas. */
+export function textMeasurer(font: string | null, context: CanvasRenderingContext2D | null = measuringContext()) {
+	const cache = new Map<string, number>();
+	return (text: string) => {
+		let w = cache.get(text);
+		if (w === undefined) {
+			let measured: number | undefined;
+			if (font && context?.measureText) {
+				context.font = font;
+				measured = context.measureText(text)?.width;
+			}
+			w = measured !== undefined && Number.isFinite(measured) && (measured > 0 || text === "") ? measured : estimateWidth(text);
+			cache.set(text, w);
+		}
+		return w;
+	};
+}
+
 /**
- * Text width at the label font. Real glyph widths via canvas where the browser
- * offers one (spec §2: label thinning must use measured widths so 32 labels on
- * a 360px phone never overlap); the 6.6 px/char estimate otherwise.
+ * Text width at the label font. Real glyph widths via canvas (spec §2: label
+ * thinning must use measured widths so 32 labels on a 360px phone never
+ * overlap); the 6.6 px/char estimate until then, or where there is no canvas.
+ *
+ * Why a layout effect and a font version (R3): the round-1 hook read
+ * `ref.current` inside `useMemo` during the first render, before the probe's
+ * ref was attached, so the canvas path never ran and zh-CN labels (≈1.6× the
+ * estimate) overlapped. The effect runs after the ref attaches and before
+ * paint, so the first painted frame already uses canvas widths; it bumps again
+ * when web fonts finish loading, since a fallback face measures differently.
  */
 export function useMeasure(ref: React.RefObject<HTMLElement | null>, width: number) {
-	return useMemo(() => {
-		let context: CanvasRenderingContext2D | null = null;
-		try {
-			const node = ref.current;
-			if (node && typeof document !== "undefined") {
-				context = document.createElement("canvas").getContext("2d");
-				const style = getComputedStyle(node);
-				if (context) context.font = `${style.fontWeight} 12px ${style.fontFamily || "sans-serif"}`;
-			}
-		} catch {
-			context = null;
-		}
-		const cache = new Map<string, number>();
-		return (text: string) => {
-			let w = cache.get(text);
-			if (w === undefined) {
-				const measured = context?.measureText?.(text)?.width;
-				w = measured && Number.isFinite(measured) ? measured : estimateWidth(text);
-				cache.set(text, w);
-			}
-			return w;
-		};
-		// Re-measure on resize only; the font does not change per render.
-	}, [width]);
+	const [font, setFont] = useState<string | null>(null);
+	const [fontsVersion, setFontsVersion] = useState(0);
+	useLayoutEffect(() => {
+		const node = ref.current;
+		if (!node || typeof getComputedStyle === "undefined") return;
+		const style = getComputedStyle(node);
+		const next = `${style.fontWeight || "400"} 12px ${style.fontFamily || "sans-serif"}`;
+		setFont((prev) => (prev === next ? prev : next));
+	}, [ref, width, fontsVersion]);
+	useEffect(() => {
+		const fonts = typeof document === "undefined" ? undefined : document.fonts;
+		if (!fonts?.ready) return;
+		let live = true;
+		void fonts.ready.then(() => { if (live) setFontsVersion((v) => v + 1); });
+		return () => { live = false; };
+	}, []);
+	// A new measurer per font (and per fonts-ready pass) drops widths cached
+	// against the fallback face.
+	return useMemo(() => textMeasurer(font), [font, fontsVersion]);
 }
 
 export type DataTable = {
@@ -168,20 +208,40 @@ function TipLine({ row }: { row: TipRow }) {
  * Floating tooltip (spec §5 "Tooltip style"/"Placement"): elevated ground,
  * overlay shadow, no border, pointer-events none, positioned in the chart's
  * relative container so it never moves layout. Placement is written straight
- * to the node in a layout effect — 8px above the mark, flipped below at the
- * top edge, clamped 4px inside the chart — so there is no second render and
- * no frame where it sits at the wrong spot.
+ * to the node in a layout effect so there is no second render and no frame
+ * where it sits at the wrong spot:
+ * - default: 8px above the mark, flipped below at the top edge, clamped 4px
+ *   inside the chart horizontally and inside [0, limit] vertically, where
+ *   `limit` is the plot's bottom — so it never parks over the x-axis labels
+ *   or the "Chart data" button below them (X4; round 1 put a percent-column
+ *   tooltip below the SVG, QA Q2).
+ * - `anchor.side` (wide donut, X5): beside the ring on the slice's side,
+ *   vertically centred on the slice, its width capped to the room outside
+ *   the ring so it never covers the ring or the centre readout (design D1).
  */
-function Tooltip({ tip, anchor, width }: { tip: Tip; anchor: Anchor; width: number }) {
+function Tooltip({ tip, anchor, width, limit }: { tip: Tip; anchor: Anchor; width: number; limit: number }) {
 	const ref = useRef<HTMLDivElement>(null);
 	useLayoutEffect(() => {
 		const node = ref.current;
 		if (!node) return;
+		const side = anchor.side;
+		node.style.maxWidth = side
+			? `${Math.max(96, Math.min(256, side === "right" ? width - anchor.x - 4 : anchor.x - 4))}px`
+			: "";
 		const w = node.offsetWidth;
 		const h = node.offsetHeight;
-		const left = Math.max(4, Math.min(anchor.x - w / 2, width - w - 4));
-		let top = anchor.y - 8 - h;
-		if (top < 0) top = (anchor.below ?? anchor.y) + 8;
+		let left: number;
+		let top: number;
+		if (side) {
+			left = side === "right" ? anchor.x : anchor.x - w;
+			top = anchor.y - h / 2;
+		} else {
+			left = anchor.x - w / 2;
+			top = anchor.y - 8 - h;
+			if (top < 0) top = (anchor.below ?? anchor.y) + 8;
+		}
+		left = Math.max(4, Math.min(left, width - w - 4));
+		top = Math.max(0, Math.min(top, limit - h));
 		node.style.left = `${left}px`;
 		node.style.top = `${top}px`;
 	});
@@ -195,11 +255,26 @@ function Tooltip({ tip, anchor, width }: { tip: Tip; anchor: Anchor; width: numb
 	);
 }
 
+/**
+ * What chart drawings and legends get besides the active mark. `hover`
+ * previews a mark (mouse enter/leave) and is ignored while something is
+ * pinned; `toggle` pins a mark or, if it is already pinned, dismisses it —
+ * the touch path for legend rows and "Also:" items (U2), where hover never
+ * happens.
+ */
+export type ChartControls = { hover: (mark: Mark | null) => void; toggle: (mark: Mark) => void };
+
 export type SurfaceProps = {
 	title: string;
 	tableId: string;
 	width: number;
 	height: number;
+	/**
+	 * Bottom of the plotted marks in px (top of the x-axis labels). The
+	 * tooltip stays above it so it never covers the axis or the "Chart data"
+	 * button (X4). Defaults to `height`.
+	 */
+	plotBottom?: number;
 	/** `data-inline-plot`, the chart kind tests and the fixture key off. */
 	kind: string;
 	/** Navigation grid: columns (←/→) by rows (↑/↓). */
@@ -213,63 +288,123 @@ export type SurfaceProps = {
 	/** Line-like charts scrub horizontally under a dragging finger. */
 	scrub?: boolean;
 	header?: ReactNode;
-	children: (active: Mark | null, setActive: (mark: Mark | null) => void) => ReactNode;
-	after?: (active: Mark | null, setActive: (mark: Mark | null) => void) => ReactNode;
+	children: (active: Mark | null, controls: ChartControls) => ReactNode;
+	after?: (active: Mark | null, controls: ChartControls) => ReactNode;
 	/** Class for the svg; height is always the real pixel height. */
 	svgClass?: string;
 	svgWidth?: number;
 };
+
+/** Touch slop in px: a press that moves less than this is a tap (X7, native's 8dp). */
+const TAP_SLOP = 8;
+
+type Gesture = { id: number; x: number; y: number; scrubbing: boolean };
 
 /**
  * One chart: ONE tab stop with `role="group"` / `aria-roledescription` (spec
  * §5 "Keyboard"), the SVG at its real pixel size (viewBox == rendered size,
  * so circles stay round — the stretched 320×100 viewBox was the operator's
  * "axes are not proper, the scale is off"), and the shared active mark.
+ *
+ * The root is forced LTR (X8): plot geometry is physical — the y axis is on
+ * the left, x grows rightward — and SVG `text-anchor` resolves against the
+ * inherited `direction`, so under `<html dir="rtl">` (Urdu) every end-anchored
+ * tick label rendered INTO the plot (review R2). Label content keeps `<bdi>`
+ * isolation, so Urdu strings still shape right-to-left inside their boxes.
  */
 export function ChartSurface(props: SurfaceProps) {
-	const { title, tableId, width, height, kind, columns, rows, exists, hit, tip, announce, scrub, header, children, after, svgClass, svgWidth = width } = props;
+	const { title, tableId, width, height, plotBottom = height, kind, columns, rows, exists, hit, tip, announce, scrub, header, children, after, svgClass, svgWidth = width } = props;
 	const [active, setActiveState] = useState<Mark | null>(null);
+	const activeRef = useRef(active);
+	activeRef.current = active;
 	const pinned = useRef(false);
-	const dragging = useRef<number | null>(null);
+	const gesture = useRef<Gesture | null>(null);
 	const root = useRef<HTMLDivElement>(null);
 	const setActive = useCallback((mark: Mark | null) => {
 		setActiveState((prev) => (prev?.c === mark?.c && prev?.s === mark?.s ? prev : mark));
 	}, []);
 	const valid = useCallback((mark: Mark) => !exists || exists(mark), [exists]);
+	const clear = useCallback(() => {
+		pinned.current = false;
+		setActive(null);
+	}, [setActive]);
+	const controls = useMemo<ChartControls>(() => ({
+		hover: (mark) => { if (!pinned.current) setActive(mark); },
+		toggle: (mark) => {
+			// Read the committed mark from a ref, not inside a state updater:
+			// updaters must stay pure (StrictMode runs them twice), and this one
+			// also flips `pinned`.
+			const prev = activeRef.current;
+			const same = pinned.current && prev?.c === mark.c && prev?.s === mark.s;
+			pinned.current = !same;
+			setActive(same ? null : mark);
+		},
+	}), [setActive]);
 
 	// A pinned (tapped) tooltip dismisses on a tap anywhere outside the chart.
 	useEffect(() => {
 		const dismiss = (event: globalThis.PointerEvent) => {
-			if (pinned.current && !root.current?.contains(event.target as Node)) {
-				pinned.current = false;
-				setActive(null);
-			}
+			if (pinned.current && !root.current?.contains(event.target as Node)) clear();
 		};
 		document.addEventListener("pointerdown", dismiss);
 		return () => document.removeEventListener("pointerdown", dismiss);
-	}, [setActive]);
+	}, [clear]);
 
 	const locate = (event: PointerEvent<HTMLDivElement>) => {
 		const rect = event.currentTarget.getBoundingClientRect();
 		return hit(event.clientX - rect.left, event.clientY - rect.top);
 	};
+	// Touch (X7, review R4 / UX U1): nothing activates on pointerdown. A press
+	// is a TAP only if it lifts within TAP_SLOP; a horizontal drag on a
+	// line-like chart becomes a scrub; anything else is the page scrolling.
+	// Round 1 pinned on pointerdown, so every chart a thumb scrolled across
+	// flashed a tooltip and the last one kept it with the rest dimmed. When the
+	// browser takes the gesture for `pan-y` it sends pointercancel, which now
+	// clears pending AND pinned state.
+	const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+		if (event.pointerType !== "touch") return;
+		gesture.current = { id: event.pointerId, x: event.clientX, y: event.clientY, scrubbing: false };
+	};
 	const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-		if (event.pointerType === "touch") {
-			if (scrub && dragging.current === event.pointerId) setActive(locate(event));
+		if (event.pointerType !== "touch") {
+			// A mouse hovering the plot takes over from any pin (a clicked legend
+			// row): hover is the mouse's way to read a mark.
+			pinned.current = false;
+			setActive(locate(event));
 			return;
+		}
+		const g = gesture.current;
+		if (!g || g.id !== event.pointerId) return;
+		const dx = event.clientX - g.x;
+		const dy = event.clientY - g.y;
+		if (!g.scrubbing) {
+			if (Math.hypot(dx, dy) <= TAP_SLOP) return;
+			if (!scrub || Math.abs(dy) >= Math.abs(dx)) {
+				// The page is scrolling under this finger: not a tap, not ours.
+				gesture.current = null;
+				clear();
+				return;
+			}
+			g.scrubbing = true;
+			pinned.current = true;
 		}
 		setActive(locate(event));
 	};
-	const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-		if (event.pointerType !== "touch") return;
-		// Tap to inspect, tap the same mark again to dismiss (spec §5 "Touch").
+	const onPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+		const g = gesture.current;
+		if (event.pointerType !== "touch" || !g || g.id !== event.pointerId) return;
+		gesture.current = null;
+		if (g.scrubbing) return; // a scrub leaves its last mark pinned
+		if (Math.hypot(event.clientX - g.x, event.clientY - g.y) > TAP_SLOP) return;
+		// Tap to inspect, tap the same mark again (or empty plot) to dismiss.
 		const mark = locate(event);
-		const same = pinned.current && mark && active && mark.c === active.c && mark.s === active.s;
-		pinned.current = Boolean(mark) && !same;
-		setActive(same ? null : mark);
-		dragging.current = scrub ? event.pointerId : null;
+		if (mark) controls.toggle(mark);
+		else clear();
 	};
-	const endDrag = () => { dragging.current = null; };
+	const onPointerCancel = () => {
+		gesture.current = null;
+		clear();
+	};
 	const onPointerLeave = (event: PointerEvent<HTMLDivElement>) => {
 		if (event.pointerType !== "touch" && !pinned.current) setActive(null);
 	};
@@ -281,13 +416,23 @@ export function ChartSurface(props: SurfaceProps) {
 	const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
 		if (event.key === "Escape") {
 			if (active) event.stopPropagation();
-			pinned.current = false;
-			setActive(null);
+			clear();
 			return;
 		}
-		const current = active ?? first();
-		if (!current) return;
+		const start = first();
+		if (!start) return;
 		const vertical = event.key === "ArrowUp" || event.key === "ArrowDown";
+		const arrow = vertical || event.key === "ArrowLeft" || event.key === "ArrowRight";
+		if (!active) {
+			// From rest (after Escape, or a click-focus) the first arrow lands ON
+			// mark 0 instead of stepping past it, as desktop and native do (U3).
+			if (arrow) {
+				event.preventDefault();
+				setActive(start);
+				return;
+			}
+		}
+		const current = active ?? start;
 		const next = { ...current };
 		if (vertical) {
 			if (rows < 2) return;
@@ -313,19 +458,19 @@ export function ChartSurface(props: SurfaceProps) {
 	return (
 		<div ref={root} role="group" tabIndex={0} aria-roledescription={messageRuntime.t("relay.chart.role")}
 			aria-label={title} aria-describedby={tableId} onKeyDown={onKeyDown} onFocus={onFocus} onBlur={onBlur}
-			className="relative rounded-sm text-meta outline-offset-4">
+			dir="ltr" style={{ direction: "ltr" }} className="relative rounded-sm text-meta outline-offset-4">
 			{header}
 			<div className="relative" style={{ touchAction: "pan-y" }}
-				onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={endDrag}
-				onPointerCancel={endDrag} onPointerLeave={onPointerLeave}>
-				<svg aria-hidden="true" data-inline-plot={kind} width={svgWidth} height={height}
+				onPointerMove={onPointerMove} onPointerDown={onPointerDown} onPointerUp={onPointerUp}
+				onPointerCancel={onPointerCancel} onPointerLeave={onPointerLeave}>
+				<svg aria-hidden="true" data-inline-plot={kind} width={svgWidth} height={height} direction="ltr"
 					viewBox={`0 0 ${svgWidth} ${height}`} className={`block max-w-full overflow-visible ${svgClass ?? ""}`}>
-					<g className="lo-chart-in">{children(active, setActive)}</g>
+					<g className="lo-chart-in">{children(active, controls)}</g>
 				</svg>
-				{shown && <Tooltip tip={shown.tip} anchor={shown.anchor} width={width} />}
+				{shown && <Tooltip tip={shown.tip} anchor={shown.anchor} width={width} limit={plotBottom} />}
 			</div>
-			{after?.(active, setActive)}
-			<div className="sr-only" aria-live="polite">{active && valid(active) ? announce(active) : ""}</div>
+			{after?.(active, controls)}
+			<div className="sr-only" aria-live="polite" dir="auto">{active && valid(active) ? announce(active) : ""}</div>
 		</div>
 	);
 }

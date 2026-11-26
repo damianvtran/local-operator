@@ -20,7 +20,7 @@ import type { CategoryChart, Heatmap, Scatter } from "../inline-ui-parts";
 import type { InlineSeries } from "../inline-series";
 import {
 	MARGIN, NARROW_BELOW, PERCENT_TICKS, type Ticks, alignedTicks, axisLabel, bestTextOn, donutDiameter,
-	exactSum, exactValue, foldSlices, niceTicks, plotHeight, relaxLabels, scale, shareText, snap, thinLabels,
+	exactSum, exactValue, foldSlices, niceTicks, pieShareText, plotHeight, relaxLabels, scale, shareText, snap, thinLabels,
 	tickFormatter, tickTarget, truncate, valueDomain, withUnit,
 } from "../lib/chart-geometry";
 import { messageRuntime, useLocaleSnapshot } from "../store";
@@ -58,8 +58,10 @@ function YAxis({ ticks, y, left, right, format, side = "left", grid = true }: {
 	format: (v: number) => string; side?: "left" | "right"; grid?: boolean;
 }) {
 	return <g>
-		{ticks.values.map((v) => (
-			<g key={v}>
+		{/* Keyed by index (X11): sub-1e-20 or otherwise degenerate tick sets
+			can repeat a value, and React drops duplicate keys' siblings. */}
+		{ticks.values.map((v, i) => (
+			<g key={i}>
 				{grid && <line x1={left} x2={right} y1={snap(y(v))} y2={snap(y(v))} strokeWidth={1}
 					className={v === 0 && ticks.min < 0 ? "stroke-hairline-strong" : "stroke-hairline"} />}
 				<text x={side === "left" ? left - 8 : right + 8} y={y(v)} dominantBaseline="central"
@@ -74,13 +76,12 @@ function XLabels({ labels, xs, slot, measure, edge, top, width }: {
 	labels: readonly string[]; xs: readonly number[]; slot: number; measure: (s: string) => number;
 	edge: boolean; top: number; width: number;
 }) {
+	// thinLabels places every label (x already shifted inside the SVG), from
+	// the same measurer that sized it, so the drawn boxes are the checked ones.
 	return <g>
-		{thinLabels(labels, xs, slot, measure, edge).map(({ index, text, anchor }) => {
-			// Centred labels are kept inside the SVG so the first/last never clip.
-			const half = measure(text) / 2;
-			const x = anchor === "middle" ? Math.max(half, Math.min(width - half, xs[index])) : xs[index];
-			return <text key={index} x={x} y={top + 18} textAnchor={anchor} className="fill-ink-muted text-meta">{text}</text>;
-		})}
+		{thinLabels(labels, xs, slot, measure, edge, [0, width]).map(({ index, text, anchor, x }) => (
+			<text key={index} data-x-label={index} x={x} y={top + 18} textAnchor={anchor} className="fill-ink-muted text-meta">{text}</text>
+		))}
 	</g>;
 }
 
@@ -175,7 +176,15 @@ function CartesianChart(props: Cartesian) {
 	};
 	const hit = (x: number, py: number): Mark | null => {
 		const c = column(x);
-		if (lineLike) return { c, s: 0 };
+		if (lineLike) {
+			// The column picks the category; the series is the line nearest the
+			// pointer, so hover and ↑/↓ address the same (c, s) (review R1).
+			let best = 0;
+			for (let s = 1; s < m; s++) {
+				if (Math.abs(yOf(s)(series[s].values[c]) - py) < Math.abs(yOf(best)(series[best].values[c]) - py)) best = s;
+			}
+			return { c, s: best };
+		}
 		if (grouped) {
 			let best = 0;
 			for (let s = 1; s < m; s++) if (Math.abs(barX(c, s) + barW / 2 - x) < Math.abs(barX(c, best) + barW / 2 - x)) best = s;
@@ -205,7 +214,12 @@ function CartesianChart(props: Cartesian) {
 			value: valueText(i, c),
 		}));
 		const notes: string[] = [];
-		if (mode === "percent" || mode === "stacked") {
+		// A share of a stack that mixes signs is a share of nothing: Refunds
+		// −18 next to a Total of 52 read "20.5% of total" over the gross sum
+		// (X6, design D2). Stacked keeps Total and drops the share then; a
+		// same-sign stack keeps both.
+		const mixed = series.some((ser) => ser.values[c] > 0) && series.some((ser) => ser.values[c] < 0);
+		if (mode === "percent" || (mode === "stacked" && !mixed)) {
 			const sum = series.reduce((acc, ser) => acc + Math.abs(ser.values[c]), 0) || 1;
 			notes.push(t("relay.chart.share", { share: shareText(locale, Math.abs(series[s].values[c]) / sum) }));
 		}
@@ -215,15 +229,19 @@ function CartesianChart(props: Cartesian) {
 			const ys = series.map((_, i) => yOf(i)(series[i].values[c]));
 			anchor = { x: xs[c], y: Math.min(...ys), below: Math.max(...ys) };
 		} else if (mode === "stacked" || mode === "percent") {
-			const tops = segments[c].flatMap(({ from, to }) => [y(from), y(to)]);
-			anchor = { x: xs[c], y: Math.min(...tops), below: Math.max(...tops) };
+			// Anchor at the HOVERED segment, not the stack (X4): a percent column
+			// always reaches the plot top, so the stack anchor always flipped the
+			// tooltip below the plot, over the x labels (QA Q2).
+			const { from, to } = segments[c][s];
+			anchor = { x: xs[c], y: Math.min(y(from), y(to)), below: Math.max(y(from), y(to)) };
 		} else {
 			const { to } = segments[c][s];
 			anchor = { x: barX(c, s) + barW / 2, y: Math.min(y(0), y(to)), below: Math.max(y(0), y(to)) };
 		}
 		return { tip: { heading: labels[c], rows, notes }, anchor };
 	};
-	const announce = ({ c, s }: Mark) => join(labels[c], m > 1 ? series[s].label : undefined, valueText(s, c), position(c, n, locale));
+	const seriesName = (s: number) => (series[s].right ? t("relay.chart.right_axis", { label: series[s].label }) : series[s].label);
+	const announce = ({ c, s }: Mark) => join(labels[c], m > 1 ? seriesName(s) : undefined, valueText(s, c), position(c, n, locale));
 
 	const legend = m > 1 && <>{series.map((ser, i) => (
 		<LegendItem key={i} swatch={SWATCH[i]} dashed={ser.right}
@@ -233,7 +251,7 @@ function CartesianChart(props: Cartesian) {
 	return (
 		<div ref={probe} className="text-meta">
 			<ChartSurface title={title} tableId={tableId} width={width} height={height} kind={kind}
-				columns={n} rows={lineLike ? 1 : m} scrub={lineLike}
+				columns={n} rows={m} scrub={lineLike} plotBottom={bottom}
 				hit={hit} tip={tip} announce={announce}
 				header={<HeaderRow start={percent ? undefined : unit} end={rightUnit}>{legend}</HeaderRow>}>
 				{(active) => {
@@ -250,7 +268,9 @@ function CartesianChart(props: Cartesian) {
 								{n > 1 && <polyline points={points} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"
 									strokeDasharray={ser.right ? "6 4" : undefined} className={`fill-none ${STROKE[s]}`} />}
 								{(n <= 12 || n === 1) && ser.values.map((v, c) => <circle key={c} cx={xs[c]} cy={yy(v)} r={n === 1 ? 4 : 2.5} className={FILL[s]} />)}
-								{active && <circle cx={xs[active.c]} cy={yy(ser.values[active.c])} r={4} strokeWidth={2} className={`${FILL[s]} stroke-canvas`} />}
+								{/* Every series gets the r4 hover dot; the active series (↑/↓) a larger ring. */}
+								{active && <circle cx={xs[active.c]} cy={yy(ser.values[active.c])} r={m > 1 && active.s === s ? 5.5 : 4} strokeWidth={2}
+									data-active-series={m > 1 && active.s === s ? "" : undefined} className={`${FILL[s]} stroke-canvas`} />}
 							</g>;
 						}) : segments.map((segs, c) => segs.map(({ from, to }, s) => {
 							if (from === to) return null;
@@ -293,10 +313,10 @@ function HorizontalBars({ value, tableId, width }: { value: CategoryChart; table
 	const n = data.length;
 	const labelW = Math.min(Math.round(width * 0.4), Math.max(28, ...data.map(([l]) => Math.ceil(measure(axisLabel(l))))) + 8);
 	const plotW = Math.max(40, width - labelW - MARGIN.right);
-	// Value ticks: the §2 rule with the target taken from the plot WIDTH (one
-	// tick per ~64px) — the spec gives no horizontal target; this keeps labels
-	// from touching on a 360px phone.
-	const ticks = niceTicks(...valueDomain(data.map(([, v]) => v), "bar"), Math.min(6, Math.max(3, Math.floor(plotW / 64))));
+	// Value ticks: the §2 rule with the target taken from the plot WIDTH, one
+	// tick per ~96px, 3–6 — the spec gives no horizontal target, and this is
+	// the desktop's density, so both surfaces agree at one width (design D5).
+	const ticks = niceTicks(...valueDomain(data.map(([, v]) => v), "bar"), Math.min(6, Math.max(3, Math.floor(plotW / 96))));
 	const format = tickFormatter(locale, ticks);
 	const x = scale(ticks, labelW, labelW + plotW);
 	const rowsH = n * 28;
@@ -310,11 +330,11 @@ function HorizontalBars({ value, tableId, width }: { value: CategoryChart; table
 	});
 	return (
 		<div ref={probe} className="text-meta">
-			<ChartSurface title={title} tableId={tableId} width={width} height={height} kind="bar" columns={n} rows={1}
+			<ChartSurface title={title} tableId={tableId} width={width} height={height} plotBottom={rowsH} kind="bar" columns={n} rows={1}
 				hit={hit} tip={tip} announce={({ c }) => join(data[c][0], valueText(c), position(c, n, locale))}
 				header={<HeaderRow end={unit} />}>
 				{(active) => <>
-					{ticks.values.map((v) => <g key={v}>
+					{ticks.values.map((v, i) => <g key={i}>
 						<line y1={0} y2={rowsH} x1={snap(x(v))} x2={snap(x(v))} strokeWidth={1} className={v === 0 && ticks.min < 0 ? "stroke-hairline-strong" : "stroke-hairline"} />
 						<text x={x(v)} y={rowsH + 18} textAnchor="middle" className="fill-ink-muted text-meta tabular-nums">{format(v)}</text>
 					</g>)}
@@ -370,7 +390,7 @@ function ScatterChart({ value, tableId, width }: { value: Scatter; tableId: stri
 	const xs = xTicks.values.map(x);
 	return (
 		<div ref={probe} className="text-meta">
-			<ChartSurface title={title} tableId={tableId} width={width} height={bottom + MARGIN.bottom} kind="scatter"
+			<ChartSurface title={title} tableId={tableId} width={width} height={bottom + MARGIN.bottom} plotBottom={bottom} kind="scatter"
 				columns={data.length} rows={1} hit={hit} tip={tip}
 				announce={({ c }) => join(...lines(order[c]).map((l) => l.value), position(c, data.length, locale))}
 				header={<HeaderRow start={yLabel} end={xLabel} />}>
@@ -441,13 +461,15 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 	const height = D + 24;
 	const cx = width / 2;
 	const cy = height / 2;
-	const labelOf = (i: number) => (slices[i].source === -1 ? t("relay.chart.other", { count: String(slices[i].folded!.length) }) : slices[i].label);
+	const labelOf = (i: number) => (slices[i].source === -1
+		? t("relay.chart.other", { count: new Intl.NumberFormat(locale).format(slices[i].folded!.length) })
+		: slices[i].label);
 	const fill = (i: number) => (slices[i].source === -1 ? OTHER_FILL : FILL[i]);
 	const swatch = (i: number) => (slices[i].source === -1 ? OTHER_SWATCH : SWATCH[i]);
 	const fraction = (i: number) => slices[i].value / total;
-	const pct = (i: number) => shareText(locale, fraction(i));
-	// "Other" is a sum of authored values: print it at their precision.
-	const ringPct = (f: number) => new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(f);
+	// One share text everywhere on the donut (X9): ring, labels, legend,
+	// "Also:", centre readout, tooltip and announcement.
+	const pct = (i: number) => pieShareText(locale, fraction(i));
 	const valueText = (i: number) => withUnit(slices[i].folded
 		? exactSum(locale, slices[i].folded!.map(({ value: v }) => v))
 		: exactValue(locale, slices[i].value), unit);
@@ -484,12 +506,16 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 	};
 	// Narrow/touch: no floating tooltip — the centre readout IS the tooltip,
 	// so a finger never covers it (spec §3/§5).
+	// Wide: beside the ring on the slice's side, centred on the slice's height
+	// (X5). Round 1 anchored above the slice and flipped DOWN at the top edge,
+	// so a top-half slice's tooltip covered the ring and the centre readout
+	// (design D1). The side edge is R + 8 from the centre, outside the ring.
 	const tip = ({ c }: Mark) => {
 		if (!wide) return null;
 		const a = mid(c);
-		const px = cx + (R + 8) * Math.sin(a);
-		const py = cy - (R + 8) * Math.cos(a);
-		return { tip: tipFor(c), anchor: { x: px, y: Math.min(py, cy - R), below: Math.max(py, cy - R) } };
+		const right = Math.sin(a) >= 0;
+		const anchor: Anchor = { x: cx + (right ? R + 8 : -(R + 8)), y: cy - R * Math.cos(a), side: right ? "right" : "left" };
+		return { tip: tipFor(c), anchor };
 	};
 
 	// Outside labels on wide columns for slices ≥ 3% (spec §3), relaxed apart.
@@ -528,13 +554,16 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 		<div ref={probe} className="text-meta">
 			<ChartSurface title={title} tableId={tableId} width={width} height={height} kind="pie" columns={slices.length} rows={1}
 				hit={hit} tip={tip} announce={announce}
-				after={(active, setActive) => <>
+				after={(active, { hover, toggle }) => <>
 					{!wide && (
 						// Narrow legend: 2-column grid, rows interactive (spec §3 "Narrow").
+						// A tap (click) pins the slice into the centre readout (U2): at
+						// 180px a 1% slice is a ~5px arc, so on a phone the legend is the
+						// only way to reach it; hover alone never fires for a finger.
 						<div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2">
 							{slices.map((_, i) => (
-								<div key={i} className={`flex min-w-0 items-center gap-1.5 ${dim(Boolean(active) && active?.c !== i)}`}
-									onPointerEnter={() => setActive({ c: i, s: 0 })} onPointerLeave={() => setActive(null)}>
+								<div key={i} data-pie-legend={i} className={`flex min-w-0 items-center gap-1.5 ${dim(Boolean(active) && active?.c !== i)}`}
+									onPointerEnter={() => hover({ c: i, s: 0 })} onPointerLeave={() => hover(null)} onClick={() => toggle({ c: i, s: 0 })}>
 									<span aria-hidden="true" className={`size-2.5 shrink-0 rounded-[2px] ${swatch(i)}`} />
 									<span className="min-w-0 truncate text-ink"><bdi>{labelOf(i)}</bdi></span>
 									<span className="ms-auto text-ink-muted tabular-nums">{pct(i)}</span>
@@ -546,7 +575,8 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						<div className="mt-2 text-ink-muted">
 							{alsoParts[0]}
 							{small.map((i, k) => (
-								<span key={i} onPointerEnter={() => setActive({ c: i, s: 0 })} onPointerLeave={() => setActive(null)}>
+								<span key={i} data-pie-also={i} onPointerEnter={() => hover({ c: i, s: 0 })} onPointerLeave={() => hover(null)}
+								onClick={() => toggle({ c: i, s: 0 })}>
 									<bdi>{labelOf(i)}</bdi> {pct(i)}{k < small.length - 1 ? ", " : ""}
 								</span>
 							))}
@@ -554,7 +584,7 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						</div>
 					)}
 				</>}>
-				{(active, setActive) => <>
+				{(active, { hover }) => <>
 					{slices.map((_, i) => (
 						<path key={i} d={sector(cx, cy, R, r, angles[i][0], angles[i][1], slices.length === 1)} fillRule="evenodd"
 							className={`${fill(i)} ${dim(Boolean(active) && active?.c !== i)}`} />
@@ -568,7 +598,7 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						const rr = (R + r) / 2;
 						return <text key={`p${i}`} x={cx + rr * Math.sin(a)} y={cy - rr * Math.cos(a)} textAnchor="middle" dominantBaseline="central"
 							fill={best.color} className={`text-meta font-semibold tabular-nums ${dim(Boolean(active) && active?.c !== i)}`}>
-							{ringPct(fraction(i))}
+							{pct(i)}
 						</text>;
 					})}
 					{outside.map(({ i, y: ly, right }) => {
@@ -581,7 +611,7 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						const pctText = pct(i);
 						const label = truncate(labelOf(i), measure(labelOf(i)), room - measure(pctText) - 8, measure);
 						return <g key={`l${i}`} className={dim(Boolean(active) && active?.c !== i)}
-							onPointerEnter={() => setActive({ c: i, s: 0 })}>
+							onPointerEnter={() => hover({ c: i, s: 0 })}>
 							<polyline points={`${sx},${sy} ${ex},${ly} ${tx},${ly}`} strokeWidth={1} strokeOpacity={0.6} className="fill-none stroke-ink-muted" />
 							<text x={tx + (right ? 4 : -4)} y={ly} dominantBaseline="central" textAnchor={right ? "start" : "end"} className="text-meta">
 								<tspan className="fill-ink">{label}</tspan><tspan className="fill-ink-muted" dx={6}>{pctText}</tspan>
@@ -611,7 +641,13 @@ function HeatmapChart({ value, tableId, width }: { value: Heatmap; tableId: stri
 	const cellW = Math.max(4, (width - left) / columns.length);
 	const gridH = rows.length * rowH;
 	const height = gridH + MARGIN.bottom;
-	// Sequential fill (spec §4): color-mix(in oklab, accent t%, surface), t = 12 + 88 × fraction.
+	// Sequential fill (spec §4): color-mix(in oklab, accent t%, surface),
+	// t = FLOOR + (100 − FLOOR) × fraction. The spec's floor of 12 left the
+	// lowest cell at 1.08:1 against the ground (oneLight), indistinguishable
+	// from empty ground and from the no-data hatch (X10); 20 — the floor the
+	// desktop design review proposed for all three surfaces — lifts the
+	// 31-theme minimum to 1.20:1 (median 1.39:1) with the top end unchanged.
+	const FLOOR = 20;
 	const mix = (tt: number) => `color-mix(in oklab, var(--lo-accent) ${tt}%, var(--lo-surface))`;
 	const fraction = (v: number) => (hi === lo ? 1 : (v - lo) / (hi - lo));
 	const hit = (px: number, py: number): Mark | null => {
@@ -631,14 +667,14 @@ function HeatmapChart({ value, tableId, width }: { value: Heatmap; tableId: stri
 	const legend = numbers.length > 0 && (
 		<span className="ms-auto inline-flex items-center gap-2 tabular-nums">
 			<bdi>{withUnit(exactValue(locale, lo), unit)}</bdi>
-			<span aria-hidden="true" className="inline-block h-2 w-30 rounded-full" style={{ backgroundImage: `linear-gradient(to right, ${mix(12)}, ${mix(100)})` }} />
+			<span aria-hidden="true" className="inline-block h-2 w-30 rounded-full" style={{ backgroundImage: `linear-gradient(to right, ${mix(FLOOR)}, ${mix(100)})` }} />
 			<bdi>{withUnit(exactValue(locale, hi), unit)}</bdi>
 		</span>
 	);
 	const xs = columns.map((_, c) => left + cellW * (c + 0.5));
 	return (
 		<div ref={probe} className="text-meta">
-			<ChartSurface title={title} tableId={tableId} width={width} height={height} kind="heatmap" columns={columns.length} rows={rows.length}
+			<ChartSurface title={title} tableId={tableId} width={width} height={height} plotBottom={gridH} kind="heatmap" columns={columns.length} rows={rows.length}
 				hit={hit} tip={tip}
 				announce={({ c, s }) => join(rowLabels[s], columns[c], cellText(c, s), position(s * columns.length + c, rows.length * columns.length, locale))}
 				header={<HeaderRow>{legend}</HeaderRow>}>
@@ -655,7 +691,7 @@ function HeatmapChart({ value, tableId, width }: { value: Heatmap; tableId: stri
 					))}
 					{rows.map((row, s) => row.map((v, c) => (
 						<rect key={`${s}-${c}`} x={left + c * cellW + 1} y={s * rowH + 1} width={cellW - 2} height={rowH - 2} rx={3}
-							fill={v === null ? `url(#${hatch})` : undefined} style={v === null ? undefined : { fill: mix(12 + 88 * fraction(v)) }}
+							fill={v === null ? `url(#${hatch})` : undefined} style={v === null ? undefined : { fill: mix(FLOOR + (100 - FLOOR) * fraction(v)) }}
 							className={dim(Boolean(active) && !(active?.c === c && active?.s === s))} />
 					)))}
 					<XLabels labels={columns} xs={xs} slot={cellW} measure={measure} edge={false} top={gridH - 0} width={width} />

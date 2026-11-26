@@ -23,10 +23,23 @@ describe("nice ticks (spec §2)", () => {
 		const ticks = niceTicks(...valueDomain([84.04, 101.2, 140.61, 153.66], "line"), tickTarget(240));
 		expect(ticks.values).toEqual([80, 100, 120, 140, 160]);
 	});
-	it("targets 3 ticks at the 180px phone plot and 5 at 240", () => {
-		expect(tickTarget(180)).toBe(3);
+	it("never targets fewer than 4 ticks, so the 180px phone plot also gets 80…160 (X1)", () => {
+		expect(tickTarget(180)).toBe(4);
 		expect(tickTarget(240)).toBe(5);
-		expect(niceTicks(84.04, 153.66, 3).values.length).toBeLessThanOrEqual(4);
+		expect(tickTarget(120)).toBe(4);
+		expect(tickTarget(400)).toBe(6);
+		// The operator's series at both plot heights: 360px phone and 760px column.
+		const domain = valueDomain([84.04, 101.2, 140.61, 153.66], "line");
+		for (const width of [360, 760]) {
+			expect(niceTicks(...domain, tickTarget(plotHeight(width))).values).toEqual([80, 100, 120, 140, 160]);
+		}
+	});
+	it("prints tiny-value ticks in scientific notation with unique labels (R7)", () => {
+		const ticks = niceTicks(1e-21, 3e-21, 4);
+		const labels = ticks.values.map(tickFormatter("en", ticks));
+		expect(new Set(labels).size).toBe(labels.length);
+		expect(labels.every((label) => /E-2\d$/.test(label))).toBe(true);
+		expect(labels.join(" ")).not.toContain("0.0000");
 	});
 	it("keeps 0 in every bar domain and on a line that reaches near it", () => {
 		expect(niceTicks(...valueDomain([12, 40], "bar"), 5).values[0]).toBe(0);
@@ -61,6 +74,23 @@ describe("number format (spec §2)", () => {
 		expect(exactValue("en", 12_345.67)).toBe("12,345.67");
 		expect(exactValue("fr", 1234.5).replace(/\s/g, " ")).toBe("1 234,5");
 	});
+	it("picks the fewest decimals that keep every compact tick distinct (X3)", () => {
+		const around = niceTicks(10_050, 10_300, 5);
+		const a = around.values.map(tickFormatter("en", around));
+		expect(new Set(a).size).toBe(a.length);
+		expect(a).toEqual(["10.05K", "10.10K", "10.15K", "10.20K", "10.25K", "10.30K"]);
+		const million = niceTicks(1_000_000, 1_004_000, 4);
+		const b = million.values.map(tickFormatter("en", million));
+		expect(b).toEqual(["1.000M", "1.001M", "1.002M", "1.003M", "1.004M"]);
+		// Round thousands still read 0K, 50K, 100K: no decimals when none are needed.
+		const round = niceTicks(0, 100_000, 3);
+		expect(round.values.map(tickFormatter("en", round))).toEqual(["0", "50K", "100K"]);
+		// Past 3 decimals, compact cannot tell them apart: full grouped numbers.
+		const fine = niceTicks(1_000_000, 1_000_400, 4);
+		const c = fine.values.map(tickFormatter("en", fine));
+		expect(new Set(c).size).toBe(c.length);
+		expect(c[0]).toBe("1,000,000");
+	});
 	it("joins units with no space for %, ‰, °, °C and °F", () => {
 		expect(withUnit("12", "USD")).toBe("12 USD");
 		expect(withUnit("12", "%")).toBe("12%");
@@ -89,6 +119,68 @@ describe("x labels (spec §2)", () => {
 		});
 		for (let i = 1; i < boxes.length; i++) expect(boxes[i][0]).toBeGreaterThan(boxes[i - 1][1]);
 	});
+	// X2 / QA Q1: every check below rebuilds each box from what the renderer
+	// draws (x, text-anchor, measured text), not from thinLabels' own numbers.
+	const drawnBoxes = (shown: ReturnType<typeof thinLabels>, measure: (s: string) => number) =>
+		shown.map(({ x, anchor, text }) => {
+			const w = measure(text);
+			const left = anchor === "start" ? x : anchor === "end" ? x - w : x - w / 2;
+			return [left, left + w] as const;
+		});
+	const lineLayout = (n: number, width: number, gutterLeft = 40, right = 12) => {
+		const slot = (width - gutterLeft - right) / Math.max(1, n - 1);
+		return { slot, xs: Array.from({ length: n }, (_, i) => gutterLeft + i * slot) };
+	};
+	const expectClean = (labels: string[], width: number, measure: (s: string) => number, edge = true) => {
+		const { slot, xs } = edge ? lineLayout(labels.length, width) : (() => {
+			const s = (width - 40 - 12) / labels.length;
+			return { slot: s, xs: labels.map((_, i) => 40 + s * (i + 0.5)) };
+		})();
+		const shown = thinLabels(labels, xs, slot, measure, edge, [0, width]);
+		const boxes = drawnBoxes(shown, measure);
+		expect(shown[0].index).toBe(0);
+		expect(shown[shown.length - 1].index).toBe(labels.length - 1);
+		for (const [left, right] of boxes) {
+			expect(left).toBeGreaterThanOrEqual(-0.5);
+			expect(right).toBeLessThanOrEqual(width + 0.5);
+		}
+		for (let i = 1; i < boxes.length; i++) expect(boxes[i][0] - boxes[i - 1][1]).toBeGreaterThanOrEqual(4 - 1e-6);
+		return shown;
+	};
+	const days = (from: Date, n: number) => Array.from({ length: n }, (_, i) =>
+		new Date(from.getTime() + i * 86_400_000).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }));
+
+	it("keeps QA's Q1 cases disjoint: 32 real days and a 7-day dual at 360/366", () => {
+		const october = days(new Date(Date.UTC(2025, 9, 25)), 32);
+		expect(october[0]).toBe("Oct 25");
+		expect(october[31]).toBe("Nov 25");
+		for (const width of [360, 366]) expectClean(october, width, estimateWidth);
+		const week = days(new Date(Date.UTC(2025, 10, 16)), 7);
+		// Dual: a right-axis gutter narrows the plot on both sides.
+		const { slot, xs } = lineLayout(7, 366, 40, 44);
+		const shown = thinLabels(week, xs, slot, estimateWidth, true, [0, 366]);
+		const boxes = drawnBoxes(shown, estimateWidth);
+		for (let i = 1; i < boxes.length; i++) expect(boxes[i][0] - boxes[i - 1][1]).toBeGreaterThanOrEqual(4 - 1e-6);
+	});
+
+	it("never overlaps long labels at 360 or 760, truncating the last to the room it has", () => {
+		const quarters = Array.from({ length: 32 }, (_, i) => `Week ${i + 1} of the quarterly reporting period`);
+		const stamps = Array.from({ length: 32 }, (_, i) => `2025-11-${String(16 + Math.floor(i / 4)).padStart(2, "0")} ${String((i % 4) * 6).padStart(2, "0")}:00 UTC`);
+		// A wider face than the estimate too (zh-CN glyphs measure ~1.6×).
+		const wide = (s: string) => Array.from(s).length * 10.5;
+		for (const measure of [estimateWidth, wide]) {
+			for (const width of [360, 760]) {
+				for (const labels of [quarters, stamps, quarters.slice(0, 2), stamps.slice(0, 3)]) {
+					for (const edge of [true, false]) expectClean(labels, width, measure, edge);
+				}
+			}
+		}
+		const shown = expectClean(quarters, 360, estimateWidth);
+		expect(shown).toHaveLength(2);
+		expect(shown[0].text).toBe("Week 1 of the quarterly reporting period");
+		expect(shown[1].text.endsWith("…")).toBe(true);
+	});
+
 	it("truncates labels with an ellipsis rather than overlapping or hiding an end", () => {
 		const shown = thinLabels(["A very long category name indeed", "Another long one here"], [40, 120], 80, estimateWidth, false);
 		expect(shown.map(({ index }) => index)).toEqual([0, 1]);

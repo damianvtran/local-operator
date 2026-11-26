@@ -30,6 +30,11 @@ describe("chartPalette", () => {
 		expect(slots).toHaveLength(7);
 		expect(slots[0]).toBe(palette.accent.toUpperCase());
 		expect(new Set(slots).size).toBe(7);
+		// Slot 1 IS the theme accent, which the algorithm never adjusts, so it is
+		// held to the 3:1 non-text floor itself (R5) — a future palette with a
+		// faint accent must fail here, not ship a faint first series. Derived
+		// slots are stepped to the algorithm's 3.05:1.
+		for (const ground of grounds) expect(contrast(slots[0], ground)).toBeGreaterThanOrEqual(3);
 		for (const slot of slots.slice(1)) for (const ground of grounds) expect(contrast(slot, ground)).toBeGreaterThanOrEqual(3.05);
 		// Series use slots 1-4: they must stay apart under red-green deficiency.
 		for (let i = 0; i < 4; i++) for (let j = i + 1; j < 4; j++) expect(cvdDistance(slots[i], slots[j])).toBeGreaterThan(6);
