@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
+from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.session import Session
 from local_operator.session_factory import (
     _latest_user_query,
@@ -337,7 +338,8 @@ def test_a_saved_selection_outranks_a_team_suggestion(monkeypatch, tmp_path) -> 
     """A resume keeps its journalled identity; the team never rewrites it."""
     from local_operator import session_factory as session_factory_module
 
-    saved = SimpleNamespace(provider="savedhost", model_id="savedmodel")
+    # Use the reader's concrete result so this covers the unmarked legacy default.
+    saved = StoredModelSelection(provider="savedhost", model_id="savedmodel")
     monkeypatch.setattr(
         session_factory_module, "resume_dir", lambda config_dir, resume_id: tmp_path
     )
