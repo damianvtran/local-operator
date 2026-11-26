@@ -31,6 +31,7 @@ import {
 	useSessionSettings,
 } from "../lib/settings-defer";
 import {
+	clearPendingContinuation,
 	getPendingContinuation,
 	settleWakingContinuation,
 	submitContinuation,
@@ -1087,6 +1088,17 @@ export function Composer({
 		if (errorRoute.current !== pid) return;
 		setErrorOccurrence(current => current === errorOccurrence ? { message: "" } : current);
 	};
+	/* THE FAILURE THIS COMPOSER'S LAST SEND RAISED, tied to the envelope it
+	   submitted. The row that later proves delivery must clear exactly that
+	   sentence and exactly the body the failure handed back — never an
+	   unrelated alert (a slash refusal, a refused attachment, a dictation) and
+	   never text the user typed since. Copy is not identity here: two failures
+	   share `CONTINUATION_ERROR`, so the occurrence object itself is recorded. */
+	const [failedSend, setFailedSend] = useState<{
+		commandId: string;
+		text: string;
+		occurrence: { message: string };
+	} | null>(null);
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
@@ -1481,14 +1493,22 @@ export function Composer({
 		   saw, and showing it here replaced a definite answer with a vaguer one.
 		   See `FailedWake`; the settle effect rebuilds the tracker from it. */
 		const failed = pending ? failedWakeFor(pid, pending.command_id) : undefined;
-		setError(
-			!pending
+		const occurrence = {
+			message: !pending
 				? ""
 				: failed
 					? failed.unconfirmed
 						? UNCONFIRMED_WAKE_ERROR
 						: messageRuntime.t("relay.health.ended_send_failed")
 					: RETAINED_RETRY_ERROR,
+		};
+		setErrorOccurrence(occurrence);
+		/* Recorded beside the copy, so the retirement effect can tell THIS
+		   failure's sentence from any other alert that replaced it. */
+		setFailedSend(
+			pending !== null && occurrence.message !== ""
+				? { commandId: pending.command_id, text: pending.text, occurrence }
+				: null,
 		);
 	}, [pid]);
 
@@ -1786,7 +1806,13 @@ export function Composer({
 				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(unconfirmed ? UNCONFIRMED_WAKE_ERROR : messageRuntime.t("relay.health.ended_send_failed"));
+			const occurrence = {
+				message: unconfirmed ? UNCONFIRMED_WAKE_ERROR : messageRuntime.t("relay.health.ended_send_failed"),
+			};
+			setErrorOccurrence(occurrence);
+			/* The retirement effect clears this one by identity when the row lands
+			   after all (the tracker keeps a failed wake for exactly that). */
+			setFailedSend({ commandId: waking.commandId, text: waking.text, occurrence });
 		} else if (outcome === null) {
 			/* Settled out from under the tracker (the envelope is gone): the row,
 			   if any is left, no longer knows a wake is running. */
@@ -1809,6 +1835,43 @@ export function Composer({
 		pid, projection.transcript, projection.transcript_head_pinned, projection.transcript_has_older,
 		projection.pid, projection.ended, projection.wake_failed, wakeDeadlineTick, armWakeDeadline, clearWakeDeadline,
 	]);
+
+	/* AN ENVELOPE THE TRANSCRIPT ALREADY CARRIES IS SETTLED, WHOEVER RETAINED IT.
+	   `settleWakingContinuation` retires one only for the id the composer holds a
+	   waking tracker for, and this composer rebuilds that tracker only while a
+	   held row still says `waking` — which a reload wipes, and which an ambiguous
+	   504 (the send may have landed) never had. So a message the session had
+	   already written kept its "may have been delivered" card, its Retry and a
+	   blocked send; and the failure the catch handed back kept that body in the
+	   composer under a sentence offering to retry a message the session already
+	   wrote — one tap from a duplicate under a fresh id. The row under the
+	   envelope's id IS that message (same UUID), so the envelope, its echo, the
+	   failure copy and the body it handed back all come down here.
+	   The failure's sentence is cleared by the OCCURRENCE this composer recorded
+	   when it raised it, never by its copy: an unrelated alert that replaced it
+	   must survive, and so must a draft typed since — only the exact body the
+	   failure restored is the envelope's. */
+	useEffect(() => {
+		const envelope = retryEnvelope;
+		const failure = failedSend;
+		const pendingId = envelope?.command_id ?? failure?.commandId ?? null;
+		if (pendingId === null) return;
+		if (!projectionCarriesCommand(projection.transcript, pendingId)) return;
+		if (envelope !== null) {
+			clearPendingContinuation(pid);
+			setRetryEnvelope(null);
+			/* The painted echo is filtered on the tail (m4, deferred): the projection
+			   carrying the row is what makes it a twin, so its own filter is left to it. */
+			withdrawPendingEcho(pid, envelope.command_id);
+		}
+		if (failure !== null) {
+			setFailedSend(null);
+			setErrorOccurrence((current) =>
+				current === failure.occurrence ? { message: "" } : current,
+			);
+			if (textRef.current.trim() === failure.text.trim()) clearDraft();
+		}
+	}, [pid, projection.transcript, retryEnvelope, failedSend]);
 
 	const addFiles = async (files: Iterable<File>) => {
 		/* Nothing silent: a file that cannot be attached (not an image, or one
@@ -2286,6 +2349,7 @@ export function Composer({
 				/* A new attempt supersedes any failure this route last reported: from
 				   here the receipt (or this send's own error) is the answer. */
 				forgetFailedWake(pid);
+				setFailedSend(null);
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -2302,7 +2366,10 @@ export function Composer({
 					(envelope) => {
 						/* A retry of an envelope the session already wrote paints nothing:
 						   the projection owns that row and a second one under the same id is
-						   the duplicate this reconciliation exists to prevent. */
+						   the duplicate this reconciliation exists to prevent. Defensive
+						   today — the retirement effect retires a carried envelope before its
+						   Retry is on screen (m2) — but it makes the paint rule total at the
+						   one moment the id is issued, which is what the next caller needs. */
 						if (projectionCarriesCommand(projection.transcript, envelope.command_id)) return;
 						registerPendingEcho(pid, {
 							commandId: envelope.command_id,
@@ -2479,7 +2546,7 @@ export function Composer({
 				setCaret(null);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(
+			const message =
 				/* A 400 that names the delivery modes is a REFUSAL with a remedy,
 				   rendered verbatim rather than swallowed as a generic retry line:
 				   the relay could not honour queue/both for this owner, and the
@@ -2509,7 +2576,18 @@ export function Composer({
 						? messageRuntime.t("relay.health.ended_send_failed")
 						: projection.streaming
 							? STEER_ERROR
-							: CONTINUATION_ERROR,
+							: CONTINUATION_ERROR;
+			/* WHICH failure this is, not which copy: the occurrence is recorded
+			   with the id it submitted, so the row that proves delivery clears
+			   this exact sentence and the draft it handed back — an unrelated
+			   alert of any wording, and text typed since, stay. P3's retry has no
+			   card left by then; the record is what still ties the catch to its row. */
+			const occurrence = { message };
+			setErrorOccurrence(occurrence);
+			setFailedSend(
+				submitted.echo === null
+					? null
+					: { commandId: submitted.echo.commandId, text: submitted.echo.text, occurrence },
 			);
 		} finally {
 			setSending(false);

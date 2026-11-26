@@ -249,9 +249,11 @@ export function hasPendingContinuation(sessionId: string): boolean {
 }
 
 /** Settle the envelope a `waking` answer left retained, against what the
- * session's stream now shows. Only the envelope `wakingCommandId` names is
- * settled here; any other retained envelope (an ambiguous 504, a reload) keeps
- * its existing retry affordance, whose same-id replay is already safe.
+ * session's stream now shows. This settles only the envelope `wakingCommandId`
+ * names — the one a wake is being watched for. Any other retained envelope (an
+ * ambiguous 504, a reload) is settled by the composer's retirement effect on
+ * the same evidence, the projection's row under the envelope's id; this
+ * function is the waking path's share of that one rule, not a second rule.
  *
  * `"delivered"`: the projection carries a row under the envelope's id — the
  * session wrote the message, the definitive acknowledgement of this UUID — so
