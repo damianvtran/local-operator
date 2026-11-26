@@ -16,7 +16,7 @@ import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 import yaml
@@ -29,8 +29,10 @@ from local_operator.team_bridge.card_projection import (
     EXCERPT_CARD_WINDOW,
     EXCERPT_MAX_BYTES,
     EXCERPT_MAX_CHARS,
+    EXCERPT_MEMO_NAME,
     EXCERPTS_PER_CARD,
     PENDING_CARD,
+    ExcerptMemo,
     attach_history_excerpts,
     bounded_excerpt,
     model_card_text,
@@ -1647,3 +1649,224 @@ def test_an_unusable_row_time_omits_received_at_only() -> None:
         "thread_reply": False
     }
     assert _card_facts({"entry_ts": True}) == {"thread_reply": False}
+
+
+# -- the memo survives a runtime restart (warm cache across idle-exit) --------
+#
+# A headless runtime idle-exits after 90 s and is relaunched inside the 1 h
+# provider cache TTL. With an in-memory memo every excerpted card past the
+# window re-rendered ids-only after the relaunch, moving bytes deep in history:
+# 24 of 25 message-level cache misses on one chief-of-staff session.
+
+
+def _memo_path(root: Path) -> Path:
+    directory = root / "sessions" / "s1"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / EXCERPT_MEMO_NAME
+
+
+def _persisted_host(root: Path) -> SimpleNamespace:
+    host = _memo_host(root)
+    host._bridge_excerpt_memo = ExcerptMemo.load(_memo_path(root))
+    return host
+
+
+def _past_window_context(root: Path, key: str) -> list[Any]:
+    """Card 1 excerpted at first render, then pushed past the window."""
+    _record_turn_body(root, key, "bcmsg_00000001", "SECRET-BODY-ONE settled early")
+    return [_numbered_card(n) for n in range(1, 2 + EXCERPT_CARD_WINDOW + 1)]
+
+
+def test_the_memo_round_trips_through_its_file(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    host = _persisted_host(tmp_path)
+    context = _past_window_context(tmp_path, key)
+    _rendered(host, context[:1])
+    _rendered(host, context)
+    live = host._bridge_excerpt_memo
+
+    restored = ExcerptMemo.load(_memo_path(tmp_path))
+    assert set(restored) == set(live) and len(restored) == len(context)
+    for card_id, decided in live.items():
+        again = restored[card_id]
+        assert again.made_for(decided.text)
+        assert {mid: s.body_sha256 for mid, s in again.excerpts.items()} == {
+            mid: s.body_sha256 for mid, s in decided.excerpts.items()
+        }
+    assert list(restored["entry0001"].excerpts) == ["bcmsg_00000001"]
+
+
+def test_a_restarted_session_renders_the_same_card_bytes(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    before_host = _persisted_host(tmp_path)
+    _rendered(before_host, context[:1])
+    before = _rendered(before_host, context)
+    assert "SECRET-BODY-ONE" in before[0], "precondition: frozen with an excerpt"
+
+    # The relaunch: a new process, a memo read back from disk.
+    after = _rendered(_persisted_host(tmp_path), context)
+    assert after == before
+    # The read-only (aside/clearance) path renders the same prefix too.
+    restarted = _persisted_host(tmp_path)
+    from local_operator.session.session import Session
+
+    transform = Session._bridge_history_transform
+    shaped = transform(restarted, context, read_only=True)  # type: ignore[arg-type]
+    assert [model_card_text(item, shaped) for item in shaped] == before
+
+    # Control: an empty memo is what used to ship — card 1 lost its excerpt.
+    cold = _rendered(_memo_host(tmp_path), context)
+    assert "SECRET-BODY-ONE" not in cold[0] and cold[0] != before[0]
+
+
+def test_a_restored_excerpt_still_drops_when_its_body_is_deleted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    host = _persisted_host(tmp_path)
+    _rendered(host, context[:1])
+    _rendered(host, context)
+
+    _delete_hub_answer(tmp_path, key, "bcmsg_00000001")
+    restarted = _persisted_host(tmp_path)
+    assert "untrusted excerpt" not in _rendered(restarted, context)[0]
+    assert restarted._bridge_excerpt_memo["entry0001"].excerpts == {}
+
+
+def test_revocation_and_compaction_clear_remove_the_file(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    host = _persisted_host(tmp_path)
+    _rendered(host, context)
+    assert _memo_path(tmp_path).is_file()
+
+    # Fence refusal: the Session's own path clears the memo, and with it the file.
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: {"code": "consent_revoked"})
+    _rendered(host, context)
+    assert not _memo_path(tmp_path).exists()
+    assert ExcerptMemo.load(_memo_path(tmp_path)) == {}
+
+    # Compaction calls the same ``clear()`` on the memo (``_finish_compaction``).
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _rendered(host, context)
+    assert _memo_path(tmp_path).is_file()
+    host._bridge_excerpt_memo.clear()
+    assert not _memo_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "",
+        "{not json",
+        "[]",
+        json.dumps({"version": 99, "cards": {}}),
+        json.dumps({"version": 1, "cards": []}),
+    ],
+)
+def test_a_missing_or_corrupt_file_is_a_fresh_memo(tmp_path: Path, content: str | None) -> None:
+    path = _memo_path(tmp_path)
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    memo = ExcerptMemo.load(path)
+    assert memo == {}
+    memo.persist()  # nothing changed: nothing written over the bad file
+    assert path.exists() == (content is not None)
+
+
+def test_a_malformed_entry_leaves_only_that_card_undecided(tmp_path: Path) -> None:
+    good = {"text_sha256": "a" * 64, "excerpts": {"bcmsg_00000001": "b" * 64}}
+    path = _memo_path(tmp_path)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cards": {
+                    "good": good,
+                    "bad_sha": {"text_sha256": "nope", "excerpts": {}},
+                    "bad_body": {"text_sha256": "a" * 64, "excerpts": {"m": "raw body"}},
+                    "too_many": {
+                        "text_sha256": "a" * 64,
+                        "excerpts": {f"m{i}": "b" * 64 for i in range(EXCERPTS_PER_CARD + 1)},
+                    },
+                    "not_a_dict": "x",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert list(ExcerptMemo.load(path)) == ["good"]
+
+
+def test_the_file_never_holds_body_or_card_text(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.team_bridge import authority
+
+    monkeypatch.setattr(authority, "authority_fence", lambda runtime: None)
+    _sign_in_radient(tmp_path)
+    key = _owner_key(_owner())
+    context = _past_window_context(tmp_path, key)
+    host = _persisted_host(tmp_path)
+    _rendered(host, context[:1])
+    rendered = _rendered(host, context)
+    raw = _memo_path(tmp_path).read_text(encoding="utf-8")
+    assert "SECRET-BODY-ONE" in rendered[0], "precondition: the excerpt was sent"
+    assert "SECRET-BODY-ONE" not in raw and "settled early" not in raw
+    assert "Direct message" not in raw and "untrusted" not in raw
+    # Only digests and ids: every leaf string is a sha256 hex.
+    leaves = [
+        value
+        for entry in json.loads(raw)["cards"].values()
+        for value in [entry["text_sha256"], *entry["excerpts"].values()]
+    ]
+    assert leaves and all(len(value) == 64 for value in leaves)
+    assert stat.S_IMODE(os.stat(_memo_path(tmp_path)).st_mode) == 0o600
+
+
+async def _never_streams() -> AsyncIterator[Any]:
+    # Construction only: the session is never prompted.
+    raise AssertionError("not prompted")
+    yield  # pragma: no cover - makes this an async generator
+
+
+def test_the_session_loads_its_persisted_memo(tmp_path: Path) -> None:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    path = _memo_path(tmp_path)
+    path.write_text(
+        json.dumps(
+            {"version": 1, "cards": {"entry0001": {"text_sha256": "a" * 64, "excerpts": {}}}}
+        ),
+        encoding="utf-8",
+    )
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+        stream_fn=lambda request, signal: _never_streams(),
+        tools=[],
+        transcript=Transcript(path.parent),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    memo = session._bridge_excerpt_memo
+    assert isinstance(memo, ExcerptMemo) and list(memo) == ["entry0001"]
+    memo.clear()
+    assert not path.exists()
