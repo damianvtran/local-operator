@@ -2677,6 +2677,27 @@ def _cold_witness(handle: BinaryIO) -> tuple[int, int, int, int]:
     return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
+_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES = 64 << 10
+
+
+def _rfind_checkpoint_spelling(window: bytes, needle: bytes, start: int, stop: int) -> int:
+    """Exact newest spelling, with forward substring search for the miss-heavy gaps."""
+    # CPython's forward bytes.find skips through long misses faster than
+    # bytes.rfind. Visit blocks newest-first, using reverse substring search
+    # only in the block known to contain a hit. The needle-width overlap
+    # catches split matches; indices avoid copying any of the journal bytes.
+    width = max(_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES, 2 * len(needle))
+    while stop - start >= len(needle):
+        block_start = max(start, stop - width)
+        first = window.find(needle, block_start, stop)
+        if first >= 0:
+            return window.rfind(needle, first, stop)
+        if block_start == start:
+            break
+        stop = block_start + len(needle) - 1
+    return -1
+
+
 def _recover_cold_checkpoint(
     handle: BinaryIO,
     *,
@@ -2706,7 +2727,7 @@ def _recover_cold_checkpoint(
         # The trailing newline above guarantees a delimiter even if the
         # entire window is the trailing fragment of a single oversized row.
         complete = window.find(b"\n") + 1 if floor else 0
-        hits = [window.rfind(needle, complete) for needle in needles]
+        hits = [_rfind_checkpoint_spelling(window, needle, complete, read) for needle in needles]
         newest = max(hits, default=-1)
         if newest < 0:
             outcome = "no_spelling"
@@ -2748,7 +2769,7 @@ def _recover_cold_checkpoint(
                 rejected.add(left)
                 for index, needle in enumerate(needles):
                     if hits[index] >= left:
-                        hits[index] = window.rfind(needle, complete, left)
+                        hits[index] = _rfind_checkpoint_spelling(window, needle, complete, left)
                 hit = max(hits)
             else:
                 outcome = "not_checkpoint"

@@ -22,9 +22,10 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import operator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, SupportsIndex
 
 import pytest
 
@@ -323,6 +324,85 @@ def test_false_presence_decodes_only_the_candidate(tmp_path: Path, dense_rows: i
     assert stats["lookup_outcome"] == "not_checkpoint"
     assert stats["lookup_rows"] == 1, "a nested needle must not make us decode the gap"
     assert stats["lookup_candidates"] == 1
+
+
+@pytest.mark.parametrize("far_hit", [False, True], ids=["no-hit", "far-false-hit"])
+def test_checkpoint_search_keeps_long_misses_off_the_reverse_search(far_hit: bool) -> None:
+    needles = _custom_type_spellings(WANTED[0])
+    assert needles is not None
+    raw = (_LOOKALIKE if far_hit else b"") + _DENSE_LINE * 49_849
+    forward_bytes = reverse_bytes = 0
+
+    class SearchWindow(bytes):
+        def find(
+            self, sub: Any, start: SupportsIndex | None = None, end: SupportsIndex | None = None
+        ) -> int:
+            nonlocal forward_bytes
+            if sub in needles:
+                forward_bytes += self._range_bytes(start, end)
+            return super().find(sub, start, end)
+
+        def rfind(
+            self, sub: Any, start: SupportsIndex | None = None, end: SupportsIndex | None = None
+        ) -> int:
+            nonlocal reverse_bytes
+            if sub in needles:
+                reverse_bytes += self._range_bytes(start, end)
+            return super().rfind(sub, start, end)
+
+        def _range_bytes(self, start: SupportsIndex | None, end: SupportsIndex | None) -> int:
+            return (len(self) if end is None else operator.index(end)) - (
+                0 if start is None else operator.index(start)
+            )
+
+    class Journal(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            return SearchWindow(super().read(size))
+
+    stats: dict[str, Any] = {}
+    with Journal(raw) as handle:
+        offset, recovery = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(raw),
+            max_bytes=len(raw),
+            name=WANTED[0],
+            needles=needles,
+            spend=None,
+            stats=stats,
+        )
+    assert offset == (raw.index(needles[0]) if far_hit else None) and recovery is None
+    assert stats["lookup_rows"] == stats["lookup_candidates"] == int(far_hit)
+    # Misses should use the fast forward search, with at most linear input
+    # plus boundary overlap. Only the block actually containing a hit may
+    # use reverse substring search, rather than re-probing the whole gap.
+    assert forward_bytes <= 3 * len(raw)
+    assert reverse_bytes <= (len(raw) // 8 if far_hit else 0)
+
+
+@pytest.mark.parametrize("spaced", [False, True], ids=["compact", "spaced"])
+def test_checkpoint_spelling_can_cross_a_search_block(spaced: bool) -> None:
+    needles = _custom_type_spellings(WANTED[0])
+    assert needles is not None
+    width = transcript_module._COLD_CHECKPOINT_SEARCH_BLOCK_BYTES
+    row = _LOOKALIKE.replace(b'"custom_type":', b'"custom_type": ') if spaced else _LOOKALIKE
+    expected = row.index(needles[spaced])
+    # The newer block starts one byte into the exact spelling. Whole-row
+    # validation still has to see the intact row and reject its nested hit.
+    raw = row + b" " * (width + expected - len(row)) + b"\n"
+    stats: dict[str, Any] = {}
+    with io.BytesIO(raw) as handle:
+        offset, recovery = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(raw),
+            max_bytes=len(raw),
+            name=WANTED[0],
+            needles=needles,
+            spend=None,
+            stats=stats,
+        )
+    assert offset == expected and recovery is None
+    assert stats["lookup_outcome"] == "not_checkpoint"
+    assert stats["lookup_rows"] == stats["lookup_candidates"] == 1
 
 
 @pytest.mark.parametrize("shape", ["false-newer", "real-newer", "alternate-writer"])
