@@ -58,7 +58,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from local_operator.atomic_files import atomic_write_text
 from local_operator.session.approval_policy import OVERRIDE_FILENAME
@@ -3721,6 +3721,22 @@ def sync_from(
     a copy to a device that had already been handed the id, and made a REFUSED move
     mutate the source's stamp (review round 1, MINOR 1).
     """
+    # Include every reply, even an abandoned/replanned attempt: a later recovery
+    # cannot retroactively make a degraded span durable. A wholly silent old owner
+    # is distinct from an upgraded owner that could not account for some replies.
+    statuses: set[str] = set()
+
+    def ask_replica(frame: dict[str, Any]) -> dict[str, Any]:
+        reply = ask(frame)
+        status = reply.get("audit_status")
+        if "audit_status" not in reply:
+            statuses.add("legacy")
+        elif isinstance(status, str) and status in _REPLICA_AUDIT_STATUSES:
+            statuses.add(status)
+        else:
+            statuses.add("unconfirmed")
+        return reply
+
     _session_component(session_id)
     destination = Path(into) if into is not None else replica_dir(root, session_id)
     blobs = Path(attachments_root) if attachments_root is not None else destination
@@ -3746,7 +3762,7 @@ def sync_from(
             result = pull(
                 root,
                 session_id,
-                ask=ask,
+                ask=ask_replica if purpose == "replica" else ask,
                 dest_dir=destination,
                 attachments_root=blobs,
                 have=have,
@@ -3762,6 +3778,17 @@ def sync_from(
             last = exc
             cursor = None
             continue
+        audit_result: dict[str, str] = {}
+        if purpose == "replica":
+            if "degraded" in statuses:
+                status = "degraded"
+            elif statuses == {"audited"}:
+                status = "audited"
+            elif statuses == {"legacy"}:
+                status = "legacy"
+            else:
+                status = "unconfirmed"
+            audit_result["audit_status"] = status
         if write_cursor:
             write_replica_cursor(
                 root,
@@ -3775,6 +3802,7 @@ def sync_from(
                     "attachments": result.attachments,
                     "transcript_mode": result.transcript_mode,
                     "last_synced_at": time.time(),
+                    **audit_result,
                     # WHAT THIS DEVICE CAN ATTEST TO, member by member, and the digest of
                     # that set. The cursor used to record the transcript alone, so a
                     # recovery promoted a replica with a CORRUPTED ``title.json`` (review
@@ -3796,6 +3824,7 @@ def sync_from(
             "attachments": result.attachments,
             "mode": result.transcript_mode,
             "cursor": result.cursor,
+            **audit_result,
         }
     raise last or SyncRefused("stale_plan", "the conversation kept changing while it was copied")
 
@@ -4673,6 +4702,150 @@ def _release_registration(kind: str, server: "RelayServer", thread: threading.Th
 # ---------------------------------------------------------------------------
 
 
+_REPLICA_AUDIT_EVENT = "session.replica.admitted"
+_REPLICA_AUDIT_STATUSES = ("audited", "degraded", "unconfirmed")
+
+
+def _replica_audit_eligible(server: RelayServer, session_id: str) -> bool:
+    from local_operator.session.placement import HandoffJournalUnreadable, handoff_in_flight
+
+    # A whole move plan can hash to the same id as a replica plan (no torn tail).
+    # The source's own handoff state, not that digest or a peer's purpose claim,
+    # excludes moves, including one that starts after the replica plan was issued.
+    try:
+        return handoff_in_flight(server.root, session_id) is None
+    except (HandoffJournalUnreadable, UnicodeError):
+        # A journal we cannot interpret cannot substantiate replica coverage.
+        return False
+
+
+@dataclass
+class _ReplicaAdmission:
+    starts: dict[str, int]
+    plan_audited: bool
+    healthy: bool
+    next_span: tuple[str, int] | None = None
+    span_audited: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _replica_audit_healthy(server: RelayServer) -> bool:
+    try:
+        return server.audit.admits_required()
+    except Exception:  # noqa: BLE001 — an unavailable writer is not an authorization failure
+        return False
+
+
+def _audit_replica_admission(
+    server: RelayServer, peer: str, session_id: str, phase: Literal["plan", "fetch", "verify"]
+) -> bool:
+    from local_operator.network.audit import AuditEvent
+
+    try:
+        return server.audit.record_required(
+            AuditEvent(
+                event=_REPLICA_AUDIT_EVENT,
+                actor=peer,
+                subject=session_id,
+                outcome="ok",
+                detail={"phase": phase},
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit loss cannot refuse an authorized replica refresh
+        logger.warning("sync: replica admission audit could not be confirmed")
+        return False
+
+
+class _ReplicaAdmissions:
+    """Evidence only, never authority to serve. Auth runs before the sync handler.
+
+    Only an owner-built replica plan, scoped to its authenticated link and session,
+    can provide continuation evidence. Eviction loses evidence, not availability.
+    The existing transfer-plan cache already bounds the number of retained plans.
+    """
+
+    def __init__(self, server: RelayServer) -> None:
+        self.server = server
+        self.plans: OrderedDict[tuple[str, str, str], _ReplicaAdmission] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def plan(self, link: Any, frame: dict[str, Any], reply: dict[str, Any]) -> None:
+        session_id = str(frame["session_id"])
+        purpose = str(frame.get("purpose") or "replica")
+        key = (str(link.link_id), session_id, str(reply["plan_id"]))
+        if purpose != "replica" or not _replica_audit_eligible(self.server, session_id):
+            with self.lock:
+                self.plans.pop(key, None)
+            if purpose == "replica":
+                reply["audit_status"] = "unconfirmed"
+            return
+        transcript = reply["transcript"]
+        starts = {str(item["name"]): 0 for item in (*reply["items"], *reply["attachments"])}
+        starts[TRANSCRIPT_NAME] = int(transcript["prefix_bytes"])
+        audited = _audit_replica_admission(self.server, link.device_id, session_id, "plan")
+        healthy = _replica_audit_healthy(self.server)
+        state = _ReplicaAdmission(starts, audited and healthy, healthy)
+        with self.lock:
+            self.plans[key] = state
+            self.plans.move_to_end(key)
+            while len(self.plans) > _PLAN_CACHE_MAX:
+                self.plans.popitem(last=False)
+        reply["audit_status"] = "audited" if state.plan_audited else "degraded"
+
+    def span(
+        self,
+        link: Any,
+        frame: dict[str, Any],
+        reply: dict[str, Any],
+        phase: Literal["fetch", "verify"],
+    ) -> None:
+        session_id = str(frame["session_id"])
+        key = (str(link.link_id), session_id, str(frame.get("plan_id") or ""))
+        with self.lock:
+            state = self.plans.get(key)
+        if state is None:
+            # Nobody proved this was a replica plan. Do not apply its audit policy
+            # or change the move/legacy reply. A new holder sees missing evidence.
+            return
+        name = str(frame.get("name") or "")
+        with state.lock:
+            if (
+                name not in state.starts
+                or not _replica_audit_eligible(self.server, session_id)
+                or _plan_whole_transcript(self.server.root, session_id, key[2])
+            ):
+                with self.lock:
+                    if self.plans.get(key) is state:
+                        del self.plans[key]
+                reply["audit_status"] = "unconfirmed"
+                return
+            healthy = _replica_audit_healthy(self.server)
+            if phase == "fetch":
+                offset = int(reply["offset"])
+                previous = state.next_span
+                contiguous = previous == (name, offset)
+                planned = (previous is None or previous[0] != name) and state.starts[name] == offset
+                state.next_span = (name, offset + int(reply["bytes"]))
+            else:
+                # The prefix answer itself discloses evidence. Give each resume a
+                # receipt, then let it cover the contiguous bytes after that prefix.
+                contiguous = planned = False
+                state.next_span = (
+                    (name, int(frame.get("prefix_bytes") or 0)) if reply["matches"] else None
+                )
+            if not healthy:
+                audited = False
+            elif not state.healthy or not (contiguous or planned):
+                audited = _audit_replica_admission(self.server, link.device_id, session_id, phase)
+            else:
+                # A fresh resume receipt can cover its continuation, not a
+                # different member whose initial plan failed to reach disk.
+                audited = state.span_audited if contiguous else state.plan_audited
+            state.healthy = _replica_audit_healthy(self.server)
+            state.span_audited = audited and state.healthy
+            reply["audit_status"] = "audited" if state.span_audited else "degraded"
+
+
 def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[str, Any]]:
     """The ``net_sync`` handler for one relay.
 
@@ -4682,17 +4855,28 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
     deadlock ``PeerLink.request`` refuses (build plan §0 finding 4).
     """
 
+    admissions = _ReplicaAdmissions(server)
+
     def _handle(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
         phase = str(frame.get("phase") or "")
         session_id = str(frame.get("session_id") or "")
         if not session_id:
             raise _refusal("bad_request", "a sync needs a conversation id")
+        # The relay has already authorized the request against current membership
+        # and session scope. This slow op runs off the event loop, including fsync.
+        # Only annotate successful source replies; nothing here can authorize egress.
         if phase == "plan":
-            return _plan(server, link, frame)
+            reply = _plan(server, link, frame)
+            admissions.plan(link, frame, reply)
+            return reply
         if phase == "fetch":
-            return _fetch(server, frame)
+            reply = _fetch(server, frame)
+            admissions.span(link, frame, reply, "fetch")
+            return reply
         if phase == "verify":
-            return _verify(server, frame)
+            reply = _verify(server, frame)
+            admissions.span(link, frame, reply, "verify")
+            return reply
         if phase == "available":
             # A NOTIFICATION, not a request: the holder decides whether to pull, and
             # the ack is the whole handler. IT IS NO LONGER THE WHOLE BEHAVIOUR: the

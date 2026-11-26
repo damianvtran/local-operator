@@ -13,6 +13,26 @@ requesting-session identity, file writes, or UI behavior.
 **not covered by this S1 admission event**. Its transcript/attachment export is
 not a preview/download alias; do not infer that every mesh byte is audited here.
 
+### Separate policy for replica refreshes
+
+The source relay admits an authorized `net_sync` replica plan in
+`session.replica.admitted`, with the authenticated peer as actor, session as
+subject, and only the admission phase (`plan`, `fetch`, or `verify`) in detail.
+This records admission, not delivery. An owner-built replica plan on the same
+link and session covers its planned and contiguous chunks while the writer is
+healthy. Prefix verification, noncontiguous resumes, and continuation after an
+observed outage can take a fresh admission. In-flight ownership handoffs and
+whole-transcript move plans are outside this policy.
+
+A confirmed audit outage does not block an otherwise-authorized replica
+refresh. The replica receipt (`lop sessions sync --json`) and cursor expose
+`audit_status` separately from transfer success: `audited` for confirmed
+coverage throughout the attempt, `degraded` for known failed durability,
+`unconfirmed` for incomplete evidence, or `legacy` when all source replies
+omit the field. A later audited span does not erase a prior gap. These statuses
+neither grant peer access nor participate in local replica promotion. The S1
+peer-file policy below still fails closed, and moves keep their existing policy.
+
 ## Admission and durability
 
 Every owner `net_file_get` **fetch**, nonempty **stat**, and valid-prefix
