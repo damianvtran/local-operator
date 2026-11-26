@@ -59,6 +59,8 @@ from local_operator.i18n.resolve import resolve_language
 from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
 from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
+from local_operator.remote_compute import records as records_module
+from local_operator.remote_compute.api import RemoteRuns
 from local_operator.remote_compute.arguments import (
     LOCAL_ONLY_FLAGS,
     REMOTE_ONLY_FLAGS,
@@ -73,17 +75,19 @@ from local_operator.remote_compute.client import (
     RemoteComputeClient,
     charged_amount,
     check_idempotency_key,
+    is_deletable,
     new_idempotency_key,
     run_exit_code,
     run_id,
     run_max_hours,
+    run_name,
     run_network,
     run_outcome,
     run_status,
     without_secrets,
 )
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
-from local_operator.remote_compute.errors import InvalidIdempotencyKey
+from local_operator.remote_compute.errors import InvalidIdempotencyKey, RunLimitReached, RunNotFound
 from local_operator.remote_compute.messages import refusal_message
 from local_operator.remote_compute.request import (
     RunCreateRequest,
@@ -183,6 +187,60 @@ def _report(failure: BaseException) -> int:
     return _refuse(refusal_message(failure))
 
 
+#: How many finished runs the limit refusal lists: enough ids to act on, not a
+#: second run listing.
+RUN_LIMIT_LISTING = 5
+
+#: The page the limit refusal reads. Bounded on purpose — an account can hold more
+#: history than a refusal should page through, and the five printed rows come from
+#: the newest end of it.
+RUN_LIMIT_PAGE = 50
+
+
+def _report_run_limit(failure: RunLimitReached, credential: int) -> int:
+    """The limit sentence, then the finished runs whose deletion can free a slot.
+
+    THE SENTENCE ALONE IS NOT ACTIONABLE FROM A TERMINAL. On servers that count a
+    finished run until it is deleted, the remedy needs run ids, and a CLI user has
+    no run list to read them from; so the finished, deletable runs are printed
+    beside the refusal with the exact command for each.
+
+    BEST-EFFORT, AND NEVER A DIFFERENT EXIT CODE. An unreachable or unreadable
+    listing leaves the sentence — which names both commands — as the whole answer,
+    because the refusal is the reason the command failed, not the listing.
+    """
+    code = _report(failure)
+    try:
+        runs = asyncio.run(_list_runs(credential))
+    except (ValueError, OSError):
+        return code
+    listed = [run for run in runs if _finished(run)][:RUN_LIMIT_LISTING]
+    if not listed:
+        return code
+    print(_t(_wr.slot_heading()))
+    for run in listed:
+        name = run_name(run)
+        if name is None:
+            print(_t(_wr.slot_row_unnamed(run_id=run_id(run))))
+        else:
+            print(_t(_wr.slot_row(run_id=run_id(run), name=name)))
+    return code
+
+
+def _finished(run: dict[str, Any]) -> bool:
+    """Whether a listed run is finished and still deletable.
+
+    A row already marked deleted is settled but has nothing left to free, so it is
+    dropped: the list exists for the runs whose deletion changes the account. A row
+    this build cannot read is dropped rather than raising — one malformed row out
+    of fifty must not cost the operator the sentence.
+    """
+    try:
+        return bool(run_id(run)) and is_deletable(run) and run_status(run).lower() != "deleted"
+    except ValueError:
+        return False
+
+
 def _credential() -> int:
     """This device's signed-in Radient account, or the refusal that names login.
 
@@ -209,6 +267,26 @@ async def _get_run(credential: int, identifier: str) -> dict[str, Any]:
 async def _cancel_run(credential: int, identifier: str) -> dict[str, Any]:
     async with _http_client() as http:
         return await RemoteComputeClient(http, credential_id=credential).cancel_run(identifier)
+
+
+async def _delete_run(credential: int, identifier: str) -> dict[str, Any]:
+    """Delete through the LIBRARY layer, so the local record is marked too.
+
+    ``RemoteRuns`` is what the desktop's delete route calls; a client-only delete
+    would reach the server and leave this device's record claiming the run still
+    exists, which is the disagreement the shared layer exists to prevent. The
+    record lives in the config dir this process resolves, exactly as it does for
+    the GUI's daemon.
+    """
+    async with _http_client() as http:
+        runs = RemoteRuns(RemoteComputeClient(http, credential_id=credential))
+        return await runs.delete_run(identifier)
+
+
+async def _list_runs(credential: int) -> list[dict[str, Any]]:
+    async with _http_client() as http:
+        client = RemoteComputeClient(http, credential_id=credential)
+        return await client.list_runs(limit=RUN_LIMIT_PAGE)
 
 
 def _explain(status: str, announced: set[str]) -> None:
@@ -355,6 +433,116 @@ def _remote_cancel(identifier: str | None) -> int:
     return 0
 
 
+def _remote_delete(identifier: str | None, *, yes: bool) -> int:
+    """``--remote-delete``: free a finished run's slot; idempotent, switch off or on.
+
+    WHY IT READS THE RUN FIRST. On servers that count a finished run until it is
+    deleted, only a confirmed delete releases the slot — and a delete also takes
+    the run's records and results away. The desktop app offers delete only on a
+    SETTLED run, and this command mirrors that rule through :func:`is_deletable`,
+    so a live run is refused with the command that can end it instead of being
+    cancelled by a command that says delete.
+
+    IT CONFIRMS LIKE THE GUI'S DELETE DOES, and the default answer is NO. A delete
+    is permanent — the run's logs and results go with it — so the run's id and
+    name are named and a person has to say yes; ``--yes`` is the deliberate way to
+    skip that, and a process with no terminal must pass it rather than delete
+    something nobody was asked about.
+
+    THE DELETE GOES THROUGH ``RemoteRuns`` (``api.py``), the layer the desktop
+    route calls, so this device's local record is marked deleted here exactly as
+    the GUI marks it.
+
+    A RUN THE SERVER NO LONGER HAS is answered as ALREADY DELETED and succeeds.
+    The server cannot tell a repeat from an id it never held — both are 404 — and
+    the command promises idempotence, so a repeat prints that line rather than a
+    refusal. Nothing is sent on that path and nothing is destroyed, which is the
+    property that makes the answer safe.
+    """
+    if not identifier:
+        return _refuse(_t(_wr.alone()))
+    try:
+        payload = asyncio.run(_get_run(_credential(), identifier))
+    except KeyboardInterrupt:
+        return 130
+    except RunNotFound:
+        print(_t(_wr.delete_already(run_id=identifier)))
+        return 0
+    except (ValueError, OSError) as failure:
+        return _report(failure)
+    if not is_deletable(payload):
+        return _refuse(_t(_wr.delete_in_flight(run_id=identifier)))
+    if run_status(payload).lower() == "deleted":
+        # Already gone at the far end: there is nothing to confirm or send, and a
+        # repeat has to succeed. The local row is marked so the next read agrees.
+        _mark_deleted_locally(identifier)
+        print(_t(_wr.delete_already(run_id=identifier)))
+        return 0
+    if not yes:
+        if not _interactive():
+            return _refuse(_t(_wr.delete_needs_yes(run_id=identifier)))
+        name = run_name(payload)
+        question = (
+            _t(_wr.delete_confirm(run_id=identifier, name=name))
+            if name is not None
+            else _t(_wr.delete_confirm_unnamed(run_id=identifier))
+        )
+        if not _confirmed(question):
+            return _refuse(_t(_wr.delete_declined(run_id=identifier)))
+    try:
+        asyncio.run(_delete_run(_credential(), identifier))
+    except KeyboardInterrupt:
+        return 130
+    except RunNotFound:
+        # Another delete won the race between the read and the delete: the run is
+        # in the state this command was asked to put it in.
+        pass
+    except (ValueError, OSError) as failure:
+        return _report(failure)
+    print(_t(_wr.deleted(run_id=identifier)))
+    return 0
+
+
+def _mark_deleted_locally(identifier: str) -> None:
+    """Mark a run the server already deleted, without sending a request.
+
+    Best-effort for the same reason ``api.RemoteRuns.delete_run`` swallows it: the
+    run's state at the far end is the fact, and a record that cannot be written is
+    a cosmetic loss.
+    """
+    try:
+        records_module.mark_deleted(identifier)
+    except OSError:
+        return
+
+
+def _interactive() -> bool:
+    """Whether this process can ask a person: a terminal on standard input.
+
+    Named so both branches are testable without a pty, and so "can we ask?" has
+    one answer here rather than a scattered ``isatty`` per call site.
+    """
+    return sys.stdin.isatty()
+
+
+#: The answers that confirm a delete; every other answer, including an empty one,
+#: is the prompt's default of NO.
+_CONFIRM_YES = frozenset({"y", "yes"})
+
+
+def _confirmed(question: str) -> bool:
+    """Ask for confirmation and read anything but an explicit yes as no.
+
+    A bare Return, a closed stdin or an answer this build cannot read must never
+    destroy a run's logs and results, so the default is NO.
+    """
+    try:
+        answer = input(question + " ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in _CONFIRM_YES
+
+
 def _submit(args: argparse.Namespace) -> int:
     """``--remote``: refuse what cannot work, then submit and watch (or detach)."""
     if not is_enabled():
@@ -440,6 +628,8 @@ def _submit(args: argparse.Namespace) -> int:
         # A Ctrl-C here may land after the request was sent, so the run may
         # exist: saying nothing is right, sending a cancel is not.
         return 130
+    except RunLimitReached as failure:
+        return _report_run_limit(failure, credential)
     except (ValueError, OSError) as failure:
         return _report(failure)
     # A REPLAY IS ANNOUNCED, NOT SILENT. A retry whose ``--idempotency-key``
@@ -561,19 +751,29 @@ def remote_command(args: argparse.Namespace) -> int:
     _install_locale()
     status_id = getattr(args, "remote_status", None)
     cancel_id = getattr(args, "remote_cancel", None)
-    if status_id or cancel_id:
-        # The two commands are READ-ONLY or single-purpose: a prompt or any run
+    delete_id = getattr(args, "remote_delete", None)
+    # ``--yes`` CONFIRMS ONE THING ONLY. Anywhere else it would be a flag that is
+    # parsed and dropped, which reads as "this will not prompt" on a command that
+    # never prompts — so it is refused by name instead.
+    if is_set(getattr(args, "yes", None)) and not delete_id:
+        return _refuse(_t(_wr.yes_only_with_delete()))
+    if status_id or cancel_id or delete_id:
+        # The commands are READ-ONLY or single-purpose: a prompt or any run
         # flag beside one of them is a composed command that would silently drop
         # half of what was typed, so it is refused instead. ``--network`` is the
         # exception for ``--remote-status``: it names the network to compare the
         # run against, which changes no run and sends no work.
-        if (status_id and cancel_id) or is_set(getattr(args, "remote", None)):
+        if sum(1 for chosen in (status_id, cancel_id, delete_id) if chosen) > 1 or is_set(
+            getattr(args, "remote", None)
+        ):
             return _refuse(_t(_wr.alone()))
-        if _run_options_set(args, allow=("network",) if status_id else ()):
+        if _run_options_set(args, allow=("network",) if status_id else ("yes",)):
             return _refuse(_t(_wr.alone()))
         if status_id:
             return _remote_status(status_id, network=getattr(args, "network", None))
-        return _remote_cancel(cancel_id)
+        if cancel_id:
+            return _remote_cancel(cancel_id)
+        return _remote_delete(delete_id, yes=is_set(getattr(args, "yes", None)))
     if not is_set(getattr(args, "remote", None)):
         # A remote-only flag without --remote: name the flag that was typed.
         spelling = first_set(args, REMOTE_ONLY_FLAGS) or "--detach"

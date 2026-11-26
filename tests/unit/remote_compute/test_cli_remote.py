@@ -38,7 +38,8 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import cli as remote_cli
 from local_operator.remote_compute import config as config_module
 from local_operator.remote_compute import repo as repo_module
-from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS
+from local_operator.remote_compute import records as records_module
+from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS, wants_remote
 
 _t = tr("wire.remote_compute")
 
@@ -364,9 +365,7 @@ def test_a_remote_command_cannot_be_mixed_with_a_run(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert _run(["exec", "--remote", "--remote-status", RUN_ID], monkeypatch) == 1
-    assert "--remote-status and --remote-cancel are commands of their own" in (
-        capsys.readouterr().err
-    )
+    assert _t(_wr.alone()) in capsys.readouterr().err
     assert origin.requests == []
 
 
@@ -1673,3 +1672,256 @@ def test_a_repository_refusal_names_its_reason(
     detail = "abc123 (main)" if reason == repo_module.REASON_UNPUSHED else "/work/repo"
     assert remote_cli._report(UnusableRepo(reason, detail=detail)) == 1
     assert expected in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# --remote-delete: a finished run gives its slot back
+# ---------------------------------------------------------------------------
+
+
+def _recorded_run() -> None:
+    """A local observation of RUN_ID, so the shared delete layer has a row to mark."""
+    records_module.record_submission(
+        run_id=RUN_ID,
+        repo_url="https://example.invalid/repo.git",
+        repo_sha=SHA,
+        prompt="do it",
+        size="m",
+        api_origin="https://api.example.invalid",
+        status="stopped",
+    )
+
+
+def test_remote_delete_is_registered_and_yes_is_its_confirmation() -> None:
+    """Argparse level: the flag exists, takes a run id, and ``--yes`` rides with it."""
+    parser = cli_module.build_cli_parser()
+    args = parser.parse_args(["exec", "--remote-delete", RUN_ID, "--yes"])
+    assert args.remote_delete == RUN_ID
+    assert args.yes is True
+    assert wants_remote(args)
+
+
+def test_a_finished_run_is_deleted_and_the_local_record_is_marked(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The delete goes through the shared layer: the DELETE leaves AND the row is marked."""
+    _recorded_run()
+    origin.responses.extend(
+        [_poll(_stopped("n_" + "a" * 24)), httpx.Response(204)]
+    )
+    assert _run(["exec", "--remote-delete", RUN_ID, "--yes"], monkeypatch) == 0
+    assert f"Deleted remote run {RUN_ID}." in capsys.readouterr().out
+    assert [(request.method, request.url.path) for request in origin.requests] == [
+        ("GET", f"/v1/remote-compute/runs/{RUN_ID}"),
+        ("DELETE", f"/v1/remote-compute/runs/{RUN_ID}"),
+    ]
+    assert [row.deleted for row in records_module.load() if row.run_id == RUN_ID] == [True]
+
+
+def test_a_confirmed_delete_asks_with_the_run_id_and_name(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """On a terminal the question names the run, and an explicit yes is what deletes."""
+    asked: list[str] = []
+
+    def answer(question: str) -> str:
+        asked.append(question)
+        return "y"
+
+    monkeypatch.setattr(remote_cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", answer)
+    origin.responses.extend(
+        [_poll(_stopped("n_" + "a" * 24, name="nightly")), httpx.Response(204)]
+    )
+    assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 0
+    assert asked == [_t(_wr.delete_confirm(run_id=RUN_ID, name="nightly")) + " "]
+    assert "DELETE" in [request.method for request in origin.requests]
+    assert f"Deleted remote run {RUN_ID}." in capsys.readouterr().out
+
+
+def test_a_declined_delete_deletes_nothing(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default is no: a bare Return, or anything but yes, sends no DELETE."""
+    monkeypatch.setattr(remote_cli, "_interactive", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda question: "")
+    origin.responses.append(_poll(_stopped("n_" + "a" * 24)))
+    assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 1
+    assert _t(_wr.delete_declined(run_id=RUN_ID)) in capsys.readouterr().err
+    assert [request.method for request in origin.requests] == ["GET"]
+
+
+def test_no_terminal_and_no_yes_refuses_and_names_the_flag(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A script cannot confirm, so it must say ``--yes`` rather than delete silently."""
+    monkeypatch.setattr(remote_cli, "_interactive", lambda: False)
+    origin.responses.append(_poll(_stopped("n_" + "a" * 24)))
+    assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert _t(_wr.delete_needs_yes(run_id=RUN_ID)) in err
+    assert "--yes" in err
+    assert [request.method for request in origin.requests] == ["GET"]
+
+
+def test_a_run_still_in_flight_is_refused_with_the_cancel_command(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mirrors the GUI's rule: delete is offered only once the run has settled."""
+    origin.responses.append(_poll(_wire_run("running", "n_" + "a" * 24)))
+    assert _run(["exec", "--remote-delete", RUN_ID, "--yes"], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert _t(_wr.delete_in_flight(run_id=RUN_ID)) in err
+    assert f"lop exec --remote-cancel {RUN_ID}" in err
+    assert [request.method for request in origin.requests] == ["GET"]
+
+
+def test_a_repeated_delete_is_idempotent_and_says_already_deleted(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The second delete gets the server's 404 and still succeeds, keeping the promise."""
+    origin.responses.append(httpx.Response(404, json={"error": "no such run"}))
+    assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 0
+    assert _t(_wr.delete_already(run_id=RUN_ID)) in capsys.readouterr().out
+    assert [request.method for request in origin.requests] == ["GET"]
+
+
+def test_yes_beside_anything_but_delete_is_refused_not_dropped(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _run(["exec", "--remote-status", RUN_ID, "--yes"], monkeypatch) == 1
+    assert _t(_wr.yes_only_with_delete()) in capsys.readouterr().err
+    assert origin.requests == []
+
+
+# ---------------------------------------------------------------------------
+# The limit refusal hands a CLI user the ids that can free a slot
+# ---------------------------------------------------------------------------
+
+
+def _listed(*runs: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(200, json={"msg": "Runs", "result": {"runs": list(runs)}})
+
+
+def test_the_run_limit_refusal_lists_deletable_runs_with_the_delete_command(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Finished runs are named with the exact command; live and deleted rows are not."""
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(
+                _wire_run("running", network_id),
+                _stopped(network_id, name="nightly"),
+                _stopped(network_id, name="backfill"),
+                _wire_run("deleted", network_id, name="gone"),
+            ),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit()) in captured.err
+    assert _t(_wr.slot_heading()) in captured.out
+    assert f"nightly: lop exec --remote-delete {RUN_ID}" in captured.out
+    assert f"backfill: lop exec --remote-delete {RUN_ID}" in captured.out
+    assert captured.out.count("lop exec --remote-delete") == 2
+    listing = origin.requests[-1]
+    assert listing.method == "GET"
+    assert listing.url.path == "/v1/remote-compute/runs"
+
+
+def test_the_run_limit_listing_is_capped_at_five(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(*[_stopped(network_id, name=f"run{n}") for n in range(8)]),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert capsys.readouterr().out.count("lop exec --remote-delete") == 5
+
+
+def test_a_listing_that_fails_leaves_the_corrected_sentence(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The refusal is the answer; the ids are a convenience and never a second failure."""
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            httpx.Response(500, json={"error": "boom"}),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit()) in captured.err
+    assert "--remote-delete" in captured.err
+    assert _t(_wr.slot_heading()) not in captured.out
+    assert "lop exec --remote-delete" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# The copy is version-neutral and names both remedies in every locale
+# ---------------------------------------------------------------------------
+
+
+def test_every_locale_s_commands_and_limit_copy_name_the_new_flag() -> None:
+    """A locale that names only cancel would send a CLI user back to the wrong remedy."""
+    from local_operator.i18n import catalogues
+
+    for locale in catalogues.locales():
+        messages = catalogues.load_catalogue(locale, "wire.remote_compute")
+        assert "--remote-delete" in messages["wire.remote_compute.alone"], locale
+        assert "--remote-cancel" in messages["wire.remote_compute.alone"], locale
+        assert "--remote-status" in messages["wire.remote_compute.alone"], locale
+        # The limit sentence must name BOTH remedies and must not promise that
+        # finishing a run frees a slot: older servers count it until it is deleted.
+        assert "--remote-cancel" in messages["wire.remote_compute.run_limit"], locale
+        assert "--remote-delete" in messages["wire.remote_compute.run_limit"], locale
+        assert set(messages) == set(
+            catalogues.load_catalogue("en", "wire.remote_compute")
+        ), locale
+        help_messages = catalogues.load_catalogue(locale, "cli.exec_remote_help")
+        assert set(help_messages) == set(
+            catalogues.load_catalogue("en", "cli.exec_remote_help")
+        ), locale
+        assert "--remote-delete" in help_messages["cli.exec_remote_help.yes"], locale

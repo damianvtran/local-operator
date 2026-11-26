@@ -1267,6 +1267,13 @@ export type MessageParams = {
   "wire.remote_compute.bad_sha": undefined;
   "wire.remote_compute.cancelled": { "run_id": string };
   "wire.remote_compute.conflict": undefined;
+  "wire.remote_compute.delete_already": { "run_id": string };
+  "wire.remote_compute.delete_confirm": { "run_id": string; "name": string };
+  "wire.remote_compute.delete_confirm_unnamed": { "run_id": string };
+  "wire.remote_compute.delete_declined": { "run_id": string };
+  "wire.remote_compute.delete_in_flight": { "run_id": string };
+  "wire.remote_compute.delete_needs_yes": { "run_id": string };
+  "wire.remote_compute.deleted": { "run_id": string };
   "wire.remote_compute.detached": { "run_id": string; "network_id": string; "idempotency_key": string };
   "wire.remote_compute.disabled": undefined;
   "wire.remote_compute.failed": { "error": string };
@@ -1300,6 +1307,9 @@ export type MessageParams = {
   "wire.remote_compute.run_busy": undefined;
   "wire.remote_compute.run_identity_mismatch": { "answered": string; "asked_for": string };
   "wire.remote_compute.run_limit": undefined;
+  "wire.remote_compute.slot_heading": undefined;
+  "wire.remote_compute.slot_row": { "run_id": string; "name": string };
+  "wire.remote_compute.slot_row_unnamed": { "run_id": string };
   "wire.remote_compute.status_line": { "status": string };
   "wire.remote_compute.status_network_matched": { "network_id": string };
   "wire.remote_compute.status_network_mismatch": { "network_id": string };
@@ -1312,6 +1322,7 @@ export type MessageParams = {
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;
+  "wire.remote_compute.yes_only_with_delete": undefined;
   "wire.runtime_memory.approval_stop_local_force": { "address": string };
   "wire.runtime_memory.enabled.choice.false.description": undefined;
   "wire.runtime_memory.enabled.choice.true.description": undefined;

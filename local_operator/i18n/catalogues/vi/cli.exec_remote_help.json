@@ -1,6 +1,7 @@
 {
   "cli.exec_remote_help.budget_usd": "Hạn mức chi tiêu cho lần chạy này bằng đô la Mỹ (mặc định: mức máy chủ đặt ra)",
   "cli.exec_remote_help.cancel": "Hủy một lần chạy từ xa rồi thoát",
+  "cli.exec_remote_help.delete": "Xóa một lần chạy từ xa đã kết thúc, giải phóng chỗ nó đang chiếm rồi thoát",
   "cli.exec_remote_help.detach": "In ID lần chạy và khóa idempotency, rồi thoát thay vì theo dõi lần chạy",
   "cli.exec_remote_help.idempotency_key": "Khóa idempotency để dùng lại thay vì tạo mới, để lần thử lại của một lần chạy đã gửi không chạy hai lần",
   "cli.exec_remote_help.max_hours": "Số giờ lần chạy từ xa được phép chạy trước khi máy chủ dừng nó (mặc định: 2; máy chủ giới hạn mức tối đa)",
@@ -9,5 +10,6 @@
   "cli.exec_remote_help.repo": "URL Git mà lần chạy từ xa checkout. Bắt buộc với --remote: tệp cục bộ không bao giờ được tải lên",
   "cli.exec_remote_help.sha": "Commit cần checkout trong --repo. Bắt buộc với --remote",
   "cli.exec_remote_help.size": "Kích thước tính toán cho lần chạy từ xa: s, m hoặc l (mặc định: m)",
-  "cli.exec_remote_help.status": "In một lần chạy từ xa dưới dạng JSON rồi thoát"
+  "cli.exec_remote_help.status": "In một lần chạy từ xa dưới dạng JSON rồi thoát",
+  "cli.exec_remote_help.yes": "Xác nhận xóa của --remote-delete mà không hỏi. Bắt buộc khi không có terminal"
 }

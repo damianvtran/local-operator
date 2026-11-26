@@ -65,6 +65,7 @@ REMOTE_ONLY_FLAGS: tuple[tuple[str, str], ...] = (
     ("sha", "--sha"),
     ("detach", "--detach"),
     ("idempotency_key", "--idempotency-key"),
+    ("yes", "--yes"),
 )
 
 
@@ -100,6 +101,8 @@ def wants_remote(args: argparse.Namespace) -> bool:
         return True
     if is_set(getattr(args, "remote_cancel", None)):
         return True
+    if is_set(getattr(args, "remote_delete", None)):
+        return True
     return any(is_set(getattr(args, name, None)) for name, _ in REMOTE_ONLY_FLAGS)
 
 
@@ -132,6 +135,13 @@ def add_remote_arguments(parser: Any, *, help_locale: str = "en") -> None:
     parser.add_argument(
         "--remote-cancel", metavar="RUN_ID", dest="remote_cancel", help=text(_erh.cancel())
     )
+    parser.add_argument(
+        "--remote-delete", metavar="RUN_ID", dest="remote_delete", help=text(_erh.delete())
+    )
+    # ``--yes`` is here rather than in ``LOCAL_ONLY_FLAGS`` because it confirms the
+    # REMOTE delete: it is registered beside the command it belongs to, and
+    # ``remote_compute/cli.py`` refuses it beside anything else by name.
+    parser.add_argument("--yes", action="store_true", help=text(_erh.yes()))
 
 
 __all__ = [

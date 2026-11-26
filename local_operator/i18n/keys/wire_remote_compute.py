@@ -37,6 +37,34 @@ def conflict() -> Msg:
     return Msg("wire.remote_compute.conflict", {})
 
 
+def delete_already(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.delete_already", {"run_id": run_id})
+
+
+def delete_confirm(*, run_id: str, name: str) -> Msg:
+    return Msg("wire.remote_compute.delete_confirm", {"run_id": run_id, "name": name})
+
+
+def delete_confirm_unnamed(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.delete_confirm_unnamed", {"run_id": run_id})
+
+
+def delete_declined(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.delete_declined", {"run_id": run_id})
+
+
+def delete_in_flight(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.delete_in_flight", {"run_id": run_id})
+
+
+def delete_needs_yes(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.delete_needs_yes", {"run_id": run_id})
+
+
+def deleted(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.deleted", {"run_id": run_id})
+
+
 def detached(*, run_id: str, network_id: str, idempotency_key: str) -> Msg:
     return Msg(
         "wire.remote_compute.detached",
@@ -175,6 +203,18 @@ def run_limit() -> Msg:
     return Msg("wire.remote_compute.run_limit", {})
 
 
+def slot_heading() -> Msg:
+    return Msg("wire.remote_compute.slot_heading", {})
+
+
+def slot_row(*, run_id: str, name: str) -> Msg:
+    return Msg("wire.remote_compute.slot_row", {"run_id": run_id, "name": name})
+
+
+def slot_row_unnamed(*, run_id: str) -> Msg:
+    return Msg("wire.remote_compute.slot_row_unnamed", {"run_id": run_id})
+
+
 def status_line(*, status: str) -> Msg:
     return Msg("wire.remote_compute.status_line", {"status": status})
 
@@ -221,3 +261,7 @@ def unreachable() -> Msg:
 
 def unreadable_envelope() -> Msg:
     return Msg("wire.remote_compute.unreadable_envelope", {})
+
+
+def yes_only_with_delete() -> Msg:
+    return Msg("wire.remote_compute.yes_only_with_delete", {})

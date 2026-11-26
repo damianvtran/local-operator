@@ -188,6 +188,35 @@ KNOWN_RUN_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+#: The statuses a run may be DELETED in, mirroring the desktop app's rule.
+#:
+#: `remoteRunPhase` in the desktop UI (local-operator-ui's
+#: `remote-compute-types.ts`) lets a person delete a run only once its phase is
+#: settled; here that is spelled as a closed set of settled tokens. `error` and
+#: `stopping` stay OUT on purpose: the server retries an errored run and re-drives
+#: it, and `stopping` is the window after a cancel press in which the run can still
+#: spend. An unrecognised token is not here either, because the UI reads it as in
+#: flight and a permissive answer would delete a live run. `deleted` IS here: it is
+#: what a second delete finds, and an idempotent repeat must not be refused.
+DELETABLE_RUN_STATUSES: frozenset[str] = frozenset(
+    {
+        "succeeded",
+        "success",
+        "complete",
+        "completed",
+        "done",
+        "stopped",
+        "failed",
+        "timed-out",
+        "timed_out",
+        "timeout",
+        "expired",
+        "cancelled",
+        "canceled",
+        "deleted",
+    }
+)
+
 #: The outcomes a stopped run can carry, as the contract spells them.
 #:
 #: ``succeeded`` is exit 0, ``failed`` any other exit, ``expired`` a deadline and
@@ -968,6 +997,28 @@ def run_network(payload: dict[str, Any]) -> str:
 def is_terminal(payload: dict[str, Any]) -> bool:
     """Whether polling may stop for this run."""
     return run_status(payload) in TERMINAL_RUN_STATUSES
+
+
+def is_deletable(payload: dict[str, Any]) -> bool:
+    """Whether this run may be deleted — one rule for the CLI and the desktop app.
+
+    A status this build cannot name is NOT deletable: the UI treats an unknown
+    token as in flight, and a permissive reading here would let `--remote-delete`
+    free a slot by destroying a run that is still spending.
+    """
+    return run_status(payload).lower() in DELETABLE_RUN_STATUSES
+
+
+def run_name(payload: dict[str, Any]) -> str | None:
+    """The run's label, or ``None`` when it carries none.
+
+    ``None`` rather than an empty string because every caller renders it: a
+    listing row needs to know whether it has a name to show beside the id.
+    """
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
 
 
 def run_outcome(payload: dict[str, Any]) -> str:
