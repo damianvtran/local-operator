@@ -644,10 +644,11 @@ function HeatmapChart({ value, tableId, width }: { value: Heatmap; tableId: stri
 	// Sequential fill (spec §4): color-mix(in oklab, accent t%, surface),
 	// t = FLOOR + (100 − FLOOR) × fraction. The spec's floor of 12 left the
 	// lowest cell at 1.08:1 against the ground (oneLight), indistinguishable
-	// from empty ground and from the no-data hatch (X10); 20 — the floor the
-	// desktop design review proposed for all three surfaces — lifts the
-	// 31-theme minimum to 1.20:1 (median 1.39:1) with the top end unchanged.
-	const FLOOR = 20;
+	// from empty ground and from the no-data hatch (X10). 28 is the floor the
+	// desktop (#2137) and native apps use, so a heatmap reads the same on every
+	// surface; over the relay's 31 themes it puts the lowest cell at ≥ 1.36:1
+	// against canvas and ≥ 1.44:1 against surface, with the top end unchanged.
+	const FLOOR = 28;
 	const mix = (tt: number) => `color-mix(in oklab, var(--lo-accent) ${tt}%, var(--lo-surface))`;
 	const fraction = (v: number) => (hi === lo ? 1 : (v - lo) / (hi - lo));
 	const hit = (px: number, py: number): Mark | null => {

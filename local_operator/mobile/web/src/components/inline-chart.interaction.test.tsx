@@ -348,10 +348,10 @@ describe("inline chart remediation round 1", () => {
 		expect(tooltip(container)!.textContent).toContain("76.9% of total");
 	});
 
-	it("X10: the heatmap's lowest cell and legend start at the raised 20% floor", () => {
+	it("X10: the heatmap's lowest cell and legend start at the shared 28% floor", () => {
 		const { container } = show({ type: "heatmap", title: "Heat", columns: ["Mon", "Tue"], rowLabels: ["AM"], rows: [[0, 10]] } as InlineUi);
 		const cells = [...container.querySelectorAll<SVGRectElement>('[data-inline-plot="heatmap"] rect')];
-		expect(cells[0].style.fill).toContain("var(--lo-accent) 20%");
+		expect(cells[0].style.fill).toContain("var(--lo-accent) 28%");
 		expect(cells[1].style.fill).toContain("var(--lo-accent) 100%");
 	});
 
