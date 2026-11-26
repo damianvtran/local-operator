@@ -310,6 +310,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The excerpt memo's mirror. ``_path`` IS inside a session directory, but it is
+    # always ``<session dir>/EXCERPT_MEMO_NAME`` (a fixed FILE name joined by
+    # ``Session.__init__``), never the directory, a transcript or a caller-supplied
+    # name: clearing the memo (standing refusal, compaction) removes only that file.
+    (
+        "local_operator/team_bridge/card_projection.py::ExcerptMemo.clear",
+        "<path>.unlink",
+        "Unlinks the fixed-name FILE sessions/<id>/bridge-excerpt-memo.json; never a directory",
+    ),
     # The receiver's runtime record (which build is running): a config-dir
     # sidecar published by atomic replace, the same pattern as the counter above.
     # Every ``_write`` caller passes ``record_path(config_dir)`` =
