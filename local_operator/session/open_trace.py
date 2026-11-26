@@ -80,13 +80,21 @@ class DesktopEventsIngressTrace:
     On ``desktop.events.*`` rows, ``ms`` is always since ASGI entry, and
     ``open_id`` joins the request without its URL or session id. The acquire
     row's separate ``acquire_id`` joins to the existing ``a.acquire`` span
-    (whose ``ms`` remains its own duration).
+    (whose ``ms`` remains its own duration), and to ``cold.summary.span`` only
+    when that acquire built the facade. A reused facade/shared cold work is
+    not a cold construction cost attributable to each waiter.
+
+    The optional client stream ID appears only on ``asgi_entry``. Later phases
+    use the server's own ID so even repeated client IDs cannot conflate them.
     """
 
-    def __init__(self, entry_mono: float, entry_at: float) -> None:
+    def __init__(
+        self, entry_mono: float, entry_at: float, *, client_stream: str | None = None
+    ) -> None:
         self._entry_mono = entry_mono
         self._entry_at = entry_at
-        self._open_id = uuid4().hex
+        self._client_stream = client_stream
+        self.open_id = uuid4().hex
         self.started = False
 
     def start(self) -> None:
@@ -95,11 +103,12 @@ class DesktopEventsIngressTrace:
         self.started = True
         # Record both boundaries, not the writer's later emission times: the
         # first row's write must not count as time spent in middleware.
-        mark("desktop.events.asgi_entry", 0.0, at=self._entry_at, open_id=self._open_id)
-        mark("desktop.events.route", route_ms, at=route_at, open_id=self._open_id)
+        client = {} if self._client_stream is None else {"client_stream": self._client_stream}
+        mark("desktop.events.asgi_entry", 0.0, at=self._entry_at, open_id=self.open_id, **client)
+        mark("desktop.events.route", route_ms, at=route_at, open_id=self.open_id)
 
     def mark(self, stage: str, **fields: object) -> None:
-        mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self._open_id, **fields)
+        mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self.open_id, **fields)
 
 
 class ColdOpenTrace:

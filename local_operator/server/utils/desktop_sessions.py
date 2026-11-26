@@ -4272,6 +4272,7 @@ class DesktopSessionBridge:
         diff_bindings: bool = False,
         on_capture: Callable[[int], None] | None = None,
         inline_ui: bool = False,
+        trace_open_id: str | None = None,
     ) -> dict[str, Any]:
         """The authoritative snapshot frame.
 
@@ -4284,6 +4285,9 @@ class DesktopSessionBridge:
         # canonical state) is time the renderer pays for too, so it comes out of
         # the same budget rather than being spent on top of it.
         started = time.monotonic()
+        # Local to this snapshot, even when its attention refresh or history
+        # read shares work with a concurrent open of the same bridge.
+        trace_fields = {} if trace_open_id is None else {"open_id": trace_open_id}
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -4312,7 +4316,10 @@ class DesktopSessionBridge:
             pass
         if open_trace.enabled():
             open_trace.mark(
-                "a.snap.attention", (time.monotonic() - started) * 1000, session=self.session_id
+                "a.snap.attention",
+                (time.monotonic() - started) * 1000,
+                session=self.session_id,
+                **trace_fields,
             )
         # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
         # the clone is now taken LAST (see the watermark note above the return).
@@ -4409,7 +4416,10 @@ class DesktopSessionBridge:
             )
             if open_trace.enabled():
                 open_trace.mark(
-                    "a.snap.history", (time.monotonic() - started) * 1000, session=self.session_id
+                    "a.snap.history",
+                    (time.monotonic() - started) * 1000,
+                    session=self.session_id,
+                    **trace_fields,
                 )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
@@ -4511,7 +4521,10 @@ class DesktopSessionBridge:
                 snapshot["conversation_title"] = stored_title
         if open_trace.enabled():
             open_trace.mark(
-                "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
+                "a.snap.total",
+                (time.monotonic() - started) * 1000,
+                session=self.session_id,
+                **trace_fields,
             )
         frame = {
             "session_id": self.session_id,
@@ -7590,8 +7603,10 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
         inline_ui: bool = False,
+        trace_open_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         gen_at = time.monotonic()
+        trace_fields = {} if trace_open_id is None else {"open_id": trace_open_id}
         try:
             cutoff = self.sequence
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
@@ -7673,10 +7688,11 @@ class DesktopSessionBridge:
                 drain(watermark)
                 sub.captured = True
 
-            async def cut_snapshot() -> dict[str, Any]:
+            async def cut_snapshot(trace_id: str | None = None) -> dict[str, Any]:
                 # ONE argument list for the open snapshot and every in-band
                 # resync snapshot (``RESYNC_MARKER``), so a resync restates the
                 # world in exactly the shape this subscriber negotiated at open.
+                # Only the initial snapshot belongs to the first-paint trace.
                 return await self.snapshot(
                     entry_times=entry_times,
                     open_frame=open_frame,
@@ -7689,15 +7705,17 @@ class DesktopSessionBridge:
                         {"diff_bindings": True} if sub.diff_bindings else {},
                     ),
                     on_capture=captured,
+                    trace_open_id=trace_id,
                 )
 
-            snapshot = await cut_snapshot()
+            snapshot = await cut_snapshot(trace_open_id)
             if open_trace.enabled():
                 open_trace.mark(
                     "a.gen.snapshot",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
                     open_frame=open_frame,
+                    **trace_fields,
                 )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()`` captures its state and sequence with nothing
@@ -7746,6 +7764,7 @@ class DesktopSessionBridge:
                     "a.gen.open_yield",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
+                    **trace_fields,
                 )
             yield {
                 "session_id": self.session_id,
@@ -7764,6 +7783,7 @@ class DesktopSessionBridge:
                     "a.gen.snapshot_yield",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
+                    **trace_fields,
                 )
             yield snapshot
             # Frames still to deliver, in queue order. A deque rather than the

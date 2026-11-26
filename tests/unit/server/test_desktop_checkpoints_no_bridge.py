@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import aclosing
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -674,6 +676,15 @@ async def test_first_paint_ingress_trace_keeps_same_session_streams_distinct(
 
     # Bound only the frame iterator; the authenticated route, shared pool,
     # competing acquisitions, and ASGI response-start are all real.
+    if sink == "off":
+
+        def unexpected(*_args, **_kwargs):
+            pytest.fail("disabled ingress trace read a clock or parsed the header")
+
+        monkeypatch.setattr(early_paint_hold, "_client_stream_id", unexpected, raising=False)
+        monkeypatch.setattr(
+            early_paint_hold, "time", SimpleNamespace(monotonic=unexpected, time=unexpected)
+        )
     both_streaming = asyncio.Event()
     streams = 0
 
@@ -686,7 +697,10 @@ async def test_first_paint_ingress_trace_keeps_same_session_streams_distinct(
         await both_streaming.wait()
 
     monkeypatch.setattr(module.DesktopSessionBridge, "events", frames)
-    opened = await asyncio.wait_for(asyncio.gather(client.get(OPEN), client.get(OPEN)), timeout=30)
+    headers = {"X-LOP-Open-Trace": "a" * 32} if sink == "off" else {}
+    opened = await asyncio.wait_for(
+        asyncio.gather(client.get(OPEN, headers=headers), client.get(OPEN)), timeout=30
+    )
     for response in opened:
         assert response.status_code == 200
         assert response.text == 'data: {"type":"snapshot","payload":{"message":"not-traced"}}\n\n'
@@ -733,11 +747,157 @@ async def test_first_paint_ingress_trace_keeps_same_session_streams_distinct(
     assert (await client.get(OPEN, headers={"Authorization": "Bearer wrong"})).status_code == 401
     assert (await client.get(OPEN + "&after_seq=-1")).status_code == 422
     assert rows() == original
-    assert (await client.get(OPEN.removesuffix("?open_frame=1"))).status_code == 200
+    header = {"X-LOP-Open-Trace": "a" * 32}
+    assert (await client.get(OPEN.removesuffix("?open_frame=1"), headers=header)).status_code == 200
     # The raw query triggers the existing hold, but FastAPI resolves the last
     # value, so a duplicate ending in zero must not produce an ingress span.
-    assert (await client.get(OPEN + "&open_frame=0")).status_code == 200
+    assert (await client.get(OPEN + "&open_frame=0", headers=header)).status_code == 200
     assert [r for r in rows() if r["stage"].startswith("desktop.events.")] == [
         r for r in original if r["stage"].startswith("desktop.events.")
     ]
     assert ti._PAINT_HOLDS == {}
+
+
+@pytest.mark.asyncio
+async def test_client_stream_joins_only_its_first_authoritative_snapshot(early, monkeypatch):
+    client, app, root, _seen = early
+    _write_session(root)
+    path = root / "trace.jsonl"
+    monkeypatch.setattr(open_trace, "_PATH", path)
+    bridge_class = module.DesktopSessionBridge
+    real_events, real_subscribe = bridge_class.events, bridge_class.subscribe
+    separate_streams = ("a" * 32, "b" * 32)
+    header = "X-LOP-Open-Trace"
+    both_reading = asyncio.Event()
+    reads = 0
+    stable_subscription = False
+
+    async def history(self, *, entry_times, **kwargs):
+        # Overlap both opens inside the real snapshot on one bridge. The distinct
+        # payload lengths let the wire rows be checked against their own replies.
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            both_reading.set()
+        await both_reading.wait()
+        return {"entries": [], "has_more": entry_times, "cursor_missing": False}
+
+    def subscribe(self, **kwargs):
+        sub = real_subscribe(self, **kwargs)
+        if stable_subscription:  # remove generated IDs only for the byte control
+            del self.subscribers[sub.id]
+            sub.id = "synthetic-stable-subscription"
+            self.subscribers[sub.id] = sub
+        return sub
+
+    async def bounded_events(self, sub, **kwargs):
+        async with aclosing(real_events(self, sub, **kwargs)) as frames:
+            snapshots = 0
+            async for frame in frames:
+                yield frame
+                if frame["type"] == "snapshot":
+                    snapshots += 1
+                    if snapshots == 2:
+                        return
+                    # Force the real in-band snapshot path and then end the rig.
+                    sub.queue.put_nowait(
+                        ({"type": module.RESYNC_MARKER, "seq": self.sequence + 1}, 0)
+                    )
+
+    def read_rows():
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def first_snapshot_chars(response):
+        open_record, snapshot, gap, resync, end = response.text.split("\n\n")
+        assert not end
+        assert [
+            json.loads(record.removeprefix("data: "))["type"]
+            for record in (open_record, snapshot, gap, resync)
+        ] == ["open", "snapshot", "gap", "snapshot"]
+        return len(snapshot + "\n\n")
+
+    monkeypatch.setattr(bridge_class, "history", history)
+    monkeypatch.setattr(bridge_class, "events", bounded_events)
+    monkeypatch.setattr(bridge_class, "subscribe", subscribe)
+    replies = await asyncio.wait_for(
+        asyncio.gather(
+            client.get(OPEN, headers={header: separate_streams[0]}),
+            client.get(OPEN + "&entry_ts=1", headers={header: separate_streams[1]}),
+        ),
+        timeout=30,
+    )
+    assert all(reply.status_code == 200 for reply in replies)
+    lengths = [first_snapshot_chars(reply) for reply in replies]
+    assert lengths[0] != lengths[1]
+    rows = read_rows()
+    entries = [r for r in rows if r["stage"] == "desktop.events.asgi_entry"]
+    assert {r["client_stream"] for r in entries} == set(separate_streams)
+    assert len({r["open_id"] for r in entries}) == 2
+    assert [r for r in rows if "client_stream" in r] == entries
+    acquire_ids = set()
+    for stream_id, reply, length in zip(separate_streams, replies, lengths):
+        [open_id] = [r["open_id"] for r in entries if r["client_stream"] == stream_id]
+        joined = [r for r in rows if r.get("open_id") == open_id]
+        assert open_id not in separate_streams
+        assert open_id not in reply.text and stream_id not in reply.text
+        assert not any(open_id in value or stream_id in value for value in reply.headers.values())
+        assert [r["stage"] for r in joined] == [
+            "desktop.events.asgi_entry",
+            "desktop.events.route",
+            "desktop.events.pool",
+            "desktop.events.acquire",
+            "desktop.events.response_start",
+            "a.snap.attention",
+            "a.snap.history",
+            "a.snap.total",
+            "a.gen.snapshot",
+            "a.gen.open_yield",
+            "a.gen.snapshot_yield",
+            "a.wire.frame",
+        ]
+        assert joined[-1]["kind"] == "snapshot" and joined[-1]["chars"] == length
+        acquire_ids.add(joined[3]["acquire_id"])
+    [cold] = [r for r in rows if r["stage"] == "cold.summary" and r["span"] in acquire_ids]
+    assert len(acquire_ids) == 2 and cold["session"] == SID
+    assert len([r for r in rows if r["stage"] == "a.wire.frame"]) == 8
+    assert len([r for r in rows if r["stage"] == "a.snap.total"]) == 4
+
+    stable_subscription = True
+    old_client = await asyncio.wait_for(client.get(OPEN), timeout=30)
+    # Every control is a newly authenticated request against the same stable view.
+    for headers, expected in (
+        ({header: separate_streams[0]}, separate_streams[0]),
+        ({header: "A" * 32}, None),
+        ({header: "a" * 31}, None),
+        ({header: "a" * 33}, None),
+        ({header: "a" * 31 + "-"}, None),
+        ({header: b"a" * 31 + b"\xff"}, None),
+        ({header: separate_streams[0] + "," + separate_streams[1]}, None),
+        ([(header, separate_streams[0]), (header, separate_streams[0])], None),
+        ([(header, ""), (header, separate_streams[0])], None),
+    ):
+        before = len(read_rows())
+        reply = await asyncio.wait_for(client.get(OPEN, headers=headers), timeout=30)
+        assert reply.status_code == old_client.status_code == 200
+        assert reply.headers == old_client.headers and reply.content == old_client.content
+        [entry] = [r for r in read_rows()[before:] if r["stage"] == "desktop.events.asgi_entry"]
+        assert entry.get("client_stream") == expected
+        assert ("client_stream" in entry) is (expected is not None)
+
+    bridge = app.state.desktop_sessions.bridges[SID]
+    bridge.move_in_progress = True  # drive the real legacy-subscribe fence
+    for url, extra_headers, status in (
+        (OPEN, {"Authorization": "Bearer wrong"}, 401),
+        (OPEN + "&after_seq=-1", {}, 422),
+        (OPEN.replace(SID, "f" * 12), {}, 404),
+        (OPEN, {}, 409),
+    ):
+        original = await client.get(url, headers=extra_headers)
+        before = len(read_rows())
+        traced = await client.get(url, headers={header: separate_streams[0], **extra_headers})
+        assert traced.status_code == original.status_code == status
+        assert traced.headers == original.headers and traced.content == original.content
+        assert separate_streams[0].encode() not in traced.content
+        if status in (401, 422):
+            assert not read_rows()[before:]
+    assert bridge.users == 0 and ti._PAINT_HOLDS == {}
