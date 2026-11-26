@@ -11,7 +11,7 @@
   "wire.remote_compute.delete_confirm_unnamed": "删除远程运行{run_id}？此操作不可撤销：它的日志和结果也会一并删除。[y/N]",
   "wire.remote_compute.delete_declined": "未删除任何内容：远程运行{run_id}保持不变。",
   "wire.remote_compute.delete_in_flight": "远程运行{run_id}仍在进行中，因此未删除：它仍可能运行并产生费用。请先取消：lop exec --remote-cancel {run_id}",
-  "wire.remote_compute.delete_needs_yes": "删除远程运行{run_id}不可撤销，而这里没有可用于确认的终端。请加上 --yes 重新运行以删除。",
+  "wire.remote_compute.delete_needs_yes": "删除远程运行{run_id}不可撤销，而这里没有可用于确认的终端。请加上--yes重新运行以删除。",
   "wire.remote_compute.deleted": "已删除远程运行{run_id}。",
   "wire.remote_compute.detached": "已提交远程运行{run_id}。\n网络（Radient已确认）：{network_id}\n幂等键：{idempotency_key}\n查看进度：lop exec --remote-status {run_id}\n取消运行：lop exec --remote-cancel {run_id}",
   "wire.remote_compute.disabled": "远程计算已关闭。用`lop config edit remote_compute.enabled true`开启，然后重新运行此命令。",
@@ -45,7 +45,7 @@
   "wire.remote_compute.retrying": "Radient报告此运行出错并正在重试，因此本次监视继续。",
   "wire.remote_compute.run_busy": "该运行或工作负载正在处理另一项操作。请等它结束后重试。",
   "wire.remote_compute.run_identity_mismatch": "Radient返回的是远程运行{answered}，而不是所请求的运行{asked_for}，因此无法将此响应报告为该运行的状态。",
-  "wire.remote_compute.run_limit": "此账户已达到云端运行的上限。请取消正在运行的运行（lop exec --remote-cancel <run id>），或删除已结束的运行（lop exec --remote-delete <run id>，也可在桌面应用的运行列表中操作），然后重试。",
+  "wire.remote_compute.run_limit": "此账户已达到云端运行的上限。请取消一个正在进行中的运行（lop exec --remote-cancel <run id>），或删除已结束的运行（lop exec --remote-delete <run id>，也可在桌面应用的运行列表中操作），然后重试。",
   "wire.remote_compute.slot_heading": "可删除的已结束运行：",
   "wire.remote_compute.slot_row": "{run_id} — {name}：lop exec --remote-delete {run_id}",
   "wire.remote_compute.slot_row_unnamed": "{run_id}：lop exec --remote-delete {run_id}",
@@ -61,5 +61,5 @@
   "wire.remote_compute.unknown_run": "所选登录名下，Radient没有这样的远程运行。",
   "wire.remote_compute.unreachable": "无法连接到Radient；检查网络后重试。",
   "wire.remote_compute.unreadable_envelope": "Radient的响应格式已更改，此lop构建无法读取。用`lop-update`更新lop后重试。",
-  "wire.remote_compute.yes_only_with_delete": "--yes 仅与 --remote-delete 搭配使用：它确认删除，否则该命令会在终端上询问。"
+  "wire.remote_compute.yes_only_with_delete": "--yes仅与--remote-delete搭配使用：它确认删除，否则该命令会在终端上询问。"
 }

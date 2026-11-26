@@ -67,12 +67,16 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.i18n.keys import wire_remote_compute as _wr
+from local_operator.i18n.text import tr
 from local_operator.network import store as network_store
 from local_operator.network import types as network_types
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import records, results
 from local_operator.remote_compute.errors import RunNotFound
 from local_operator.server.routes import desktop_radient, desktop_remote_compute
+
+_t = tr("wire.remote_compute")
 
 #: THE GATE'S PLACEHOLDER TOKEN, spelled as a word the way the neighbouring
 #: desktop suites spell it: this backend only checks that the bearer matches the
@@ -1588,7 +1592,10 @@ async def test_a_409_run_limit_is_read_by_its_code_not_its_status(api: Api) -> N
     assert answer.status_code == 409, answer.text
     error = answer.json()["error"]
     assert error["code"] == "run_limit"
-    assert "concurrent" in error["message"]
+    # THE SENTENCE IS THE LIBRARY'S KEY, not a second copy of it: the desktop body
+    # and the CLI print one remedy, and it names the command that frees a slot.
+    assert error["message"] == _t(_wr.run_limit())
+    assert "--remote-delete" in error["message"]
 
 
 @pytest.mark.asyncio

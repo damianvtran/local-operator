@@ -1,7 +1,7 @@
 {
   "cli.exec_remote_help.budget_usd": "本次运行的花费上限，单位为美元（默认：服务器的准入默认值）",
   "cli.exec_remote_help.cancel": "取消一次远程运行并退出",
-  "cli.exec_remote_help.delete": "删除已结束的远程运行，释放它占用的名额并退出",
+  "cli.exec_remote_help.delete": "删除已结束的远程运行并退出",
   "cli.exec_remote_help.detach": "打印运行ID和幂等键后退出，而不是监视该运行",
   "cli.exec_remote_help.idempotency_key": "要复用的幂等键（而非新生成的键），以免已提交的运行在重试时执行两次",
   "cli.exec_remote_help.max_hours": "远程运行在服务器停止它之前可执行的小时数（默认：2；最大值由服务器限制）",
@@ -11,5 +11,5 @@
   "cli.exec_remote_help.sha": "在--repo中检出的提交。配合--remote时必填",
   "cli.exec_remote_help.size": "远程运行的计算规格：s、m或l（默认：m）",
   "cli.exec_remote_help.status": "以JSON打印一次远程运行并退出",
-  "cli.exec_remote_help.yes": "无需询问即确认 --remote-delete 的删除。没有终端时必须使用"
+  "cli.exec_remote_help.yes": "确认--remote-delete原本会询问的删除。没有终端时必须使用"
 }

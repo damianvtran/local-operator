@@ -1,7 +1,7 @@
 {
   "cli.exec_remote_help.budget_usd": "Plafond de dépense pour cette exécution, en dollars US (défaut : valeur d’admission du serveur)",
   "cli.exec_remote_help.cancel": "Annuler une exécution distante et quitter",
-  "cli.exec_remote_help.delete": "Supprimer une exécution distante terminée, libérer la place qu’elle occupe et quitter",
+  "cli.exec_remote_help.delete": "Supprimer une exécution distante terminée et quitter",
   "cli.exec_remote_help.detach": "Afficher l’ID de l’exécution et la clé d’idempotence, puis quitter sans suivre l’exécution",
   "cli.exec_remote_help.idempotency_key": "Clé d’idempotence à réutiliser au lieu d’en créer une, pour qu’un nouvel essai d’une exécution soumise ne la lance pas deux fois",
   "cli.exec_remote_help.max_hours": "Durée maximale en heures de l’exécution distante avant que le serveur ne l’arrête (défaut : 2 ; le serveur plafonne le maximum)",
@@ -11,5 +11,5 @@
   "cli.exec_remote_help.sha": "Commit à récupérer dans --repo. Obligatoire avec --remote",
   "cli.exec_remote_help.size": "Taille de calcul pour l’exécution distante : s, m ou l (défaut : m)",
   "cli.exec_remote_help.status": "Afficher une exécution distante en JSON et quitter",
-  "cli.exec_remote_help.yes": "Confirmer la suppression de --remote-delete sans demander. Obligatoire sans terminal"
+  "cli.exec_remote_help.yes": "Confirmer la suppression que --remote-delete demanderait sinon. Obligatoire sans terminal"
 }

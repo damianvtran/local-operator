@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.exec_remote_help",
+  "history_sha256": "7b4390594184214982f4be70575d346f2ad5c7235afe6a555360e0a385f042cb",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "3c817302111b8ca8d47d22816d443276e3e21fdd11eba9731224c846c2fbdd81",
+      "target_sha256": "a2a87eda3f258ee1d68c5d63afb02b4548543c264076f4e199018be1329a9966",
+      "translator": {
+        "agent": "coder (team lopdev) authoring PR c01406efc in session deb385678bc3; the fifteen keys were authored in that session",
+        "session": "deb385678bc3",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR c01406efc, round 1; independent of the translator and the implementer",
+        "session": "5cf08f3165eb",
+        "model": "deepseek/deepseek-flash",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "changes requested",
+        "findings": 8,
+        "unresolved_blocker_major": 3,
+        "severity_counts": {
+          "blocker": 1,
+          "major": 2,
+          "minor": 5,
+          "nit": 1
+        },
+        "finding_ids": [
+          "I18N-1",
+          "I18N-2",
+          "I18N-3",
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5",
+          "n1"
+        ],
+        "locale_verdict": "FAIL"
+      },
+      "status": "changes_requested",
+      "round": "pr-c01406efc-r1",
+      "note": "Independent i18n audit round 1 of PR c01406efc (fix/rc-remote-delete), fr/cli.exec_remote_help at the c01406efc bytes. 15 keys audited: 13 wire.remote_compute (alone, run_limit, deleted, delete_already, delete_in_flight, delete_confirm, delete_confirm_unnamed, delete_declined, delete_needs_yes, yes_only_with_delete, slot_heading, slot_row, slot_row_unnamed) and cli.exec_remote_help.delete/.yes. Mechanical: key/placeholder parity exact, flag and literal parity exact, no manual bidi controls, no maxCells budget. Semantic: permanent-delete warning and 'nothing was deleted' facts preserved; run_limit correct on both server versions in all eight languages. Open at this round: BLOCKER I18N-1 (a merged head ships English-only until the passed receipts land), MAJOR I18N-2 (help delete claimed a finished run holds a slot) and MAJOR I18N-3 (help yes read as deleting the flag); locale-scoped minors fr U+202F, ru удалённый/удалён, zh-CN and vi 'the running run', es/hi pronoun antecedent. No native-speaker or rendered-frame certification claimed."
+    }
+  ]
+}

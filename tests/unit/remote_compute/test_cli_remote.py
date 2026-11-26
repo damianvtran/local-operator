@@ -37,8 +37,8 @@ from local_operator.network.types import MemberRecord, NetworkRecord
 from local_operator.providers.auth_store import AuthStore
 from local_operator.remote_compute import cli as remote_cli
 from local_operator.remote_compute import config as config_module
-from local_operator.remote_compute import repo as repo_module
 from local_operator.remote_compute import records as records_module
+from local_operator.remote_compute import repo as repo_module
 from local_operator.remote_compute.arguments import LOCAL_ONLY_FLAGS, wants_remote
 
 _t = tr("wire.remote_compute")
@@ -1709,9 +1709,7 @@ def test_a_finished_run_is_deleted_and_the_local_record_is_marked(
 ) -> None:
     """The delete goes through the shared layer: the DELETE leaves AND the row is marked."""
     _recorded_run()
-    origin.responses.extend(
-        [_poll(_stopped("n_" + "a" * 24)), httpx.Response(204)]
-    )
+    origin.responses.extend([_poll(_stopped("n_" + "a" * 24)), httpx.Response(204)])
     assert _run(["exec", "--remote-delete", RUN_ID, "--yes"], monkeypatch) == 0
     assert f"Deleted remote run {RUN_ID}." in capsys.readouterr().out
     assert [(request.method, request.url.path) for request in origin.requests] == [
@@ -1736,9 +1734,7 @@ def test_a_confirmed_delete_asks_with_the_run_id_and_name(
 
     monkeypatch.setattr(remote_cli, "_interactive", lambda: True)
     monkeypatch.setattr("builtins.input", answer)
-    origin.responses.extend(
-        [_poll(_stopped("n_" + "a" * 24, name="nightly")), httpx.Response(204)]
-    )
+    origin.responses.extend([_poll(_stopped("n_" + "a" * 24, name="nightly")), httpx.Response(204)])
     assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 0
     assert asked == [_t(_wr.delete_confirm(run_id=RUN_ID, name="nightly")) + " "]
     assert "DELETE" in [request.method for request in origin.requests]
@@ -1917,9 +1913,7 @@ def test_every_locale_s_commands_and_limit_copy_name_the_new_flag() -> None:
         # finishing a run frees a slot: older servers count it until it is deleted.
         assert "--remote-cancel" in messages["wire.remote_compute.run_limit"], locale
         assert "--remote-delete" in messages["wire.remote_compute.run_limit"], locale
-        assert set(messages) == set(
-            catalogues.load_catalogue("en", "wire.remote_compute")
-        ), locale
+        assert set(messages) == set(catalogues.load_catalogue("en", "wire.remote_compute")), locale
         help_messages = catalogues.load_catalogue(locale, "cli.exec_remote_help")
         assert set(help_messages) == set(
             catalogues.load_catalogue("en", "cli.exec_remote_help")

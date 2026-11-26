@@ -11,7 +11,7 @@
   "wire.remote_compute.delete_confirm_unnamed": "¿Eliminar la ejecución remota {run_id}? Es permanente: también se eliminan su registro y sus resultados. [y/N]",
   "wire.remote_compute.delete_declined": "No se eliminó nada: la ejecución remota {run_id} no cambió.",
   "wire.remote_compute.delete_in_flight": "La ejecución remota {run_id} sigue en marcha, así que no se eliminó: aún puede ejecutarse y gastar. Cancélala primero con: lop exec --remote-cancel {run_id}",
-  "wire.remote_compute.delete_needs_yes": "Eliminar la ejecución remota {run_id} es permanente y aquí no hay terminal para confirmarlo. Vuelve a ejecutarlo con --yes para eliminarla.",
+  "wire.remote_compute.delete_needs_yes": "Eliminar la ejecución remota {run_id} es permanente y aquí no hay terminal para confirmarlo. Vuelve a ejecutar el comando con --yes para eliminarla.",
   "wire.remote_compute.deleted": "Se eliminó la ejecución remota {run_id}.",
   "wire.remote_compute.detached": "Ejecución remota {run_id} enviada.\nred (confirmada por Radient): {network_id}\nClave de idempotencia: {idempotency_key}\nSeguirla: lop exec --remote-status {run_id}\nCancelarla: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.disabled": "El cómputo remoto está desactivado. Actívalo con `lop config edit remote_compute.enabled true` y vuelve a ejecutar esto.",

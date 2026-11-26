@@ -58,8 +58,9 @@ from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
 from local_operator.i18n.text import tr
 from local_operator.network.types import MeshRefusal
-from local_operator.remote_compute import RunSpec, is_enabled, resolve_network
+from local_operator.remote_compute import RunSpec, is_enabled
 from local_operator.remote_compute import records as records_module
+from local_operator.remote_compute import resolve_network
 from local_operator.remote_compute.api import RemoteRuns
 from local_operator.remote_compute.arguments import (
     LOCAL_ONLY_FLAGS,
@@ -87,7 +88,11 @@ from local_operator.remote_compute.client import (
     without_secrets,
 )
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
-from local_operator.remote_compute.errors import InvalidIdempotencyKey, RunLimitReached, RunNotFound
+from local_operator.remote_compute.errors import (
+    InvalidIdempotencyKey,
+    RunLimitReached,
+    RunNotFound,
+)
 from local_operator.remote_compute.messages import refusal_message
 from local_operator.remote_compute.request import (
     RunCreateRequest,
@@ -462,7 +467,11 @@ def _remote_delete(identifier: str | None, *, yes: bool) -> int:
     if not identifier:
         return _refuse(_t(_wr.alone()))
     try:
-        payload = asyncio.run(_get_run(_credential(), identifier))
+        credential = _credential()
+    except ValueError as failure:
+        return _report(failure)
+    try:
+        payload = asyncio.run(_get_run(credential, identifier))
     except KeyboardInterrupt:
         return 130
     except RunNotFound:
@@ -490,7 +499,7 @@ def _remote_delete(identifier: str | None, *, yes: bool) -> int:
         if not _confirmed(question):
             return _refuse(_t(_wr.delete_declined(run_id=identifier)))
     try:
-        asyncio.run(_delete_run(_credential(), identifier))
+        asyncio.run(_delete_run(credential, identifier))
     except KeyboardInterrupt:
         return 130
     except RunNotFound:

@@ -45,7 +45,7 @@
   "wire.remote_compute.retrying": "Radient báo lỗi ở lần chạy này và sẽ thử lại, nên quá trình theo dõi vẫn tiếp tục.",
   "wire.remote_compute.run_busy": "Lần chạy hoặc khối lượng công việc đó đang bận với một thao tác khác. Hãy đợi nó xong rồi thử lại.",
   "wire.remote_compute.run_identity_mismatch": "Radient trả về lần chạy từ xa {answered}, không phải lần chạy {asked_for} đã được yêu cầu, nên không thể báo cáo phản hồi này là trạng thái của lần chạy đó.",
-  "wire.remote_compute.run_limit": "Tài khoản này đã đạt giới hạn số lần chạy trên đám mây. Hãy hủy một lần chạy đang chạy (lop exec --remote-cancel <run id>) hoặc xóa các lần chạy đã kết thúc (lop exec --remote-delete <run id>, hoặc từ danh sách lần chạy trong ứng dụng máy tính), rồi thử lại.",
+  "wire.remote_compute.run_limit": "Tài khoản này đã đạt giới hạn số lần chạy trên đám mây. Hãy hủy một lần chạy đang diễn ra (lop exec --remote-cancel <run id>) hoặc xóa các lần chạy đã kết thúc (lop exec --remote-delete <run id>, hoặc từ danh sách lần chạy trong ứng dụng máy tính), rồi thử lại.",
   "wire.remote_compute.slot_heading": "Các lần chạy đã kết thúc có thể xóa:",
   "wire.remote_compute.slot_row": "{run_id} — {name}: lop exec --remote-delete {run_id}",
   "wire.remote_compute.slot_row_unnamed": "{run_id}: lop exec --remote-delete {run_id}",
