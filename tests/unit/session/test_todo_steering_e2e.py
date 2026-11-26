@@ -707,17 +707,87 @@ async def test_phase_block_changes_every_open_row_but_only_binds_relevant_wakes(
             "Reminder: await another team to “deploy” first.",
             ["deploy schema to staging"],
         ),
+        (
+            ['Review "Send code" copy', "Send code"],
+            "Await copy approval",
+            'For “Review "Send code" copy”, await copy approval.',
+            ['Review "Send code" copy'],
+        ),
+        (
+            ["Review “Send code” copy", "Send code"],
+            "Await copy approval",
+            'For "Review “Send code” copy", await copy approval.',
+            ["Review “Send code” copy"],
+        ),
+        (
+            ['Review "Send code" copy', "Send code"],
+            "Await copy approval",
+            r'For "Review \"Send code\" copy", await copy approval.',
+            ['Review "Send code" copy'],
+        ),
+        (
+            ["Check print layout"],
+            'Await the 3" sample',
+            'Await the 3" sample for "Check print layout".',
+            ["Check print layout"],
+        ),
+        (
+            ["Send code", 'Review "Send code" copy'],
+            "Await copy approval",
+            'Await copy approval for “Review "Send code" copy in French”.',
+            [],
+        ),
+        (
+            ["Archive", "Send code"],
+            "Await approval",
+            'For "Archive "[draft]" / "Send code" copy", await approval.',
+            [],
+        ),
+        (
+            ["Send code"],
+            'Await the 3" sample labelled "Send code"',
+            'Await the 3" sample labelled "Send code". Await the 3" sample labelled "Send code".',
+            [],
+        ),
+        (
+            ["Send code"],
+            'Await label "Send',
+            'Await label "Send code" on tray. Await label "Send.',
+            [],
+        ),
     ],
-    ids=["unquoted-prefix", "only-in-condition", "exact-title-in-same-phase"],
+    ids=[
+        "unquoted-prefix",
+        "only-in-condition",
+        "exact-title-in-same-phase",
+        "literal-straight-quotes",
+        "literal-curly-quotes",
+        "escaped-same-delimiter",
+        "inch-mark-in-blocker",
+        "nested-and-longer-title",
+        "same-family-nesting-is-not-independent",
+        "inch-mark-and-embedded-title-in-blocker",
+        "title-cannot-start-in-blocker",
+    ],
 )
 @pytest.mark.asyncio
 async def test_phase_block_requires_independent_exact_task_title(
     tmp_path, tasks, condition, purpose, expected_coverage
 ) -> None:
-    reason = f"[wake:gate] {condition}"
     reply = {"events": [StreamTextDelta(delta="Waiting on the handoff.")]}
-    stream = SteeringStream(
-        [
+    stream = SteeringStream([])
+    session = make_session(tmp_path, stream)
+    try:
+        context = session._build_tool_context()
+        (wake_tool,) = create_tools(context, ["wake"])
+        created = await wake_tool.execute(
+            "create", {"op": "create", "message": purpose, "in": "10m"}, None, None, context
+        )
+        assert not created.is_error, created.text
+        (wake,) = session.wake_scheduler.armed_schedules
+        assert wake.message == purpose
+        reason = f"[wake:{wake.id}] {condition}"
+        stream.turns[:] = [
             {
                 "events": todo_call(
                     "init", {"op": "init", "phases": [{"phase": "Release", "items": tasks}]}
@@ -727,21 +797,15 @@ async def test_phase_block_requires_independent_exact_task_title(
             reply,
             reply,
         ]
-    )
-    session = make_session(tmp_path, stream)
-    now = int(time.time() * 1000)
-    try:
-        await session.wake_scheduler.update(
-            [WakeSchedule(id="gate", message=purpose, next_due_at=now + 60_000, created_at=now)]
-        )
         await session.prompt("Park the whole Release phase")
-        assert len(stream.requests) == 4, "uncovered rows need a private check"
-        (reminder,) = reminders_in(stream, 3)
+        needs_check = len(expected_coverage) != len(tasks)
+        assert len(stream.requests) == (4 if needs_check else 3)
+        reminders = reminders_in(stream, len(stream.requests) - 1)
+        assert len(reminders) == int(needs_check), "only uncovered rows need a private check"
         assert [row["text"] for row in builtin.blocked_todos("e2e")] == tasks
         for task in tasks:
-            assert (f"- {task} — blocked: {condition}" in reminder) == (
-                task not in expected_coverage
-            )
+            was_reminded = any(f"- {task} — blocked: {condition}" in text for text in reminders)
+            assert was_reminded == (task not in expected_coverage)
         covered = [key[1] for key, block in session._todo_state()[1].items() if block[-1]]
         assert covered == expected_coverage
     finally:
