@@ -58,6 +58,9 @@ describe("retainConfigStream", () => {
 		// its error card, bundled so a diagram in a cold-open transcript is labelled.
 		// relay.pairing is the terminal-free pairing sheet (pairing design v2, A1):
 		// bundled so an unpaired phone's Approve tap renders it with no fetch.
+		// relay.chart is the inline chart's "Chart data" toggle, legend words (Other,
+		// Total, Also) and screen-reader position/role text, bundled so a chart in a
+		// cold-open transcript is labelled and announced with no fetch.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -65,6 +68,7 @@ describe("retainConfigStream", () => {
 			"relay.approvals",
 			"relay.ask",
 			"relay.asks",
+			"relay.chart",
 			"relay.chrome",
 			"relay.composer",
 			"relay.diagram",

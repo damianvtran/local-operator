@@ -52,9 +52,12 @@ export function tickTarget(height: number): number {
 /**
  * Strip float noise from a tick (3 × 0.1 → 0.3) at ANY magnitude. Rounding
  * with toFixed(decimals) collapsed sub-1e-20 ticks to 0, since decimals cap
- * at 20 (R7); 12 significant digits is well past any nice step's precision.
+ * at 20 (R7). 15 significant digits, not 12 (R2-2 / C3): a tick is `i × step`
+ * and `i` can itself need 13+ digits — epoch-ms or 1e12+1…1e12+4 collapsed to
+ * one value at 12, drawing a point 540px off the plot. 15 is the most digits
+ * every float64 round-trips, so it still strips 0.30000000000000004.
  */
-const roundTick = (value: number) => Number(value.toPrecision(12));
+const roundTick = (value: number) => Number(value.toPrecision(15));
 
 const tickCount = (lo: number, hi: number, step: number) =>
 	Math.ceil(hi / step - 1e-9) - Math.floor(lo / step + 1e-9) + 1;
@@ -151,11 +154,15 @@ const SCIENTIFIC_BELOW = 1e-6;
  * Tick formatter: compact (12K, 1.5M) when the domain reaches |10 000|,
  * scientific for sub-micro steps, else standard with the step's decimals.
  *
- * Compact and scientific labels take the FEWEST decimals (0–3) that keep
- * every tick on the axis distinct (X3): one fixed decimal printed 10,050–
- * 10,300 as `10.1K` five times and 1,000,000–1,004,000 as `1M` five times,
- * an axis that says nothing. When even 3 decimals collide, fall back to full
- * grouped numbers, which are distinct by construction of the nice step.
+ * Compact and scientific labels take the FEWEST decimals (0–3) that print
+ * every tick EXACTLY (X3, then C1): one fixed decimal printed 10,050–10,300
+ * as `10.1K` five times and 1,000,000–1,004,000 as `1M` five times. Merely
+ * distinct was not enough (QA Q3): with step 2,500, 0 decimals gave six
+ * distinct labels `0, 3K, 5K, 8K, 10K, 13K` that lie about evenly spaced
+ * gridlines. Exactness is checked in the locale's own units (K, 万, लाख…)
+ * without parsing: a tick is exact at `d` decimals when rounding to at most
+ * `d` decimals prints the same as rounding to 20. When no `d` ≤ 3 is exact,
+ * fall back to full grouped numbers, exact by construction of the nice step.
  */
 export function tickFormatter(locale: string, ticks: Ticks, suffix = "") {
 	const standard = new Intl.NumberFormat(locale, { minimumFractionDigits: ticks.decimals, maximumFractionDigits: ticks.decimals });
@@ -164,16 +171,17 @@ export function tickFormatter(locale: string, ticks: Ticks, suffix = "") {
 	let format = standard;
 	if (compact || scientific) {
 		const notation = compact ? "compact" : "scientific";
+		const full = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: 0, maximumFractionDigits: 20 });
 		for (let digits = 0; digits <= 3; digits++) {
+			const atMost = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: 0, maximumFractionDigits: digits });
+			if (!ticks.values.every((v) => atMost.format(v) === full.format(v))) continue;
 			const candidate = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: digits, maximumFractionDigits: digits });
 			const texts = ticks.values.map((v) => candidate.format(v));
 			if (new Set(texts).size === texts.length) { format = candidate; break; }
 		}
-		// Sub-micro steps have no sane standard rendering: keep scientific at
-		// 3 decimals rather than 20+ zeros, even if two ticks still collide.
-		if (format === standard && scientific) {
-			format = new Intl.NumberFormat(locale, { notation, minimumFractionDigits: 3, maximumFractionDigits: 3 });
-		}
+		// Sub-micro steps have no sane standard rendering (20+ zeros): keep
+		// scientific, with as many decimals as each tick needs to stay exact.
+		if (format === standard && scientific) format = full;
 	}
 	return (value: number) => `${format.format(value)}${suffix}`;
 }

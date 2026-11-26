@@ -69,8 +69,8 @@ describe("nice ticks (spec §2)", () => {
 
 describe("number format (spec §2)", () => {
 	it("compacts ticks from 10 000 but keeps tooltips exact and grouped", () => {
-		const ticks = niceTicks(0, 12_000, 5);
-		expect(tickFormatter("en", ticks)(12_000)).toBe("12K");
+		const ticks = niceTicks(0, 20_000, 4);
+		expect(tickFormatter("en", ticks)(20_000)).toBe("20K");
 		expect(exactValue("en", 12_345.67)).toBe("12,345.67");
 		expect(exactValue("fr", 1234.5).replace(/\s/g, " ")).toBe("1 234,5");
 	});
@@ -90,6 +90,57 @@ describe("number format (spec §2)", () => {
 		const c = fine.values.map(tickFormatter("en", fine));
 		expect(new Set(c).size).toBe(c.length);
 		expect(c[0]).toBe("1,000,000");
+	});
+	it("prints every compact and scientific tick exactly, never merely distinct (C1, QA Q3)", () => {
+		const labels = (lo: number, hi: number, target: number, locale = "en") => {
+			const ticks = niceTicks(lo, hi, target);
+			return ticks.values.map(tickFormatter(locale, ticks));
+		};
+		// Step 2,500: 0 decimals were distinct but read 3K / 8K / 13K.
+		const bars = labels(0, 10_300, 5);
+		expect(bars).toEqual(["0.0", "2.5K", "5.0K", "7.5K", "10.0K", "12.5K"]);
+		expect(bars.join(" ")).not.toMatch(/\b(3|8|13)K/);
+		expect(labels(0, 1_200_000, 5).at(-1)).toBe("1.25M");
+		expect(labels(0, 1.2e-6, 5).at(-1)).toBe("1.25E-6");
+		// Locale units are checked in their own terms (万 = 10⁴): 12,500 is 1.25万.
+		expect(labels(0, 10_300, 5, "zh-CN").at(-1)).toBe("1.25万");
+		// Sub-1e-20 scientific stays exact too.
+		expect(labels(1e-21, 3e-21, 4)).toEqual(["1.0E-21", "1.5E-21", "2.0E-21", "2.5E-21", "3.0E-21"]);
+	});
+	it("keeps 15 significant digits in tick values so 1e12+1…1e12+4 stay distinct (C3, R2-2)", () => {
+		const ticks = niceTicks(1e12 + 1, 1e12 + 4, 4);
+		expect(ticks.values).toEqual([1e12 + 1, 1e12 + 2, 1e12 + 3, 1e12 + 4]);
+		expect(ticks.values.map(tickFormatter("en", ticks))).toEqual([
+			"1,000,000,000,001", "1,000,000,000,002", "1,000,000,000,003", "1,000,000,000,004",
+		]);
+		const epoch = niceTicks(1_764_180_000_123, 1_764_180_000_127, 4);
+		expect(new Set(epoch.values).size).toBe(epoch.values.length);
+		expect(epoch.min).toBeLessThanOrEqual(1_764_180_000_123);
+		expect(epoch.max).toBeGreaterThanOrEqual(1_764_180_000_127);
+		// Still strips float noise: 3 × 0.1 is 0.3, not 0.30000000000000004.
+		expect(niceTicks(0.1, 0.7, 5).values.every((v) => String(v).length <= 4)).toBe(true);
+	});
+	it("centres and slides a 24-column hourly heatmap's edge labels inside the chart (C2)", () => {
+		// Mirrors HeatmapChart: gutter from the row labels, centred labels
+		// (edgeAnchored false), bounds = the SVG. A centred edge label is slid
+		// inward whole; it never truncates to a bare `…` or leaves the chart.
+		const measure = (text: string) => Array.from(text).length * 7;
+		const columns = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+		for (const width of [328, 360, 760]) for (const rowLabel of ["Mon", "Wednesday"]) {
+			const left = Math.min(Math.round(width * 0.4), Math.max(28, measure(rowLabel) + 8));
+			const cellW = (width - left) / columns.length;
+			const xs = columns.map((_, c) => left + cellW * (c + 0.5));
+			const shown = thinLabels(columns, xs, cellW, measure, false, [0, width]);
+			expect(shown[0].index).toBe(0);
+			expect(shown.at(-1)!.index).toBe(23);
+			for (const label of shown) {
+				const kept = label.text.endsWith("…") ? Array.from(label.text).length - 1 : Infinity;
+				expect(label.text === columns[label.index] || kept >= 3).toBe(true);
+				expect(label.left).toBeGreaterThanOrEqual(-0.5);
+				expect(label.right).toBeLessThanOrEqual(width + 0.5);
+			}
+			expect(shown.at(-1)!.text).toBe("23:00");
+		}
 	});
 	it("joins units with no space for %, ‰, °, °C and °F", () => {
 		expect(withUnit("12", "USD")).toBe("12 USD");

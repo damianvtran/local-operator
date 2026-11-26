@@ -35,6 +35,15 @@ const position = (index: number, count: number, locale: string) => {
 	return t("relay.chart.position", { index: f.format(index + 1), count: f.format(count) });
 };
 const join = (...parts: (string | undefined)[]) => parts.filter(Boolean).join(", ");
+/**
+ * Hover preview for a mouse or pen only (U5). A finger's `pointerenter` fires
+ * on touch-down, before the browser knows it is a tap or a scroll, so a press
+ * that starts a scroll flashed the slice preview; the plot has followed the
+ * same rule since X7. For touch the tap's `click` pins instead.
+ */
+const mouseOnly = (event: { pointerType: string }, run: () => void) => {
+	if (event.pointerType !== "touch") run();
+};
 
 // ---- shared SVG pieces --------------------------------------------------------
 
@@ -560,10 +569,10 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						// A tap (click) pins the slice into the centre readout (U2): at
 						// 180px a 1% slice is a ~5px arc, so on a phone the legend is the
 						// only way to reach it; hover alone never fires for a finger.
-						<div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2">
+						<div className="mt-1 grid grid-cols-2 gap-x-4">
 							{slices.map((_, i) => (
-								<div key={i} data-pie-legend={i} className={`flex min-w-0 items-center gap-1.5 ${dim(Boolean(active) && active?.c !== i)}`}
-									onPointerEnter={() => hover({ c: i, s: 0 })} onPointerLeave={() => hover(null)} onClick={() => toggle({ c: i, s: 0 })}>
+								<div key={i} data-pie-legend={i} className={`flex min-w-0 cursor-pointer items-center gap-1.5 py-1 ${dim(Boolean(active) && active?.c !== i)}`}
+									onPointerEnter={(e) => mouseOnly(e, () => hover({ c: i, s: 0 }))} onPointerLeave={() => hover(null)} onClick={() => toggle({ c: i, s: 0 })}>
 									<span aria-hidden="true" className={`size-2.5 shrink-0 rounded-[2px] ${swatch(i)}`} />
 									<span className="min-w-0 truncate text-ink"><bdi>{labelOf(i)}</bdi></span>
 									<span className="ms-auto text-ink-muted tabular-nums">{pct(i)}</span>
@@ -575,8 +584,9 @@ function DonutChart({ value, tableId, width }: { value: CategoryChart; tableId: 
 						<div className="mt-2 text-ink-muted">
 							{alsoParts[0]}
 							{small.map((i, k) => (
-								<span key={i} data-pie-also={i} onPointerEnter={() => hover({ c: i, s: 0 })} onPointerLeave={() => hover(null)}
-								onClick={() => toggle({ c: i, s: 0 })}>
+								<span key={i} data-pie-also={i} className="cursor-pointer py-[5px]"
+									onPointerEnter={(e) => mouseOnly(e, () => hover({ c: i, s: 0 }))} onPointerLeave={() => hover(null)}
+									onClick={() => toggle({ c: i, s: 0 })}>
 									<bdi>{labelOf(i)}</bdi> {pct(i)}{k < small.length - 1 ? ", " : ""}
 								</span>
 							))}
@@ -646,8 +656,9 @@ function HeatmapChart({ value, tableId, width }: { value: Heatmap; tableId: stri
 	// lowest cell at 1.08:1 against the ground (oneLight), indistinguishable
 	// from empty ground and from the no-data hatch (X10). 28 is the floor the
 	// desktop (#2137) and native apps use, so a heatmap reads the same on every
-	// surface; over the relay's 31 themes it puts the lowest cell at ≥ 1.36:1
-	// against canvas and ≥ 1.44:1 against surface, with the top end unchanged.
+	// surface. Over the relay's 31 themes the lowest cell's minimum is 1.35:1
+	// against canvas (oneLight: #B4CCF7 on #EAEAEA, measured from the computed
+	// fill in QA round 2) and ≥ 1.44:1 against surface; the top end is unchanged.
 	const FLOOR = 28;
 	const mix = (tt: number) => `color-mix(in oklab, var(--lo-accent) ${tt}%, var(--lo-surface))`;
 	const fraction = (v: number) => (hi === lo ? 1 : (v - lo) / (hi - lo));

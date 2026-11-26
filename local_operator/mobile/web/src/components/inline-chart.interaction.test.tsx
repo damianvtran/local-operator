@@ -376,4 +376,75 @@ describe("inline chart remediation round 1", () => {
 		expect(xs.length).toBeGreaterThanOrEqual(3);
 		for (let i = 1; i < xs.length; i++) expect(xs[i] - xs[i - 1]).toBeGreaterThanOrEqual(95);
 	});
+
+	it.each([328, 360, 760])("C2: a 24-column hourly heatmap at %ipx keeps both edge labels whole inside the chart", (w) => {
+		width = w;
+		const columns = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}:00`);
+		const { container } = show({ type: "heatmap", title: "Hourly", columns, rowLabels: ["Mon", "Wednesday"], rows: [columns.map((_, i) => i), columns.map(() => null)] } as InlineUi);
+		const labels = [...container.querySelectorAll<SVGTextElement>("[data-x-label]")];
+		expect(labels[0].textContent).toBe("00:00");
+		expect(labels.at(-1)!.textContent).toBe("23:00");
+		for (const node of labels) {
+			const text = node.textContent ?? "";
+			expect(text === "…" || (text.endsWith("…") && Array.from(text).length < 4)).toBe(false);
+			const x = px(node.getAttribute("x"));
+			const half = measured(text) / 2;
+			expect(node.getAttribute("text-anchor")).toBe("middle");
+			expect(x - half).toBeGreaterThanOrEqual(-0.5);
+			expect(x + half).toBeLessThanOrEqual(w + 0.5);
+		}
+	});
+
+	it("R2-1: the Chart data table fits the column, and takes a focusable rail only when its whole numbers overflow", () => {
+		// happy-dom has no table layout: stand in the two widths the frame reads.
+		let tableWidth = 300;
+		const ow = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (this: HTMLElement) {
+			return this.tagName === "TABLE" ? tableWidth : 0;
+		});
+		const cw = vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(() => width);
+		restore.push(() => { ow.mockRestore(); cw.mockRestore(); });
+		const open = () => fireEvent.click(screen.getAllByRole("button", { name: "Chart data" }).at(-1)!);
+		const { unmount } = show({ type: "bar", title: "Fit", data: [["a", 12], ["b", 1_234_567]] });
+		open();
+		const fit = document.getElementById(screen.getByRole("button", { name: "Chart data" }).getAttribute("aria-controls")!)!;
+		expect(fit.className).not.toContain("overflow-x-auto");
+		expect(fit.getAttribute("tabindex")).toBeNull();
+		// Numbers never break mid-value (a wrapped `12` reads as `1` and `2`); text may.
+		expect(screen.getByRole("cell", { name: "1,234,567" }).className).toContain("whitespace-nowrap");
+		expect(screen.getByRole("rowheader", { name: "b" }).className).toContain("wrap-anywhere");
+		unmount();
+		tableWidth = 552;
+		show({ type: "heatmap", title: "Wide", columns: Array.from({ length: 24 }, (_, h) => `${h}:00`), rowLabels: ["Mon"], rows: [Array.from({ length: 24 }, (_, h) => h * 10)] } as InlineUi);
+		open();
+		const rail = screen.getByRole("region", { name: "Wide" });
+		expect(rail.className).toContain("overflow-x-auto");
+		expect(rail.getAttribute("tabindex")).toBe("0");
+	});
+
+	it("U5 + U6: a finger on a legend row or Also item does not preview; a mouse does; both read as tappable", () => {
+		const { container } = show({ type: "pie", title: "Mix", data: [["A", 700], ["B", 296], ["C", 4]] });
+		const chart = screen.getByRole("group", { name: "Mix" });
+		const row = container.querySelector<HTMLElement>('[data-pie-legend="2"]')!;
+		fireEvent.pointerEnter(row, { pointerType: "touch" });
+		expect(live(chart)).toBe("");
+		expect(container.querySelectorAll(".opacity-35").length).toBe(0);
+		fireEvent.pointerLeave(row, { pointerType: "touch" });
+		fireEvent.pointerEnter(row, { pointerType: "mouse" });
+		expect(live(chart)).toBe("C, 4, <1%, 3 of 3");
+		fireEvent.pointerLeave(row, { pointerType: "mouse" });
+		// ≥24px hit area: 17.4px row + py-1 (8px); the grid gap moved into the padding.
+		expect(row.className).toMatch(/\bcursor-pointer\b.*\bpy-1\b|\bpy-1\b.*\bcursor-pointer\b/);
+		expect(row.parentElement!.className).not.toContain("gap-y-2");
+		cleanup();
+		width = 760;
+		const wide = show({ type: "pie", title: "Wide", data: [["A", 700], ["B", 296], ["C", 4]] });
+		const also = wide.container.querySelector<HTMLElement>("[data-pie-also]")!;
+		const wideChart = screen.getByRole("group", { name: "Wide" });
+		fireEvent.pointerEnter(also, { pointerType: "touch" });
+		expect(live(wideChart)).toBe("");
+		fireEvent.click(also);
+		expect(live(wideChart)).toBe("C, 4, <1%, 3 of 3");
+		expect(also.className).toContain("cursor-pointer");
+		expect(also.className).toContain("py-[5px]");
+	});
 });

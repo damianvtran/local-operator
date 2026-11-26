@@ -157,6 +157,25 @@ export function ChartBlock({ title, table, children }: {
 	const tableId = useId();
 	const [open, setOpen] = useState(false);
 	const [ref, width] = useWidth();
+	const tableRef = useRef<HTMLTableElement>(null);
+	const [wide, setWide] = useState(false);
+	// The table fits the phone column whenever it can: text cells break
+	// anywhere and numbers stay whole and end-aligned (R2-1, operator finding
+	// B). Only a table whose whole numbers cannot fit at all — measured by the
+	// browser, not guessed; a 3-row × 24-hour heatmap with 4-digit values lays
+	// out 1,286px wide at 328px — gets the keyboard-reachable rail the inline
+	// data grid uses. Breaking `12` into `1`/`2` would be a false
+	// reading, and truncating it loses the exact value the table exists for.
+	// On the rail the table takes its max-content width, so labels stop
+	// breaking letter by letter beside numbers that already scroll. Its width
+	// exceeds the box only while its content does, so a rotate or resize wide
+	// enough for every cell drops the rail again.
+	useLayoutEffect(() => {
+		const node = tableRef.current;
+		if (!open || !node?.parentElement) return;
+		const next = node.offsetWidth > node.parentElement.clientWidth + 0.5;
+		setWide((prev) => (prev === next ? prev : next));
+	}, [open, width, table]);
 	return (
 		// 16px margin + the transcript's 8px gap = the 24px block rhythm. No card,
 		// border or fill: the chart sits on the message ground (spec §1), so the
@@ -171,19 +190,23 @@ export function ChartBlock({ title, table, children }: {
 					<path d="M3 4.5 6 7.5 9 4.5" className="fill-none stroke-current" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
 				</svg>
 			</button>
-			<div id={tableId} hidden={!open} className="mt-2 overflow-x-auto">
-				<table aria-labelledby={titleId} className="w-full border-collapse text-meta">
+			{/* Fit first (see `wide` above): headers and row labels break
+			    anywhere, so the auto layout shrinks them before any number. */}
+			<div id={tableId} hidden={!open} className={wide ? "mt-2 overflow-x-auto rounded-sm focus-visible:outline-accent" : "mt-2 min-w-0"} {...(wide ? {
+				role: "region", "aria-labelledby": titleId, tabIndex: 0,
+			} : {})}>
+				<table ref={tableRef} aria-labelledby={titleId} className={`${wide ? "w-max min-w-full" : "w-full"} border-collapse text-meta`}>
 					<thead className="text-ink-muted">
 						<tr className="h-7">
-							{table.rows.some((row) => row.label !== undefined) && <th scope="col" className="px-2 text-start font-medium"><bdi>{table.corner ?? ""}</bdi></th>}
-							{table.columns.map((column, i) => <th key={i} scope="col" className="px-2 text-end font-medium"><bdi>{column}</bdi></th>)}
+							{table.rows.some((row) => row.label !== undefined) && <th scope="col" className="px-2 text-start font-medium wrap-anywhere"><bdi>{table.corner ?? ""}</bdi></th>}
+							{table.columns.map((column, i) => <th key={i} scope="col" className="px-2 text-end font-medium wrap-anywhere"><bdi>{column}</bdi></th>)}
 						</tr>
 					</thead>
 					<tbody>
 						{table.rows.map((row, i) => (
 							<tr key={i} className="h-7 border-t border-hairline">
 								{row.label !== undefined && <th scope="row" className="px-2 text-start font-normal text-ink-muted wrap-anywhere"><bdi>{row.label}</bdi></th>}
-								{row.cells.map((cell, j) => <td key={j} className="px-2 text-end tabular-nums"><bdi>{cell}</bdi></td>)}
+								{row.cells.map((cell, j) => <td key={j} className="px-2 text-end tabular-nums whitespace-nowrap"><bdi>{cell}</bdi></td>)}
 							</tr>
 						))}
 					</tbody>
