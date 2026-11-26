@@ -1787,6 +1787,27 @@ def test_a_run_still_in_flight_is_refused_with_the_cancel_command(
     assert [request.method for request in origin.requests] == ["GET"]
 
 
+def test_a_run_body_without_a_status_is_refused_not_a_traceback(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A document this build cannot read is a sentence and an exit code, not a raise.
+
+    The delete rule reads the run's status through :func:`is_deletable` and
+    :func:`run_status`, and both raise the typed refusal for a body that carries
+    none. Those reads have to sit inside the command's handler: outside it, the
+    only thing a person sees for a malformed answer is a traceback.
+    """
+    origin.responses.append(_poll({"id": RUN_ID, "network_id": "n_" + "a" * 24}))
+    assert _run(["exec", "--remote-delete", RUN_ID, "--yes"], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert _t(_wr.failed(error="Radient returned a remote run without a status.")) in err
+    assert "Traceback" not in err
+    assert [request.method for request in origin.requests] == ["GET"]
+
+
 def test_a_repeated_delete_is_idempotent_and_says_already_deleted(
     signed_in: int,
     origin: _Origin,

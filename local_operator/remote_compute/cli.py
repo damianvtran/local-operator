@@ -479,9 +479,21 @@ def _remote_delete(identifier: str | None, *, yes: bool) -> int:
         return 0
     except (ValueError, OSError) as failure:
         return _report(failure)
-    if not is_deletable(payload):
+    # A BODY WITHOUT A READABLE STATUS IS A REFUSAL, NOT A TRACEBACK. Both reads
+    # below raise the typed ``RemoteComputeError`` for a document this build
+    # cannot read, and they used to run outside the handler every other read of
+    # this payload sits in — so a server answering a run with no ``status`` made
+    # the command die on a traceback instead of naming the failure. They go
+    # through ``_report`` because that is the one ladder that turns a typed
+    # failure into a sentence.
+    try:
+        deletable = is_deletable(payload)
+        settled = run_status(payload).lower()
+    except (ValueError, OSError) as failure:
+        return _report(failure)
+    if not deletable:
         return _refuse(_t(_wr.delete_in_flight(run_id=identifier)))
-    if run_status(payload).lower() == "deleted":
+    if settled == "deleted":
         # Already gone at the far end: there is nothing to confirm or send, and a
         # repeat has to succeed. The local row is marked so the next read agrees.
         _mark_deleted_locally(identifier)

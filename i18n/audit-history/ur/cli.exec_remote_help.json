@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.exec_remote_help",
-  "history_sha256": "ca39e1213f7d6a4df1778e854c9490ee6697c2d1342d9b0e433ad626d302d72a",
+  "history_sha256": "f14e8896e2492ee309f12af2d2d2d985cececa4d37d01b13a82cfd16cc2c862c",
   "entries": [
     {
       "locale": "ur",
@@ -46,6 +46,51 @@
       "status": "changes_requested",
       "round": "pr-c01406efc-r1",
       "note": "Independent i18n audit round 1 of PR c01406efc (fix/rc-remote-delete), ur/cli.exec_remote_help at the c01406efc bytes. 15 keys audited: 13 wire.remote_compute (alone, run_limit, deleted, delete_already, delete_in_flight, delete_confirm, delete_confirm_unnamed, delete_declined, delete_needs_yes, yes_only_with_delete, slot_heading, slot_row, slot_row_unnamed) and cli.exec_remote_help.delete/.yes. Mechanical: key/placeholder parity exact, flag and literal parity exact, no manual bidi controls, no maxCells budget. Semantic: permanent-delete warning and 'nothing was deleted' facts preserved; run_limit correct on both server versions in all eight languages. Open at this round: BLOCKER I18N-1 (a merged head ships English-only until the passed receipts land), MAJOR I18N-2 (help delete claimed a finished run holds a slot) and MAJOR I18N-3 (help yes read as deleting the flag); locale-scoped minors fr U+202F, ru удалённый/удалён, zh-CN and vi 'the running run', es/hi pronoun antecedent. No native-speaker or rendered-frame certification claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "2dcdfe851b05c76e4a67124210d774a6dc077fdb7df249ab1c65df843933759c",
+      "context_sha256": "c264c5940c3c3282b25dc23747270f3b10f963ee119c5c453976d8630c1dfa53",
+      "target_sha256": "ffe010e235955cfe7be69a7644e249190c90bf30dbe421c8b3b0a5b5350dfe16",
+      "round": "pr-c01406efc-r2",
+      "keys_audited": 15,
+      "translator": {
+        "agent": "coder (team lopdev): the fifteen keys were authored for PR c01406efc in session deb385678bc3; the round-1 findings were remediated by commit 03d8e6ecf (git author Ola Fagbemi)",
+        "session": "deb385678bc3",
+        "session_kind": "authoring session recorded in the round-1 receipts; the remediation commit names no session id",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR c01406efc, round 2; independent of the translator and of the remediation",
+        "session": "022cf2402a25",
+        "session_kind": "auditor's own lop subagent session id (lane rc-delete-i18n-audit-r2)",
+        "model": "deepseek/deepseek-flash",
+        "model_kind": "served model per the auditor session record (selected_model, effort high)",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "pass",
+        "independent_from_translator": true,
+        "unresolved_blocker_major": 0,
+        "findings": 3,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 2
+        },
+        "finding_ids": [
+          "r2-m1",
+          "r2-n1",
+          "r2-n2"
+        ],
+        "finding_detail": "0 blocker, 0 major, 1 minor (ru облачный/удалённый split across the namespace), 2 nit (zh-CN 原本 for 'otherwise'; hi/ur yes-help phrasing diverges from its sibling) — all deferred, none gating",
+        "locale_verdict": "PASS",
+        "scope": "round 2 delta c01406efc..03d8e6ecf: the 15 keys read against en, the en context sidecars, i18n/glossary.md, the locale style guide and namespace usage; all eight round-1 findings retested individually; order-insensitive diff of the en context sidecar (63 keys, one note changed); placeholder/literal/NFC/bidi/space parity over 15 keys x 8 locales; checks: catalogue checks 0 problems, ledger validate --base 8c1a8c92c clean; targeted tests recorded, remaining failures are the shipped-set-dark mechanism only"
+      },
+      "status": "passed",
+      "note": "ur/cli.exec_remote_help: Independent i18n audit round 2 retested PR c01406efc at head 03d8e6ecf7b75c03cc686e8872ae9a4a19278ebf: the fifteen keys against en, all eight round-1 findings and this locale's own copy all pass (locale_verdict PASS, 0 blocker, 0 major); the new r2-m1 (ru облачный/удалённый split), r2-n1 (zh-CN 原本 for 'otherwise') and r2-n2 (hi/ur yes-help phrasing) findings are deferred, none gating."
     }
   ]
 }
