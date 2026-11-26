@@ -7521,12 +7521,11 @@ class AttachedSession:
         if trace is not None:
             trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
-            # ``stats`` names which proof a MISS paid (incremental after growth,
-            # full after a rewrite) in the open trace, so a slow open can be
-            # attributed without re-instrumenting.
-            stats: dict[str, Any] = {}
+            # A traced MISS records only the proof's fixed reasons, counts
+            # and times. No stats allocation or lookup clock on untraced opens.
+            stats: dict[str, Any] | None = {} if trace is not None else None
             record = await asyncio.to_thread(build_cold_tail_metadata, witness, path, stats)
-            if trace is not None:
+            if trace is not None and stats is not None:
                 trace.fields.update(stats)
         if record is None:
             return None

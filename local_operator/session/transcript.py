@@ -94,7 +94,7 @@ from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
 )
-from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
@@ -923,9 +923,13 @@ class TranscriptEntry:
         return json.dumps(row, separators=(",", ":"))
 
     @staticmethod
-    def from_json(line: str) -> "TranscriptEntry | None":
+    def from_json(line: str, *, warn_malformed: bool = True) -> "TranscriptEntry | None":
         """Parse one line; malformed lines are dropped individually (a corrupt
-        row must never destroy the whole replay)."""
+        row must never destroy the whole replay).
+
+        Speculative readers may inspect rows replay would never reach. They
+        suppress the payload-bearing warning without changing replay's parser.
+        """
         try:
             raw = json.loads(line)
             return TranscriptEntry(
@@ -939,7 +943,8 @@ class TranscriptEntry:
                 inline_ui_source_blocks=_read_inline_ui_blocks(raw.get("inline_ui_source_blocks")),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("dropping malformed transcript line: %.120s", line)
+            if warn_malformed:
+                logger.warning("dropping malformed transcript line: %.120s", line)
             return None
 
 
@@ -2541,6 +2546,8 @@ class ReplaySuffix:
     #: the bytes above this boundary (``replay_cache.build_cold_tail_metadata``).
     absence_covered_end: int = 0
     absence_needles: tuple[bytes, ...] = ()
+    #: Recovery is a met checkpoint, not a certificate of its absence.
+    recovered_checkpoint: bool = False
 
 
 #: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
@@ -2665,6 +2672,146 @@ def custom_type_proven_absent(
         return False
 
 
+def _cold_witness(handle: BinaryIO) -> tuple[int, int, int, int]:
+    stat = os.fstat(handle.fileno())
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES = 64 << 10
+
+
+def _rfind_checkpoint_spelling(window: bytes, needle: bytes, start: int, stop: int) -> int:
+    """Exact newest spelling, with forward substring search for the miss-heavy gaps."""
+    # CPython's forward bytes.find skips through long misses faster than
+    # bytes.rfind. Visit blocks newest-first, using reverse substring search
+    # only in the block known to contain a hit. The needle-width overlap
+    # catches split matches; indices avoid copying any of the journal bytes.
+    width = max(_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES, 2 * len(needle))
+    while stop - start >= len(needle):
+        block_start = max(start, stop - width)
+        first = window.find(needle, block_start, stop)
+        if first >= 0:
+            return window.rfind(needle, first, stop)
+        if block_start == start:
+            break
+        stop = block_start + len(needle) - 1
+    return -1
+
+
+def _recover_cold_checkpoint(
+    handle: BinaryIO,
+    *,
+    low: int,
+    max_bytes: int,
+    name: str,
+    needles: tuple[bytes, ...],
+    spend: dict[str, Any] | None,
+    stats: dict[str, Any] | None,
+) -> tuple[int | None, tuple[dict[str, Any], int, int] | None]:
+    """The newest complete-row needle's file offset, plus recovery if rows prove it.
+
+    One byte window sees both writer spellings without per-chunk overlap or a
+    second read. As in the bounded tail walker, discard the fragment at a
+    non-BOF floor: it might be the end of an arbitrarily large older row.
+    """
+    started = time.monotonic() if stats is not None else 0.0
+    read = rows = candidates = 0
+    outcome = "unreadable"
+    try:
+        floor = max(0, low - max_bytes)
+        handle.seek(floor)
+        window = handle.read(low - floor)
+        read = len(window)
+        if read != low - floor or not window.endswith(b"\n"):
+            return None, None
+        # The trailing newline above guarantees a delimiter even if the
+        # entire window is the trailing fragment of a single oversized row.
+        complete = window.find(b"\n") + 1 if floor else 0
+        hits = [_rfind_checkpoint_spelling(window, needle, complete, read) for needle in needles]
+        newest = max(hits, default=-1)
+        if newest < 0:
+            outcome = "no_spelling"
+            return None, None
+
+        # A reused absence witness covers a prefix. Only the newest hit can
+        # rule out absence in the remaining suffix; use its absolute BYTE
+        # position, not the candidate's row start or a window-relative index.
+        hit_offset = floor + newest
+        if spend is not None and SessionSpend.from_details(spend) is None:
+            outcome = "invalid_spend"
+            return hit_offset, None
+
+        def parse(raw: bytes) -> TranscriptEntry:
+            nonlocal rows
+            rows += 1
+            entry = TranscriptEntry.from_json(raw.decode("utf-8"), warn_malformed=False)
+            if entry is None or not isinstance(entry.payload.get("provider_payload") or {}, dict):
+                raise ValueError  # Decline, including on rows eager may never reach.
+            return entry
+
+        def is_checkpoint(entry: TranscriptEntry) -> bool:
+            return entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == name
+
+        # A spelling inside another row (e.g. nested details) buys no order
+        # walk. Check whole candidate rows newest-first and consume every hit
+        # on that line together. Keep each needle's position so a sparse or
+        # absent spelling doesn't rescan the same prefix for every candidate.
+        rejected: set[int] = set()
+        hit = newest
+        try:
+            while hit >= 0:
+                left = max(complete, window.rfind(b"\n", complete, hit) + 1)
+                right = window.index(b"\n", hit)
+                candidates += 1
+                candidate = parse(window[left:right])
+                if is_checkpoint(candidate):
+                    break
+                rejected.add(left)
+                for index, needle in enumerate(needles):
+                    if hits[index] >= left:
+                        hits[index] = _rfind_checkpoint_spelling(window, needle, complete, left)
+                hit = max(hits)
+            else:
+                outcome = "not_checkpoint"
+                return hit_offset, None
+
+            # Eager's ordinal counts every newer parsed row, including shrinks.
+            # Don't seed from this walk, and don't decode known non-matches or
+            # the candidate twice. An alternate writer can hide a newer actual
+            # checkpoint in the gap without either byte spelling: still let
+            # that row win, just as eager does.
+            order = 1
+            pos = read - 1
+            while pos > right:
+                start = window.rfind(b"\n", left, pos) + 1
+                if start not in rejected:
+                    raw = window[start:pos]
+                    if not raw.strip():
+                        pos = start - 1
+                        continue
+                    entry = parse(raw)
+                    if is_checkpoint(entry):
+                        candidate = entry
+                        break
+                order += 1
+                pos = start - 1
+            details = dict(candidate.payload.get("details", {}))
+        except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
+            # Damage could affect the ordinal (eager replaces bad UTF-8 and
+            # skips malformed JSON). Leave the canonical facts to that reader.
+            outcome = "malformed"
+            return hit_offset, None
+        outcome = "matched"
+        return hit_offset, (details, order, read)
+    finally:
+        if stats is not None:
+            stats["lookup_bytes"] = read
+            stats["lookup_rows"] = rows  # Actual continuation decode attempts, not the ordinal.
+            stats["lookup_candidates"] = candidates
+            stats["lookup_ms"] = round((time.monotonic() - started) * 1000, 3)
+            stats["lookup_outcome"] = outcome
+
+
 def read_cold_tail(
     directory: str | Path,
     *,
@@ -2673,6 +2820,8 @@ def read_cold_tail(
     max_rows: int = 256,
     max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
     known_absent: tuple[int, frozenset[bytes]] | None = None,
+    desktop_source: tuple[int, int, int, int] | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> ReplaySuffix | None:
     """Prove first-frame facts from a bounded plain-journal suffix, or decline.
 
@@ -2681,7 +2830,9 @@ def read_cold_tail(
     type, plus the usage seed) is either MET in the newest 4 MiB / 256 rows,
     or PROVEN ABSENT from every byte below them. Damaged or incomplete lines,
     archives and a shrink row met before a usage receipt keep the exact eager
-    path. A bound alone is never taken as proof of absence.
+    path. A bound alone is never taken as proof of absence. The exact desktop
+    open may additionally meet its required checkpoint in one preceding
+    tail-sized window, without widening the seed or opportunistic spend facts.
 
     WHY the absence proof (L7 design R1): legacy journals carry no checkpoint
     and no spend row at all. Requiring the tail to *meet* them sent every such
@@ -2788,9 +2939,15 @@ def read_cold_tail(
     # Lazy: usage_seed -> model_selection -> this module.
     from local_operator.session.usage_seed import parse_usage
 
+    # Only fixed reasons, never row content or exception strings, go to the
+    # caller's opt-in trace.
+    def decline(reason: str) -> None:
+        if stats is not None:
+            stats["decline_reason"] = reason
+
     path, codec = transcript_source(Path(directory))
     if codec is not None:
-        return None
+        return decline("archive")
     spellings = {name: _custom_type_spellings(name) for name in checkpoint_types}
     checkpoints: dict[str, dict[str, Any]] = {}
     order: dict[str, int] = {}
@@ -2815,7 +2972,7 @@ def read_cold_tail(
                 # A complete JSON object without its terminating newline can
                 # still be an interrupted append. Let eager replay decide it.
                 if first and (not lines or lines[0] != b""):
-                    return None
+                    return decline("torn_tail")
                 for index, raw in enumerate(lines):
                     # The first chunk's leading b"" is the zero bytes after
                     # the final newline, not a row.
@@ -2828,10 +2985,10 @@ def read_cold_tail(
                         break
                     entry = TranscriptEntry.from_json(raw.decode("utf-8"))
                     if entry is None:
-                        return None
+                        return decline("malformed_tail")
                     provider = entry.payload.get("provider_payload") or {}
                     if not isinstance(provider, dict):
-                        return None
+                        return decline("malformed_tail")
                     # Conservatism, not the seed's boundary (see docstring):
                     # every shrink spelling usages_since_newest_shrink honours.
                     if (
@@ -2840,7 +2997,7 @@ def read_cold_tail(
                         or (entry.type == ENTRY_MESSAGE and provider.get("pruned"))
                     ):
                         if not have_seed:
-                            return None
+                            return decline("shrink_before_seed")
                         stopped = True
                         break
                     parsed.append(entry)
@@ -2881,32 +3038,86 @@ def read_cold_tail(
             # the walker ran out (byte bound, or BOF with ``low == 0``).
             bytes_read = end - low
             if low >= end:
-                return None
+                return decline("empty_tail")
             # What is still unproven. A usage receipt that the tail met but
             # could not parse is not proven absent: eager would look further
             # back for a parseable one. So this declines (design row 15).
             if have_usage and not have_seed:
-                return None
+                return decline("no_usable_seed")
             missing = [name for name in checkpoint_types if name not in checkpoints]
             needles: list[bytes] = []
             for name in missing:
                 spelling = spellings[name]
                 if spelling is None:
-                    return None
+                    return decline("unsupported_spelling")
                 needles.extend(spelling)
             if not have_usage:
                 needles.extend(_USAGE_SPELLINGS)
             longest = max(len(n) for n in needles)
             scan_end = min(end, low + longest - 1)
-            # The cap stays on the RANGE the proof covers, not on the bytes this
-            # call reads, so a prior proof never changes which journals decline.
-            if scan_end > max_scan_bytes:
-                return None
-            scan_start = 0
-            if known_absent is not None and set(needles) <= known_absent[1]:
-                scan_start = max(0, min(known_absent[0], scan_end) - (longest - 1))
-            if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
-                return None
+
+            def absence_start(needed: list[bytes]) -> int:
+                if known_absent is not None and set(needed) <= known_absent[1]:
+                    return max(0, min(known_absent[0], scan_end) - (longest - 1))
+                return 0
+
+            scan_start = absence_start(needles)
+            recovery = None
+            name = checkpoint_types[0]
+            frontend_needles = spellings[name]
+            # Only the exact desktop caller supplies the witness. A seed met
+            # before any shrink lets this lookup cross shrinks for order without
+            # changing usage; spend must be valid in the tail or still pass its
+            # original absence proof, on the original range and cap. Don't
+            # pay for a lookup when the cap already rules that proof out.
+            if (
+                desktop_source is not None
+                and have_seed
+                and name in missing
+                and frontend_needles
+                and low
+                and (SESSION_SPEND_CUSTOM_TYPE in checkpoints or scan_end <= max_scan_bytes)
+            ):
+                hit, recovery = _recover_cold_checkpoint(
+                    handle,
+                    low=low,
+                    max_bytes=max_bytes,
+                    name=name,
+                    needles=frontend_needles,
+                    spend=checkpoints.get(SESSION_SPEND_CUSTOM_TYPE),
+                    stats=stats,
+                )
+                if recovery is not None:
+                    remaining = [needle for needle in needles if needle not in frontend_needles]
+                    if remaining:
+                        # The hit is not a reason to scan the whole prefix for
+                        # frontend needles first. Prove only the remaining fact.
+                        spend_start = absence_start(remaining)
+                        if scan_end > max_scan_bytes or not _spellings_absent(
+                            handle, spend_start, scan_end, tuple(remaining)
+                        ):
+                            return decline("spend_unproven")
+                    else:
+                        spend_start = scan_end
+                    if _cold_witness(handle) != desktop_source or end != desktop_source[1]:
+                        return decline("source_changed")
+                    checkpoints[name], extra_rows, lookup_bytes = recovery
+                    order[name] = len(parsed) + extra_rows
+                    bytes_read += lookup_bytes
+                    needles = remaining
+                    scan_start = spend_start
+                elif hit is not None and scan_start <= hit and scan_end <= max_scan_bytes:
+                    # This exact supported spelling is in the original scan's
+                    # range; that proof would decline too. If a prior proof
+                    # skips it, run the original path rather than guess.
+                    return decline("below_tail_presence")
+            if recovery is None:
+                # Unchanged legacy proof when the continuation has no hit or
+                # was not admitted. The cap bounds the proof RANGE, not I/O.
+                if scan_end > max_scan_bytes:
+                    return decline("absence_cap")
+                if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
+                    return decline("below_tail_presence")
             return ReplaySuffix(
                 entries=tuple(reversed(parsed)),
                 through_present=True,
@@ -2917,11 +3128,12 @@ def read_cold_tail(
                 rows_read=len(parsed),
                 usage_proven_absent=not have_usage,
                 absence_scan_bytes=scan_end - scan_start,
-                absence_covered_end=low,
+                absence_covered_end=low if needles else 0,
                 absence_needles=tuple(needles),
+                recovered_checkpoint=recovery is not None,
             )
     except (OSError, UnicodeError, TypeError, ValueError):
-        return None
+        return decline("read_error")
 
 
 def read_replay_suffix(
