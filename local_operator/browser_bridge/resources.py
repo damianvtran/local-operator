@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,119 @@ _REPLAY_LANES = (HOST_UI, HOST_BRIDGE)
 #: paused tab) is dropped: it is in use, not owed.
 #: Private like ``surface_id``: ``read_inventory`` publishes only a count.
 STRANDED_FIELD = "stranded_surfaces"
+
+#: PENDING-ASK HOLD: the retention a session's DISPOSAL writes while one of its
+#: asks still waits on the user, so the tab the user was sent to survives the
+#: process boundary the ask spans.
+#:
+#: Why it exists (session a64fec9430f3, 2026-11-25): the agent opened a sign-in
+#: tab, queued ask a-e69c, and correctly left the tab open. Four minutes later
+#: the fleet update retired the runtime ("retiring for 0.113.5"), the retiring
+#: process ran its ordinary disposal, and ``finish("disposed")`` sent
+#: ``owner_finish`` to an UNRETAINED scope — so the extension closed the tab
+#: while the ask still pointed at it. The user answered to an empty browser.
+#: Disposal is a fallback for "this session is gone", but a runtime retirement,
+#: an idle exit or a restart is not the session ending: the ask outlives the
+#: process and is answered by its successor.
+#:
+#: The hold is EXPLICIT and KEYED, never inferred from "some ask is open":
+#: the ``ask`` tool's ``browser_handoff=true`` writes one binding per ask to
+#: ``ASK_HANDOFFS_FIELD`` — ``{ask_id, surface_id, origin, expires_at}`` — at
+#: the moment it queues the question, naming the exact tab and the origin the
+#: user is being sent to. A binding holds only while ALL of these are true:
+#: its own ask is still ``open`` in the session's ask log; the record's live
+#: surface is still that exact handle; and the last origin the agent observed
+#: on it (``SURFACE_ORIGIN_FIELD``) is still the bound origin. So an unrelated
+#: ask neither creates a hold nor, by settling, releases one; a tab the agent
+#: navigated elsewhere or closed is not held for a handoff it no longer shows.
+#: It is distinguishable from an explicit ``retain`` by ``ASK_HOLD_PREFIX`` and
+#: never overwrites one. Its expiry (``ASK_HOLD_EXPIRES_FIELD``) is the latest
+#: deadline among the live bindings; past it the hold no longer protects the
+#: row from ``lop browser cleanup``, so a session that is never resumed cannot
+#: pin a tab forever.
+ASK_HOLD_PREFIX = "pending ask "
+ASK_HOLD_EXPIRES_FIELD = "retention_expires_at"
+ASK_HANDOFFS_FIELD = "ask_handoffs"
+SURFACE_ORIGIN_FIELD = "surface_origin"
+
+#: THE REOPEN FLOOR (the part that does not depend on the model). Pinning
+#: (``browser_handoff=true``) is an optimisation a model must remember to ask
+#: for; the incident's agent had ``retain`` available and did not use it. So
+#: whenever an ask is queued while the session holds a live tab, a reference
+#: to the page it showed is recorded regardless of any flag, with NO
+#: retention: ordinary cleanup still closes the tab. When a later browser
+#: action finds no live tab and that ask is still open (or was just answered),
+#: the tool reopens the recorded URL in a fresh tab OF THIS SESSION — never
+#: another session's, never focused — and reports it as a reopened handoff.
+#:
+#: Two copies, on purpose. The ask's own row (``asks.jsonl``, which travels
+#: with a moved session and is read by remote surfaces) carries only the
+#: ORIGIN (hostname and port, never userinfo) and the public tab label: no
+#: path, query or fragment, any of which can carry a magic-link token, a
+#: session id (``;jsessionid=``) or a one-time code (review R2-1). The full
+#: URL stays in this private, device-local record (``HANDOFF_REFS_FIELD``),
+#: which is what the reopen uses.
+#:
+#: LIFETIME (review R2-4): a reference reopens while its ask is ``open``, or
+#: for ``REOPEN_AFTER_ANSWER_MS`` after it was answered — the answering turn,
+#: which in the incident began 0.6 s after the answer (15:04:02.598 answer,
+#: 15:04:02.644 turn start, ``turn-journal.json``). 30 minutes covers a turn
+#: queued behind a busy runtime without letting an old login page reopen days
+#: later. ``release``, a settled hold and the agent's own open/goto/close
+#: clear the references outright.
+SURFACE_URL_FIELD = "surface_url"
+HANDOFF_REFS_FIELD = "handoff_refs"
+#: Ask states in which a missing tab is still worth reopening: the user is
+#: being asked to act in it, or has just answered and the agent continues.
+_REOPENABLE_ASK_STATES = frozenset({"open", "answered"})
+REOPEN_AFTER_ANSWER_MS = 30 * 60 * 1000
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def url_origin(url: Any) -> str:
+    """``scheme://host[:port]`` of ``url``, lower-cased; ``""`` when it has none.
+
+    Built from ``hostname`` and ``port`` ONLY, never the raw authority: a URL
+    like ``https://alice:pw@host`` must not carry its userinfo into an origin
+    that is written to the ask row or compared as a key (review R2-1).
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(url, str) or not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return ""
+    if not parts.scheme or not host:
+        return ""
+    if ":" in host:  # an IPv6 literal keeps its brackets
+        host = f"[{host}]"
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
+
+
+def open_ask_ids(directory: Path) -> set[str]:
+    """Ids of the asks still ``open`` in the session log at ``directory``.
+
+    The same durable log and the same ``fold`` the ask queue uses, so "open"
+    here cannot disagree with the ask bar: answered, declined, withdrawn and
+    timed-out asks are settled. Raises ``OSError``/``ValueError`` on an
+    unreadable log so each caller chooses which way an unknown fails.
+    """
+    from local_operator.asks import store as ask_store
+
+    # STRICT: an unreadable log must not read as "no open asks" (review R1-2).
+    records = ask_store.fold(ask_store.read_events(directory, strict=True), _now_ms())
+    return {str(r.get("ask_id", "")) for r in ask_store.outstanding_asks(records)}
+
+
+def is_ask_hold(retention: Any) -> bool:
+    return isinstance(retention, str) and retention.startswith(ASK_HOLD_PREFIX)
 
 
 def _tab_key(surface_id: str) -> str:
@@ -1294,6 +1408,13 @@ class BrowserResource:
         # set would make a LATER finish's terminal clearable by a recover that
         # is no longer a resume at all.
         self.record.pop("resumed_scope", None)
+        if result.get("state") != "unresolved":
+            # The successor of a run that held the tab for a pending ask: once
+            # the ask has settled the hold is spent, and leaving it on the
+            # extension would make this run's own disposal keep a tab nobody is
+            # waiting on. A still-open ask keeps it (the tab is now addressable
+            # again through the `tab` this reply just re-attributed).
+            await self._refresh_ask_hold(may_add=False)
         # A successful reconcile means this link really does implement the
         # lifecycle, so any `unavailable` marker written by an earlier degraded
         # pass under a different peer is retired with it.
@@ -1534,6 +1655,7 @@ class BrowserResource:
         # Persist intent BEFORE waiting for a possibly in-flight tool. A crash
         # or timeout leaves an exact obligation, not guessed terminal evidence.
         self.assert_current()
+        prior_terminal = str(self.record.get("terminal") or "")
         outcome = str(self.record.get("terminal") or outcome)
         self.record["terminal"] = outcome
         self.record["state"] = "cleanup_pending"
@@ -1567,6 +1689,11 @@ class BrowserResource:
                 stranded = await self.close_stranded(close_allowed=close_allowed)
                 if close_allowed is not None and not close_allowed():
                     return BrowserCleanupResult("pending", admission_skipped=True)
+                # Only a FIRST settle by disposal may add the hold: a child's
+                # authoritative finish (completed/failed) has its own handoff
+                # rules, and a later disposal over an already-settled child
+                # arrives with `prior_terminal` set.
+                await self._refresh_ask_hold(may_add=outcome == "disposed" and not prior_terminal)
                 if self.record.get("retention"):
                     await self.client().call(
                         "owner_retain", {**self.params(), "reason": self.record["retention"]}
@@ -1592,6 +1719,251 @@ class BrowserResource:
             # failure; the class name is the fallback for a type that carries
             # no message, matching how the CLI renders its outer handler.
             return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
+
+    def bind_ask_handoff(self, ask_id: str, expires_at: Any) -> dict[str, Any]:
+        """Record that ``ask_id`` sends the user to THIS session's live tab.
+
+        Called by the ``ask`` tool (``browser_handoff=true``) right after the
+        ask is durably queued. Binds the exact live handle and the origin last
+        observed on it, so the hold can never transfer to another tab or page.
+        Raises ``BrowserOwnershipError`` when there is no live tab to bind.
+        """
+        self.initialize()
+        surface = str(self.record.get("surface_id", ""))
+        if not surface:
+            raise BrowserOwnershipError("no browser tab is open in this session to hand off")
+        if not self.record.get(SURFACE_ORIGIN_FIELD):
+            # The origin is half of the key: unbound to a page, the hold could
+            # follow the tab anywhere. Every open/goto/snapshot records it.
+            raise BrowserOwnershipError(
+                "the page this tab shows is not known yet; snapshot it, then ask again"
+            )
+        binding = {
+            "ask_id": str(ask_id),
+            "surface_id": surface,
+            "origin": str(self.record.get(SURFACE_ORIGIN_FIELD, "")),
+            "expires_at": (
+                expires_at
+                if isinstance(expires_at, int) and not isinstance(expires_at, bool)
+                else None
+            ),
+        }
+        bindings = [
+            b
+            for b in self.record.get(ASK_HANDOFFS_FIELD, [])
+            if isinstance(b, dict) and b.get("ask_id") != binding["ask_id"]
+        ]
+        self.record[ASK_HANDOFFS_FIELD] = [*bindings, binding]
+        self._save()
+        return binding
+
+    def note_surface_origin(self, url: Any) -> None:
+        """Remember the page the agent last saw its live tab on (or forget it).
+
+        Private, like ``surface_id``: the full URL is the reopen target.
+        """
+        live = bool(self.record.get("surface_id"))
+        origin = url_origin(url) if live else ""
+        full = str(url) if origin else ""
+        if origin == self.record.get(SURFACE_ORIGIN_FIELD, "") and full == self.record.get(
+            SURFACE_URL_FIELD, ""
+        ):
+            return
+        self.assert_current()
+        for field, value in ((SURFACE_ORIGIN_FIELD, origin), (SURFACE_URL_FIELD, full)):
+            if value:
+                self.record[field] = value
+            else:
+                self.record.pop(field, None)
+        self._save()
+
+    def handoff_reference(self) -> dict[str, Any] | None:
+        """The REDACTED reference for an ask queued now, or ``None`` (no live tab).
+
+        Safe for the ask row: origin and public tab label only (see
+        ``HANDOFF_REFS_FIELD``).
+        """
+        from local_operator.browser_bridge.handoff import public_surface_label
+
+        surface = str(self.record.get("surface_id", ""))
+        url = str(self.record.get(SURFACE_URL_FIELD, ""))
+        if not surface or not url_origin(url):
+            return None
+        return {
+            "origin": url_origin(url),
+            "surface": public_surface_label(surface),
+        }
+
+    def record_handoff_ref(self, ask_id: str) -> None:
+        """Keep the private reopen target for ``ask_id`` (full URL, host lane)."""
+        surface = str(self.record.get("surface_id", ""))
+        url = str(self.record.get(SURFACE_URL_FIELD, ""))
+        if not ask_id or not surface or not url_origin(url):
+            return
+        self.assert_current()
+        refs = [
+            r
+            for r in self.record.get(HANDOFF_REFS_FIELD, [])
+            if isinstance(r, dict) and r.get("ask_id") != ask_id
+        ]
+        refs.append(
+            {
+                "ask_id": str(ask_id),
+                "url": url,
+                "origin": url_origin(url),
+                "host": str(self.record.get("host", "") or surface_host(surface)),
+            }
+        )
+        # Bounded: the open-ask cap already bounds live asks; keep a short tail.
+        self.record[HANDOFF_REFS_FIELD] = refs[-8:]
+        self._save()
+
+    def reopenable_handoff(self) -> dict[str, Any] | None:
+        """The newest reference whose tab is gone and whose ask still wants it.
+
+        ``None`` while a tab is live (nothing to reopen), when no reference
+        exists, or when the ask log cannot be read STRICTLY (a read failure
+        must not open a page on a guess).
+        """
+        if self.record.get("surface_id"):
+            return None
+        refs = [r for r in self.record.get(HANDOFF_REFS_FIELD, []) if isinstance(r, dict)]
+        if not refs:
+            return None
+        from local_operator.asks import store as ask_store
+
+        try:
+            records = ask_store.fold(ask_store.read_events(self.directory, strict=True), _now_ms())
+        except (OSError, ValueError):
+            return None
+        now = _now_ms()
+        wanting: dict[str, str] = {}
+        for r in records:
+            state = str(r.get("status", ""))
+            if state not in _REOPENABLE_ASK_STATES:
+                continue
+            answered_at = r.get("answered_at")
+            if state == "answered" and not (
+                isinstance(answered_at, int) and now - answered_at <= REOPEN_AFTER_ANSWER_MS
+            ):
+                continue
+            wanting[str(r.get("ask_id", ""))] = state
+        for ref in reversed(refs):
+            ask_id = str(ref.get("ask_id", ""))
+            if ask_id in wanting and url_origin(ref.get("url")):
+                return {**ref, "ask_status": wanting[ask_id]}
+        return None
+
+    def consume_handoff_refs(self) -> None:
+        """The agent opened or closed a tab itself: no reference is owed any more.
+
+        A reopen is a floor for a tab that vanished UNDER the agent; once the
+        agent chose a page (or chose to close), reopening the old one would
+        override that choice.
+        """
+        if self.record.pop(HANDOFF_REFS_FIELD, None) is not None:
+            self.assert_current()
+            self._save()
+
+    def _live_handoffs(self, open_ids: set[str] | None) -> list[dict[str, Any]]:
+        """Bindings that still hold. ``open_ids=None`` means the ask log could not
+        be read: every binding on the same tab and origin is kept, because the
+        safe failure for a tab a person may be using is to keep it (its own
+        deadline still bounds the hold), never to close it on a guess."""
+        surface = str(self.record.get("surface_id", ""))
+        origin = str(self.record.get(SURFACE_ORIGIN_FIELD, ""))
+        if not surface:
+            return []
+        return [
+            b
+            for b in self.record.get(ASK_HANDOFFS_FIELD, [])
+            if isinstance(b, dict)
+            and (open_ids is None or b.get("ask_id") in open_ids)
+            and b.get("surface_id") == surface
+            # Origin isolation: a binding made for origin A never holds the tab
+            # once the agent has seen it on origin B (or lost track of where it
+            # is). Both sides must be known and equal.
+            and b.get("origin") and b.get("origin") == origin
+        ]
+
+    async def _refresh_ask_hold(self, *, may_add: bool) -> None:
+        """Make this scope's pending-ask hold match its live handoff bindings.
+
+        Called under ``self.lock`` from ``finish`` (before the existing
+        retention/``owner_finish`` step, which then honours whatever this
+        leaves) and from ``recover`` on the next run.
+
+        * An explicit ``retain`` (no ``ASK_HOLD_PREFIX``) is never touched.
+        * ``may_add`` (a first settle by disposal): live bindings write the
+          hold, so ``owner_retain`` keeps the tab through this disposal.
+        * An existing hold with no live binding left is RELEASED on the host,
+          or the extension's copy of the retention would keep the tab.
+        * Bindings that can never hold again (ask settled, other tab, other
+          origin) are pruned so a later ask cannot revive them.
+
+        An unreadable ask log keeps (or writes) the hold for bindings on the
+        same tab and origin — a read failure never looks like an empty log.
+        """
+        current = self.record.get("retention")
+        if current and not is_ask_hold(current):
+            return
+        if not current and not self.record.get(ASK_HANDOFFS_FIELD):
+            return
+        open_ids: set[str] | None
+        try:
+            open_ids = open_ask_ids(self.directory)
+        except (OSError, ValueError):
+            open_ids = None
+        live = self._live_handoffs(open_ids)
+        if live != self.record.get(ASK_HANDOFFS_FIELD):
+            if live:
+                self.record[ASK_HANDOFFS_FIELD] = live
+            else:
+                self.record.pop(ASK_HANDOFFS_FIELD, None)
+            self._save()
+        if live and (current or may_add):
+            deadlines = [b.get("expires_at") for b in live]
+            known = [d for d in deadlines if isinstance(d, int) and not isinstance(d, bool)]
+            self.record["retention"] = f"{ASK_HOLD_PREFIX}{live[-1]['ask_id']}"
+            self.record[ASK_HOLD_EXPIRES_FIELD] = (
+                max(known) if len(known) == len(deadlines) else None
+            )
+            self._save()
+        elif current and not live:
+            if open_ids is not None:
+                # A hold that settled because its ask did spends that ask's
+                # reopen reference too (review R2-4): the ask it served is
+                # over, so its page must not come back later. A hold lifted
+                # only because the TAB vanished keeps the reference of a still
+                # open ask: that is exactly the case the reopen floor serves.
+                refs = [
+                    r
+                    for r in self.record.get(HANDOFF_REFS_FIELD, [])
+                    if isinstance(r, dict) and r.get("ask_id") in open_ids
+                ]
+                if refs:
+                    self.record[HANDOFF_REFS_FIELD] = refs
+                else:
+                    self.record.pop(HANDOFF_REFS_FIELD, None)
+            await self._release_ask_hold()
+
+    async def drop_ask_handoffs(self) -> None:
+        """The owner's explicit ``close`` wins: forget every binding, lift the hold."""
+        had_hold = is_ask_hold(self.record.get("retention"))
+        if self.record.pop(ASK_HANDOFFS_FIELD, None) is not None and not had_hold:
+            self._save()
+        if had_hold:
+            await self._release_ask_hold()
+
+    async def _release_ask_hold(self) -> None:
+        # A legacy link never accepted the retention (see `finish_degraded`),
+        # so there is nothing on the host to release; only the record changes.
+        if self.ownership_mode() is not False:
+            await self.client().call("owner_release", self.params())
+        self.assert_current()
+        self.record["retention"] = ""
+        self.record.pop(ASK_HOLD_EXPIRES_FIELD, None)
+        self._save()
 
     async def release_and_finish(self, outcome: str) -> BrowserCleanupResult:
         """Drop this scope's retention, then settle it (close its tab).
@@ -1698,7 +2070,23 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
     in. Guessing wrong pushes them to retry against a protected tab, which is
     the behaviour the fence exists to discourage.
     """
-    if value.get("retention"):
+    expires = value.get(ASK_HOLD_EXPIRES_FIELD)
+    ask_hold_lapsed = (
+        is_ask_hold(value.get("retention"))
+        and isinstance(expires, int)
+        and not isinstance(expires, bool)
+        and expires <= _now_ms()
+    )
+    # A lapsed pending-ask hold is no longer a reason to refuse: its ask's
+    # deadline passed, so the session that never came back cannot keep the tab
+    # forever. `finish` (which cleanup runs) re-reads the ask log and releases
+    # the hold on the host before closing.
+    if value.get("retention") and not ask_hold_lapsed:
+        if is_ask_hold(value.get("retention")):
+            return False, (
+                f"retained: {value['retention']} — the session is waiting on that answer; "
+                "the hold lifts when the ask settles or expires"
+            )
         if value.get("handed_to"):
             # A finished child's retained tab handed to its parent (see
             # ``browser_bridge.handoff``): the CHILD's record still holds it, so
@@ -1718,6 +2106,12 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
             "no terminal intent recorded (owner did not finish) — "
             "resume it with 'lop --resume <session>' and let it close the tab"
         )
+    if ask_hold_lapsed:
+        # Terminal, and the only thing keeping its tab was a hold whose ask is
+        # past its deadline. The row reads `retained` (that is what the host
+        # answered the disposal), which is not a stranded state, so without
+        # this the lapse would only change the refusal's wording.
+        return True, ""
     if value.get(STRANDED_FIELD):
         # Terminal and unretained, but still owing a tab it lost track of. The
         # live slot may read "closed" (the LATEST tab settled), which is exactly

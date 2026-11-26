@@ -113,6 +113,19 @@ cleanup. Ordinary assistant final messages and idle sessions are not terminal
 lifecycle evidence. Running jobs, paused work, and pending approvals are not
 orphans.
 
+When you ask the user to act in your tab (sign in, approve, finish a form),
+pass `browser_handoff=true` to `ask`. That binds THIS ask to the exact tab and
+the origin it currently shows: if the runtime is retired, restarted or exits
+before the answer, disposal keeps that tab (`retained: pending ask <id>` in
+`lop browser tabs`) instead of closing it, and the next run re-addresses the
+same tab. The hold lifts by itself when that ask settles (answered, declined,
+withdrawn or past its deadline), when you `close` the tab, or when you drive
+it to another origin; ordinary cleanup then applies. Other asks never create
+or release it. It never focuses the tab, never touches an explicit `retain`,
+and past its deadline it no longer blocks `lop browser cleanup`. A legacy
+extension without the ownership lifecycle cannot hold a tab and still closes
+it.
+
 ### Subagents: a tab for a human belongs with the parent
 
 A subagent's tab lives exactly as long as the subagent's task. When a child

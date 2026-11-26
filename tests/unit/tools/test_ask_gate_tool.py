@@ -145,7 +145,9 @@ def test_the_ask_schema_and_default_tool_names_do_not_move() -> None:
     # ``relay`` joined in #2520: the pointer alternative to ``questions``, and the
     # ledger entries (``MEASURED_TOKENS`` and the bench ceiling) were re-measured
     # with it. The GATE still adds nothing — that is what this cell pins.
-    assert set(properties) == {"i", "questions", "timeout", "relay"}
+    # ``browser_handoff`` joined for the pending sign-in handoff (session
+    # a64fec9430f3), with both ledgers re-measured in the same diff.
+    assert set(properties) == {"i", "questions", "timeout", "relay", "browser_handoff"}
 
     from local_operator.tools.registry import DEFAULT_TOOL_NAMES
 

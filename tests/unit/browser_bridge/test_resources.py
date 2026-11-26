@@ -56,6 +56,9 @@ class BridgeFixture:
         if method == "owner_retain":
             self.retained = True
             return {"state": "retained"}
+        if method == "owner_release":
+            self.retained = False
+            return {"state": "released", "terminal": ""}
         if method == "owner_finish":
             if self.unreachable:
                 raise BridgeUnreachable(
@@ -741,3 +744,424 @@ def test_an_owed_handle_whose_tab_number_was_reused_stays_owed(tmp_path: Path) -
     resource.record["stranded_surfaces"] = [{"surface": "ui:8:A", "allocation_id": "a"}]
     resource.remember("ui:8:B")
     assert resource.record["stranded_surfaces"] == [{"surface": "ui:8:A", "allocation_id": "a"}]
+
+
+# -- pending-ask handoff hold (session a64fec9430f3) -------------------------
+#
+# The incident: a sign-in tab was left open for ask a-e69c, the fleet update
+# retired the runtime, and the retiring process's disposal closed the tab
+# because the scope was unretained. The hold is keyed: only an ask bound to
+# the exact live tab AND its origin (`bind_ask_handoff`, written by
+# `ask browser_handoff=true`) keeps that tab, and only until THAT ask settles.
+
+SIGNIN = "https://signin.example.test/login?next=%2Fapps"
+TAB = "bridge:100:private"
+
+
+def _queue_ask(directory: Path, ask_id: str, *, expires_in_ms: int = 3_600_000) -> int:
+    from local_operator.asks import store
+
+    now = store.now_ms()
+    store.append_event(
+        directory,
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now,
+            "created_at": now,
+            "expires_at": now + expires_in_ms,
+            "timeout_s": max(1, expires_in_ms // 1000),
+            "questions": [{"id": "signin", "question": "Sign in?", "options": []}],
+            "tool_call_id": "call_synthetic",
+            "urgent": False,
+        },
+    )
+    return now + expires_in_ms
+
+
+def _settle_ask(directory: Path, ask_id: str, kind: str) -> None:
+    from local_operator.asks import store
+
+    event: dict[str, Any] = {
+        "v": 1,
+        "kind": kind,
+        "ask_id": ask_id,
+        "at": store.now_ms(),
+        "tool_call_id": "call_synthetic",
+    }
+    if kind == "answered":
+        event["answers"] = {"signin": ["Signed in"]}
+        event["by"] = {"surface": "unverified"}
+    store.append_event(directory, event)
+
+
+def _methods(bridge: BridgeFixture) -> list[str]:
+    return [method for method, _ in bridge.calls]
+
+
+def _owned_tab(directory: Path, url: str = SIGNIN) -> BrowserResource:
+    resource = BrowserResource(directory, directory.name)
+    resource.initialize()
+    resource.remember(TAB)
+    resource.note_surface_origin(url)
+    return resource
+
+
+def _handoff(resource: BrowserResource, ask_id: str, **kw: Any) -> None:
+    resource.bind_ask_handoff(ask_id, _queue_ask(resource.directory, ask_id, **kw))
+
+
+@pytest.mark.asyncio
+async def test_disposal_keeps_the_tab_bound_to_an_open_handoff_ask(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """The reproduction: before the hold this closed the tab."""
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-e69c")
+    result = await resource.finish(resource.generation, "disposed")
+    assert result.state == "retained"
+    assert [p["reason"] for m, p in bridge.calls if m == "owner_retain"] == ["pending ask a-e69c"]
+    record = json.loads(resource.path.read_text())
+    assert record["surface_id"] == TAB
+    assert record[resources.ASK_HANDOFFS_FIELD][0]["origin"] == "https://signin.example.test"
+    assert "close" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_open_ask_does_not_retain_an_active_tab(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Over-retention control: a tab held for the agent's own work plus an
+    unbound preference question closes at disposal exactly as before."""
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-preference")
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+async def test_another_asks_settlement_cannot_release_the_handoff(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-unrelated")
+    _handoff(resource, "a-signin")
+    _settle_ask(tmp_path, "a-unrelated", "answered")
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+    assert "owner_release" not in _methods(bridge)
+    assert resource.record["retention"] == "pending ask a-signin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["answered", "withdrawn", "timed_out"])
+async def test_a_settled_handoff_closes_as_before(
+    tmp_path: Path, bridge: BridgeFixture, settle: str
+) -> None:
+    resource = _owned_tab(tmp_path)
+    if settle == "timed_out":
+        _handoff(resource, "a-1", expires_in_ms=-1_000)
+    else:
+        _handoff(resource, "a-1")
+        _settle_ask(tmp_path, "a-1", settle)
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+    assert resources.ASK_HANDOFFS_FIELD not in json.loads(resource.path.read_text())
+
+
+@pytest.mark.asyncio
+async def test_origin_isolation_a_handoff_for_a_does_not_hold_the_tab_on_b(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin")
+    # The agent then drove the same tab to another site.
+    resource.note_surface_origin("https://other.example.test/dashboard")
+    assert (await resource.finish(resource.generation, "disposed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+def test_binding_refuses_without_a_live_tab_or_a_known_origin(tmp_path: Path) -> None:
+    resource = BrowserResource(tmp_path, tmp_path.name)
+    resource.initialize()
+    with pytest.raises(resources.BrowserOwnershipError, match="no browser tab"):
+        resource.bind_ask_handoff("a-1", None)
+    resource.remember(TAB)
+    with pytest.raises(resources.BrowserOwnershipError, match="not known"):
+        resource.bind_ask_handoff("a-1", None)
+
+
+@pytest.mark.asyncio
+async def test_child_completion_with_a_handoff_keeps_the_old_rule(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-1")
+    assert (await resource.finish(resource.generation, "completed")).state == "closed"
+    assert "owner_retain" not in _methods(bridge)
+
+
+async def _retire_with_handoff(directory: Path, bridge: BridgeFixture) -> None:
+    first = _owned_tab(directory)
+    _handoff(first, "a-1")
+    assert (await first.finish(first.generation, "disposed")).state == "retained"
+    bridge.calls.clear()
+
+
+@pytest.mark.asyncio
+async def test_successor_readdresses_the_held_tab_and_keeps_it_while_open(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    assert successor.record["surface_id"] == TAB
+    assert "owner_release" not in _methods(bridge)
+    assert (await successor.finish(successor.generation, "disposed")).state == "retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["answered", "withdrawn"])
+async def test_successor_releases_when_the_ask_settled_while_it_was_down(
+    tmp_path: Path, bridge: BridgeFixture, settle: str
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    _settle_ask(tmp_path, "a-1", settle)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    assert successor.record["surface_id"] == TAB
+    assert successor.record["retention"] == ""
+    assert "owner_release" in _methods(bridge)
+    assert (await successor.finish(successor.generation, "disposed")).state == "closed"
+
+
+@pytest.mark.asyncio
+async def test_successor_releases_when_the_ask_settles_after_it_took_over(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Settlement AFTER an update: the new runtime recovered while the ask was
+    still open (hold kept), then the answer arrives; its disposal releases."""
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    assert successor.record["retention"] == "pending ask a-1"
+    _settle_ask(tmp_path, "a-1", "answered")
+    assert (await successor.finish(successor.generation, "disposed")).state == "closed"
+    assert _methods(bridge)[-2:] == ["owner_release", "owner_finish"]
+
+
+@pytest.mark.asyncio
+async def test_owner_close_drops_the_handoff_and_lifts_the_hold(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    await successor.ensure_recovered()
+    await successor.drop_ask_handoffs()
+    assert "owner_release" in _methods(bridge)
+    assert successor.record["retention"] == ""
+    assert resources.ASK_HANDOFFS_FIELD not in successor.record
+
+
+@pytest.mark.asyncio
+async def test_hold_is_released_when_the_tab_was_closed_meanwhile(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    successor = BrowserResource(tmp_path, tmp_path.name)
+    successor.initialize()
+    bridge.recover_reply = {"state": "closed", "tab": ""}
+    await successor.ensure_recovered()
+    await successor.finish(successor.generation, "disposed")
+    assert "owner_release" in _methods(bridge)
+    assert json.loads(successor.path.read_text())["retention"] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_retain_is_never_rewritten_or_released(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    resource = _owned_tab(tmp_path)
+    resource.record["retention"] = "pending login"
+    result = await resource.finish(resource.generation, "disposed")
+    assert result.state == "retained"
+    assert [p["reason"] for m, p in bridge.calls if m == "owner_retain"] == ["pending login"]
+    assert "owner_release" not in _methods(bridge)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_refuses_a_live_handoff_hold_and_closes_a_lapsed_one(
+    tmp_path: Path, bridge: BridgeFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    record = json.loads((tmp_path / RESOURCE_NAME).read_text())
+    assert record["state"] == "retained"
+    eligible, reason = cleanup_disposition(record)
+    assert not eligible and "waiting on that answer" in reason
+    assert not cleanup_disposition({**record, resources.ASK_HOLD_EXPIRES_FIELD: None})[0]
+    deadline = int(record[resources.ASK_HOLD_EXPIRES_FIELD])
+    monkeypatch.setattr(resources, "_now_ms", lambda: deadline + 1)
+    assert cleanup_disposition(record) == (True, "")
+    result = await cleanup_exact(tmp_path, record["generation"])
+    assert result.state == "closed", result
+    assert _methods(bridge)[-2:] == ["owner_release", "owner_finish"]
+
+
+@pytest.mark.asyncio
+async def test_the_hold_label_and_deadline_are_the_bound_asks_own(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """Review: an unrelated 2 h ask must not stretch a 10-minute sign-in hold,
+    and the label names the ask being served, not the newest one."""
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin", expires_in_ms=600_000)
+    deadline = resource.record[resources.ASK_HANDOFFS_FIELD][0]["expires_at"]
+    _queue_ask(tmp_path, "a-later-preference", expires_in_ms=7_200_000)
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+    record = json.loads(resource.path.read_text())
+    assert record["retention"] == "pending ask a-signin"
+    assert record[resources.ASK_HOLD_EXPIRES_FIELD] == deadline
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_ask_log_never_reads_as_no_open_asks(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    """R1-2: a read failure keeps the bound tab (bounded by its own deadline)
+    instead of closing it as if every ask had settled."""
+    from local_operator.asks import store
+
+    resource = _owned_tab(tmp_path)
+    _handoff(resource, "a-signin")
+    log = store.asks_log_path(tmp_path)
+    log.unlink()
+    log.mkdir()  # read_bytes() now raises IsADirectoryError, an OSError
+    with pytest.raises(OSError):
+        resources.open_ask_ids(tmp_path)
+    assert (await resource.finish(resource.generation, "disposed")).state == "retained"
+
+
+# -- reopen floor references -------------------------------------------------
+
+
+def test_handoff_reference_is_redacted_and_the_private_ref_keeps_the_url(
+    tmp_path: Path,
+) -> None:
+    resource = _owned_tab(tmp_path, "https://signin.example.test/login?code=SECRET#frag")
+    ref = resource.handoff_reference()
+    assert ref == {"origin": "https://signin.example.test", "surface": "bridge:100"}
+    resource.record_handoff_ref("a-1")
+    assert resource.record[resources.HANDOFF_REFS_FIELD][0]["url"].endswith("?code=SECRET#frag")
+
+
+def test_reopen_is_offered_only_with_no_live_tab_and_a_wanting_ask(tmp_path: Path) -> None:
+    from local_operator.asks import store
+
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-1")
+    resource.record_handoff_ref("a-1")
+    assert resource.reopenable_handoff() is None  # the tab is still live
+    resource.remember("")
+    reopenable = resource.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_id"] == "a-1"
+    # A read failure never opens a page on a guess.
+    log = store.asks_log_path(tmp_path)
+    saved = log.read_bytes()
+    log.unlink()
+    log.mkdir()
+    assert resource.reopenable_handoff() is None
+    log.rmdir()
+    log.write_bytes(saved)
+    _settle_ask(tmp_path, "a-1", "withdrawn")
+    assert resource.reopenable_handoff() is None
+
+
+@pytest.mark.parametrize(
+    ("url", "origin"),
+    [
+        ("https://alice:pw@Host.Example:8443/p?q=1#f", "https://host.example:8443"),
+        ("http://[::1]:9000/x", "http://[::1]:9000"),
+        ("https://user@host.example/", "https://host.example"),
+        ("not a url", ""),
+    ],
+)
+def test_url_origin_never_carries_userinfo(url: str, origin: str) -> None:
+    assert resources.url_origin(url) == origin
+
+
+def test_an_answered_ask_reopens_only_inside_the_short_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q4: an answered ask kept reopening its login page 30 days later."""
+    resource = _owned_tab(tmp_path)
+    _queue_ask(tmp_path, "a-1", expires_in_ms=86_400_000)
+    resource.record_handoff_ref("a-1")
+    resource.remember("")
+    _settle_ask(tmp_path, "a-1", "answered")
+    reopenable = resource.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_status"] == "answered"
+    now = resources._now_ms()
+    monkeypatch.setattr(
+        resources, "_now_ms", lambda: now + resources.REOPEN_AFTER_ANSWER_MS + 1_000
+    )
+    assert resource.reopenable_handoff() is None
+
+
+@pytest.mark.asyncio
+async def test_a_hold_settled_by_its_ask_spends_the_reference_but_a_vanished_tab_keeps_it(
+    tmp_path: Path, bridge: BridgeFixture
+) -> None:
+    await _retire_with_handoff(tmp_path, bridge)
+    tab_gone = BrowserResource(tmp_path, tmp_path.name)
+    tab_gone.initialize()
+    tab_gone.record[resources.HANDOFF_REFS_FIELD] = [
+        {"ask_id": "a-1", "url": SIGNIN, "origin": "https://signin.example.test", "host": "bridge"}
+    ]
+    bridge.recover_reply = {"state": "closed", "tab": ""}
+    await tab_gone.ensure_recovered()
+    # Ask still open, tab vanished: the reference survives for the floor.
+    reopenable = tab_gone.reopenable_handoff()
+    assert reopenable is not None and reopenable["ask_id"] == "a-1"
+    _settle_ask(tmp_path, "a-1", "withdrawn")
+    tab_gone.record["retention"] = "pending ask a-1"
+    tab_gone.record[resources.ASK_HANDOFFS_FIELD] = [{"ask_id": "a-1"}]
+    await tab_gone._refresh_ask_hold(may_add=False)
+    assert resources.HANDOFF_REFS_FIELD not in tab_gone.record
+
+
+def test_origin_only_text_keeps_the_surrounding_delimiters() -> None:
+    """Review N4-2: the URL pattern swallowed a closing quote or bracket."""
+    from local_operator.tools.builtin import _origin_only_text
+
+    text = (
+        "'https://h.test:8443/p/tok?x=1#f' failed (url=https://h.test:8443/a?c=1). "
+        "See https://h.test/y, or [https://h.test/z?q=2] and <https://h.test/w>"
+    )
+    assert _origin_only_text(text) == (
+        "'https://h.test:8443' failed (url=https://h.test:8443). "
+        "See https://h.test, or [https://h.test] and <https://h.test>"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://us'er:pa'SECRETPW@h.test/",
+        "https://h.test/reset/abc'SECRETTAIL",
+        "https://h.test/p#frag'SECRETFRAG",
+    ],
+)
+def test_origin_only_text_keeps_bytes_after_an_apostrophe_out(url: str) -> None:
+    """Review F1: an apostrophe is a URL byte (unencoded in userinfo, path and
+    fragment), so ending the match there let everything after it survive."""
+    from local_operator.tools.builtin import _origin_only_text
+
+    for text in (url, f"failed (url={url}).", f"see {url} now", f"'{url}'"):
+        out = _origin_only_text(text)
+        print("F1:", repr(text), "->", repr(out))
+        assert "SECRET" not in out and "us'er" not in out
+        assert "https://h.test" in out

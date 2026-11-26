@@ -399,8 +399,14 @@ class AskQueue:
         *,
         tool_call_id: str = "",
         consent: Mapping[str, Any] | None = None,
+        browser_ref: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate, cap, append ``queued``, arm the timer; return a receipt.
+
+        ``browser_ref`` is the REDACTED reference to the browser tab the session
+        held when it asked (origin and public tab label only — see
+        ``browser_bridge.resources.HANDOFF_REFS_FIELD``). Written on the
+        ``queued`` row as-is; the fold ignores it, so no surface changes.
 
         ``consent`` is HOST-ONLY (see ``store.EVENT_CONSENT_USED``): the account
         write an affirmative answer to this ask authorises. Keyword-only and never
@@ -478,6 +484,8 @@ class AskQueue:
         }
         if consent is not None:
             record["consent"] = dict(consent)
+        if browser_ref:
+            record["browser_ref"] = {k: str(browser_ref.get(k, "")) for k in ("origin", "surface")}
         event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
         if not store.append_event(self.session_dir, event):
             return {

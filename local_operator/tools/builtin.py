@@ -27052,6 +27052,15 @@ def _host_of_surface(surface_id: str) -> str:
     return ""
 
 
+def _named_host_label(host: str) -> str:
+    """:func:`_host_label` that never GUESSES (review F3): an empty or unknown
+    host is "an unknown browser host", not the extension by default, because a
+    handoff that names the wrong profile reads like success on a login wall."""
+    if host in (HOST_UI_PREFIX, HOST_BRIDGE_PREFIX):
+        return _host_label(host)
+    return "an unknown browser host"
+
+
 def _host_label(host: str) -> str:
     """A short prose name for a host, for the few sentences that need one."""
     if host == HOST_UI_PREFIX:
@@ -31771,7 +31780,194 @@ async def execute_browser(
     state = getattr(context, "browser", None)
     if state is None:
         return result
+    result = await _reopen_handoff_if_gone(tool_call_id, args, result, signal, on_update, context)
     return _child_browser_fate_note(state, args, result, before)
+
+
+#: The only actions replayed on a reopened page: they read it and change
+#: nothing. An ALLOWLIST, so a new mutating action is safe by default.
+_REOPEN_REPLAY_ACTIONS = frozenset(
+    {"read", "snapshot", "screenshot", "logs", "styles", "hit_test", "ancestors", "query"}
+)
+#: Actions that mean "continue in my tab" — the ones a vanished handoff tab
+#: turns into "no browser surface open". `open`/`goto`/`close` choose a page or
+#: an end themselves; `tabs` and the access/ownership verbs never need a page.
+_REOPEN_EXEMPT_ACTIONS = frozenset(
+    {
+        "open",
+        "goto",
+        "close",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "retain",
+        "release",
+    }
+)
+
+
+async def _reopen_handoff_if_gone(
+    tool_call_id: str,
+    args: dict[str, Any],
+    result: ToolResult,
+    signal: AbortSignal | None,
+    on_update: Callable[[AgentToolUpdate], None] | None,
+    context: ToolContext | None,
+) -> ToolResult:
+    """The reopen floor: put a vanished handoff tab back, then do what was asked.
+
+    Runs AFTER the owned lane released its lock (a reopen is an ordinary `open`
+    through that same lane, so ownership, site approval and the tab cap all
+    apply unchanged) and only when this session has no live tab and its
+    record holds a reference for an ask that is still open or just answered
+    (``BrowserResource.reopenable_handoff``). The tab is a NEW one owned by
+    this session, opened in the background on the host the original used; no
+    other session's tab is ever looked up. The result says it is a reopened
+    handoff, so the agent continues instead of starting over.
+    """
+    action = str(args.get("action", "")).strip().lower()
+    state = getattr(context, "browser", None)
+    resource = getattr(state, "resource", None)
+    if action in _REOPEN_EXEMPT_ACTIONS or resource is None or getattr(state, "surface_id", ""):
+        return result
+    try:
+        ref = resource.reopenable_handoff()
+    except Exception:  # noqa: BLE001 - the floor must never break the action it serves
+        logger.warning("handoff reopen check failed", exc_info=True)
+        return result
+    if not ref:
+        return result
+    # Deliberately an ORDINARY `open` of this session's own surface through the
+    # owned lane (review R2-6): site approval and the tab cap apply exactly as
+    # they would to an `open` the agent typed.
+    backend = {"bridge": "extension", "ui": "ui"}.get(str(ref.get("host", "")), "")
+    open_args: dict[str, Any] = {"action": "open", "url": ref["url"]}
+    if backend:
+        open_args["backend"] = backend
+    reopened = await _execute_browser_owned(
+        f"{tool_call_id}:reopen", open_args, signal, on_update, context
+    )
+    # Only what is KNOWN is stated (review R2-3): the tab is gone, not why, and
+    # the reopened page may be a login wall or an approval prompt. The origin
+    # only, because a path or query can hold a token and transcripts travel.
+    origin = url_origin_for_copy(ref["url"])
+    label = f"ask {ref['ask_id']} ({ref.get('ask_status')})"
+    recorded_host = _named_host_label(str(ref.get("host", "")))
+    if reopened.is_error:
+        # ALWAYS an error result, whatever the triggering action returned (a
+        # `recover` answers in plain text): a failed reopen must be impossible
+        # to read as success. The backend hint above names the recorded host,
+        # and a named host that cannot serve refuses instead of falling back,
+        # so nothing opened on the other profile.
+        return _error(
+            tool_call_id,
+            "browser",
+            f"{result.text}\n\nThe tab for {label} is no longer open, and reopening {origin} "
+            f"on {recorded_host} (where it was recorded) failed; nothing was opened on any "
+            f"other browser host: {_origin_only_text(reopened.text)}",
+            # The triggering result's own details survive (review F5).
+            details=dict(result.details or {}),
+        )
+    # Named from the handle the host actually returned, never from the hint, so
+    # the reply cannot claim a host the tab did not open on.
+    opened_on = _named_host_label(
+        _host_of_surface(str((reopened.details or {}).get("surface_id", "")))
+    )
+    note = (
+        f"Reopened handoff: the tab for {label} is no longer open, so its page on {origin} "
+        f"was reopened in a new background tab of this session in {opened_on}. This is the "
+        "earlier handoff, not a fresh start; check what the page shows before acting."
+    )
+    # The internal reopen's OWN reply is rebuilt origin-only (review M3-1 / QA
+    # Q7): the ordinary `open` reply prints the full URL, which on this path is
+    # a recorded page that may carry userinfo, a path token or a one-time code.
+    # Only `surface_id` (the session's own handle, as every open reports) and
+    # the origin are kept; the ordinary `open` path is untouched.
+    opened = _text(
+        tool_call_id,
+        "browser",
+        f"Opened a new background tab on {origin} in {opened_on}.",
+        details={
+            "surface_id": (reopened.details or {}).get("surface_id", ""),
+            "origin": origin,
+            "reopened_handoff": str(ref["ask_id"]),
+        },
+    )
+    if action == "recover":
+        return _append_result_text(opened, note)
+    if action not in _REOPEN_REPLAY_ACTIONS:
+        # NEVER replay a mutating action on a page nobody has looked at (review
+        # R2-2): on a consent or approval prompt a replayed `click` would grant
+        # it. The agent snapshots first, then acts on what it sees.
+        return _append_result_text(
+            opened.model_copy(update={"details": {**(opened.details or {}), "not_run": action}}),
+            f"{note} Your '{action}' was NOT run on it: snapshot the page first, then act.",
+        )
+    retried = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
+    # The replayed read reports the page's live URL the ordinary way, and right
+    # after a reopen that IS the recorded URL, tokens and all (review M4-1): cut
+    # every URL in its reply and details to its origin, like the reopen reply.
+    # Only this one replayed call; later actions are ordinary page reads.
+    details = _origin_only_value(dict(retried.details or {}))
+    details["reopened_handoff"] = str(ref["ask_id"])
+    details["reopened_origin"] = url_origin_for_copy(str((reopened.details or {}).get("url", "")))
+    content = [
+        TextContent(text=_origin_only_text(block.text)) if isinstance(block, TextContent) else block
+        for block in retried.content
+    ]
+    retried = retried.model_copy(update={"details": details, "content": content})
+    return _append_result_text(retried, note)
+
+
+#: A URL in prose: a scheme, then everything up to whitespace, a double quote
+#: or an angle bracket. Compiled once (review N4-3). The APOSTROPHE is part of
+#: the URL (review F1): browsers leave it unencoded in userinfo, path and
+#: fragment, so ending the match there let everything after it survive.
+_PROSE_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>]+")
+#: Trailing characters that close the SURROUNDING text, not the URL: kept out of
+#: the rewrite so `(url=…)` or a sentence's full stop stays balanced (N4-2). A
+#: trailing apostrophe is one only when it closes a quote the text opened; see
+#: :func:`_origin_only_text`. Dropping these can only SHORTEN what is kept,
+#: because the origin is rebuilt from what remains.
+_PROSE_URL_TAIL = ".,;:!?)]}"
+
+
+def _origin_only_text(text: str) -> str:
+    """``text`` with every URL in it cut down to its origin (no userinfo, path,
+    query or fragment): a failed reopen's host error may echo the page it tried."""
+
+    def origin(match: re.Match[str]) -> str:
+        url = match.group(0)
+        bare = url.rstrip(_PROSE_URL_TAIL)
+        # A closing quote is kept only when the URL was opened by one, and only
+        # the quote itself: never a tail carrying URL bytes.
+        quoted = match.start() > 0 and text[match.start() - 1] == "'"
+        while quoted and bare.endswith("'"):
+            bare = bare[:-1].rstrip(_PROSE_URL_TAIL)
+        return url_origin_for_copy(bare) + url[len(bare) :]
+
+    return _PROSE_URL.sub(origin, text)
+
+
+def _origin_only_value(value: Any) -> Any:
+    """:func:`_origin_only_text` over every string inside a details payload.
+
+    Tuples are not walked (review F4): no detail builder produces one today."""
+    if isinstance(value, str):
+        return _origin_only_text(value)
+    if isinstance(value, dict):
+        return {k: _origin_only_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_origin_only_value(v) for v in value]
+    return value
+
+
+def url_origin_for_copy(url: str) -> str:
+    """The reopened page as the model reads it: its origin only."""
+    from local_operator.browser_bridge.resources import url_origin
+
+    return url_origin(url) or "its recorded page"
 
 
 async def _browser_handed_close(
@@ -32058,6 +32254,22 @@ async def _execute_browser_owned(
                     _browser_ownership_text(str(result.get("state", "")), bool(state.surface_id)),
                 )
             if action in ("retain", "release"):
+                if action == "release":
+                    # An explicit release outranks every ask handoff on this
+                    # scope: dropping the bindings here is what stops this run's
+                    # disposal from re-adding the hold (QA Q2). Saved at once
+                    # (review M3-2): if the release RPC below fails, nothing
+                    # else would persist the cleared references.
+                    from local_operator.browser_bridge.resources import (
+                        ASK_HANDOFFS_FIELD,
+                        HANDOFF_REFS_FIELD,
+                    )
+
+                    resource.record.pop(ASK_HANDOFFS_FIELD, None)
+                    # ...and spends every reopen reference (review R2-4).
+                    resource.record.pop(HANDOFF_REFS_FIELD, None)
+                    resource.assert_current()
+                    resource._save()
                 reason = str(args.get("text", "")).strip()
                 if action == "retain" and not reason:
                     # Caught HERE because `text` defaults to "", so omitting it
@@ -32164,9 +32376,30 @@ async def _execute_browser_owned(
             await _close_stranded_quietly(resource)
             resource.allocate()
         failed_close = False
+        observed_url: Any = None
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
+            if not result.is_error:
+                # The page the tab last showed THIS session: an ask handoff is
+                # bound to that origin (resources.SURFACE_ORIGIN_FIELD), so a tab
+                # the agent has since driven to another site is not held for it.
+                observed_url = (result.details or {}).get("url")
+            if action in ("open", "goto", "close") and not result.is_error:
+                # The agent chose a page (or chose to close): any reopen
+                # reference for a vanished handoff tab is spent.
+                try:
+                    resource.consume_handoff_refs()
+                except (BrowserOwnershipError, OSError, ValueError):
+                    logger.warning("handoff references not cleared", exc_info=True)
+            if action == "close" and not result.is_error:
+                # The owner's explicit close always wins over a pending-ask hold.
+                # Best-effort: the tab is already closed, and a hold that could
+                # not be lifted here is lifted by the next finish (no live tab).
+                try:
+                    await resource.drop_ask_handoffs()
+                except Exception:  # noqa: BLE001 - never cost the close its result
+                    logger.warning("pending-ask hold not lifted on close", exc_info=True)
             if action == "close":
                 # 'close' also settles tabs this session owns but no longer
                 # holds the live handle for; otherwise the model's explicit close
@@ -32205,6 +32438,8 @@ async def _execute_browser_owned(
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
                     host=_host_of_surface(state.surface_id),
                 )
+                if observed_url or not state.surface_id:
+                    resource.note_surface_origin(observed_url)
             except (BrowserOwnershipError, OSError, ValueError):
                 logger.warning("browser ownership record not updated", exc_info=True)
             if pending:
@@ -38292,6 +38527,19 @@ class AskParams(BaseModel):
         ),
     )
 
+    # PENDING-ASK BROWSER HANDOFF (session a64fec9430f3, 2026-11-25): a sign-in
+    # tab left open for an ask was closed by the runtime's disposal when an
+    # update retired it mid-wait. This flag is the EXPLICIT key that binds the
+    # ask to this session's live tab and its current origin
+    # (`BrowserResource.bind_ask_handoff`), so only that ask holds that tab,
+    # and only until that ask settles — never "any open ask holds any tab".
+    browser_handoff: bool = Field(
+        default=False,
+        description=(
+            "true if the user must act in your open browser tab; keeps it open until answered."
+        ),
+    )
+
     @model_validator(mode="after")
     def _exactly_one_source(self) -> "AskParams":
         """EXACTLY ONE of `questions` / `relay` (#2520).
@@ -38719,6 +38967,29 @@ async def execute_ask(
     if bounds_error is not None:
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    handoff_resource: Any = None
+    if params.browser_handoff:
+        # Refused BEFORE anything is queued: a handoff that cannot be bound
+        # would leave an ask promising a tab nothing keeps open.
+        browser = getattr(context, "browser", None) if context is not None else None
+        handoff_resource = getattr(browser, "resource", None)
+        if params.relay is not None:
+            return _error(
+                tool_call_id, "ask", "browser_handoff applies to your own questions, not a relay."
+            )
+        if not callable(enqueue) or handoff_resource is None:
+            return _error(
+                tool_call_id,
+                "ask",
+                "browser_handoff needs the queued ask and a browser tab this session owns; "
+                "ask without it, or use browser action='retain'.",
+            )
+        if not str(getattr(browser, "surface_id", "") or ""):
+            return _error(
+                tool_call_id,
+                "ask",
+                "browser_handoff needs an open browser tab: 'open' the page first.",
+            )
     if params.relay is not None:
         # A RELAY NEVER ENTERS THE BLOCKING ARM (#2520). A relay is a pointer at
         # a row in another session's LOG; with no queue there is no log to point
@@ -38755,23 +39026,61 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(questions, params.timeout, tool_call_id=tool_call_id)
+        # THE REOPEN FLOOR (resources.HANDOFF_REFS_FIELD): with or without
+        # `browser_handoff`, an ask queued while this session holds a live tab
+        # records which page it showed, so a later turn can reopen it if the tab
+        # is gone. A redacted copy rides the ask's own row; no retention.
+        browser_now = getattr(context, "browser", None) if context is not None else None
+        ref_resource: Any = getattr(browser_now, "resource", None)
+        browser_ref: dict[str, Any] | None = None
+        if ref_resource is not None and str(getattr(browser_now, "surface_id", "") or ""):
+            try:
+                ref_resource.initialize()
+                browser_ref = ref_resource.handoff_reference()
+            except Exception:  # noqa: BLE001 - a reference must never cost the ask
+                logger.warning("ask handoff reference not computed", exc_info=True)
+        outcome: Any = (
+            enqueue(questions, params.timeout, tool_call_id=tool_call_id, browser_ref=browser_ref)
+            if browser_ref
+            else enqueue(questions, params.timeout, tool_call_id=tool_call_id)
+        )
+        # `ref_resource` is re-checked: pyright cannot see that a non-empty
+        # `browser_ref` implies the resource that produced it exists.
+        if outcome.get("ok") and browser_ref and ref_resource is not None:
+            try:
+                ref_resource.record_handoff_ref(str((outcome.get("details") or {}).get("ask_id")))
+            except Exception:  # noqa: BLE001
+                logger.warning("ask handoff reference not recorded", exc_info=True)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,
                 "ask",
                 str(outcome.get("error") or "this ask could not be queued."),
             )
+        details = dict(outcome.get("details") or {})
+        if handoff_resource is not None:
+            from local_operator.browser_bridge.resources import BrowserOwnershipError
+
+            try:
+                handoff_resource.bind_ask_handoff(
+                    str(details.get("ask_id", "")), details.get("expires_at")
+                )
+            except (BrowserOwnershipError, OSError, ValueError) as exc:
+                # The ask is already queued, so it stands; say the tab is not
+                # held rather than implying it is.
+                return _text(
+                    tool_call_id,
+                    "ask",
+                    f"{outcome.get('text') or ''}\n\nThe browser tab is NOT held for this ask "
+                    f"({exc}); use browser action='retain' if the user needs it.",
+                    details=details,
+                )
+            details["browser_handoff"] = True
         # NO QUESTION REPETITION: the model has just written them, and echoing
         # them back buys nothing but tokens. What the receipt must carry is the
         # part the model cannot know — that the answer arrives LATER, that a
         # receipt is not permission to act, and when the deadline falls.
-        return _text(
-            tool_call_id,
-            "ask",
-            str(outcome.get("text") or ""),
-            details=dict(outcome.get("details") or {}),
-        )
+        return _text(tool_call_id, "ask", str(outcome.get("text") or ""), details=details)
     # A HOST THAT KNOWS IT CANNOT ASK REFUSES IN WORDS (review round 1,
     # MINOR-1 / QA Q1). ``AskUnavailableError`` is raised only by the
     # queued-only ask surface when something awaits it with the engine off;

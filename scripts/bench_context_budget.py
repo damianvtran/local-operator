@@ -1963,7 +1963,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #   origin/main 7fe9250a   89,331 chars = ~32,133 billed (2 of headroom)
 #   merged head d40af99    89,397 chars = ~32,157 billed
 #     = +66 chars = ~+24 billed; the ceiling moves by that plus 1.
-BUDGET_BILLED_TOKENS = 32_160
+# RAISED 32,160 -> 32,217, +57: `ask` tool `browser_handoff` field (pending
+# sign-in handoff, session a64fec9430f3, 2026-11-25) — the explicit key that
+# binds an ask to the tab the user must act in, so a runtime retirement no
+# longer closes that tab and no unrelated ask can hold or release it. Rung 1 of
+# the footprint ladder (a field on an existing tool); description trimmed from
+# 233 to 82 chars before raising. Same script, isolated HOME and config dir,
+# one host, base from `git archive`:
+#   origin/main 83f8e209   89,361 chars = ~32,144 billed (16 of headroom)
+#   this branch 55c6fcbb   89,519 chars = ~32,201 billed
+#     = +158 chars = ~+57 billed; the ceiling moves by exactly that, keeping
+#     main's 16 of headroom. The child arm does not carry `ask`: unchanged at
+#     76,638 chars on both.
+BUDGET_BILLED_TOKENS = 32_217
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
