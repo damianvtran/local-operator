@@ -73,7 +73,12 @@ import sqlite3
 from collections.abc import Mapping
 from typing import Any
 
-from .client import BridgeRefusal, BridgeSignInRequired, RosterReadBinding, TeamBridgeClient
+from .client import (
+    BridgeRefusal,
+    BridgeSignInRequired,
+    RosterReadBinding,
+    TeamBridgeClient,
+)
 from .tool import BridgeRuntime, _RosterReadRefused
 
 logger = logging.getLogger(__name__)
