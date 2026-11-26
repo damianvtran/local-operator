@@ -523,6 +523,9 @@ def test_a_revoke_during_the_source_read_is_not_reported_as_retryable_busy(
 def test_a_panic_during_backoff_prevents_the_second_borrower_ask(
     borrower: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import time
+    from types import SimpleNamespace
+
     from local_operator.network import store
     from local_operator.network.credentials import client as client_mod
     from local_operator.network.credentials.types import BrokerError
@@ -537,7 +540,11 @@ def test_a_panic_during_backoff_prevents_the_second_borrower_ask(
             record.trust = "untrusted"
             store.save(record, b.rig.env.root)
 
-    monkeypatch.setattr(client_mod.time, "sleep", panic)
+    # The stdlib time module is shared across the pytest worker. Swapping the
+    # client's binding keeps unrelated thread sleeps from triggering panic.
+    stdlib_sleep = time.sleep
+    monkeypatch.setattr(client_mod, "time", SimpleNamespace(monotonic=time.monotonic, sleep=panic))
+    assert time.sleep is stdlib_sleep, "the borrower backoff fake must not intercept other threads"
     result = b.client.request_grant_sync("github", session_id="synthetic")
     assert isinstance(result, BrokerError) and result.code == "not_a_holder"
     assert len(b.calls) == 1 and sleeps == [0.25]
