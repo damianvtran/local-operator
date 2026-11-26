@@ -1753,7 +1753,9 @@ def test_a_declined_delete_deletes_nothing(
     origin.responses.append(_poll(_stopped("n_" + "a" * 24)))
     assert _run(["exec", "--remote-delete", RUN_ID], monkeypatch) == 1
     assert _t(_wr.delete_declined(run_id=RUN_ID)) in capsys.readouterr().err
-    assert [request.method for request in origin.requests] == ["GET"]
+    assert [(request.method, request.url.path) for request in origin.requests] == [
+        ("GET", f"/v1/remote-compute/runs/{RUN_ID}")
+    ]
 
 
 def test_no_terminal_and_no_yes_refuses_and_names_the_flag(
@@ -1769,7 +1771,9 @@ def test_no_terminal_and_no_yes_refuses_and_names_the_flag(
     err = capsys.readouterr().err
     assert _t(_wr.delete_needs_yes(run_id=RUN_ID)) in err
     assert "--yes" in err
-    assert [request.method for request in origin.requests] == ["GET"]
+    assert [(request.method, request.url.path) for request in origin.requests] == [
+        ("GET", f"/v1/remote-compute/runs/{RUN_ID}")
+    ]
 
 
 def test_a_run_still_in_flight_is_refused_with_the_cancel_command(
@@ -1785,6 +1789,22 @@ def test_a_run_still_in_flight_is_refused_with_the_cancel_command(
     assert _t(_wr.delete_in_flight(run_id=RUN_ID)) in err
     assert f"lop exec --remote-cancel {RUN_ID}" in err
     assert [request.method for request in origin.requests] == ["GET"]
+
+
+def test_a_body_about_another_run_is_refused_and_deletes_nothing(
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The id in the answer is the check that ties it to the question that was asked."""
+    origin.responses.append(_poll(_stopped("n_" + "a" * 24, id="run_OTHER")))
+    assert _run(["exec", "--remote-delete", RUN_ID, "--yes"], monkeypatch) == 1
+    err = capsys.readouterr().err
+    assert _t(_wr.run_identity_mismatch(asked_for=RUN_ID, answered="run_OTHER")) in err
+    assert [(request.method, request.url.path) for request in origin.requests] == [
+        ("GET", f"/v1/remote-compute/runs/{RUN_ID}")
+    ]
 
 
 def test_a_run_body_without_a_status_is_refused_not_a_traceback(
@@ -1833,7 +1853,7 @@ def test_yes_beside_anything_but_delete_is_refused_not_dropped(
 
 
 # ---------------------------------------------------------------------------
-# The limit refusal hands a CLI user the ids that can free a slot
+# The limit refusal: wait or cancel, and the listing only on a legacy server
 # ---------------------------------------------------------------------------
 
 
@@ -1841,7 +1861,19 @@ def _listed(*runs: dict[str, Any]) -> httpx.Response:
     return httpx.Response(200, json={"msg": "Runs", "result": {"runs": list(runs)}})
 
 
-def test_the_run_limit_refusal_lists_deletable_runs_with_the_delete_command(
+def _settled(network_id: str, **extra: Any) -> dict[str, Any]:
+    """A finished run whose settlement is recorded, so the current server stops counting it."""
+    return _stopped(network_id, settled_at="2026-11-25T00:00:00Z", **extra)
+
+
+#: The submit a limit refusal answers, and the one list read every case makes after it.
+_LIMIT_REQUESTS = [
+    ("POST", "/v1/remote-compute/runs"),
+    ("GET", "/v1/remote-compute/runs"),
+]
+
+
+def test_a_legacy_server_gets_the_delete_advice_and_the_listing(
     enabled: None,
     network: NetworkRecord,
     signed_in: int,
@@ -1849,32 +1881,30 @@ def test_the_run_limit_refusal_lists_deletable_runs_with_the_delete_command(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Finished runs are named with the exact command; live and deleted rows are not."""
+    """Zero counting rows: finished runs held by the old rule are the only explanation."""
     network_id = network.network_id
     origin.responses.extend(
         [
             httpx.Response(409, json={"code": "run_limit"}),
             _listed(
-                _wire_run("running", network_id),
-                _stopped(network_id, name="nightly"),
-                _stopped(network_id, name="backfill"),
-                _wire_run("deleted", network_id, name="gone"),
+                _settled(network_id, id="run_a", name="nightly"),
+                _settled(network_id, id="run_b", name="backfill"),
+                _wire_run("deleted", network_id, id="run_c", name="gone"),
             ),
         ]
     )
     assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert _t(_wr.run_limit()) in captured.err
+    assert _t(_wr.run_limit_legacy()) in captured.out
     assert _t(_wr.slot_heading()) in captured.out
-    assert f"nightly: lop exec --remote-delete {RUN_ID}" in captured.out
-    assert f"backfill: lop exec --remote-delete {RUN_ID}" in captured.out
-    assert captured.out.count("lop exec --remote-delete") == 2
-    listing = origin.requests[-1]
-    assert listing.method == "GET"
-    assert listing.url.path == "/v1/remote-compute/runs"
+    assert "nightly: lop exec --remote-delete run_a" in captured.out
+    assert "backfill: lop exec --remote-delete run_b" in captured.out
+    assert captured.out.count("lop exec --remote-delete run_") == 2
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
 
 
-def test_the_run_limit_listing_is_capped_at_five(
+def test_a_current_server_gets_no_delete_advice_and_no_listing(
     enabled: None,
     network: NetworkRecord,
     signed_in: int,
@@ -1882,18 +1912,33 @@ def test_the_run_limit_listing_is_capped_at_five(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """Three rows that still count: wait or cancel — a delete would free nothing.
+
+    The third row is the subtle one: ``stopped`` alone is not finished, because
+    the current rule stops counting only once the settlement is recorded.
+    """
     network_id = network.network_id
     origin.responses.extend(
         [
             httpx.Response(409, json={"code": "run_limit"}),
-            _listed(*[_stopped(network_id, name=f"run{n}") for n in range(8)]),
+            _listed(
+                _wire_run("running", network_id, id="run_a"),
+                _wire_run("pending", network_id, id="run_b"),
+                _stopped(network_id, id="run_c"),
+            ),
         ]
     )
     assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
-    assert capsys.readouterr().out.count("lop exec --remote-delete") == 5
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit()) in captured.err
+    assert "--remote-delete" not in captured.err
+    assert _t(_wr.run_limit_legacy()) not in captured.out
+    assert _t(_wr.slot_heading()) not in captured.out
+    assert "lop exec --remote-delete" not in captured.out
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
 
 
-def test_a_listing_that_fails_leaves_the_corrected_sentence(
+def test_one_counting_run_beside_finished_ones_gets_no_delete_advice(
     enabled: None,
     network: NetworkRecord,
     signed_in: int,
@@ -1901,7 +1946,36 @@ def test_a_listing_that_fails_leaves_the_corrected_sentence(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The refusal is the answer; the ids are a convenience and never a second failure."""
+    """A legacy server cannot be proven while any row still counts, so no advice is printed."""
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(
+                _wire_run("running", network_id, id="run_a"),
+                _settled(network_id, id="run_b", name="nightly"),
+                _settled(network_id, id="run_c", name="backfill"),
+            ),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    captured = capsys.readouterr()
+    assert _t(_wr.run_limit()) in captured.err
+    assert _t(_wr.run_limit_legacy()) not in captured.out
+    assert _t(_wr.slot_heading()) not in captured.out
+    assert "lop exec --remote-delete" not in captured.out
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
+
+
+def test_a_listing_that_fails_leaves_the_sentence_alone(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed read is not evidence of a legacy server, so the sentence is the whole answer."""
     origin.responses.extend(
         [
             httpx.Response(409, json={"code": "run_limit"}),
@@ -1911,18 +1985,39 @@ def test_a_listing_that_fails_leaves_the_corrected_sentence(
     assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
     captured = capsys.readouterr()
     assert _t(_wr.run_limit()) in captured.err
-    assert "--remote-delete" in captured.err
+    assert "--remote-delete" not in captured.err
+    assert _t(_wr.run_limit_legacy()) not in captured.out
     assert _t(_wr.slot_heading()) not in captured.out
     assert "lop exec --remote-delete" not in captured.out
+    assert [(request.method, request.url.path) for request in origin.requests] == _LIMIT_REQUESTS
+
+
+def test_the_legacy_listing_is_capped_at_five(
+    enabled: None,
+    network: NetworkRecord,
+    signed_in: int,
+    origin: _Origin,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    network_id = network.network_id
+    origin.responses.extend(
+        [
+            httpx.Response(409, json={"code": "run_limit"}),
+            _listed(*[_settled(network_id, id=f"run_{n}", name=f"run{n}") for n in range(8)]),
+        ]
+    )
+    assert _run(BASE + HOSTING + ["do it"], monkeypatch) == 1
+    assert capsys.readouterr().out.count("lop exec --remote-delete run_") == 5
 
 
 # ---------------------------------------------------------------------------
-# The copy is version-neutral and names both remedies in every locale
+# The copy names the server's remedy, and the delete advice only where it applies
 # ---------------------------------------------------------------------------
 
 
-def test_every_locale_s_commands_and_limit_copy_name_the_new_flag() -> None:
-    """A locale that names only cancel would send a CLI user back to the wrong remedy."""
+def test_every_locale_s_limit_copy_waits_or_cancels_and_the_legacy_one_deletes() -> None:
+    """A locale that named only delete would recommend destroying a run for nothing."""
     from local_operator.i18n import catalogues
 
     for locale in catalogues.locales():
@@ -1930,10 +2025,14 @@ def test_every_locale_s_commands_and_limit_copy_name_the_new_flag() -> None:
         assert "--remote-delete" in messages["wire.remote_compute.alone"], locale
         assert "--remote-cancel" in messages["wire.remote_compute.alone"], locale
         assert "--remote-status" in messages["wire.remote_compute.alone"], locale
-        # The limit sentence must name BOTH remedies and must not promise that
-        # finishing a run frees a slot: older servers count it until it is deleted.
+        # The limit sentence waits or cancels: finishing and settling is what frees
+        # a slot on the current server, and deleting is destructive.
         assert "--remote-cancel" in messages["wire.remote_compute.run_limit"], locale
-        assert "--remote-delete" in messages["wire.remote_compute.run_limit"], locale
+        assert "--remote-delete" not in messages["wire.remote_compute.run_limit"], locale
+        # The legacy sentence is the only place a delete is recommended, and it says
+        # the delete is permanent and asks for confirmation.
+        assert "--remote-delete" in messages["wire.remote_compute.run_limit_legacy"], locale
+        assert "--remote-cancel" not in messages["wire.remote_compute.run_limit_legacy"], locale
         assert set(messages) == set(catalogues.load_catalogue("en", "wire.remote_compute")), locale
         help_messages = catalogues.load_catalogue(locale, "cli.exec_remote_help")
         assert set(help_messages) == set(

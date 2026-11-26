@@ -203,6 +203,10 @@ def run_limit() -> Msg:
     return Msg("wire.remote_compute.run_limit", {})
 
 
+def run_limit_legacy() -> Msg:
+    return Msg("wire.remote_compute.run_limit_legacy", {})
+
+
 def slot_heading() -> Msg:
     return Msg("wire.remote_compute.slot_heading", {})
 

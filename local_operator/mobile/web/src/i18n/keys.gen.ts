@@ -1307,6 +1307,7 @@ export type MessageParams = {
   "wire.remote_compute.run_busy": undefined;
   "wire.remote_compute.run_identity_mismatch": { "answered": string; "asked_for": string };
   "wire.remote_compute.run_limit": undefined;
+  "wire.remote_compute.run_limit_legacy": undefined;
   "wire.remote_compute.slot_heading": undefined;
   "wire.remote_compute.slot_row": { "run_id": string; "name": string };
   "wire.remote_compute.slot_row_unnamed": { "run_id": string };

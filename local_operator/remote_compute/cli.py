@@ -203,25 +203,35 @@ RUN_LIMIT_PAGE = 50
 
 
 def _report_run_limit(failure: RunLimitReached, credential: int) -> int:
-    """The limit sentence, then the finished runs whose deletion can free a slot.
+    """The limit sentence, then — only against a legacy server — runs worth deleting.
 
-    THE SENTENCE ALONE IS NOT ACTIONABLE FROM A TERMINAL. On servers that count a
-    finished run until it is deleted, the remedy needs run ids, and a CLI user has
-    no run list to read them from; so the finished, deletable runs are printed
-    beside the refusal with the exact command for each.
+    THE REMEDY ON THIS SERVER IS TO WAIT OR CANCEL: a run that has finished and
+    settled has already released its slot, so the sentence leads with finishing
+    work and never with a delete that would destroy a run for nothing.
+
+    DELETION IS ADVICE ONLY WHERE IT IS THE ONLY REMEDY, and the evidence for that
+    is the RUNS: a legacy server counts a finished run until it is deleted, so a
+    409 while NO listed run still counts can only mean finished runs are holding
+    slots. The rule is the server's, not this build's, so it is inferred from the
+    listing rather than assumed from a version — guessing would push a permanent
+    deletion on every account that is merely busy.
 
     BEST-EFFORT, AND NEVER A DIFFERENT EXIT CODE. An unreachable or unreadable
-    listing leaves the sentence — which names both commands — as the whole answer,
-    because the refusal is the reason the command failed, not the listing.
+    listing leaves the sentence as the whole answer — for that server there is no
+    accounting evidence either, so no delete advice is the safe outcome — because
+    the refusal is the reason the command failed, not the listing.
     """
     code = _report(failure)
     try:
         runs = asyncio.run(_list_runs(credential))
     except (ValueError, OSError):
         return code
+    if any(_counting(run) for run in runs):
+        return code
     listed = [run for run in runs if _finished(run)][:RUN_LIMIT_LISTING]
     if not listed:
         return code
+    print(_t(_wr.run_limit_legacy()))
     print(_t(_wr.slot_heading()))
     for run in listed:
         name = run_name(run)
@@ -230,6 +240,35 @@ def _report_run_limit(failure: RunLimitReached, credential: int) -> int:
         else:
             print(_t(_wr.slot_row(run_id=run_id(run), name=name)))
     return code
+
+
+def _settled(run: dict[str, Any]) -> bool:
+    """Whether the row carries the server's settlement time.
+
+    ``settled_at`` is what makes a finished run final for accounting, and it is
+    the field the current server's limit counts on. A server build that does not
+    send it answers NO here: reading absence as settlement would let this build
+    recommend deleting a run that may still be settling.
+    """
+    settled = run.get("settled_at")
+    return isinstance(settled, str) and bool(settled.strip())
+
+
+def _counting(run: dict[str, Any]) -> bool:
+    """Whether this listed run still holds a slot under the CURRENT server rule.
+
+    Not deleted, and not a finished (``stopped``) run that has settled — that is
+    exactly the row the current server stops counting. A row this build cannot
+    read COUNTS, because the fail-safe for delete advice is no advice: calling an
+    unreadable row finished could recommend tearing down live work.
+    """
+    try:
+        status = run_status(run).lower()
+    except ValueError:
+        return True
+    if status == "deleted":
+        return False
+    return not (status == "stopped" and _settled(run))
 
 
 def _finished(run: dict[str, Any]) -> bool:

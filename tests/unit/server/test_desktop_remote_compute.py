@@ -1593,9 +1593,11 @@ async def test_a_409_run_limit_is_read_by_its_code_not_its_status(api: Api) -> N
     error = answer.json()["error"]
     assert error["code"] == "run_limit"
     # THE SENTENCE IS THE LIBRARY'S KEY, not a second copy of it: the desktop body
-    # and the CLI print one remedy, and it names the command that frees a slot.
+    # and the CLI print one remedy, and it names the command that frees a slot
+    # without recommending a delete that frees nothing on this server.
     assert error["message"] == _t(_wr.run_limit())
-    assert "--remote-delete" in error["message"]
+    assert "--remote-cancel" in error["message"]
+    assert "--remote-delete" not in error["message"]
 
 
 @pytest.mark.asyncio
