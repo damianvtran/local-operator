@@ -74,6 +74,24 @@ TRACE_SCOPE_KEY = "local_operator.desktop_events_ingress_trace"
 #: component; the route resolves it (``pool.session``, whose lookup answers an
 #: unknown id with 404) only after this layer has run.
 _EVENTS = re.compile(r"^/v1/desktop/sessions/([^/]{1,128})/events$")
+_OPEN_TRACE_HEADER = b"x-lop-open-trace"
+_CLIENT_STREAM = re.compile(rb"[0-9a-f]{32}")
+
+
+def _client_stream_id(scope: Scope) -> str | None:
+    """Accept only the desktop's 16 random bytes rendered as lowercase hex.
+
+    Read the raw ASGI pairs to reject duplicates (even identical ones) without
+    picking a winner. Never log rejected bytes; this value is a trace join key,
+    not part of admission or the wire contract.
+    """
+    value: bytes | None = None
+    for name, raw in scope.get("headers", ()):
+        if name.lower() == _OPEN_TRACE_HEADER:
+            if value is not None:
+                return None
+            value = raw
+    return value.decode("ascii") if value is not None and _CLIENT_STREAM.fullmatch(value) else None
 
 
 def _is_first_paint(query: bytes) -> bool:
@@ -141,7 +159,9 @@ class EarlyPaintHoldMiddleware:
                 await self.app(scope, receive, send)
                 return
 
-            trace = open_trace.DesktopEventsIngressTrace(*entry)
+            trace = open_trace.DesktopEventsIngressTrace(
+                *entry, client_stream=_client_stream_id(scope)
+            )
             scope[TRACE_SCOPE_KEY] = trace
 
             async def traced_send(message: Message) -> None:

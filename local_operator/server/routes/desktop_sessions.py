@@ -7392,6 +7392,9 @@ async def events(
         await context.__aexit__(None, None, None)
 
     async def stream():
+        # One HTTP request owns the correlation; the bridge and its cold/attach
+        # tasks may be reused by another stream of this same session.
+        wire_open_id = ingress_trace.open_id if ingress_trace is not None else None
         try:
             # THE GENERATOR IS CLOSED BEFORE THE RELEASE, AND THAT ORDER IS THE
             # FIX (F-A). On a CANCELLED teardown -- which is what an SSE client's
@@ -7425,6 +7428,7 @@ async def events(
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                     **inline_ui_opt_in(inline_ui),
                     peer_journal_source=bool(peer_journal_source),
+                    trace_open_id=wire_open_id,
                 )
             ) as frames:
                 try:
@@ -7432,7 +7436,9 @@ async def events(
                         if not inline_ui:
                             frame = without_desktop_inline_ui(frame)
                         ser_at = time.monotonic() if open_trace.enabled() else 0.0
-                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                        kind = frame.get("type") if isinstance(frame, dict) else ""
+                        is_snapshot = kind == "snapshot"
+                        if is_snapshot:
                             # The one frame proportional to the session (bounded
                             # state + a history page): encode it in a thread so a
                             # large session's open does not spend loop time here
@@ -7442,15 +7448,23 @@ async def events(
                         else:
                             text = _sse_data(frame)
                         if ser_at:
+                            # Only the first authoritative snapshot is on the
+                            # open's critical path. Resyncs and heartbeats keep
+                            # their existing uncorrelated rows.
+                            fields = {}
+                            if is_snapshot and wire_open_id is not None:
+                                fields["open_id"] = wire_open_id
+                                wire_open_id = None
                             open_trace.mark(
                                 "a.wire.frame",
                                 (time.monotonic() - ser_at) * 1000,
                                 session=session_id,
-                                kind=frame.get("type") if isinstance(frame, dict) else "",
+                                kind=kind,
                                 chars=len(text),
+                                **fields,
                             )
                         yield text
-                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                        if is_snapshot:
                             # Written: the first paint no longer needs the GIL to
                             # itself, so a deferred scan may start now.
                             release_paint()
