@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     from local_operator.agents import AgentData, AgentRegistry
     from local_operator.clients.radient import RadientClient
     from local_operator.hub_sync.identity import Kind
+    from local_operator.server.desktop_idle_update import Channel as IdleUpdateChannel
 
 from local_operator.helpers import setup_cross_platform_environment
 
@@ -1173,6 +1174,9 @@ def build_cli_parser() -> LocalizedArgumentParser:
         default=None,
         help=(_sv.listener_fd().envelope(locale=help_locale)["text"]),
     )
+
+    # Private desktop spawn contract; never a user-facing stop option.
+    serve_parser.add_argument("--desktop-idle-update-fd", type=int, help=argparse.SUPPRESS)
 
     # Mobile command: the phone-facing control plane (daemon + supervision).
     # Same lazy-import rule as ``serve`` — the mobile modules pull starlette/
@@ -13032,19 +13036,38 @@ def arm_adopted_boot_deadline(
     return done
 
 
-def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
+def serve_command(
+    host: str,
+    port: int,
+    reload: bool,
+    *,
+    listener_fd: int | None = None,
+    idle_update_control: Any = None,
+) -> int:
     # Install before importing the server or uvicorn: startup diagnostics must
     # not inherit the CLI's synchronous stderr handler. No other CLI changes.
     from local_operator.serve_logging import configure_serve_logging
 
     handler = configure_serve_logging()
     try:
-        return _serve_command(host, port, reload, listener_fd=listener_fd)
+        if idle_update_control is None:
+            return _serve_command(host, port, reload, listener_fd=listener_fd)
+        with idle_update_control.socket:
+            return _serve_command(
+                host, port, reload, listener_fd=listener_fd, idle_update_control=idle_update_control
+            )
     finally:
         handler.close()
 
 
-def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
+def _serve_command(
+    host: str,
+    port: int,
+    reload: bool,
+    *,
+    listener_fd: int | None = None,
+    idle_update_control: Any = None,
+) -> int:
     """Start the FastAPI server using uvicorn.
 
     The bind address is refused unless it is loopback-only, with no override
@@ -13244,6 +13267,11 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         from local_operator.server import peer_check
 
         peer_check.ensure_resolving()
+        http_protocol = peer_check.gated_protocol_class()
+        if idle_update_control is not None and listener_fd is None:
+            from local_operator.server import desktop_idle_update
+
+            http_protocol = desktop_idle_update.stream_protocol(http_protocol, asgi_app)
         # dictConfig otherwise closes ALL existing handlers (including ours)
         # and reinstalls synchronous stderr handlers before startup can run.
         config = uvicorn.Config(
@@ -13251,7 +13279,7 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
             host=host,
             port=resolved_port,
             log_config=None,
-            http=peer_check.gated_protocol_class(),
+            http=http_protocol,
         )
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame
@@ -13266,6 +13294,10 @@ def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | Non
         )
         serve_ref["server"] = server
         serve_ref["owner"] = asgi_app.state.listener_owner
+        if idle_update_control is not None and listener_fd is None:
+            from local_operator.server import desktop_idle_update
+
+            desktop_idle_update.bind(asgi_app, idle_update_control, server)
         # ``KeyboardInterrupt`` caught here because this path replaces
         # ``uvicorn.run``, which catches it around the same call. uvicorn's own
         # signal handling turns Ctrl+C into a clean shutdown while it is
@@ -19326,6 +19358,86 @@ def _exit_quietly_on_broken_pipe() -> int:
     return 1
 
 
+def _prepare_startup_channels(args: argparse.Namespace) -> IdleUpdateChannel | None:
+    """Preserve the original child's control and scrub the bearer before any shell probe."""
+    idle_update_control = None
+    update_fd = getattr(args, "desktop_idle_update_fd", None)
+    if update_fd is not None:
+        from local_operator.server import desktop, desktop_idle_update
+
+        idle_update_control = desktop_idle_update.adopt(update_fd)
+        # Never keep control on supervised/adopted launches or across the
+        # compatibility bearer re-exec. A valid but disabled descriptor is
+        # closed here, not left inheritable by the old startup path.
+        if idle_update_control is not None and (
+            args.reload
+            or args.listener_fd is not None
+            or args.install_service
+            or os.environ.get(desktop.TOKEN_FD_ENV) != "0"
+            or desktop.TOKEN_ENV in os.environ
+        ):
+            idle_update_control.socket.close()
+            idle_update_control = None
+    # The direct owned launch can choose its own branded binary. Re-exec
+    # here would discard its now close-on-exec channel. Ordinary launches
+    # keep the same branding and compatibility bearer behavior.
+    if idle_update_control is None:
+        _maybe_brand_process(args)
+
+    if args.subcommand == "serve" and not getattr(args, "reload", False):
+        # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
+        # whose only inherited channel is the environment, so it keeps today's env
+        # behaviour. It is a developer mode the desktop app never launches.)
+        # FIRST after branding, before the login-shell PATH probe spawns anything:
+        # move the desktop bearer out of the environment so no child -- that probe's
+        # shell, a session runtime, a reload successor -- is ever handed it. Why a
+        # descriptor and not the environment: ``server.desktop.TOKEN_FD_ENV``.
+        from local_operator.server.desktop import adopt_spawn_bearer
+
+        adopt_spawn_bearer()
+        if idle_update_control is not None:
+            from local_operator.server.desktop import has_adopted_spawn_bearer
+
+            if not has_adopted_spawn_bearer():
+                idle_update_control.socket.close()
+                idle_update_control = None
+    return idle_update_control
+
+
+def _dispatch_serve(args: argparse.Namespace, idle_update_control: IdleUpdateChannel | None) -> int:
+    if args.install_service:
+        # Installation returns before warming a runtime: this command's
+        # product is the user unit, not a second foreground API listener.
+        from local_operator import services
+
+        result = services.install_linux_serve_service(args.port)
+        for line in result["lines"]:
+            print(line)
+        return 0 if result["ok"] else 1
+    # The desktop daemon engages a runtime for every conversation the app
+    # opens cold, so it keeps ONE pre-imported standby for its root (see
+    # ``session/runtime/standby.py`` for the cost it removes and the
+    # guards). ``daemon=True`` puts it in the root's singleton slot: the
+    # count of spares per root is capped, and the app's surface must not
+    # lose its spare to whichever TUI happened to start first. Here, at the
+    # CLI dispatch, rather than in ``serve_command`` or the app's lifespan:
+    # those are what the suite drives in-process, and a test must never
+    # leave a warmed interpreter behind.
+    from local_operator.session.runtime import standby
+
+    standby.enable_warming(daemon=True)
+    # Use the provided host, port, and reload options for serving the API.
+    if idle_update_control is not None:
+        return serve_command(
+            args.host,
+            args.port,
+            args.reload,
+            listener_fd=args.listener_fd,
+            idle_update_control=idle_update_control,
+        )
+    return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -19356,23 +19468,7 @@ def main() -> int:
             print(str(tr("cli.exec_runtime")(_er.temporary_conflicts_resume())), file=sys.stderr)
             return 2
 
-        # macOS: replace this process with a branded image so Activity Monitor
-        # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
-        # a no-op everywhere else. Placed after the parse so `--version` and
-        # `--help` (which argparse exits from inside `parse_args`) never pay it.
-        _maybe_brand_process(args)
-
-        if args.subcommand == "serve" and not getattr(args, "reload", False):
-            # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
-            # whose only inherited channel is the environment, so it keeps today's env
-            # behaviour. It is a developer mode the desktop app never launches.)
-            # FIRST after branding, before the login-shell PATH probe below spawns anything:
-            # move the desktop bearer out of the environment so no child -- that probe's
-            # shell, a session runtime, a reload successor -- is ever handed it. Why a
-            # descriptor and not the environment: ``server.desktop.TOKEN_FD_ENV``.
-            from local_operator.server.desktop import adopt_spawn_bearer
-
-            adopt_spawn_bearer()
+        idle_update_control = _prepare_startup_channels(args)
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all
@@ -19871,29 +19967,7 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
-            if args.install_service:
-                # Installation returns before warming a runtime: this command's
-                # product is the user unit, not a second foreground API listener.
-                from local_operator import services
-
-                result = services.install_linux_serve_service(args.port)
-                for line in result["lines"]:
-                    print(line)
-                return 0 if result["ok"] else 1
-            # The desktop daemon engages a runtime for every conversation the app
-            # opens cold, so it keeps ONE pre-imported standby for its root (see
-            # ``session/runtime/standby.py`` for the cost it removes and the
-            # guards). ``daemon=True`` puts it in the root's singleton slot: the
-            # count of spares per root is capped, and the app's surface must not
-            # lose its spare to whichever TUI happened to start first. Here, at the
-            # CLI dispatch, rather than in ``serve_command`` or the app's lifespan:
-            # those are what the suite drives in-process, and a test must never
-            # leave a warmed interpreter behind.
-            from local_operator.session.runtime import standby
-
-            standby.enable_warming(daemon=True)
-            # Use the provided host, port, and reload options for serving the API.
-            return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
+            return _dispatch_serve(args, idle_update_control)
         elif args.subcommand == "hub":
             if args.hub_command == "status":
                 return hub_status_command(args, base_dir)

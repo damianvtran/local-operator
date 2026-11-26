@@ -431,6 +431,7 @@ class SettingsApplier:
         sleep: Callable[[float], Awaitable[Any]] | None = None,
         budget: float | None = None,
         max_in_flight: int = MAX_IN_FLIGHT,
+        update_stopping: Callable[[], bool] | None = None,
     ) -> None:
         self.store = IntentStore(config_dir)
         self.driver = driver
@@ -441,6 +442,8 @@ class SettingsApplier:
         self._limit = asyncio.Semaphore(max_in_flight)
         self._sessions: dict[str, _SessionState] = {}
         self._closed = False
+        self._update_stopping = update_stopping
+        self._active_steps = 0
         self.in_flight = 0
         self.peak_in_flight = 0
 
@@ -617,6 +620,10 @@ class SettingsApplier:
                 self._kick(session_id)
         return armed
 
+    def idle_update_busy(self) -> bool:
+        """A durable backoff is resumable; an admitted settings step isn't."""
+        return bool(self._active_steps)
+
     async def close(self) -> None:
         self._closed = True
         tasks = [s.task for s in self._sessions.values() if s.task is not None]
@@ -662,8 +669,16 @@ class SettingsApplier:
         state = self._state(session_id)
         try:
             while not self._closed:
+                # A sleeping retry/prune is not live work. But it must not
+                # begin a new write after the daemon has committed to stop.
+                if self._update_stopping is not None and self._update_stopping():
+                    return
                 state.wake.clear()
-                delay = await self._step(session_id)
+                self._active_steps += 1
+                try:
+                    delay = await self._step(session_id)
+                finally:
+                    self._active_steps -= 1
                 if delay is None:
                     return
                 await self._sleep_until(state, delay)

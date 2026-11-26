@@ -86,6 +86,34 @@ async def test_lifespan_publishes_the_record_and_health_identifies_it(
 
 
 @pytest.mark.asyncio
+async def test_idle_update_opt_in_closes_pairing_only_after_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
+) -> None:
+    from local_operator.network import pairing_attest
+    from local_operator.server import desktop_idle_update, reload
+
+    async def capture_listener(config_dir, *, admitting):
+        assert config_dir == tmp_path
+        app.state.pairing_admission_probe = admitting
+        return None
+
+    async def no_control_task(*args):
+        pass
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(pairing_attest, "start_service", capture_listener)
+    monkeypatch.setattr(desktop_idle_update, "run", no_control_task)
+    setattr(app.state, desktop_idle_update.ATTACHED, object())
+    async with lifespan(app):
+        admits = app.state.pairing_admission_probe
+        assert admits()
+        setattr(app.state, reload.ADMISSION_ATTR, True)
+        assert admits(), "an ordinary rolling reload may still roll back"
+        setattr(app.state, desktop_idle_update.STOPPING, True)
+        assert not admits(), "a committed private stop must admit no new pairing work"
+
+
+@pytest.mark.asyncio
 async def test_lifespan_removes_the_record_even_when_teardown_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_app_state: None
 ) -> None:

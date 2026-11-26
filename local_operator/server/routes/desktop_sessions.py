@@ -1780,13 +1780,16 @@ class Interrupt(Input):
 def host(request: Request) -> DesktopSessions:
     pool = getattr(request.app.state, "desktop_sessions", None)
     if pool is None:
+        from local_operator.server.desktop_idle_update import stopping
+
         pool = DesktopSessions(
             request.app.state.config_manager.config_dir,
             # The DAEMON's retirement, asked of app state rather than of the pool:
             # the pool is built lazily by the first request that needs it, and a
             # pool built after the announcement must refuse for the same reason
             # (and with the same 503) as one built before it.
-            retiring=lambda: bool(getattr(request.app.state, RETIRING_STATE_ATTR, False)),
+            retiring=lambda: bool(getattr(request.app.state, RETIRING_STATE_ATTR, False))
+            or stopping(request.app),
         )
         request.app.state.desktop_sessions = pool
     return pool

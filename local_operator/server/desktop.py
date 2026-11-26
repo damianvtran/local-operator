@@ -393,6 +393,11 @@ def adopt_spawn_bearer() -> None:
         _relaunch_with_bearer_fd()
 
 
+def has_adopted_spawn_bearer() -> bool:
+    """A serve launch credential, never a claim or an environment fallback read."""
+    return bool(_SPAWN_BEARER)
+
+
 #: The ``-c`` program the desktop app launches its managed backend with
 #: (``SERVE_ENTRYPOINT`` in the app's ``src/main/backend/owned-serve-launch.ts``). Matched
 #: as a substring so a launcher that adds an import in front still counts.

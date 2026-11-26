@@ -155,7 +155,7 @@ def make_service(**kwargs: Any) -> app_attest.AttestService:
     return app_attest.AttestService(LISTENER_NAME, validator=validate_frame, **kwargs)
 
 
-async def start_service(config_dir: Path) -> app_attest.AttestService | None:
+async def start_service(config_dir: Path, **kwargs: Any) -> app_attest.AttestService | None:
     """Bind ``<config>/run/attest/mesh-pairing.sock`` on macOS; ``None`` elsewhere.
 
     Additive and never a boot gate: any failure is logged and leaves no listener, and
@@ -166,7 +166,7 @@ async def start_service(config_dir: Path) -> app_attest.AttestService | None:
     try:
         from local_operator.session.runtime.registry import run_dir
 
-        service = make_service()
+        service = make_service(**kwargs)
         attest_dir = run_dir(Path(config_dir), app_attest.ATTEST_RUN_DIRNAME)
         if await service.start(attest_dir) is not None:
             return service
