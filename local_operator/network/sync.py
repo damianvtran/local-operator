@@ -400,6 +400,13 @@ EXCLUDED_ENTRIES: dict[str, str] = {
         "owner-local sealed snapshots; bytes only through the P1/P2/audited op"
     ),
     "profile-backups": "origin-local before-images; never portable approval or action authority",
+    # THE TEAM BRIDGE EXCERPT MEMO (``team_bridge.card_projection.EXCERPT_MEMO_NAME``):
+    # digests pointing into THIS device's display-body store, kept only so a restart
+    # inside the provider's cache TTL re-renders the same card bytes. Another device
+    # has neither the rows nor the warm cache, so a copy would protect nothing.
+    "bridge-excerpt-memo.json": (
+        "device-local cache-stability digests into this device's display-body store"
+    ),
     # THE INBOX'S TWO TRANSPORT LOCKS (``session/runtime/inbox``): empty
     # coordination files whose only meaning is "a writer/reader on THIS device is
     # inside the spool transaction". Copying one would carry a lock with no
