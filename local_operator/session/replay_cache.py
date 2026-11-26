@@ -565,33 +565,43 @@ def build_cold_tail_metadata(
     -- O(journal) per open. A validated earlier proof (:func:`_prior_absence`)
     lets the scan start at its boundary instead, so a grown open reads only the
     appended span; the answer is byte-for-byte the full scan's. ``stats``, when
-    given, receives ``absence_scan_bytes`` and ``proof_mode`` for the open trace.
+    given, receives only counters, times and fixed proof outcomes for the trace.
     """
+
+    def decline(reason: str | None = None) -> None:
+        if stats is not None:
+            stats["proof_mode"] = "declined"
+            if reason is not None:
+                stats["decline_reason"] = reason
+
     if key.through_id is not None or key.strict_cut or not key.checkpoint_types:
-        return None
+        return decline("request_shape")
+    # Eager extends its replay window for the required frontend checkpoint,
+    # NOT for opportunistic spend. Do not enable this for a different cut or
+    # set of requested facts, even if that caller also wants the frontend row.
+    source = key.inode, key.size, key.mtime_ns, key.ctime_ns
+    desktop = key.checkpoint_types == (FRONTEND_CHECKPOINT_CUSTOM_TYPE,) and (
+        key.opportunistic_types == (SESSION_SPEND_CUSTOM_TYPE,)
+    )
     prior = _prior_absence(key, path)
     suffix = read_cold_tail(
         key.directory,
         checkpoint_types=key.checkpoint_types + key.opportunistic_types,
         known_absent=prior,
+        desktop_source=source if desktop else None,
+        stats=stats,
     )
     if stats is not None:
-        if suffix is None or not suffix.absence_needles:
-            stats["proof_mode"] = "declined" if suffix is None else "met"
-        elif prior is not None and set(suffix.absence_needles) <= prior[1]:
-            stats["proof_mode"] = "incremental"
-        else:
-            stats["proof_mode"] = "full"
         stats["absence_scan_bytes"] = suffix.absence_scan_bytes if suffix is not None else None
     if suffix is None:
-        return None
+        return decline()
     seed = seed_reported_usage(usages_since_newest_shrink(suffix.entries))
     # ``None`` has two meanings. With usage PROVEN ABSENT from the whole journal
     # it is eager's own answer (no receipt anywhere to seed from). Otherwise it
     # means the tail met no parseable receipt, so eager might seed from an older
     # one, and the tail must decline.
     if seed is None and not suffix.usage_proven_absent:
-        return None
+        return decline("no_usable_seed")
     selection = read_selection_reading(Path(key.directory))
     fresh = replay_key(
         key.directory,
@@ -600,10 +610,17 @@ def build_cold_tail_metadata(
         checkpoint_types=key.checkpoint_types,
         opportunistic_types=key.opportunistic_types,
     )
-    if fresh != key:
-        return None
-    if selection.source != (key.inode, key.size, key.mtime_ns, key.ctime_ns):
-        return None
+    if fresh != key or selection.source != source:
+        return decline("source_changed")
+    if stats is not None:
+        if suffix.recovered_checkpoint:
+            stats["proof_mode"] = "recovered"
+        elif not suffix.absence_needles:
+            stats["proof_mode"] = "met"
+        elif prior is not None and set(suffix.absence_needles) <= prior[1]:
+            stats["proof_mode"] = "incremental"
+        else:
+            stats["proof_mode"] = "full"
     record = ColdMetadata(
         witness=witness_for(key),
         checkpoint=suffix.checkpoint,

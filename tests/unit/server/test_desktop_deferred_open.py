@@ -25,7 +25,10 @@ because its id-referencing payload is exactly what the index reads for
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Iterator
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -38,11 +41,11 @@ from local_operator.config import ConfigManager
 from local_operator.harness.types import Message, TextContent, ToolCall, Usage
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
-from local_operator.session import cold_metadata, replay_cache
+from local_operator.session import cold_metadata, open_trace, replay_cache
 from local_operator.session import transcript_index as ti
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
-from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import TRANSCRIPT_FILENAME, Transcript
 
 SESSION_ID = "defeed012345"
@@ -520,6 +523,155 @@ async def test_hydration_reads_the_journal_as_of_the_hydration_not_the_open(
         assert [m.id for m in eager.history()] == rows
     finally:
         await eager.dispose()
+
+
+async def _first_sse_records(app: FastAPI, path: str) -> tuple[int, list[dict[str, Any]]]:
+    """Drive the streaming ASGI route until the first snapshot, then disconnect.
+
+    HTTPX's ASGI transport buffers a response to EOF; the desktop stream never
+    ends on its own. Disconnect from the test client, not inside the bridge.
+    """
+    disconnected = asyncio.Event()
+    requested = False
+    status = 0
+    pending = b""
+    records: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal requested
+        if not requested:
+            requested = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal status, pending
+        if message["type"] == "http.response.start":
+            status = message["status"]
+        elif message["type"] == "http.response.body":
+            pending += message.get("body", b"")
+            while b"\n\n" in pending and not disconnected.is_set():
+                record, pending = pending.split(b"\n\n", 1)
+                if record.startswith(b"data: "):
+                    records.append(json.loads(record[6:]))
+                    if records[-1]["type"] == "snapshot":
+                        disconnected.set()
+            if not message.get("more_body"):
+                disconnected.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "query_string": b"open_frame=1",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=10)
+    return status, records
+
+
+@pytest.mark.asyncio
+async def test_recovered_checkpoint_preserves_first_records_on_both_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    trace_path = tmp_path / "open-trace.jsonl"
+    monkeypatch.setattr(open_trace, "_PATH", trace_path)
+    directory = await _seed(root, turns=0)
+    writer = Transcript(directory)
+    for i in range(270):
+        await writer.append_message(
+            Message(id=f"u{i}", role="user", content=[TextContent(text=f"question {i}")])
+        )
+    await writer.append_custom(SESSION_SPEND_CUSTOM_TYPE, SessionSpend(micro=125000).to_details())
+    await writer.append_message(
+        Message(id="receipt", role="assistant", usage=Usage(input_tokens=42, context_tokens=500))
+    )
+    writer.flush()
+    writer.close()
+    key = replay_cache.replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+        opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+    )
+    assert key is not None
+    metadata_path = cold_metadata.cold_metadata_path(root, SESSION_ID)
+    route = f"/v1/desktop/sessions/{SESSION_ID}"
+    saved_records = []
+    wire = []
+    for arm in ("eager", "proof"):
+        assert not metadata_path.exists() and replay_cache.cached_replay(key) is None
+        assert await _settle_index(root) is not None
+        app, pool = _app(root)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                auth = {"Authorization": f"Bearer {TOKEN}"}
+                unauth = await client.get(route + "/history", params={"open_frame": 1})
+                invalid = await client.get(
+                    route + "/history", params={"open_frame": -1}, headers=auth
+                )
+                assert (unauth.status_code, invalid.status_code) == (401, 422)
+                assert not metadata_path.exists() and _replay_calls == 0
+                # The control forces only the established eager branch; routing,
+                # auth, disk reads, the stream and persisted facts are real in both.
+                control = (
+                    patch(
+                        "local_operator.session.attached.build_cold_tail_metadata",
+                        return_value=None,
+                    )
+                    if arm == "eager"
+                    else nullcontext()
+                )
+                with control:
+                    page = await client.get(
+                        route + "/history", params={"open_frame": 1}, headers=auth
+                    )
+                    status, records = await _first_sse_records(app, route + "/events")
+                assert (page.status_code, status) == (200, 200)
+                assert [row["type"] for row in records][:2] == ["open", "snapshot"]
+                assert _replay_calls == (1 if arm == "eager" else 0)
+                wire.append(_canonical({"page": page.json(), "events": records}))
+                assert "Article search rollout" in str(wire[-1])
+                digest = hashlib.sha256(json.dumps(wire[-1], sort_keys=True).encode()).hexdigest()
+                print(
+                    f"{arm}: unauthorized={unauth.status_code} invalid={invalid.status_code} "
+                    f"page={page.status_code} events={status}/open,snapshot "
+                    f"eager_replays={_replay_calls} canonical_sha256={digest}"
+                )
+                saved = cold_metadata.read_cold_metadata(
+                    metadata_path, replay_cache.witness_for(key)
+                )
+                assert saved is not None and saved.checkpoint is not None
+                assert saved.checkpoint["checkpoint_id"] == "c1"
+                saved_records.append(
+                    (saved.checkpoints, saved.order, saved.seed_usage, saved.selection)
+                )
+        finally:
+            await pool.close()
+            await _settle_index(root)
+        metadata_path.unlink()
+        replay_cache.replay_cache().clear()
+        _reset_replay_calls()
+    assert wire[0] == wire[1] and saved_records[0] == saved_records[1]
+    [recovered] = [
+        row for row in map(json.loads, trace_path.read_text().splitlines())
+        if row.get("proof_mode") == "recovered"
+    ]
+    assert recovered["stage"] == "cold.summary" and recovered["metadata_record"] == "miss"
+    assert recovered["lookup_outcome"] == "matched" and recovered["lookup_rows"] > 0
+    assert 0 < recovered["lookup_bytes"] <= 4 << 20 and recovered["lookup_ms"] >= 0
+    assert recovered["absence_scan_bytes"] == 0
+    assert "Article search rollout" not in trace_path.read_text()
 
 
 @pytest.mark.asyncio
