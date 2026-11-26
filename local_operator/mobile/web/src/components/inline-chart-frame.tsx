@@ -487,15 +487,18 @@ export function HeaderRow({ start, end, children }: { start?: ReactNode; end?: R
 }
 
 /** One interactive legend entry; hovering it highlights its series (spec §5). */
-export function LegendItem({ swatch, label, dashed, active, onEnter, onLeave }: {
-	swatch: string; label: string; dashed?: boolean; active?: boolean;
+export function LegendItem({ swatch, stroke, label, dashed, active, onEnter, onLeave }: {
+	/** `bg-chart-N` for the square swatch; `stroke-chart-N` for the dashed one.
+	 * Both spelled in full at the call site: the bundle check (and Tailwind's
+	 * scanner) only see literal class names, never `swatch.replace("bg-", …)`. */
+	swatch: string; stroke: string; label: string; dashed?: boolean; active?: boolean;
 	onEnter: () => void; onLeave: () => void;
 }) {
 	return (
 		<span className={`inline-flex min-w-0 items-center gap-1.5 ${dim(active === false)}`}
 			onPointerEnter={onEnter} onPointerLeave={onLeave}>
 			{dashed
-				? <svg aria-hidden="true" width={12} height={2} className="shrink-0 overflow-visible"><line x1={0} x2={12} y1={1} y2={1} strokeWidth={2} strokeDasharray="4 2" className={swatch.replace("bg-", "stroke-")} /></svg>
+				? <svg aria-hidden="true" width={12} height={2} className="shrink-0 overflow-visible"><line x1={0} x2={12} y1={1} y2={1} strokeWidth={2} strokeDasharray="4 2" className={stroke} /></svg>
 				: <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-[2px] ${swatch}`} />}
 			<span className="truncate text-ink"><bdi>{label}</bdi></span>
 		</span>

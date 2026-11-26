@@ -244,7 +244,7 @@ function CartesianChart(props: Cartesian) {
 	const announce = ({ c, s }: Mark) => join(labels[c], m > 1 ? seriesName(s) : undefined, valueText(s, c), position(c, n, locale));
 
 	const legend = m > 1 && <>{series.map((ser, i) => (
-		<LegendItem key={i} swatch={SWATCH[i]} dashed={ser.right}
+		<LegendItem key={i} swatch={SWATCH[i]} stroke={STROKE[i]} dashed={ser.right}
 			label={ser.right ? t("relay.chart.right_axis", { label: ser.label }) : ser.label}
 			onEnter={() => setLegend(i)} onLeave={() => setLegend(null)} active={legendActive === null ? undefined : legendActive === i} />
 	))}</>;
