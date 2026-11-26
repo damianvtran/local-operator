@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.remote_compute",
-  "history_sha256": "ee345b246775ac833480eecc4c87c6443540f8bedf063ab7190d59b87f809b37",
+  "history_sha256": "de3ca49ec3ac87095188eccdb8a946cd2d96a0a5b567d4f998f1f88db4e634ce",
   "entries": [
     {
       "locale": "ur",
@@ -126,6 +126,53 @@
       },
       "status": "passed",
       "note": "ur/wire.remote_compute: Independent i18n audit round 2 retested PR c01406efc at head 03d8e6ecf7b75c03cc686e8872ae9a4a19278ebf: the fifteen keys against en, all eight round-1 findings and this locale's own copy all pass (locale_verdict PASS, 0 blocker, 0 major); the new r2-m1 (ru облачный/удалённый split), r2-n1 (zh-CN 原本 for 'otherwise') and r2-n2 (hi/ur yes-help phrasing) findings are deferred, none gating."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "8b465ec610aabb245aad1c5f9fad01799796bc4a81026325c36a67156acb2a0e",
+      "context_sha256": "ef9ea368656c6c1cfd9fb1ce1755c26f4fbc517a50aa7feb82a280726face30f",
+      "target_sha256": "340ddc59bda8d3034cd03772350343fdc936f32eae87708cac939ff7829877cc",
+      "round": "pr-c01406efc-r3",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "coder (team lopdev): run_limit rewritten and run_limit_legacy added for PR 4624 in commit f02a1a8b6; the seven locale strings are that commit's work (git author Ola Fagbemi)",
+        "session": "unknown — the commit names no authoring session",
+        "session_kind": "authoring commit recorded here; no session id is recorded for it",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR 4624, round 3; independent of the translator",
+        "session": "925dd9407c78",
+        "session_kind": "auditor's own lop subagent session id (lane 4624-i18n-audit-r3)",
+        "model": "deepseek/deepseek-flash",
+        "model_kind": "served model per the auditor session record (selected_model, effort high)",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "pass",
+        "independent_from_translator": true,
+        "unresolved_blocker_major": 0,
+        "findings": 5,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 2,
+          "nit": 3
+        },
+        "finding_ids": [
+          "r3-m1",
+          "r3-m2",
+          "r3-n1",
+          "r3-n2",
+          "r3-n3"
+        ],
+        "finding_detail": "0 blocker, 0 major, 2 minor (ur relative-clause gender attaches the confirmation to the run; ru расчёт reads as payment settlement), 3 nit (hi प्रतीक्षा vs sibling इंतज़ार; es/hi leave the confirming command unnamed; en 'running runs' stutter) — all deferred, none gating",
+        "locale_verdict": "PASS",
+        "scope": "round 3 delta 05265bda5..f02a1a8b: wire.remote_compute.run_limit rewritten and .run_limit_legacy added in all seven locales, read against en, the en context sidecar notes, i18n/glossary.md and each locale's style guide; all other 13 keys of wire.remote_compute and all 13 of cli.exec_remote_help verified byte-identical to 05265bda5; placeholder/literal/NFC/bidi/space parity over 2 keys x 8 locales; en context sidecar order-insensitive diff (64 keys, exactly run_limit note, run_limit_legacy role/tone/note and slot_heading role/note changed); checks: catalogue checks 0 problems, ledger validate --base 05265bda5 clean, generate --check 212 artifacts byte-identical; the three test_cli_remote locale assertions still render en because the shipped set is dark pending these receipts"
+      },
+      "status": "passed",
+      "note": "ur/wire.remote_compute: independent i18n audit round 3 on head f02a1a8b6fccaa16b8b8c84853c4d42fefd27a01 — run_limit now leads with waiting or cancelling and names no delete, run_limit_legacy carries the legacy delete remedy, the permanence warning and the confirmation, both against en and the rewritten context notes; locale_verdict PASS, 0 blocker, 0 major; r3-m1..r3-n3 are deferred and none gates."
     }
   ]
 }
