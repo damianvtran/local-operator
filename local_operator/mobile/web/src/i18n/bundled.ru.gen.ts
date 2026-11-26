@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "\u041e\u0442\u043e\u0437\u0432\u0430\u043d\u043e \u2014 \u0430\u0433\u0435\u043d\u0442\u0443 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u043d\u0443\u0436\u0435\u043d \u043e\u0442\u0432\u0435\u0442",
     },
   },
+  "relay.chart": {
+    "ru": {
+      "relay.chart.also": "\u0422\u0430\u043a\u0436\u0435: {items}",
+      "relay.chart.axis_value": "{label}: {value}",
+      "relay.chart.data_toggle": "\u0414\u0430\u043d\u043d\u044b\u0435 \u0434\u0438\u0430\u0433\u0440\u0430\u043c\u043c\u044b",
+      "relay.chart.more": "\u0435\u0449\u0451 {count}",
+      "relay.chart.no_data": "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",
+      "relay.chart.other": "\u0414\u0440\u0443\u0433\u043e\u0435 ({count})",
+      "relay.chart.position": "{index} \u0438\u0437 {count}",
+      "relay.chart.right_axis": "{label} \u00b7 \u043f\u0440\u0430\u0432\u0430\u044f \u043e\u0441\u044c",
+      "relay.chart.role": "\u0434\u0438\u0430\u0433\u0440\u0430\u043c\u043c\u0430",
+      "relay.chart.share": "{share} \u043e\u0442 \u043e\u0431\u0449\u0435\u0433\u043e",
+      "relay.chart.total": "\u0418\u0442\u043e\u0433\u043e",
+    },
+  },
   "relay.chrome": {
     "ru": {
       "relay.chrome.appearance.group_by_tag": "\u0413\u0440\u0443\u043f\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0431\u0435\u0441\u0435\u0434\u044b \u043f\u043e \u0442\u0435\u0433\u0430\u043c",

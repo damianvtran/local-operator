@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "\u0110\u00e3 r\u00fat l\u1ea1i \u2014 t\u00e1c nh\u00e2n kh\u00f4ng c\u00f2n c\u1ea7n c\u00e2u tr\u1ea3 l\u1eddi",
     },
   },
+  "relay.chart": {
+    "vi": {
+      "relay.chart.also": "Ngo\u00e0i ra: {items}",
+      "relay.chart.axis_value": "{label}: {value}",
+      "relay.chart.data_toggle": "D\u1eef li\u1ec7u bi\u1ec3u \u0111\u1ed3",
+      "relay.chart.more": "+{count} m\u1ee5c kh\u00e1c",
+      "relay.chart.no_data": "Kh\u00f4ng c\u00f3 d\u1eef li\u1ec7u",
+      "relay.chart.other": "Kh\u00e1c ({count})",
+      "relay.chart.position": "M\u1ee5c {index} trong s\u1ed1 {count}",
+      "relay.chart.right_axis": "{label} \u00b7 tr\u1ee5c ph\u1ea3i",
+      "relay.chart.role": "bi\u1ec3u \u0111\u1ed3",
+      "relay.chart.share": "{share} c\u1ee7a t\u1ed5ng",
+      "relay.chart.total": "T\u1ed5ng",
+    },
+  },
   "relay.chrome": {
     "vi": {
       "relay.chrome.appearance.group_by_tag": "Nh\u00f3m cu\u1ed9c tr\u00f2 chuy\u1ec7n theo nh\u00e3n",

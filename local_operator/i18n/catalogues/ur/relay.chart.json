@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "مزید: {items}",
+  "relay.chart.axis_value": "{label}: {value}",
+  "relay.chart.data_toggle": "چارٹ کا ڈیٹا",
+  "relay.chart.more": "+{count} مزید",
+  "relay.chart.no_data": "کوئی ڈیٹا نہیں",
+  "relay.chart.other": "دیگر ({count})",
+  "relay.chart.position": "نمبر {index}، کل {count}",
+  "relay.chart.right_axis": "{label} · دایاں محور",
+  "relay.chart.role": "چارٹ",
+  "relay.chart.share": "کل کا {share}",
+  "relay.chart.total": "کل"
+}

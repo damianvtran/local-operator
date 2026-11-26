@@ -28,19 +28,25 @@ afterEach(cleanup);
 
 describe("mobile transcript inline UI", () => {
 	it("mounts signed bars between surrounding Markdown in the completed assistant row", () => {
-		render(transcript("Legacy prose", undefined, overlay()));
-		const table = screen.getByRole("table", { name: "Net change (USD)" });
+		const { container } = render(transcript("Legacy prose", undefined, overlay()));
+		// The exact grid now sits behind the collapsed "Chart data" disclosure.
+		const table = screen.getByRole("table", { name: "Net change", hidden: true });
 		const before = screen.getByText("📈 Before");
 		const after = screen.getByText("After");
 		expect(before.tagName).toBe("STRONG");
 		expect(after.tagName).toBe("EM");
 		expect(before.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(table.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(within(table).getByRole("rowheader", { name: "Q1" })).toBeTruthy();
-		const negative = within(table).getByRole("cell", { name: "-3" });
-		const positive = within(table).getByRole("cell", { name: "9" });
-		expect(negative.querySelector("[aria-hidden] span")?.getAttribute("style")).toContain("width: 25%");
-		expect(positive.querySelector("[aria-hidden] span")?.getAttribute("style")).toContain("left: 25%");
+		expect(within(table).getByRole("rowheader", { name: "Q1", hidden: true })).toBeTruthy();
+		expect(within(table).getByRole("cell", { name: "-3", hidden: true })).toBeTruthy();
+		expect(within(table).getByRole("cell", { name: "9", hidden: true })).toBeTruthy();
+		// Signed bars share one zero-including nice axis: -5, 0, 5, 10 at the
+		// 180px narrow plot (spec §2), "USD" once above the ticks, never on them.
+		const plot = container.querySelector('[data-inline-plot="bar"]')!;
+		expect([...plot.querySelectorAll("text")].map((node) => node.textContent).slice(0, 4)).toEqual(["-5", "0", "5", "10"]);
+		expect(plot.querySelectorAll("path")).toHaveLength(2);
+		expect(plot.textContent).not.toContain("USD");
+		expect(screen.getByRole("group", { name: "Net change" }).textContent).toContain("USD");
 	});
 
 	it.each([
@@ -60,22 +66,24 @@ describe("mobile transcript inline UI", () => {
 	] as const)("renders %s with a literal, named value grid", (type, fields, expected) => {
 		const payload = { ...fields, type: "mode" in fields ? "series" : type, title: "Preview" };
 		const { container } = render(transcript("Legacy prose", undefined, overlay([{ offset: 0, payload }])));
-		const table = screen.getByRole("table", { name: "Preview" });
-		expect(within(table).getByRole("cell", { name: expected })).toBeTruthy();
+		const table = screen.getByRole("table", { name: "Preview", hidden: true });
+		expect(within(table).getByRole("cell", { name: expected, hidden: true })).toBeTruthy();
 		expect(container.querySelector("img")).toBeNull();
 		if (type === "dual") {
-			expect(within(table).getByRole("columnheader", { name: "Mass (kg)" })).toBeTruthy();
-			expect(container.querySelector("[data-inline-plot]")).toBeNull();
+			expect(within(table).getByRole("columnheader", { name: "Mass (kg)", hidden: true })).toBeTruthy();
 		}
-		if (["line", "scatter", "pie", "grouped", "stacked", "percent"].includes(type)) {
+		if (type !== "table" && type !== "spreadsheet") {
 			const graphic = container.querySelector(`[data-inline-plot="${type}"]`);
 			expect(graphic?.childElementCount).toBeGreaterThan(0);
 			expect(graphic?.outerHTML).not.toMatch(/NaN|Infinity/);
 		}
 		if (type === "heatmap") {
-			expect(within(table).getByRole("rowheader", { name: "Night" })).toBeTruthy();
-			expect(table.querySelectorAll("td [aria-hidden]")).toHaveLength(1);
-			expect(within(table).getByRole("row", { name: /Night/ }).lastElementChild?.textContent).toBe("");
+			expect(within(table).getByRole("rowheader", { name: "Night", hidden: true })).toBeTruthy();
+			// Two cells: one filled, one hatched "no data" (never drawn as zero).
+			const cells = container.querySelectorAll('[data-inline-plot="heatmap"] rect');
+			expect(cells).toHaveLength(2);
+			expect(cells[1].getAttribute("fill")).toMatch(/^url\(#lo-hatch-/);
+			expect(within(table).getByRole("row", { name: /Night/, hidden: true }).lastElementChild?.textContent).toBe("");
 		}
 	});
 
@@ -182,7 +190,7 @@ describe("live session inline UI negotiation", () => {
 		await emit({ ...projection, inline_ui: overlay() });
 		const before = screen.getByText("📈 Before");
 		const after = screen.getByText("After");
-		const table = screen.getByRole("table", { name: "Net change (USD)" });
+		const table = screen.getByRole("table", { name: "Net change", hidden: true });
 		expect(before.tagName).toBe("STRONG");
 		expect(after.tagName).toBe("EM");
 		expect(before.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -191,14 +199,14 @@ describe("live session inline UI negotiation", () => {
 
 		// The relay can change just the overlay without bumping projection.version.
 		await emit({ ...projection, inline_ui: overlay([{ offset: -1, payload: bar }]) });
-		expect(screen.queryByRole("table", { name: "Net change (USD)" })).toBeNull();
-		expect(screen.queryByRole("table", { name: "Legacy preview (USD)" })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Net change", hidden: true })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Legacy preview", hidden: true })).toBeNull();
 		await emit({ ...projection, inline_ui: overlay() });
-		expect(screen.getByRole("table", { name: "Net change (USD)" })).toBeTruthy();
+		expect(screen.getByRole("table", { name: "Net change", hidden: true })).toBeTruthy();
 		await emit(projection);
-		expect(screen.queryByRole("table", { name: "Net change (USD)" })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Net change", hidden: true })).toBeNull();
 		expect(screen.getByText("Legacy prose")).toBeTruthy();
-		expect(screen.queryByRole("table", { name: "Legacy preview (USD)" })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Legacy preview", hidden: true })).toBeNull();
 	});
 
 	it("negotiates older pages without replacing or reviving the live overlay", async () => {
@@ -219,13 +227,13 @@ describe("live session inline UI negotiation", () => {
 		const request = fetchJson.mock.calls.find(([url]) => url.startsWith(historyPath))?.[0];
 		expect(request).toContain("before=answer");
 		expect(request).toContain("inline_ui=1");
-		expect(screen.getByRole("table", { name: "Historical preview (USD)" })).toBeTruthy();
+		expect(screen.getByRole("table", { name: "Historical preview", hidden: true })).toBeTruthy();
 		expect(screen.getByText("Historical prose")).toBeTruthy();
-		expect(screen.getByRole("table", { name: "Net change (USD)" })).toBeTruthy();
+		expect(screen.getByRole("table", { name: "Net change", hidden: true })).toBeTruthy();
 		await emit(pinned);
-		expect(screen.getByRole("table", { name: "Historical preview (USD)" })).toBeTruthy();
-		expect(screen.queryByRole("table", { name: "Legacy preview (USD)" })).toBeNull();
-		expect(screen.queryByRole("table", { name: "Net change (USD)" })).toBeNull();
+		expect(screen.getByRole("table", { name: "Historical preview", hidden: true })).toBeTruthy();
+		expect(screen.queryByRole("table", { name: "Legacy preview", hidden: true })).toBeNull();
+		expect(screen.queryByRole("table", { name: "Net change", hidden: true })).toBeNull();
 	});
 
 	it("shows server-projected live prose with no widget before a typed overlay arrives", async () => {
@@ -234,7 +242,7 @@ describe("live session inline UI negotiation", () => {
 		expect(screen.getByText("Partial answer")).toBeTruthy();
 		expect(screen.queryByRole("table")).toBeNull();
 		await emit({ ...projection, inline_ui: overlay() });
-		expect(screen.getByRole("table", { name: "Net change (USD)" })).toBeTruthy();
+		expect(screen.getByRole("table", { name: "Net change", hidden: true })).toBeTruthy();
 	});
 
 	it("sends the v1 declaration on prompt and steer but not unrelated commands", async () => {

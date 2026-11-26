@@ -76,7 +76,18 @@
 	--color-ink-disabled: var(--lo-ink-disabled);
 
 	--color-hairline: var(--lo-hairline);
+	--color-hairline-strong: var(--lo-hairline-strong);
 	--color-control: var(--lo-border-control);
+
+	/* Categorical chart marks. Derived per palette by scripts/chart-palette.mjs
+	   (inline-chart spec §4), never authored; chart-1 is always the accent. */
+	--color-chart-1: var(--lo-chart-1);
+	--color-chart-2: var(--lo-chart-2);
+	--color-chart-3: var(--lo-chart-3);
+	--color-chart-4: var(--lo-chart-4);
+	--color-chart-5: var(--lo-chart-5);
+	--color-chart-6: var(--lo-chart-6);
+	--color-chart-7: var(--lo-chart-7);
 
 	--color-accent: var(--lo-accent);
 	--color-accent-hover: var(--lo-accent-hover);
@@ -776,4 +787,19 @@ html :focus-visible {
 .lo-composer:has(:focus-visible) {
 	outline: 2px solid var(--color-accent);
 	outline-offset: 2px;
+}
+
+/* Inline chart marks fade in ONCE on mount (inline-chart spec §7): 180ms,
+   opacity only — no growing bars, line draw-on or slice sweep, which would
+   read as layout motion in a streaming transcript. A CSS animation runs when
+   the node mounts, so a re-render, resize or theme flip never replays it. */
+@keyframes lo-chart-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+.lo-chart-in {
+	animation: lo-chart-in 180ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-chart-in { animation: none; }
 }

@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "Ngoài ra: {items}",
+  "relay.chart.axis_value": "{label}: {value}",
+  "relay.chart.data_toggle": "Dữ liệu biểu đồ",
+  "relay.chart.more": "+{count} mục khác",
+  "relay.chart.no_data": "Không có dữ liệu",
+  "relay.chart.other": "Khác ({count})",
+  "relay.chart.position": "Mục {index} trong số {count}",
+  "relay.chart.right_axis": "{label} · trục phải",
+  "relay.chart.role": "biểu đồ",
+  "relay.chart.share": "{share} của tổng",
+  "relay.chart.total": "Tổng"
+}

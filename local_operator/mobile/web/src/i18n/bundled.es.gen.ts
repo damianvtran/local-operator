@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "Retirado \u2014 el agente ya no necesita respuesta",
     },
   },
+  "relay.chart": {
+    "es": {
+      "relay.chart.also": "Tambi\u00e9n: {items}",
+      "relay.chart.axis_value": "{label}: {value}",
+      "relay.chart.data_toggle": "Datos del gr\u00e1fico",
+      "relay.chart.more": "+{count} m\u00e1s",
+      "relay.chart.no_data": "Sin datos",
+      "relay.chart.other": "Otros ({count})",
+      "relay.chart.position": "{index} de {count}",
+      "relay.chart.right_axis": "{label} \u00b7 eje derecho",
+      "relay.chart.role": "gr\u00e1fico",
+      "relay.chart.share": "{share} del total",
+      "relay.chart.total": "Total",
+    },
+  },
   "relay.chrome": {
     "es": {
       "relay.chrome.appearance.group_by_tag": "Agrupar conversaciones por etiqueta",
