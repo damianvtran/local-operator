@@ -96,6 +96,7 @@ def _entry_owners() -> dict[str, str]:
     )
     from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
+    from local_operator.team_bridge.card_projection import EXCERPT_MEMO_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
 
@@ -141,6 +142,10 @@ def _entry_owners() -> dict[str, str]:
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.
         KERNEL_MARKER_NAME: "local_operator.tools.eval",
+        # The Team Bridge excerpt memo: excluded (device-local digests into this
+        # device's display-body store); listed so the round-trip test proves it
+        # does NOT arrive.
+        EXCERPT_MEMO_NAME: "team_bridge.card_projection",
         # The pending-voice markers (``session.channel_spend``): copied, so a
         # session moved while a voice charge is still unfoled arrives with the
         # fact the published object states (sync.COPY_SET_NAMES's comment has

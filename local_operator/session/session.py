@@ -5693,10 +5693,21 @@ class Session:
         #: a resumed session has none, so a resumed turn simply gets no note.
         self._voice_note_for: str | None = None
         #: Team Bridge card excerpt decisions, frozen at each card's first render
-        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: (``card_projection.attach_history_excerpts``): keeps
         #: already-cached card bytes stable. Cleared whenever standing fails and
-        #: at every compaction commit (``_finish_compaction``).
-        self._bridge_excerpt_memo: dict[str, Any] = {}
+        #: at every compaction commit (``_finish_compaction``). Persisted in the
+        #: session directory and reloaded here, because a runtime that idle-exits
+        #: and resumes inside the provider's cache TTL still has a warm cache
+        #: (``card_projection.ExcerptMemo`` has the measurement).
+        from local_operator.team_bridge.card_projection import (
+            EXCERPT_MEMO_NAME,
+            ExcerptMemo,
+        )
+
+        session_dir = self._session_dir()
+        self._bridge_excerpt_memo: ExcerptMemo = ExcerptMemo.load(
+            None if session_dir is None else Path(session_dir) / EXCERPT_MEMO_NAME
+        )
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
