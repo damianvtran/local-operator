@@ -29997,7 +29997,10 @@ class Session:
             if item["status"] == "pending":
                 pending.append(key)
             elif item["status"] == "blocked":
-                reason = str(item.get("reason") or "")
+                raw_reason = item.get("reason")
+                # Malformed restored values are not blocker text or receipt refs.
+                # Never stringify their contents into a model-facing reminder.
+                reason = raw_reason if isinstance(raw_reason, str) else ""
                 binding = item.get("block_binding")
                 ref = _todo_block_ref(reason) if binding else None
                 if ref is not None and ref not in receipts:

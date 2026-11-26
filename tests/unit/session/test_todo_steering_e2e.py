@@ -337,6 +337,34 @@ async def test_blocking_an_item_earns_one_reconciliation_nudge(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_restored_blocker_reminder_only_renders_string_reasons(tmp_path) -> None:
+    session = make_session(tmp_path, SteeringStream([]))
+    # Restoration can load JSON that bypassed the todo tool's schema.
+    private = "synthetic-private-value"
+    builtin.restore_todos(
+        "e2e",
+        [
+            {
+                "name": "Deploy",
+                "items": [
+                    {"text": "migrate", "status": "blocked", "reason": {"token": private}},
+                    {"text": "publish", "status": "blocked", "reason": "waiting for approval"},
+                ],
+            }
+        ],
+    )
+    try:
+        (reminder,) = await session._todo_continuation()
+        assert isinstance(reminder, CustomMessage)
+        text = reminder.details["text"]
+        assert private not in text
+        assert "- migrate — blocked" in text.splitlines()
+        assert "- publish — blocked: waiting for approval" in text.splitlines()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> None:
     """THE over-fire repro, end to end: an accounted parked set must not be
     re-asserted on the next turn's first yield. Before the cross-turn latch,
