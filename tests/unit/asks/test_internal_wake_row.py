@@ -135,6 +135,10 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
             "ask_timeout fire runs one via ``deliver_ask_messages``, so either "
             "would hit the warm cache before expiry; it renders nothing"
         ),
+        "_live_todo_receipt": (
+            "an engine reader: verifies an owner-local todo receipt in process; "
+            "hidden and internal rows cannot substantiate it, and it renders nothing"
+        ),
         "_queue_wake_rearm": (
             "the drain's successor reservation: it probes ``hold_pending``, which "
             "registers the owed one-shot in the owned list"
