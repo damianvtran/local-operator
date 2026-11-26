@@ -12,7 +12,11 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from local_operator.config import ConfigManager
 from local_operator.i18n.keys import wire_errors_auth as w
-from local_operator.model.defaults import SuggestedModel, suggested_model_for
+from local_operator.model.defaults import (
+    SuggestedModel,
+    stored_route_suggestion,
+    suggested_model_for,
+)
 from local_operator.providers import key_check
 from local_operator.providers.auth_store import AuthStore, credential_identity
 from local_operator.providers.registry import (
@@ -177,6 +181,7 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                 503,
                 w.store_unreadable().envelope(),
             )
+        vertex = stored_route_suggestion("google-vertex", host.store)
         rows = []
         for view_row in view:
             provider = view_row.definition
@@ -281,10 +286,14 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     "has_credential": view_row.has_credential,
                     "stored_credentials": view_row.stored_credentials,
                     "base_url": provider.base_url,
-                    # The model a first sign-in here will set as the default (API
-                    # key spelling; each method carries its own), or null for a
-                    # provider with no suggestion (local runtimes, TypeSafe).
-                    "suggested_model": _suggestion(storage_id),
+                    # The provider row also drives Make default. Vertex Cloud
+                    # users should see their inference route's model, not the
+                    # Express recommendation still shown on the key method.
+                    "suggested_model": (
+                        {"id": vertex.id, "name": vertex.name}
+                        if storage_id == "google-vertex" and vertex is not None
+                        else _suggestion(storage_id)
+                    ),
                 }
             )
         return _reply({"providers": rows})

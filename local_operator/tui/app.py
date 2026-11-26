@@ -47338,6 +47338,15 @@ class OperatorApp(App[None]):
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
         provider, sep, model_id = target.partition("/")
+        if _rehome and sep and not model_id:
+            from local_operator.model.defaults import (
+                OAUTH_SUGGESTED_MODELS,
+                default_model_for,
+            )
+            from local_operator.paths import config_dir
+
+            if provider in OAUTH_SUGGESTED_MODELS:
+                model_id = default_model_for(provider, config_dir=config_dir()) or ""
         if not sep or not model_id:
             self._system_notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
@@ -58921,6 +58930,7 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
                 accessible=accessible,
+                config_dir=manager.config_dir,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -59013,6 +59023,14 @@ class OperatorApp(App[None]):
             )
             provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
+            if provider and not model_id:
+                from local_operator.model.defaults import (
+                    OAUTH_SUGGESTED_MODELS,
+                    default_model_for,
+                )
+
+                if provider in OAUTH_SUGGESTED_MODELS:
+                    model_id = default_model_for(provider, config_dir=manager.config_dir) or ""
         except Exception:  # noqa: BLE001 — a repair must never fail a completed login
             return self._deferred_close(from_pending, speak=True)
         if not is_first_provider_login(accessible, login_provider):
@@ -59055,7 +59073,19 @@ class OperatorApp(App[None]):
                 return None
             return rehome_deferred_notice(old_label)
         self._rehome_pending = None
-        self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
+        from local_operator.model.defaults import RouteDefaultModel
+
+        # The receipt names a preview; the private slash dispatch must still
+        # carry omission. A concrete configured ID takes the ordinary pin path.
+        automatic = isinstance(model_id, RouteDefaultModel)
+        if automatic and _is_viewer(session):
+            # A local viewer's set-model RPC accepts literal IDs. Let the
+            # owner perform the same guarded repair as desktop and emit its
+            # own receipt only after the selection lands.
+            self.run_worker(session.rehome_to_auth_default(old_label, provider))
+            return None
+        target_id = "" if automatic else model_id
+        self._run_slash_command(f"/model {provider}/{target_id}", _rehome=True)
         return rehome_notice(old_label, f"{provider}/{model_id}")
 
     def _deferred_close(self, from_pending: bool, *, speak: bool) -> str | None:
@@ -66734,7 +66764,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 158
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 159
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

@@ -525,10 +525,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # closed — an older runtime answers `unknown op`, which the caller reads
         # as "this session cannot be re-homed" and reports as zero moved
         # sessions. Additive; no PROTOCOL_VERSION bump.
-        for name in ("expected", "provider", "model_id"):
+        for name in ("expected", "provider"):
             value = frame.get(name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
+        model_id = frame.get("model_id")
+        # Empty is an intentional omission; a missing field or whitespace is
+        # still malformed. Older runtimes reject empty rather than mis-pin it.
+        if not isinstance(model_id, str) or (model_id and not model_id.strip()):
+            raise ValueError("model_id must be a model ID or an empty string")
     elif op == "peer_set_model":
         # Another local lop session switching THIS one's model (`send model=` /
         # `lop model`). SHAPE only: whether the pair is servable is the

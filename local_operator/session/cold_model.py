@@ -97,7 +97,7 @@ def _pair_from(config: Any) -> tuple[str, str]:
     if provider and not model_id:
         from local_operator.model.defaults import default_model_for
 
-        model_id = default_model_for(provider) or ""
+        model_id = default_model_for(provider, config_dir=config.config_dir) or ""
     return provider, model_id
 
 

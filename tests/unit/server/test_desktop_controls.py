@@ -1466,17 +1466,21 @@ async def test_provider_census_carries_the_suggested_model(desktop):
         "id": "claude-opus-5-5",
         "name": "Claude Opus 5.5",
     }
-    assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
+    assert rows["deepseek"]["suggested_model"] == {
+        "id": "deepseek-flash",
+        "name": "DeepSeek V4.1 Flash",
+    }
+    assert rows["google"]["suggested_model"] == {"id": "gemini-4-neon", "name": "Gemini 4 Neon"}
     assert rows["ollama"]["suggested_model"] is None
     assert rows["typesafe"]["suggested_model"] is None
     # Per method, because the route decides the spelling (Kimi). Both OAuth
     # entries (kimi.ai and the WeChat entry) reach the same coding host, so
-    # both spell K3 `k3`; only the API-key method uses the mainland `kimi-k3`.
+    # both spell K3.1 Pro `k3.1-pro`; only the API-key method uses the mainland `kimi-k3.1-pro`.
     kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
     assert kimi == {
-        "kimi": "k3",
-        "kimi-wechat": "k3",
-        "kimi:api-key": "kimi-k3",
+        "kimi": "k3.1-pro",
+        "kimi-wechat": "k3.1-pro",
+        "kimi:api-key": "kimi-k3.1-pro",
     }
 
 
@@ -1491,7 +1495,7 @@ async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
     assert result["defaults_applied"] == {
         "hosting": "deepseek",
         "model": "deepseek-flash",
-        "model_name": "DeepSeek Flash",
+        "model_name": "DeepSeek V4.1 Flash",
         "receipt": "Set default hosting to 'deepseek', model to 'deepseek-flash'.",
     }
     assert "sk-first-run-secret" not in response.text

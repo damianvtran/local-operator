@@ -729,7 +729,9 @@ def test_only_a_first_answer_may_carry_images(op: str) -> None:
 
 
 def test_a_valid_rehome_frame_passes_and_every_field_is_required() -> None:
-    """``rehome_if_current`` shape: three non-empty strings, nothing else.
+    """``rehome_if_current`` requires a selector, provider and a model field.
+
+    An explicitly empty model field requests the owner's automatic default.
 
     SHAPE only — whether the pair is servable, whether the old provider is still
     stranded and whether the session is idle are the receiving handle's questions
@@ -737,31 +739,22 @@ def test_a_valid_rehome_frame_passes_and_every_field_is_required() -> None:
     ``expected`` is refused here specifically because it would read as "the
     selection is nothing", which the owner must never be asked to act on.
     """
-    validate_control_frame(
-        {
-            "op": "rehome_if_current",
-            "req": 1,
-            "expected": "radient/auto",
-            "provider": "deepseek",
-            "model_id": "deepseek-flash",
-        }
-    )
-    for missing in ("expected", "provider", "model_id"):
-        frame: dict[str, Any] = {
-            "op": "rehome_if_current",
-            "expected": "radient/auto",
-            "provider": "deepseek",
-            "model_id": "deepseek-flash",
-        }
-        frame.pop(missing)
-        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
-            validate_control_frame(frame)
-        frame[missing] = "   "
-        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
-            validate_control_frame(frame)
-        frame[missing] = 3
-        with pytest.raises(ValueError, match=f"{missing} must be a non-empty string"):
-            validate_control_frame(frame)
+    frame: dict[str, Any] = {
+        "op": "rehome_if_current",
+        "req": 1,
+        "expected": "radient/auto",
+        "provider": "deepseek",
+        "model_id": "deepseek-flash",
+    }
+    validate_control_frame(frame)
+    validate_control_frame({**frame, "provider": "google-vertex", "model_id": ""})
+    for required in ("expected", "provider", "model_id"):
+        missing = {key: value for key, value in frame.items() if key != required}
+        with pytest.raises(ValueError, match=rf"^{required} must be"):
+            validate_control_frame(missing)
+        for invalid in ("   ", 3, None):
+            with pytest.raises(ValueError, match=rf"^{required} must be"):
+                validate_control_frame({**frame, required: invalid})
 
 
 @pytest.mark.parametrize("reason", ["answered_in_chat", "moot"])

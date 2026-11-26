@@ -94,7 +94,11 @@ async def rehome_after_login(
     values = manager.get_config().values
     provider = str(values.get("hosting", "") or "").strip().lower()
     model_id = str(values.get("model_name", "") or "").strip()
-    if not provider or not model_id:
+    from local_operator.model.defaults import OAUTH_SUGGESTED_MODELS
+
+    # The runtime sees the credential tier. Do not turn a daemon-side preview
+    # into a pin by sending its concrete ID across the owner boundary.
+    if not provider or (not model_id and provider not in OAUTH_SUGGESTED_MODELS):
         # Nothing to move them TO. The planner leaves this state alone as well
         # (its case 1), so it is not a failure: a default with no model is its
         # own setup state, and re-homing onto a half-configured pair would trade

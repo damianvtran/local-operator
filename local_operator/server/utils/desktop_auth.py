@@ -250,6 +250,7 @@ def apply_desktop_login_defaults(
             manager.get_config_value("model_name"),
             oauth=oauth,
             accessible=accessible,
+            config_dir=manager.config_dir,
         )
         wrote = apply_login_defaults(manager, plan)
         if plan.receipt is None:

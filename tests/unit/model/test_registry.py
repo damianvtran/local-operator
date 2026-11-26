@@ -209,6 +209,8 @@ def test_token_plan_models_ship_their_real_windows() -> None:
     } == {
         # Output caps as the endpoint's own `max_tokens` validator reports them
         # ("Range of max_tokens should be [1, N]"); see the note beside the map.
+        # Qwen4-Max docs: cap usable in both thinking and non-thinking modes.
+        "qwen4-max": (1_000_000, 131_072),
         "qwen3.8-max": (1_000_000, 131_072),
         "qwen3.8-flash": (1_000_000, 131_072),
         "qwen3.7-max": (1_000_000, 131_072),
@@ -266,6 +268,7 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     # 2026-08-19 snapshot: it serves chat (verified live) and is on the
     # allowlist, but had no row, so it resolved to the 128k unknown default.
     gateway_chat_models = {
+        "qwen4-max",  # Added separately from the Nov 25 Personal Edition allowlist.
         "qwen3.8-max",
         "qwen3.8-flash",
         "qwen3.7-max",
@@ -293,6 +296,7 @@ def test_token_plan_ships_a_row_for_every_chat_model_the_gateway_lists() -> None
     # removed from the first fails here rather than quietly widening the map.
     assert gateway_chat_models.isdisjoint(gateway_non_chat_models)
     assert gateway_chat_models | gateway_non_chat_models == {
+        "qwen4-max",
         "qwen3.8-max",
         "qwen3.8-flash",
         "qwen3.7-max",
@@ -339,22 +343,27 @@ def test_token_plan_models_declare_prompt_caching() -> None:
     measured_explicit = {"qwen3.8-max", "qwen3.8-flash"}
     marked_hit_only = {"qwen3.7-plus", "qwen3.6-flash", "glm-5.2", "deepseek-v4-pro"}
     inferred_inert = {"qwen3.7-max", "deepseek-v4-flash-0731"}
+    # Model Studio's Qwen4 caching docs do not validate explicit markers on
+    # the Token Plan gateway. Keep the provider's implicit caching only.
+    unverified = {"qwen4-max"}
+    assert unverified.isdisjoint(measured_explicit | marked_hit_only | inferred_inert)
 
     # Every row is classified exactly once, so a new row cannot ride in on a
     # blanket assertion.
     assert measured_explicit.isdisjoint(marked_hit_only)
     assert inferred_inert.isdisjoint(measured_explicit | marked_hit_only)
     assert (
-        measured_explicit | marked_hit_only | inferred_inert
+        measured_explicit | marked_hit_only | inferred_inert | unverified
     ) == qwencloud_token_plan_models.keys()
 
     for model_id, info in qwencloud_token_plan_models.items():
-        assert info.supports_prompt_cache is True, model_id
+        assert info.supports_prompt_cache is (model_id not in unverified), model_id
 
     # The end of the pipe, not just the map: `build_model_spec` is what the
     # client actually reads the flag from.
     assert build_model_spec("alibaba-token-plan", "qwen3.8-max").supports_prompt_cache is True
     assert build_model_spec("alibaba-token-plan", "qwen3.8-flash").supports_prompt_cache is True
+    assert build_model_spec("alibaba-token-plan", "qwen4-max").supports_prompt_cache is False
 
 
 def test_token_plan_vision_rows_match_what_the_endpoint_accepts() -> None:

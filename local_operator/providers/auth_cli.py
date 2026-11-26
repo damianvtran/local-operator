@@ -1176,6 +1176,7 @@ def _apply_login_defaults(provider_id: str, *, oauth: bool | None = None) -> Non
             manager.get_config_value("model_name"),
             oauth=oauth,
             accessible=accessible,
+            config_dir=manager.config_dir,
         )
         # The write is shared too (``apply_login_defaults``): a plan may set only
         # the model, which a hosting-gated write here used to drop.

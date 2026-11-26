@@ -1598,9 +1598,26 @@ def bedrock_family_model_info(model_id: str) -> Optional[ModelInfo]:
 
 
 openai_models: Dict[str, ModelInfo] = {
-    # GPT-6 Astra -- the suggested default for OpenAI (`model.defaults`), on
-    # both the API-key and the ChatGPT-subscription routes (the Codex catalogue
-    # serves it; `scripts/bench_openai_oauth_cache.py` drives it over OAuth).
+    # GPT-6.2 Sol is the default on both API and Codex. Carry the short-context
+    # rate, as for the other OpenAI long-context models; the pricing layer
+    # applies the documented >272k tier separately.
+    # https://developers.openai.com/api/docs/models/gpt-6.2-sol
+    "gpt-6.2-sol": ModelInfo(
+        id="gpt-6.2-sol",
+        name="GPT-6.2 Sol",
+        input_price=2.0,
+        output_price=10.0,
+        cache_writes_price=2.5,
+        cache_reads_price=0.1,
+        max_tokens=128_000,
+        context_window=1_050_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        supports_responses_api=True,
+        description="OpenAI's go-to model for coding and agents at scale.",
+        recommended=True,
+    ),
+    # GPT-6 Astra remains available for explicit selection.
     # https://developers.openai.com/api/docs/models/gpt-6-astra (read
     # 2026-09-24): $10 / $1 cached / $12.50 cache write / $50 per million,
     # 1,050,000 context, 128k max output. Prompts over 272k input are billed at
@@ -1844,6 +1861,37 @@ openai_models: Dict[str, ModelInfo] = {
 
 
 google_models: Dict[str, ModelInfo] = {
+    # The GenerateContent stream consumes one foreground segment, not Neon's
+    # continuation-token long decode. Use the 65,536 segment limit, not 1M.
+    # AI Studio's model page and the Vertex model card document the same limits.
+    "gemini-4-neon": ModelInfo(
+        id="gemini-4-neon",
+        name="Gemini 4 Neon",
+        max_tokens=65_536,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_audio_input=True,
+        supports_prompt_cache=True,
+        input_price=3.0,
+        output_price=15.0,
+        cache_reads_price=0.15,
+        description="Google's frontier Gemini model for long-horizon agent work.",
+        recommended=True,
+    ),
+    # Express Mode documents the stable ID, not the old dated preview rows.
+    "gemini-2.5-flash": ModelInfo(
+        id="gemini-2.5-flash",
+        name="Gemini 2.5 Flash",
+        max_tokens=65_536,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_audio_input=True,
+        supports_prompt_cache=True,
+        input_price=0.30,
+        output_price=2.50,
+        cache_reads_price=0.03,
+        description="Stable Gemini Flash supported by Vertex Express Mode.",
+    ),
     # ``supports_audio_input`` on the current-generation rows below (3.x and
     # 2.5): Google's audio guide (read 2026-09-28,
     # https://ai.google.dev/gemini-api/docs/audio) documents audio
@@ -2032,7 +2080,7 @@ deepseek_models: Dict[str, ModelInfo] = {
     # pricing page still prices carry it. The legacy ids below deliberately do not.
     "deepseek-flash": ModelInfo(
         id="deepseek-flash",
-        name="DeepSeek Flash",
+        name="DeepSeek V4.1 Flash",
         max_tokens=393_216,
         context_window=1_000_000,
         supports_images=True,
@@ -2147,8 +2195,24 @@ for _deepseek_alias, _deepseek_label in (
     )
 
 qwen_models: Dict[str, ModelInfo] = {
-    # Qwen3.8 Max on Model Studio (pay-as-you-go) -- the suggested default for
-    # the `alibaba` provider (`model.defaults`). The Token Plan row of the same id
+    # Alibaba qwen4-max docs, International scope. Don't copy these USD rates
+    # into Token Plan: its separate row is a subscription billed in credits.
+    # Use the documented cap common to thinking and non-thinking.
+    "qwen4-max": ModelInfo(
+        id="qwen4-max",
+        name="Qwen4 Max (Model Studio)",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=1.5,
+        output_price=4.5,
+        cache_reads_price=0.075,
+        cache_writes_price=1.875,
+        description="Alibaba's flagship Qwen model on Model Studio.",
+        recommended=True,
+    ),
+    # Qwen3.8 Max on Model Studio (pay-as-you-go). The Token Plan row of the same id
     # further down is a SUBSCRIPTION and is priced in credits; this is the
     # metered route. https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max
     # (International scope, read 2026-09-24): $2 in / $6 out / $0.25 implicit-
@@ -2504,6 +2568,19 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
     # tokens and a 97% cache-read share. None of these percentages is a USD
     # rate on this plan anyway (credits, see above) — they are the ratio
     # between the two paths.
+    # Same documented generation limits; unlike Model Studio, Token Plan
+    # charges plan credits, not the direct model's metered USD prices.
+    # Model Studio documents explicit markers; do not assume the Token Plan
+    # gateway accepts those same markers. Implicit caching remains provider-side.
+    "qwen4-max": ModelInfo(
+        id="qwen4-max",
+        name="Qwen4 Max",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        supports_images=True,
+        description="Alibaba's flagship Qwen model on Token Plan.",
+        recommended=True,
+    ),
     "qwen3.8-max": ModelInfo(
         id="qwen3.8-max",
         name="Qwen3.8 Max",
@@ -2635,6 +2712,21 @@ qwencloud_token_plan_models: Dict[str, ModelInfo] = {
 }
 
 mistral_models: Dict[str, ModelInfo] = {
+    # Mistral's launch names the stable API id and direct prices; the direct
+    # models.dev listing supplies the generation cap.
+    "mistral-large-4": ModelInfo(
+        id="mistral-large-4",
+        name="Mistral Large 4",
+        max_tokens=262_144,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=0.70,
+        output_price=2.10,
+        cache_reads_price=0.07,
+        description="Mistral's flagship multimodal model for agentic coding.",
+        recommended=True,
+    ),
     # Mistral Medium 3.5 (`mistral-medium-2604`), addressed by its floating alias
     # -- the suggested default for Mistral (`model.defaults`). Mistral's models
     # overview calls it "our frontier-class multimodal model optimized for agentic
@@ -2782,6 +2874,33 @@ mistral_models: Dict[str, ModelInfo] = {
 YUAN_TO_USD = 0.14
 
 kimi_models: Dict[str, ModelInfo] = {
+    # The API host uses a different id and metered pricing. Kimi Code lists
+    # a 1M context on eligible tiers but its catalogue gives no output limit;
+    # retain the previous K3 subscription's conservative output budget.
+    "k3.1-pro": ModelInfo(
+        id="k3.1-pro",
+        name="Kimi K3.1 Pro",
+        max_tokens=131_072,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_prompt_cache=True,
+        description="Kimi Code's K3.1 Pro flagship.",
+        recommended=True,
+    ),
+    "kimi-k3.1-pro": ModelInfo(
+        id="kimi-k3.1-pro",
+        name="Kimi K3.1 Pro (Moonshot API)",
+        max_tokens=131_072,
+        context_window=1_048_576,
+        supports_images=True,
+        supports_prompt_cache=True,
+        input_price=2.0,
+        output_price=10.0,
+        cache_writes_price=2.0,
+        cache_reads_price=0.2,
+        description="Moonshot API's K3.1 Pro flagship.",
+        recommended=True,
+    ),
     "moonshot-v1-8k": ModelInfo(
         id="moonshot-v1-8k",
         name="Moonshot V1 8K",
@@ -2889,8 +3008,7 @@ kimi_models: Dict[str, ModelInfo] = {
     ),
 }
 # ``kimi-k3`` is the SAME model under the API-key host's spelling (see the
-# comment on ``k3``), and it is the suggested default for an API-key Kimi login
-# (`model.defaults`): the coding-plan id ``k3`` does not exist on
+# comment on ``k3``): the coding-plan id ``k3`` does not exist on
 # ``api.moonshot.cn``. Copied rather than restated so the two spellings cannot
 # drift apart on price or window. Named for its host, as `GLM-5.2 (Token Plan)` is,
 # because shipped names must be unique (test_no_two_shipped_rows_share_a_curated_name)
@@ -3220,6 +3338,20 @@ xai_models: Dict[str, ModelInfo] = {
 #: separate cache-write premium; cache READS are discounted (~19% of input),
 #: which is the number that actually moves a long agent session's bill.
 glm_models: Dict[str, ModelInfo] = {
+    # Z.AI publishes GLM-5.4 for Coding Plan only; no metered price to quote.
+    # Its Coding Plan models.dev row provides the offline context/output limits.
+    "glm-5.4": ModelInfo(
+        id="glm-5.4",
+        name="GLM-5.4",
+        max_tokens=131_072,
+        context_window=1_000_000,
+        # Coding Plan's model card explicitly lists image input; callers
+        # requiring stated vision support must not wait for live metadata.
+        supports_images=True,
+        supports_prompt_cache=True,
+        description="Z.AI's flagship GLM Coding Plan model.",
+        recommended=True,
+    ),
     "glm-5.3": ModelInfo(
         id="glm-5.3",
         name="GLM-5.3",

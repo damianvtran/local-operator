@@ -7294,7 +7294,9 @@ class ServingSessionHandle(SessionHandle):
             # same fail-closed reading ``_idle_for_rehome`` makes on the TUI side.
             self._rehome_pending = (current, provider, model_id)
             return "kept: this session's work state is unreadable"
-        accessible = await asyncio.to_thread(credentialed_chat_providers_here)
+        accessible = await asyncio.to_thread(
+            credentialed_chat_providers_here, config_dir=self._config_dir
+        )
         if accessible is None:
             self._close_deferred_rehome(from_pending, speak=True)
             return "kept: the credential store could not be read"
@@ -7339,6 +7341,19 @@ class ServingSessionHandle(SessionHandle):
             # its notice would land on a handle that is going away, breaking
             # "retiring work begins no new work" at the one moment it still can.
             return "kept: the runtime is retiring"
+        if not model_id:
+            from local_operator.model.defaults import (
+                OAUTH_SUGGESTED_MODELS,
+                default_model_for,
+            )
+
+            # Keep the omitted ID through busy deferrals. Resolve it only at
+            # the activation edge, with this owner's own credential snapshot.
+            if provider in OAUTH_SUGGESTED_MODELS:
+                model_id = default_model_for(provider, config_dir=self._config_dir) or ""
+            if not model_id:
+                self._close_deferred_rehome(from_pending, speak=True)
+                return "kept: no automatic re-home model is configured"
         await self.set_model_effort(provider, model_id, None)
         # The answer comes from the read-back, never from the switch's own
         # receipt: ``set_model`` assigns the spec before its journal writes and

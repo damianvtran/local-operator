@@ -70,7 +70,6 @@ SCOPES = f"openid https://www.googleapis.com/auth/userinfo.email {CLOUD_PLATFORM
 
 CALLBACK_PORT = 8085
 CALLBACK_PATH = "/"
-DEFAULT_LOCATION = "global"
 EXPIRY_SKEW_MS = 5 * 60 * 1000
 JWT_LIFETIME_SECONDS = 3600
 # Cap Service Usage probes so project discovery stays fast on accounts with
@@ -97,8 +96,8 @@ _ALLOWED_TOKEN_ENDPOINTS: frozenset[tuple[str, str]] = frozenset(
 # ids ("example.com:proj") also exist; this admits those while rejecting
 # anything that could change a URL's host or path ("/", "#", "?", "..").
 PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-# Vertex locations: "global" or a region such as "us-central1"/"europe-west4".
-LOCATION_RE = re.compile(r"^(global|[a-z]{2,16}-[a-z0-9]{1,16}\d{1,2})$")
+# Vertex supports global, the explicit US/EU multi-regions and ordinary regions.
+LOCATION_RE = re.compile(r"^(global|us|eu|[a-z]{2,16}-[a-z0-9]{1,16}\d{1,2})$")
 
 # Service-account key files are ~2.3 KiB; 64 KiB leaves ample headroom while
 # refusing to slurp arbitrary large files (or devices/FIFOs) named as a "path".
@@ -144,7 +143,7 @@ def validate_project_id(project_id: str) -> str:
 
 
 def validate_location(location: str) -> str:
-    """Reject a location that is not ``global`` or a GCP region name."""
+    """Reject anything other than global, a multi-region or a GCP region name."""
     value = (location or "").strip()
     if not LOCATION_RE.fullmatch(value):
         raise LoginError(
@@ -289,11 +288,9 @@ def _configured_project() -> str | None:
 
 
 def _configured_location() -> str:
-    for var in ("GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"):
-        value = (os.environ.get(var) or "").strip()
-        if value:
-            return value
-    return DEFAULT_LOCATION
+    from local_operator.model.defaults import vertex_location
+
+    return vertex_location()
 
 
 def _extract_email_from_id_token(id_token: Any) -> str | None:

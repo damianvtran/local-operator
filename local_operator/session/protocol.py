@@ -773,7 +773,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 158 public members and a POSITIVE
+    than stylistic. This protocol carries 159 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -875,7 +875,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     the same ``bridge.remote`` binding as ``ask_respond``, whether the answer
     just sent carried operator proof, and only the facade sends it), 158 once
     the same route needed ``bridge_decide_signature_free`` — whether a Team
-    Bridge card's decision would be signed, i.e. a Touch ID sheet), so
+    Bridge card's decision would be signed, i.e. a Touch ID sheet, 159 once a
+    terminal viewer needed ``rehome_to_auth_default`` to request a guarded
+    automatic model switch on its owner), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -936,6 +938,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ``tests/unit/session/test_viewer_protocol.py``, which fails when a new
     undeclared duck-typed member appears.
     """
+
+    async def rehome_to_auth_default(self, expected: str, provider: str) -> None:
+        """Ask the local owner to re-home only if the session is still stranded."""
+        ...
 
     # --- what kind of viewer this is --------------------------------------
     @property

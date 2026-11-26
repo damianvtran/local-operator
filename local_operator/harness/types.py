@@ -4589,6 +4589,9 @@ class ModelSpec(BaseModel):
 
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
+    # A login-sensitive default can only be finalized once the request selects
+    # its credential. Never infer this from the ID: users can name either ID.
+    auth_route_default: bool = Field(default=False, exclude=True)
     context_window: int = 128_000
     # A conservative unknown route is still freshly resolved; absence of
     # positive provider limits must not let a legacy checkpoint override it.

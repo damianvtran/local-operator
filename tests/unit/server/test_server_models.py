@@ -225,7 +225,7 @@ def test_list_providers_with_ollama_active(client):
         assert openai["requiredCredentials"] == ["OPENAI_API_KEY"]
         # The suggestion rides the same catalogue the onboarding step reads, from
         # the one backend table (`model.defaults`) -- never a renderer copy.
-        assert openai["suggestedModel"] == {"id": "gpt-6-astra", "name": "GPT-6 Astra"}
+        assert openai["suggestedModel"] == {"id": "gpt-6.2-sol", "name": "GPT-6.2 Sol"}
 
         # Verify Ollama provider is present and has expected details
         ollama = next(p for p in providers if p["id"] == "ollama")

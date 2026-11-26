@@ -163,6 +163,7 @@ async def test_openai_plan_leg_streams_the_codex_backend(monkeypatch) -> None:
     assert request.headers["chatgpt-account-id"] == "acct-1"
     assert request.headers["openai-beta"] == "responses=experimental"
     assert body["stream"] is True and body["store"] is False
+    assert body["model"] == "gpt-6.2-sol"
     assert response.auth_mode == "plan" and len(response.sources) == 2
     assert response.cost is not None
     assert response.cost.usd is None and response.cost.basis == "included in ChatGPT plan"

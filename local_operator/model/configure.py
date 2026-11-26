@@ -57,6 +57,11 @@ from local_operator.model.catalogue import (
     note_unavailable,
 )
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
+from local_operator.model.defaults import (
+    RouteDefaultModel,
+    default_model_for,
+    suggested_model_for,
+)
 from local_operator.model.effort import (
     default_effort,
     resolve_effort_in,
@@ -100,7 +105,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
-    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.auth_store import AuthStore, OAuthAccess
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
@@ -872,6 +877,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     because both serve ids that legitimately begin with their own name
     (``openrouter/auto``; ``ollama/hf.co/...``).
     """
+    auth_route_default = isinstance(model_name, RouteDefaultModel)
     bare_name = _hosting_qualified_bare_id(hosting, model_name)
     if bare_name is not None:
         model_name = bare_name
@@ -1295,7 +1301,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
 
     return ModelSpec(
         provider=canonical,
-        model_id=model_name,
+        model_id=str(model_name),
+        auth_route_default=auth_route_default,
         bedrock_metadata=getattr(info, "bedrock_metadata", None),
         context_window=context_window,
         default_context_window=getattr(info, "default_context_window", None),
@@ -3400,7 +3407,7 @@ def configure_model(
     if definition.local_setup and not model_name:
         raise ValueError(f"Model is required for {canonical} hosting")
     if not model_name:
-        model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
+        model_name = default_model_for(canonical, config_dir=config_dir) or ""
 
     # Best-effort static key for legacy consumers; the store-first reader tries
     # the provider-class row, then the environment (the legacy plaintext file is
@@ -3552,6 +3559,36 @@ def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
     if isinstance(openai, Mapping) and openai.get("use_max_context_window") is False:
         return False
     return OPENAI_USE_MAX_CONTEXT_WINDOW
+
+
+def auth_route_spec(spec: ModelSpec, access: OAuthAccess | None) -> ModelSpec:
+    """Finalize an omitted ID against the credential used on this attempt."""
+    if not spec.auth_route_default or access is None:
+        return spec
+    location = str((access.raw or {}).get("location") or "")
+    suggestion = suggested_model_for(
+        spec.provider, oauth=access.kind == "oauth", vertex_locations=(location,)
+    )
+    if suggestion is None or suggestion.id == spec.model_id:
+        return spec
+    # The curated rows describe the model actually served; don't carry Neon's
+    # limits to Express Flash. Keep the user's sampling/effort intent.
+    resolved = build_model_spec(
+        spec.provider, suggestion.id, get_model_info(spec.provider, suggestion.id)
+    )
+    effort = spec.reasoning_effort
+    if effort is not None:
+        effort = resolve_effort_in(
+            resolved.reasoning_efforts, resolved.reasoning_default_effort, effort
+        )
+    return resolved.model_copy(
+        update={
+            "auth_route_default": True,
+            "temperature": spec.temperature,
+            "top_p": spec.top_p,
+            "reasoning_effort": effort if effort is not None else resolved.reasoning_effort,
+        }
+    )
 
 
 def context_spec_for_access(
@@ -8794,7 +8831,7 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
 # OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
 # dated snapshots; future and aggregator models must not inherit these prices.
 _OPENAI_LONG_CONTEXT_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
     r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
 )
@@ -8804,7 +8841,7 @@ _OPENAI_LONG_CONTEXT_MODELS = re.compile(
 # twice Standard for these families, including their long-context rates. Other
 # tiers cannot inherit this rule: some have a different premium or no quote.
 _OPENAI_FAST_DOUBLE_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna)(?:-\d{4}-\d{2}-\d{2})?$"
 )
 # These two older Fast rows have only a short-context quote and one is 2.5x,

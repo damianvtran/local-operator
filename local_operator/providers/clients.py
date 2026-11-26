@@ -7349,6 +7349,7 @@ class GoogleClient:
         # validated: they come from stored credentials and env vars, and a
         # value like ``attacker.com/x#`` in ``location`` would otherwise be
         # spliced into the regional HOST and send the bearer token elsewhere.
+        from local_operator.model.defaults import vertex_location
         from local_operator.providers.oauth.vertex import LOCATION_RE, PROJECT_ID_RE
 
         quoted_model = urllib.parse.quote(model_id, safe="")
@@ -7371,12 +7372,7 @@ class GoogleClient:
                     "`/login google-vertex`.",
                     retryable=False,
                 )
-            location = (
-                str(raw.get("location") or "").strip()
-                or (os.environ.get("GOOGLE_CLOUD_LOCATION") or "").strip()
-                or (os.environ.get("VERTEX_LOCATION") or "").strip()
-                or "global"
-            )
+            location = vertex_location(str(raw.get("location") or ""))
             if not PROJECT_ID_RE.fullmatch(project_id) or ".." in project_id:
                 raise ProviderError(
                     400,
@@ -7393,10 +7389,14 @@ class GoogleClient:
             # Only synthesize the regional host when the client is on Vertex's
             # default global host; preserve an explicit custom base URL override
             # (gateway, proxy, or test fixture).
-            if location != "global" and self._base_url == VERTEX_API_URL:
-                host = f"https://{location}-aiplatform.googleapis.com"
-            else:
-                host = self._base_url
+            host = self._base_url
+            if self._base_url == VERTEX_API_URL:
+                if location in {"us", "eu"}:
+                    # Multi-region jurisdictions use Google's .rep. endpoints,
+                    # not the host pattern for ordinary regions.
+                    host = f"https://aiplatform.{location}.rep.googleapis.com"
+                elif location != "global":
+                    host = f"https://{location}-aiplatform.googleapis.com"
             url = (
                 f"{host}/v1/projects/{urllib.parse.quote(project_id, safe='')}"
                 f"/locations/{urllib.parse.quote(location, safe='')}"

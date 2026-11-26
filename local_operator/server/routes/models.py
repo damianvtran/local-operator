@@ -9,7 +9,7 @@ import logging
 import os
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import SecretStr
 
 from local_operator.clients.openrouter import OpenRouterClient
@@ -142,7 +142,10 @@ async def _vertex_listing_credential(
         },
     },
 )
-async def list_providers() -> CRUDResponse[ProviderListResponse]:
+async def list_providers(
+    request: Request,
+    response: Response,
+) -> CRUDResponse[ProviderListResponse]:
     """
     List all available model providers with their details.
 
@@ -152,10 +155,33 @@ async def list_providers() -> CRUDResponse[ProviderListResponse]:
     try:
         # Discovery belongs to the model request. Hiding stopped servers here
         # made them impossible to select in the desktop application's setup UI.
-        from local_operator.model.defaults import suggested_model_for
+        from local_operator.model.defaults import (
+            stored_route_suggestion,
+            suggested_model_for,
+        )
+        from local_operator.server.desktop import require_desktop
+        from local_operator.server.routes.auth import get_desktop_auth
+
+        # This catalogue predates desktop pairing. Refusing desktop access
+        # removes account evidence, not access to the public catalogue.
+        provider_auth_store = None
+        try:
+            require_desktop(request)
+        except HTTPException:
+            pass
+        else:
+            provider_auth_store = (
+                await get_desktop_auth(request, get_config_manager(request))
+            ).store
+        # The same URL can return a private, account-derived suggestion.
+        response.headers["Cache-Control"] = "private, no-store"
 
         def with_suggestion(provider: ProviderDetail) -> ProviderDetail:
-            suggested = suggested_model_for(provider.id)
+            suggested = (
+                stored_route_suggestion(provider.id, provider_auth_store)
+                if provider.id == "google-vertex" and provider_auth_store is not None
+                else suggested_model_for(provider.id)
+            )
             if suggested is None:
                 return provider
             return provider.model_copy(

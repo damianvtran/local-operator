@@ -8,7 +8,14 @@ from typing import Any
 import httpx
 import pytest
 
-from local_operator.harness.types import ChatRequest, Message, ModelSpec, TextContent
+from local_operator.harness.types import (
+    ChatRequest,
+    Message,
+    ModelSpec,
+    StreamEndEvent,
+    StreamModelEvent,
+    TextContent,
+)
 from local_operator.providers import documents, key_check
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.clients import (
@@ -43,6 +50,98 @@ def _sse_body() -> bytes:
         "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 3, "totalTokenCount": 7},
     }
     return f"data: {json.dumps(payload)}\n\n".encode("utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["google-vertex", "kimi"])
+@pytest.mark.parametrize("credential_change", ["block", "override", "stale", "explicit", "none"])
+async def test_default_follows_actual_wire_credential(
+    tmp_path, monkeypatch, provider: str, credential_change: str
+) -> None:
+    from local_operator.model.configure import configure_model
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.failover import stream_with_failover
+
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    cloud_id, key_id = {
+        "google-vertex": ("gemini-4-neon", "gemini-2.5-flash"),
+        "kimi": ("k3.1-pro", "kimi-k3.1-pro"),
+    }[provider]
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = (
+            _sse_body()
+            if provider == "google-vertex"
+            else (
+                b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            )
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    try:
+        oauth_data: dict[str, Any] = {"type": "oauth", "access": "synthetic-oauth"}
+        if provider == "google-vertex":
+            oauth_data.update(project_id="synthetic-project", location="global")
+        if credential_change == "stale":
+            oauth_data["expires"] = 1
+        oauth = store.upsert_credential(provider, oauth_data)
+        store.upsert_credential(
+            provider, {"type": "api_key", "key": "synthetic-key", "source": "login"}
+        )
+        explicit = credential_change == "explicit"
+        spec = configure_model(provider, cloud_id if explicit else "", config_dir=tmp_path).spec
+        assert spec.model_id == (key_id if credential_change == "stale" else cloud_id)
+        assert spec.auth_route_default is not explicit
+        # The route can change AFTER model construction. This must exercise
+        # the real cascade and clients, not just compare two static suggestions.
+        if credential_change in {"block", "explicit"}:
+            store.block_credential(oauth.id, provider)
+        elif credential_change == "override":
+            store.set_runtime_api_key(provider, "synthetic-override")
+
+        request = _vertex_request().with_model(spec)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            events = [
+                event
+                async for event in stream_with_failover(
+                    request,
+                    store,
+                    None,
+                    lambda target: client_for_spec(target, http_client=http),
+                    session_id="synthetic-route-default",
+                )
+            ]
+        assert len(seen) == 1
+        on_cloud = credential_change == "none"
+        expected = cloud_id if on_cloud or explicit else key_id
+        wire = seen[0]
+        if provider == "google-vertex":
+            prefix = "/v1/projects/synthetic-project/locations/global" if on_cloud else "/v1"
+            assert (
+                wire.url.path
+                == f"{prefix}/publishers/google/models/{expected}:streamGenerateContent"
+            )
+            if on_cloud:
+                assert wire.headers["authorization"] == "Bearer synthetic-oauth"
+            else:
+                assert wire.headers["x-goog-api-key"] == (
+                    "synthetic-override" if credential_change == "override" else "synthetic-key"
+                )
+        else:
+            assert wire.url.host == ("api.kimi.com" if on_cloud else "api.moonshot.cn")
+            assert json.loads(wire.content)["model"] == expected
+        model_events = [
+            event.model.model_id for event in events if isinstance(event, StreamModelEvent)
+        ]
+        assert model_events == ([expected] if credential_change in {"block", "override"} else [])
+        terminal = events[-1]
+        assert isinstance(terminal, StreamEndEvent) and terminal.stop_reason == "stop"
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -135,6 +234,26 @@ async def test_vertex_client_oauth_global_and_regional_endpoints() -> None:
     assert seen[1].headers["authorization"] == "Bearer ya29.regional-bearer"
 
 
+@pytest.mark.parametrize("location", ["us", "eu"])
+def test_vertex_neon_multi_region_uses_data_residency_endpoint(location: str) -> None:
+    from local_operator.providers.oauth.vertex import validate_location
+
+    client = GoogleClient(base_url=VERTEX_API_URL, vertex=True)
+    access = OAuthAccess(
+        access_token="synthetic",
+        credential_id=1,
+        email=None,
+        kind="oauth",
+        raw={"project_id": "example-project", "location": validate_location(location)},
+    )
+    url, _ = client._vertex_endpoint_and_headers("gemini-4-neon", None, access)
+    assert url == (
+        f"https://aiplatform.{location}.rep.googleapis.com/v1/projects/example-project"
+        f"/locations/{location}/publishers/google/models/gemini-4-neon"
+        ":streamGenerateContent?alt=sse"
+    )
+
+
 @pytest.mark.asyncio
 async def test_vertex_client_oauth_without_project_raises_clear_provider_error(
     monkeypatch: pytest.MonkeyPatch,
@@ -224,7 +343,7 @@ def test_vertex_registry_documents_and_model_tables() -> None:
     assert OPENROUTER_NAMESPACE["google-vertex"] == "google"
     assert "google" in _PRICE_CATALOGUE_KEYS["google-vertex"]
     suggested = suggested_model_for("google-vertex")
-    assert suggested is not None and suggested.id == "gemini-3.8-flash"
+    assert suggested is not None and suggested.id == "gemini-2.5-flash"
     info = get_model_info("google-vertex", "gemini-3.8-flash")
     assert info is not None and info.id == "gemini-3.8-flash"
 
@@ -238,13 +357,13 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
     from httpx import ASGITransport
 
     from local_operator.config import ConfigManager
+    from local_operator.model.defaults import local_route_suggestion
     from local_operator.providers.auth_store import AuthStore
-    from local_operator.server.dependencies import get_config_manager
-    from local_operator.server.desktop import require_desktop
-    from local_operator.server.routes.auth import get_desktop_auth
     from local_operator.server.routes.auth import router as auth_router
+    from local_operator.server.routes.models import router as models_router
     from local_operator.server.utils.desktop_auth import DesktopAuth
 
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "global")
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     config_manager = ConfigManager(cfg_dir)
@@ -252,9 +371,11 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
 
     app = FastAPI()
     app.include_router(auth_router)
-    app.dependency_overrides[require_desktop] = lambda: None
-    app.dependency_overrides[get_config_manager] = lambda: config_manager
-    app.dependency_overrides[get_desktop_auth] = lambda: host
+    app.include_router(models_router)
+    app.state.config_manager = config_manager
+    app.state.desktop_auth = host
+    desktop_token = "synthetic-vertex-census-bearer"
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", desktop_token)
 
     async def fake_check(_provider: str, _key: str, **_kwargs: Any) -> key_check.KeyCheck:
         return key_check.KeyCheck(True, None)
@@ -263,7 +384,9 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
 
     try:
         async with httpx.AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {desktop_token}"},
         ) as client:
             resp = await client.get("/v1/auth/providers")
             assert resp.status_code == 200
@@ -277,6 +400,13 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
             assert methods["google-vertex-key"]["kind"] == "api_key"
             assert methods["google-vertex-key"]["requires_secret_input"] is True
             assert methods["google-vertex-sa"]["requires_secret_input"] is True
+            assert {
+                method_id: method["suggested_model"]["id"] for method_id, method in methods.items()
+            } == {
+                "google-vertex": "gemini-4-neon",
+                "google-vertex-key": "gemini-2.5-flash",
+                "google-vertex-sa": "gemini-4-neon",
+            }
 
             # POST /v1/auth/login for google-vertex-sa opens a paste prompt cleanly.
             started = await client.post("/v1/auth/login", json={"provider": "google-vertex-sa"})
@@ -296,6 +426,94 @@ async def test_desktop_auth_providers_lists_all_three_vertex_auth_methods(
             stored = host.store.list_credentials("google-vertex")
             assert len(stored) == 1
             assert stored[0].data["key"] == "vx-desktop-api-key"
+            assert config_manager.get_config_value("hosting") == "google-vertex"
+            assert not config_manager.get_config_value("model_name")
+
+            async def provider_suggestion(path: str, field: str) -> dict[str, str]:
+                response = await client.get(path)
+                assert response.status_code == 200
+                row = next(
+                    row
+                    for row in response.json()["result"]["providers"]
+                    if row["id"] == "google-vertex"
+                )
+                return row[field]
+
+            express = {"id": "gemini-2.5-flash", "name": "Vertex Gemini 2.5 Flash"}
+            neon = {"id": "gemini-4-neon", "name": "Vertex Gemini 4 Neon"}
+            assert vertex_row["suggested_model"] == express
+            assert await provider_suggestion("/v1/models/providers", "suggestedModel") == express
+
+            async def no_refresh(*_args: Any, **_kwargs: Any) -> Any:
+                pytest.fail("provider previews must not attempt OAuth refresh")
+
+            monkeypatch.setattr(host.store, "_ensure_oauth_fresh", no_refresh)
+            cloud = {"type": "oauth", "access": "cloud-test", "location": "eu"}
+            cases: list[tuple[dict[str, Any], str, dict[str, str]]] = [
+                ({}, "fresh", neon),
+                ({"expires": 1}, "expired without refresh", express),
+                ({"expires": 1, "refresh": "test-refresh"}, "expired browser grant", neon),
+                ({"expires": 1, "refresh_token": "test-refresh"}, "alternate token key", neon),
+                ({"expires": 1, "refresh": "test-refresh"}, "blocked", express),
+                ({"expires": 1, "refresh": "test-refresh"}, "dead", express),
+                ({"expires": 1, "refresh": "test-refresh"}, "moved", express),
+                (
+                    {
+                        "expires": 1,
+                        "auth_mode": "service_account",
+                        "private_key": "test-key",
+                        "client_email": "vertex@example.test",
+                    },
+                    "service account",
+                    neon,
+                ),
+                (
+                    {"expires": 1, "auth_mode": "service_account", "private_key": "test-key"},
+                    "incomplete service account",
+                    express,
+                ),
+            ]
+            for fields, case, expected in cases:
+                oauth = host.store.upsert_credential("google-vertex", {**cloud, **fields})
+                if case == "blocked":
+                    host.store.block_credential(oauth.id, "google-vertex")
+                elif case == "dead":
+                    assert host.store._mark_grant_dead(
+                        oauth.id, rejected_refresh_token="test-refresh"
+                    )
+                elif case == "moved":
+                    assert host.store.mark_family_moved(oauth.id)
+                assert (
+                    await provider_suggestion("/v1/auth/providers", "suggested_model") == expected
+                ), case
+                assert (
+                    await provider_suggestion("/v1/models/providers", "suggestedModel") == expected
+                ), case
+                local = local_route_suggestion("google-vertex", cfg_dir)
+                assert local is not None and local.id == expected["id"], case
+                if case == "fresh":
+                    async with httpx.AsyncClient(
+                        transport=ASGITransport(app=app), base_url="http://test"
+                    ) as public:
+                        for headers in (
+                            {},
+                            {"Authorization": "Bearer wrong"},
+                            {
+                                "Authorization": f"Bearer {desktop_token}",
+                                "Origin": "https://denied.test",
+                            },
+                        ):
+                            response = await public.get("/v1/models/providers", headers=headers)
+                            assert response.status_code == 200
+                            assert response.headers["cache-control"] == "private, no-store"
+                            row = next(
+                                row
+                                for row in response.json()["result"]["providers"]
+                                if row["id"] == "google-vertex"
+                            )
+                            assert row["suggestedModel"] == express
+                        assert (await public.get("/v1/auth/providers")).status_code == 401
+                host.store.delete_credential(oauth.id)
     finally:
         await host.close()
         host.store.close()
