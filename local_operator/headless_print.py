@@ -48,6 +48,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.i18n.keys import cli_exec_runtime as copy
 from local_operator.i18n.text import register_refresh, tr
+from local_operator.incidents import TODO_INCOMPLETE_CAUSE
 from local_operator.session.protocol import SessionProtocol
 
 _t = tr("cli.exec_runtime")
@@ -266,6 +267,11 @@ class PrintRenderer:
         if isinstance(event, AgentEndEvent):
             if event.error or event.aborted:
                 self.failed = True
+            if event.cut_off_cause == TODO_INCOMPLETE_CAUSE and getattr(
+                self._session, "has_output_contract", False
+            ):
+                # Do not write parseable partial text as a certified result.
+                self.output_contract_failed = True
         elif isinstance(event, OutputValidationEvent):
             if event.ok:
                 self.last_output_payload = event.payload_text
@@ -535,6 +541,14 @@ class PrintRenderer:
                 # exits with this line. The probe's wall envelope is ~5.5s
                 # worst case; the module swallows every failure and nothing
                 # on this path may raise.
+                if event.cut_off_cause == TODO_INCOMPLETE_CAUSE:
+                    self.console.print(
+                        "! " + sanitize_prompt_line(event.error),
+                        style="yellow",
+                        highlight=False,
+                        markup=False,
+                    )
+                    return
                 sentence = append_auth_recovery(event.error, provider or None)
                 sentence = append_usage_limit_recovery(sentence, provider or None)
                 # ``soft_wrap`` ONLY for the contract-exhaustion end, and the

@@ -602,6 +602,8 @@ CONTINUATION_LIMIT_CAUSE = "continuation-limit"
 
 #: The todo producer spent its bounded accounting pass without settling pending work.
 TODO_INCOMPLETE_CAUSE = "todo-incomplete"
+_TODO_INCOMPLETE_REASON = "Turn ended with unfinished todos"
+_TODO_INCOMPLETE_NEXT_STEP = " — reply to continue or resolve them."
 
 #: The LOOP's OTHER involuntary bound: a turn hit the model's OUTPUT limit with
 #: nothing visible produced, and the harness could not continue it. Published so
@@ -621,9 +623,8 @@ OUTPUT_LIMIT_CAUSE = "output-limit"
 
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
-    # Structured cause only: the generic localized sentence is not distinctive
-    # enough to classify old, untyped incident text in cut_off_cause_from_reason.
-    TODO_INCOMPLETE_CAUSE: "",
+    # The todo reason is checked as a prefix, not a generic substring.
+    TODO_INCOMPLETE_CAUSE: _TODO_INCOMPLETE_REASON,
     # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
     # (the runtime, not the operator and not another process) because that is the
     # fact this arm exists to state: every other involuntary arm here names an
@@ -1060,11 +1061,8 @@ def render_cut_off_reason(cause: str, *, detail: str = "", clause: str = "") -> 
     still stalled) rather than adding detail about a death it did not cause.
     """
     if cause == TODO_INCOMPLETE_CAUSE:
-        from local_operator.i18n.keys import wire_exec
-
-        sentence = wire_exec.turn_did_not_complete().envelope(locale="en")["text"]
-    else:
-        sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
+        return _TODO_INCOMPLETE_REASON + (f": {detail}" if detail else "")
+    sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
     lead = f"; {clause}" if clause else ""
     return f"{sentence}{lead}{_render_cut_off_detail(detail)}"
 
@@ -1273,10 +1271,18 @@ def cause_from_reason(reason: str) -> str:
     ``""`` for prose this vocabulary did not write, so a provider's own error
     message is never misclassified as a harness cause.
     """
+    raw = reason.removesuffix(_TODO_INCOMPLETE_NEXT_STEP)
+    if raw == _TODO_INCOMPLETE_REASON or raw.startswith(_TODO_INCOMPLETE_REASON + ": "):
+        return TODO_INCOMPLETE_CAUSE
     for cause, sentence in CUT_OFF_CAUSES.items():
-        if sentence and sentence in reason:
+        if cause != TODO_INCOMPLETE_CAUSE and sentence and sentence in reason:
             return cause
     return ""
+
+
+def todo_incomplete_notice(reason: str) -> str:
+    """Shared live/replay copy: the model replied; work, not text, is missing."""
+    return reason.removesuffix(_TODO_INCOMPLETE_NEXT_STEP) + _TODO_INCOMPLETE_NEXT_STEP
 
 
 def format_cut_off_notice(cause: str, *, detail: str = "") -> str:
@@ -1289,8 +1295,11 @@ def format_cut_off_notice(cause: str, *, detail: str = "") -> str:
     NEXT turn's model context, where the consequence and the advice both earn
     their space.
     """
+    reason = render_cut_off_reason(cause, detail=detail)
+    if cause == TODO_INCOMPLETE_CAUSE:
+        return todo_incomplete_notice(reason)
     return (
-        f"turn cut off — {render_cut_off_reason(cause, detail=detail)}. "
+        f"turn cut off — {reason}. "
         "The transcript holds what it wrote before that and nothing after."
     )
 
@@ -1303,6 +1312,13 @@ def format_cut_off_raw(reason: str) -> str:
     detail it can recombine: re-deriving one from the other there would re-render
     a different sentence than the one the store and the sidebar are showing.
     """
+    if cause_from_reason(reason) == TODO_INCOMPLETE_CAUSE:
+        # No crash recovery advice: the result is intact and the list is open.
+        return (
+            f"[session incident] {TODO_INCOMPLETE_CAUSE}\n"
+            f"{reason}. Recheck the current todo list before claiming completion. "
+            "Do not retry a refused action or override a hold."
+        )
     return Incident(category="cut-off", raw=reason).render()
 
 

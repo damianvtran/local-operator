@@ -2762,7 +2762,9 @@ class ToolContext(BaseModel):
     monitor_scheduler: MonitorSchedulerProtocol | None = None
     #: Host-only resolver for an exact ``todo block`` receipt. Resolved at the
     #: write, so a persisted block cannot inherit a later reuse of the handle.
-    bind_todo_block: Callable[[str], str | None] | None = Field(default=None, exclude=True)
+    bind_todo_block: Callable[[str, str, int, str], str | None] | None = Field(
+        default=None, exclude=True
+    )
     #: The session's effective action class, resolved FRESH by the host each
     #: time this context is built (``local_operator.action_class``). The
     #: ``patience`` tool's createIf reads it (reactive sessions are never
@@ -3349,6 +3351,9 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
+    #: A no-work quiet wake closes its activity but does not supersede the
+    #: previously reported unfinished work in the owner's/viewer's snapshot.
+    retains_prior_outcome: bool = False
     #: WHICH model produced ``error``, as ``provider/model``, and the selector
     #: the request started from when the failure came from a DIFFERENT target.
     #:
@@ -4443,9 +4448,9 @@ class LoopConfig(BaseModel):
     get_follow_up_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(
         default=None, exclude=True
     )
-    #: After follow-ups and output validation settle, a host may name a cut-off
-    #: instead of letting an otherwise clean (possibly quiet) end imply success.
-    terminal_cut_off: Callable[[], str] | None = Field(default=None, exclude=True)
+    #: Before final output validation, the host can veto success with a named
+    #: outcome. The flag is the loop's trusted quiet candidate.
+    terminal_cut_off: Callable[[bool], str] | None = Field(default=None, exclude=True)
 
     # Gates and hooks.
     before_model_call: Callable[[], Awaitable[bool] | bool] | None = Field(

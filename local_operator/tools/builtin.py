@@ -16156,16 +16156,26 @@ async def execute_todo(
         target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
         verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
         bind = context.bind_todo_block if context is not None else None
-        binding: str | None = None
-        binding_resolved = False
+        # Index every occurrence, not just the blocked rows: a phase-wide
+        # block can address two same-text items and each needs its own scope.
+        occurrences: dict[int, tuple[str, int]] = {}
+        if bind is not None and target == "blocked" and reason.startswith("["):
+            counts: dict[tuple[str, str], int] = {}
+            for phase in phases:
+                for row in phase["items"]:
+                    key = (phase["name"], row["text"])
+                    occurrence = counts[key] = counts.get(key, 0) + 1
+                    occurrences[id(row)] = (phase["name"], occurrence)
 
         def resolve_item(item: TodoItem) -> None:
-            nonlocal binding, binding_resolved
             item["status"] = target
             if target == "blocked":
-                if not binding_resolved:
-                    binding = bind(reason) if bind is not None else None
-                    binding_resolved = True
+                scope = occurrences.get(id(item))
+                binding = (
+                    bind(scope[0], item["text"], scope[1], reason)
+                    if bind is not None and scope is not None
+                    else None
+                )
                 old_binding = item.get("block_binding", "")
                 item["reason"] = reason
                 if binding is not None:
@@ -16174,6 +16184,7 @@ async def execute_todo(
                     if (
                         not old_binding
                         or old_binding.split(":", 2)[:2] != binding.split(":", 2)[:2]
+                        or old_binding.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
                     ):
                         item["block_binding"] = binding
                 elif not reason.startswith(f"[{':'.join(old_binding.split(':', 2)[:2])}]"):

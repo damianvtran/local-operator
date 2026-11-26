@@ -204,6 +204,7 @@ from local_operator.harness.types import (
     ModelSpec,
     MonitorDeltaEvent,
     NoticeEvent,
+    OutputValidationEvent,
     PeerMessageDeliveredEvent,
     ReasoningDeltaEvent,
     SteeringDeliveredEvent,
@@ -376,12 +377,7 @@ from local_operator.supplements.trigger import (
     items_text_size,
     snapshot_messages,
 )
-from local_operator.tools.builtin import (
-    open_todos,
-    restore_todos,
-    todo_fingerprint,
-    todo_snapshot,
-)
+from local_operator.tools.builtin import restore_todos, todo_fingerprint, todo_snapshot
 from local_operator.tools.deferral import deferred_tool_names, tool_deferral_enabled
 from local_operator.tools.tool_docs import chain_tool_docs
 
@@ -1864,7 +1860,30 @@ def _state_section_text(body: Any, heading: str) -> str:
 # not correlation. Keep the marker in the persisted reason to avoid changing
 # the tool schema and its cached declaration for every provider request.
 _TODO_BLOCK_REF = re.compile(r"^\[(wake|monitor|ask):([A-Za-z0-9_-]+)\](?:\s|$)")
-_TodoBlock = tuple[str, str, str, str | None, bool]  # phase, text, reason, binding, live
+_TodoKey = tuple[str, str, int]  # phase, text, same-text occurrence (ignores status)
+_TodoBlock = tuple[str, str | None, bool]  # reason, bound incarnation, currently covered
+_TodoPending = tuple[_TodoKey, ...]
+
+
+def _todo_rows(phases: list[dict[str, Any]]) -> Iterator[tuple[_TodoKey, dict[str, Any]]]:
+    # The todo tool can hold two identical texts in one phase; count every
+    # occurrence, including resolved rows, so blocking one cannot alias another.
+    counts: dict[tuple[str, str], int] = {}
+    for phase in phases:
+        for item in phase["items"]:
+            name_text = (phase["name"], item["text"])
+            occurrence = counts[name_text] = counts.get(name_text, 0) + 1
+            yield (*name_text, occurrence), item
+
+
+def _todo_condition(reason: str) -> str:
+    return _TODO_BLOCK_REF.sub("", reason.strip(), count=1).strip()
+
+
+def _todo_scope(key: _TodoKey, condition: str) -> str:
+    # This exact standalone line must live on the *producer* receipt. A todo
+    # reason can point at a receipt but cannot give that receipt a new purpose.
+    return "Todo follow-up: " + json.dumps([*key, condition], ensure_ascii=False)
 
 
 def _todo_block_ref(reason: str) -> tuple[str, str] | None:
@@ -1933,12 +1952,16 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
             "its condition still holds. Resume only if it has cleared and the work is "
             "still authorized. Never retry a refused action or resume an intentional hold. "
             "If the decision is the user's, use `ask` when available; for an external "
-            "condition, use a relevant wake or monitor when appropriate. To link a live "
-            "receipt for this exact blocker, re-block with a reason starting with "
-            "`[ask:<id>]`, `[wake:<id>]`, or `[monitor:<id>]` followed by the condition. "
-            "If no safe next action or follow-up exists, explain what remains blocked."
+            "condition, use a relevant wake or monitor when appropriate. Link only a "
+            "receipt actually created for this exact condition. Copy its Todo follow-up "
+            "line below as a standalone line in the wake message, monitor description, "
+            "or Ask question, then re-block with `[ask:<id>]`, `[wake:<id>]`, or "
+            "`[monitor:<id>]` followed by the exact condition. Do not tag unrelated "
+            "receipts. If there is no safe next action, leave the item blocked and "
+            "explain why."
         )
-    body = "\n".join([*rows, *paragraphs])
+    scopes = [item["scope"] for item in blocked if item.get("scope")]
+    body = "\n".join([*rows, *paragraphs, *scopes])
     return (
         "<system-reminder>\n"
         "Injected by the harness at the turn boundary. Not from the user, and "
@@ -5584,6 +5607,7 @@ class Session:
         # whether the run continues, `_logical_generation` remembers which
         # agent_start the eventual end belongs to. Both are None outside a run.
         self._held_end: AgentEndEvent | None = None
+        self._held_output_validation: OutputValidationEvent | None = None
         #: This turn's claim on a pending conversation BODY, if any. ``None``
         #: means the turn is an ordinary one; the transform is attached only
         # when ``_open_pending_body_turn`` actually won a reservation, so a
@@ -5861,12 +5885,16 @@ class Session:
         # from a pass that reached the clean terminal boundary. A shed follow-up,
         # dropped render, cancellation or output failure must not buy silence on
         # the next turn. Only the completed per-item checks carry across turns.
-        self._todo_pending_seen: set[tuple[tuple[str, str], ...]] = set()
-        self._todo_offered: tuple[str, tuple[_TodoBlock, ...]] | None = None
-        self._todo_block_offered: set[tuple[str, str]] = set()
-        self._todo_presented: dict[tuple[str, str], _TodoBlock] = {}
-        self._todo_accounted: dict[tuple[str, str], _TodoBlock] = {}
-        self._todo_terminal_checks: dict[tuple[str, str], _TodoBlock] = {}
+        self._todo_pending_seen: set[_TodoPending] = set()
+        self._todo_reported_pending: _TodoPending = ()
+        self._todo_projections: dict[str, tuple[_TodoPending, dict[_TodoKey, _TodoBlock]]] = {}
+        self._todo_offer_id = ""
+        self._todo_presented: dict[_TodoKey, _TodoBlock] = {}
+        self._todo_accounted: dict[_TodoKey, _TodoBlock] = {}
+        self._todo_terminal_checks: dict[_TodoKey, _TodoBlock] = {}
+        self._todo_terminal_pending: _TodoPending = ()
+        self._todo_quiet_preserves_warning = False
+        self._todo_incomplete_detail = ""
         self._todo_terminal_guard_refused = False
         self._todo_terminal_parked = False
         # The todo snapshot that was last WRITTEN to the transcript, so the
@@ -6914,37 +6942,41 @@ class Session:
         """
         if not any(_is_todo_reminder(message) for message in messages):
             return messages
-        # Scope backing reads to the offered blocked rows; no Ask-log read for
-        # ordinary history or legacy prose, and no repeated read for duplicate refs.
-        current = todo_fingerprint(self._session_id)
-        blocks: dict[tuple[str, str], _TodoBlock] | None = None
-
-        def expired(message: AgentMessage) -> bool:
-            nonlocal blocks
+        projection = self._todo_projections.get(self._todo_offer_id)
+        rendered: list[AgentMessage] = []
+        for message in messages:
             if not _is_todo_reminder(message):
-                return False
-            if _stamped_todo_fingerprint(message.details) != current:
-                return True
-            shown = message.details.get("blocks")
-            if shown is None:
-                return False
+                rendered.append(message)
+                continue
+            if "blocks" not in message.details:
+                # Historical/synthetic stamps predate per-item offers.
+                if _stamped_todo_fingerprint(message.details) == todo_fingerprint(self._session_id):
+                    rendered.append(message)
+                continue
             if (
-                self._todo_terminal_guard_refused
-                or self._todo_terminal_parked
-                or self._deliberate_stop_noted
+                projection is None
+                or message.id != self._todo_offer_id
+                or self._todo_retry_forbidden()
             ):
-                return True
-            # A reminder is an accounting pass for this turn, not a
-            # directive to repeat on every later wake with the same history.
-            if self._todo_offered is None or message.id != self._todo_offered[0]:
-                return True
-            if not shown:
-                return False
-            if blocks is None:
-                blocks = self._todo_blocks()
-            return any(blocks.get((row[0], row[1])) != row for row in shown)
-
-        return [message for message in messages if not expired(message)]
+                continue
+            pending, blocks = projection
+            current_pending, current_blocks = self._todo_state()
+            kept_pending = tuple(key for key in pending if key in current_pending)
+            kept_blocks = {
+                key: row for key, row in blocks.items() if current_blocks.get(key) == row
+            }
+            if not (kept_pending or kept_blocks):
+                continue
+            if kept_pending == pending and kept_blocks == blocks:
+                rendered.append(message)
+                continue
+            # The wire retains the message ID, not its CustomMessage details.
+            # Give a trimmed projection its own ID so dispatch charges exactly
+            # the rows it carried, even if another render ran in between.
+            trimmed = self._make_todo_reminder(kept_pending, kept_blocks)
+            self._todo_projections[trimmed.id] = (kept_pending, kept_blocks)
+            rendered.append(trimmed)
+        return rendered
 
     def _live_project_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """``messages`` without project reminders the stale set has since outrun.
@@ -17465,6 +17497,11 @@ class Session:
         self.refresh_tools(self._tools)
         self.materialize_declared_tools()
 
+    @property
+    def has_output_contract(self) -> bool:
+        """Print hosts must not fall back to raw assistant text on a veto."""
+        return self._output_contract is not None
+
     def set_output_contract(self, contract: "OutputContract | None") -> None:
         """Enforce ``contract`` on this session's final responses, or clear it.
 
@@ -19887,6 +19924,8 @@ class Session:
         # note for a cause that lost to this one.
         if not self._cut_off_cause:
             self._cut_off_cause = cause
+            if cause == TODO_INCOMPLETE_CAUSE:
+                self._cut_off_detail = self._todo_incomplete_detail
         detail = self._cut_off_detail if self._cut_off_cause == cause else ""
         return event.model_copy(
             update={
@@ -20762,6 +20801,10 @@ class Session:
           veto. A deliberate stop (``interrupted``) stays suppressed by the
           consumers' kind filters whatever this value says.
         """
+        if event.cut_off_cause == TODO_INCOMPLETE_CAUSE:
+            # The live and durable warning already name the work. Do not push
+            # a second, crash-labelled OS banner about the same intact turn.
+            return False
         kind = (
             "error"
             if (event.error or event.cut_off_cause)
@@ -22757,7 +22800,14 @@ class Session:
             needs_user = self._run_needs_user()
             if self._run_input_surface is not None:
                 self._conversation_driver = self._run_input_surface
-            event = event.model_copy(update={"origin": origin, "needs_user": needs_user})
+            event = event.model_copy(
+                update={
+                    "origin": origin,
+                    "needs_user": needs_user,
+                    "retains_prior_outcome": event.quiet_accepted
+                    and self._todo_quiet_preserves_warning,
+                }
+            )
             self._attention_outcome = event
             # Turn supplements (§2.1): freeze the facts the runtime subscriber needs, while
             # they still exist -- ``_run_triggers`` and the accumulator are reset at the
@@ -22779,16 +22829,16 @@ class Session:
             # here from the pipeline finally; abort/error skip the hold and
             # emit immediately). The canonical snapshot copies this field so a
             # rebinding viewer can synthesise the matching AgentEndEvent.
-            if event.error:
-                self._last_turn_outcome = "error"
-            elif event.aborted:
-                self._last_turn_outcome = "aborted"
-            else:
-                self._last_turn_outcome = "completed"
-            # Rides the snapshot beside the outcome so a viewer that rebinds
-            # after the turn settled can name the cause instead of the "turn
-            # failed" placeholder.
-            self._last_turn_cut_off = event.cut_off
+            # A no-work wake did not complete the earlier pending work. Keep
+            # its warning in both the bound-view snapshot and attention store.
+            if not event.retains_prior_outcome:
+                if event.error:
+                    self._last_turn_outcome = "error"
+                elif event.aborted:
+                    self._last_turn_outcome = "aborted"
+                else:
+                    self._last_turn_outcome = "completed"
+                self._last_turn_cut_off = event.cut_off
         if isinstance(event, ModelChangeEvent) and event.context_metadata:
             current = self.effective_model
             primary = (self._model.provider, self._model.model_id) == (
@@ -23364,10 +23414,13 @@ class Session:
         # Not in `_run_turn`: compaction can continue the SAME input turn. A
         # new input re-arms pending, but doesn't re-open accounted blocked work.
         self._todo_pending_seen.clear()
-        self._todo_offered = None
-        self._todo_block_offered.clear()
+        self._todo_projections.clear()
+        self._todo_offer_id = ""
         self._todo_presented.clear()
         self._todo_terminal_checks.clear()
+        self._todo_terminal_pending = ()
+        self._todo_quiet_preserves_warning = False
+        self._todo_incomplete_detail = ""
         self._todo_terminal_guard_refused = False
         self._todo_terminal_parked = False
         # The project guardrail's latch and its worked-turn counter share this
@@ -23463,6 +23516,7 @@ class Session:
             },
         )
         self._turn_task = asyncio.current_task()
+        logically_settled = False
         try:
             await self._run_turn(
                 initial,
@@ -23473,7 +23527,7 @@ class Session:
                 drain_steering_on_open=drain_steering_on_open,
                 opened_body=opened_body,
             )
-            await self._settle_quiet_request()
+            logically_settled = await self._settle_quiet_request()
         except ImportError as exc:
             # A lazy import against a HALF-REPLACED install is the one failure
             # whose cause the traceback cannot state: ``lop-update`` replaces
@@ -23486,8 +23540,10 @@ class Session:
             raise
         finally:
             self._turn_task = None
-            await self._flush_held_end()
+            await self._flush_held_end(logically_settled=logically_settled)
             await self._publish_attention_outcome()
+            if logically_settled and self._cut_off_cause == TODO_INCOMPLETE_CAUSE:
+                self._commit_todo_warning()
             # A bang-mode command may have completed while this turn owned the
             # provider message list. Persist it before releasing `_turn_lock`,
             # when no next prompt can build from a half-updated conversation.
@@ -24245,7 +24301,7 @@ class Session:
         for key in {self.session_id, str(getattr(runtime, "session_id", "") or "")}:
             memo.pop(key, None)
 
-    async def _settle_quiet_request(self) -> None:
+    async def _settle_quiet_request(self) -> bool:
         """Commit silence only at the HOST boundary, after compaction/obligations.
 
         The loop's candidate carries actual dispatch evidence but cannot know
@@ -24254,7 +24310,8 @@ class Session:
         failed/aborted continuation, and no drain follows successful commitment.
         """
         while True:
-            await self._drain_continuation()
+            if not await self._drain_continuation() or self._abort_requested or self._disposed:
+                return False
             held = self._held_end
             if (
                 held is None
@@ -24262,10 +24319,8 @@ class Session:
                 or held.error
                 or held.aborted
                 or held.cut_off_cause
-                or self._abort_requested
-                or self._disposed
             ):
-                return
+                return True
             # _run_turn already settled the reservation in its finally. Its
             # clean body candidate must retain the same held-person exception
             # as the tool-time door (Q-R3-1), without admitting a person into
@@ -24276,7 +24331,7 @@ class Session:
                 else await self._quiet_end_refusal()
             )
             if self._abort_requested or self._disposed:
-                return
+                return False
             if refusal:
                 # Do not consume or copy queued input here: the ordinary
                 # steering-on-open path owns it exactly once. The correction is
@@ -24296,28 +24351,27 @@ class Session:
             # later input remains ordinary next-turn ingress, never drained here.
             self._quiet_accepted_generation = self._logical_generation or held.generation
             self._held_end = held.model_copy(update={"quiet_accepted": True})
-            return
+            return True
 
-    async def _flush_held_end(self) -> None:
+    async def _flush_held_end(self, *, logically_settled: bool = False) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
         self._held_end = None
+        validated = self._held_output_validation
+        self._held_output_validation = None
         context_tokens = self._held_context_tokens
         self._held_context_tokens = None
         if held is None:
             return
-        if not (held.aborted or held.error or held.cut_off_cause):
-            if self._todo_terminal_checks:
-                # The logical turn really ended; neither a discarded aside nor
-                # a failed/cancelled continuation can close the accounting pass.
-                current = self._todo_blocks()
-                self._todo_accounted.update(
-                    {
-                        key: row
-                        for key, row in self._todo_terminal_checks.items()
-                        if current.get(key) == row
-                    }
-                )
+        if held.cut_off_cause == TODO_INCOMPLETE_CAUSE and self._abort_requested:
+            held = held.model_copy(update={"cut_off_cause": ""})
+        if (
+            validated is not None
+            and logically_settled
+            and not (self._abort_requested or self._disposed)
+            and not (held.error or held.aborted or held.cut_off_cause)
+        ):
+            await self._emit(validated)
         generation = self._logical_generation or held.generation
         self._logical_generation = None
         changes: dict[str, Any] = {}
@@ -24402,6 +24456,9 @@ class Session:
         # earns a fresh notice.
         self._pre_aborted_drops = 0
         self._pre_abort_notified = False
+        # A successful check certifies only this run's answer. Do not publish
+        # it if post-loop work re-enters and the final run leaves open todos.
+        self._held_output_validation = None
         if self._wake.needs_rearm:
             # HC-20: the scheduler could not arm without a running loop at
             # construction; the first turn (with a loop) re-arms via pump().
@@ -24668,13 +24725,16 @@ class Session:
 
                 def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
-                    offer = self._todo_offered
-                    if (
-                        offer is not None
-                        and offer[1]
-                        and any(m.id == offer[0] for m in request.messages)
-                    ):
-                        self._todo_presented.update({(row[0], row[1]): row for row in offer[1]})
+                    if self._todo_projections:
+                        for message in reversed(request.messages):
+                            if (offer := self._todo_projections.get(message.id)) is not None:
+                                pending, blocks = offer
+                                if pending:
+                                    self._todo_pending_seen.add(pending)
+                                self._todo_presented.update(blocks)
+                                self._todo_projections.clear()
+                                self._todo_offer_id = ""
+                                break
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
                     )
@@ -24987,7 +25047,9 @@ class Session:
                             _last_stop_reason(event),
                             bool(event.aborted),
                         )
-                    if event.aborted or event.error:
+                    if (
+                        event.aborted or event.error
+                    ) and event.cut_off_cause != TODO_INCOMPLETE_CAUSE:
                         # A failed or interrupted run is a real boundary: never
                         # hold it behind a compaction that may not happen. The
                         # end is re-stamped with the generation of the start
@@ -25028,6 +25090,9 @@ class Session:
                         self._quiet_requested_by_body = bool(
                             event.quiet_requested and self._pending_body_turn is not None
                         )
+                    continue
+                if isinstance(event, OutputValidationEvent) and event.ok:
+                    self._held_output_validation = event
                     continue
                 # The worked-turn guard for the project guardrail: a turn that
                 # ran no tools cannot have moved a project's record. Both halves
@@ -25649,7 +25714,7 @@ class Session:
             len(initial),
         )
 
-    async def _drain_continuation(self) -> None:
+    async def _drain_continuation(self) -> bool:
         """Run queued auto-continuation prompts (post-compaction resume) as
         sequential turns inside the same lock hold, capped at
         ``_MAX_CONTINUATIONS`` — the remainder is dropped with a warning
@@ -25657,14 +25722,14 @@ class Session:
         if self._quiet_accepted_generation is not None:
             # Do not consume late work into an owner whose terminal boundary
             # has committed. Ordinary ingress owns the next admission.
-            return
+            return True
         continuations = 0
         while self._continuation_queue and not self._disposed:
             if self._abort_requested:
                 # Ctrl+C landed in the gap between turns; the continuation
                 # the user interrupted must not run.
                 self._continuation_queue.clear()
-                return
+                return False
             if continuations >= _MAX_CONTINUATIONS:
                 dropped = len(self._continuation_queue)
                 self._continuation_queue.clear()
@@ -25678,10 +25743,11 @@ class Session:
                         _nt.auto_continuation_limit(limit=str(_MAX_CONTINUATIONS)), kind="warning"
                     )
                 )
-                return
+                return False
             message = self._continuation_queue.pop(0)
             await self._run_turn([message])
             continuations += 1
+        return not self._continuation_queue
 
     def _spawn_background(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any] | None:
         """Route a fire-and-forget coroutine through the session task group
@@ -29811,17 +29877,13 @@ class Session:
         else:
             timer.add_done_callback(finish)
 
-    def _live_todo_binding(self, kind: str, handle: str, now: int) -> str | None:
-        """Return the incarnation of an actionable, owner-local receipt.
-
-        Runtime snapshots, not list copy or a last tool result, decide liveness.
-        Normal ticks don't change the incarnation; retiring and reusing an ID
-        does. Old rows without creation stamps cannot back a durable binding.
-        """
+    def _live_todo_receipt(self, kind: str, handle: str, now: int) -> tuple[str, set[str]] | None:
+        """The incarnation and purpose asserted on a live owner-local receipt."""
         from hashlib import sha256
 
         created_at = 0
         subject = ""
+        purposes: list[str] = []
         if kind == "wake" and not self._wake.disposed:
             from local_operator.wakes.store import is_internal_wake_row
 
@@ -29836,6 +29898,7 @@ class Session:
                     continue
                 created_at = row.created_at
                 subject = row.message
+                purposes = [row.message]
                 break
         elif kind == "monitor" and not self._monitors.disposed:
             monitor = self._monitors.runtime(handle)
@@ -29852,8 +29915,11 @@ class Session:
                     )
                 ):
                     created_at = spec.created_at
+                    purposes = [spec.description]
                     subject = json.dumps(
-                        [spec.tool, spec.arguments, spec.cwd], sort_keys=True, default=str
+                        [spec.tool, spec.arguments, spec.cwd, spec.description],
+                        sort_keys=True,
+                        default=str,
                     )
         elif kind == "ask":
             from local_operator.asks import store as ask_store
@@ -29867,121 +29933,174 @@ class Session:
                 and row.get("expires_at", 0) > now
             ):
                 created_at = row.get("created_at", 0)
-                subject = row.get("tool_call_id") or ""
+                purposes = [str(question.get("question") or "") for question in row["questions"]]
+                subject = json.dumps([row.get("tool_call_id"), row["questions"]], sort_keys=True)
         if type(created_at) is not int or created_at <= 0:
             return None
-        # Edits to the job's purpose can make it unrelated without retiring it.
-        # Persist a digest, not a second copy of wake text or tool arguments.
+        # The digest covers the producer's purpose, not merely the handle.
+        # A purpose edit or handle reuse invalidates a binding without copying
+        # the durable receipt into each todo snapshot.
         digest = sha256(subject.encode()).hexdigest()
-        return f"{kind}:{handle}:{created_at}:{digest}"
+        scopes = {line.strip() for text in purposes for line in text.splitlines()}
+        return f"{kind}:{handle}:{created_at}:{digest}", scopes
 
-    def _bind_todo_block(self, reason: str) -> str | None:
+    def _bind_todo_block(self, phase: str, text: str, occurrence: int, reason: str) -> str | None:
         ref = _todo_block_ref(reason)
-        return self._live_todo_binding(*ref, int(time.time() * 1000)) if ref is not None else None
+        condition = _todo_condition(reason)
+        if ref is None or not condition:
+            return None
+        receipt = self._live_todo_receipt(*ref, int(time.time() * 1000))
+        if receipt is not None and _todo_scope((phase, text, occurrence), condition) in receipt[1]:
+            return receipt[0]
+        return None
 
-    def _todo_blocks(
-        self, phases: list[dict[str, Any]] | None = None
-    ) -> dict[tuple[str, str], _TodoBlock]:
-        if phases is None:
-            phases = todo_snapshot(self._session_id)
+    def _todo_state(self) -> tuple[_TodoPending, dict[_TodoKey, _TodoBlock]]:
         now = int(time.time() * 1000)
-        live: dict[tuple[str, str], str | None] = {}
-        rows: dict[tuple[str, str], _TodoBlock] = {}
-        for phase in phases:
-            for item in phase["items"]:
-                if item.get("status") != "blocked":
-                    continue
-                name, text = phase["name"], item["text"]
+        receipts: dict[tuple[str, str], tuple[str, set[str]] | None] = {}
+        pending: list[_TodoKey] = []
+        blocks: dict[_TodoKey, _TodoBlock] = {}
+        for key, item in _todo_rows(todo_snapshot(self._session_id)):
+            if item["status"] == "pending":
+                pending.append(key)
+            elif item["status"] == "blocked":
                 reason = str(item.get("reason") or "")
                 binding = item.get("block_binding")
                 ref = _todo_block_ref(reason) if binding else None
-                if ref is not None and ref not in live:
-                    live[ref] = self._live_todo_binding(*ref, now)
-                rows[name, text] = (name, text, reason, binding, bool(ref and live[ref] == binding))
-        return rows
+                if ref is not None and ref not in receipts:
+                    receipts[ref] = self._live_todo_receipt(*ref, now)
+                receipt = receipts.get(ref) if ref is not None else None
+                covered = bool(
+                    receipt
+                    and receipt[0] == binding
+                    and _todo_scope(key, _todo_condition(reason)) in receipt[1]
+                )
+                blocks[key] = (reason, binding, covered)
+        # Membership, not display order, decides if the model made progress.
+        return tuple(sorted(pending)), blocks
+
+    def _todo_retry_forbidden(self) -> bool:
+        # A refusal forbids an automatic retry, not an honest unresolved outcome.
+        return self._todo_terminal_guard_refused or self._todo_terminal_exempt()
 
     def _todo_terminal_exempt(self) -> bool:
-        # These are host/tool facts, not something an agent can assert in a
-        # todo reason. A free-text hold remains ambiguous, never permission.
-        return (
-            self._deliberate_stop_noted
-            or self._abort_requested
-            or self._todo_terminal_guard_refused
-            or self._todo_terminal_parked
+        return self._deliberate_stop_noted or self._abort_requested or self._todo_terminal_parked
+
+    def _todo_unreported_blocks(
+        self, blocks: dict[_TodoKey, _TodoBlock]
+    ) -> dict[_TodoKey, _TodoBlock]:
+        # A row that has since changed (including becoming covered) cannot
+        # inherit an old warning if it later loses the backing or is re-parked.
+        self._todo_accounted = {
+            key: row for key, row in self._todo_accounted.items() if blocks.get(key) == row
+        }
+        return {
+            key: row
+            for key, row in blocks.items()
+            if not row[-1] and self._todo_accounted.get(key) != row
+        }
+
+    def _todo_pending_requires_check(self, pending: _TodoPending, quiet_candidate: bool) -> bool:
+        if pending != self._todo_reported_pending:
+            self._todo_reported_pending = ()
+        # A real owner request, a new pending set, or a non-quiet answer can
+        # still do work; only an unchanged no-work wake inherits silence.
+        return bool(pending) and not (
+            quiet_candidate
+            and pending == self._todo_reported_pending
+            and not self._todo_terminal_guard_refused
+            and "user" not in self._run_triggers
         )
 
-    def _todo_terminal_cut_off(self) -> str:
+    def _todo_terminal_cut_off(self, quiet_candidate: bool) -> str:
+        self._todo_terminal_checks.clear()
+        self._todo_terminal_pending = ()
+        self._todo_quiet_preserves_warning = False
+        self._todo_incomplete_detail = ""
         if self._todo_terminal_exempt():
             return ""
-        if self._todo_pending_seen and open_todos(self._session_id):
-            return TODO_INCOMPLETE_CAUSE
-        # A reason-only rewrite during a delivered pass may clarify an
-        # ambiguous park; it is not a reason to loop. A live backing becoming
-        # stale is different: never record a changed explicit ref as checked.
-        if self._todo_presented:
-            current = self._todo_blocks()
-            self._todo_terminal_checks = {
-                key: row
-                for key, row in current.items()
-                if (shown := self._todo_presented.get(key)) is not None
-                and (
-                    shown == row or (not _todo_block_ref(shown[2]) and not _todo_block_ref(row[2]))
-                )
-            }
-        return ""
-
-    async def _todo_continuation(self) -> list[AgentMessage]:
-        """Ask only for unfinished work at the actual, shared yield boundary.
-
-        A pending projection may move and earn another pass inside the existing
-        loop budget, but rewriting blocker prose or cycling through already-seen
-        states cannot buy more requests. Blocked accounting is per item, at most
-        once per turn per item, and is carried across turns only after dispatch
-        and a clean logical end. Verified live bindings need no accounting pass.
-        """
-        if self._todo_terminal_exempt():
-            return []
-        fingerprint = todo_fingerprint(self._session_id)
-        if not fingerprint and not self._todo_accounted:
-            return []
-        blocks = self._todo_blocks()
-        self._todo_block_offered.intersection_update(blocks)
-        # Clear removed or now-live items, so re-parking or losing that backing
-        # does not inherit an earlier check of an unbacked row.
-        self._todo_accounted = {
-            key: row
-            for key, row in self._todo_accounted.items()
-            if key in blocks and not blocks[key][-1]
+        pending, blocks = self._todo_state()
+        unreported = self._todo_unreported_blocks(blocks)
+        if pending and not self._todo_pending_requires_check(pending, quiet_candidate):
+            self._todo_quiet_preserves_warning = True
+            pending = ()
+        elif not pending:
+            self._todo_reported_pending = ()
+        if not (pending or unreported):
+            return ""
+        # Delivery is not disposition. The host reports the unresolved state;
+        # only a warning plus dispatch of this *exact* condition buys silence.
+        # A rewrite (or a lost/shed offer) remains eligible on the next turn.
+        self._todo_terminal_checks = {
+            key: row for key, row in unreported.items() if self._todo_presented.get(key) == row
         }
-        pending = tuple(
-            (phase, text) for phase, text, status, _ in fingerprint if status == "pending"
+        if pending in self._todo_pending_seen:
+            self._todo_terminal_pending = pending
+        from local_operator.ansi import sanitize_prompt_line
+
+        labels = [key[1] for key in pending]
+        for key, (reason, _, _) in unreported.items():
+            condition = _todo_condition(reason)
+            labels.append(f"{key[1]} (blocked: {condition})" if condition else key[1])
+        shown = [sanitize_prompt_line(label, limit=120) for label in labels[:3]]
+        self._todo_incomplete_detail = ", ".join(shown)
+        if len(labels) > len(shown):
+            self._todo_incomplete_detail += f" (+{len(labels) - len(shown)} more)"
+        return TODO_INCOMPLETE_CAUSE
+
+    def _commit_todo_warning(self) -> None:
+        # A provider end is only provisional. This runs after the host's
+        # post-loop work and warning publication, not from the finally's held
+        # event alone: aborts and discarded continuations must not buy silence.
+        if self._abort_requested or self._disposed:
+            return
+        pending, current = self._todo_state()
+        self._todo_accounted.update(
+            {key: row for key, row in self._todo_terminal_checks.items() if current.get(key) == row}
         )
-        pending_fires = bool(pending) and pending not in self._todo_pending_seen
-        due = tuple(
-            row
-            for key, row in blocks.items()
-            if not row[-1]
-            and self._todo_accounted.get(key) != row
-            and key not in self._todo_block_offered
-        )
-        if not (pending_fires or due):
-            return []
-        if pending_fires:
-            self._todo_pending_seen.add(pending)
-        self._todo_block_offered.update((row[0], row[1]) for row in due)
-        message = CustomMessage(
+        if pending and pending == self._todo_terminal_pending:
+            self._todo_reported_pending = pending
+
+    @staticmethod
+    def _make_todo_reminder(
+        pending: _TodoPending,
+        blocks: dict[_TodoKey, _TodoBlock],
+    ) -> CustomMessage:
+        blocked = []
+        for key, (reason, _, _) in blocks.items():
+            condition = _todo_condition(reason)
+            blocked.append(
+                {
+                    "text": key[1],
+                    "reason": condition,
+                    "scope": _todo_scope(key, condition) if condition else "",
+                }
+            )
+        return CustomMessage(
             custom_type=TODO_REMINDER_MESSAGE_TYPE,
             attribution="system",
             details={
-                "text": _todo_reminder_text(
-                    [{"text": text} for _, text in pending] if pending_fires else [],
-                    [{"text": row[1], "reason": row[2]} for row in due],
-                ),
-                "fingerprint": fingerprint,
-                "blocks": due,
+                "text": _todo_reminder_text([{"text": key[1]} for key in pending], blocked),
+                "blocks": True,  # live, per-offer projection rather than a legacy stamp
             },
         )
-        self._todo_offered = (message.id, due)
+
+    async def _todo_continuation(self, quiet_candidate: bool = False) -> list[AgentMessage]:
+        """At most one *presented* check per row / pending set inside the loop budget."""
+        if self._todo_retry_forbidden():
+            return []
+        pending, blocks = self._todo_state()
+        unreported = self._todo_unreported_blocks(blocks)
+        due = {key: row for key, row in unreported.items() if key not in self._todo_presented}
+        if (
+            not self._todo_pending_requires_check(pending, quiet_candidate)
+            or pending in self._todo_pending_seen
+        ):
+            pending = ()
+        if not (pending or due):
+            return []
+        message = self._make_todo_reminder(pending, due)
+        self._todo_offer_id = message.id
+        self._todo_projections = {message.id: (pending, due)}
         return [message]
 
     async def _project_continuation(self) -> list[AgentMessage]:
@@ -30065,7 +30184,13 @@ class Session:
         the charging rule does not know about. Order is stable — todos first,
         then projects — so a mixed batch's contents are deterministic.
         """
-        return [*await self._todo_continuation(), *await self._project_continuation()]
+        # The loop sets this on the same context just before running the yield
+        # hooks. Keep the established no-argument follow-up API for other hosts.
+        quiet_candidate = self._context.quiet_candidate
+        return [
+            *await self._todo_continuation(quiet_candidate),
+            *await self._project_continuation(),
+        ]
 
     # -- compaction ------------------------------------------------------------
 

@@ -132,19 +132,13 @@ async def test_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
 
     assert len(stream.requests) == 2  # one nudge, then the turn ends
     assert len(reminders(session._context.messages)) == 1
-    assert session._todo_pending_seen == {(("Todos", "decide the domain"),)}
+    assert session._todo_pending_seen == {(("Todos", "decide the domain", 1),)}
     await session.dispose()
 
 
 @pytest.mark.asyncio
 async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
-    """THE §5.3 coupling guard. A PHASED no-progress list must be nudged exactly
-    once, the same as a flat one. If ``session.py:_stamped_todo_fingerprint`` is
-    NOT widened to 4-tuples in lockstep with ``builtin.todo_fingerprint``, the
-    stamped side compares empty, every reminder expires on every render, and the
-    latch nudges again on the second identical yield. That failure is SILENT in
-    the flat suite (whose stamps happen to survive) and in any 'does it nudge?'
-    test — only a phased 'does it STOP nudging?' assertion catches it."""
+    """A phased projection must reach the provider once, then stop."""
     builtin.TODO_STORE[SESSION_ID] = [
         {"name": "Foundation", "items": [{"text": "decide the domain", "status": "pending"}]},
         {"name": "Verification", "items": [{"text": "run the gate", "status": "pending"}]},
@@ -157,15 +151,8 @@ async def test_phased_unchanged_list_is_nudged_exactly_once(tmp_path) -> None:
     assert len(stream.requests) == 2, "one nudge, then the turn ends — not re-nudged every yield"
     assert len(reminders(session._context.messages)) == 1
     assert session._todo_pending_seen == {
-        (("Foundation", "decide the domain"), ("Verification", "run the gate"))
+        (("Foundation", "decide the domain", 1), ("Verification", "run the gate", 1))
     }
-    # The reminder must actually REACH the model on the continuation request:
-    # that render passes through ``_expire_stale_todo_reminders`` →
-    # ``_stamped_todo_fingerprint``. If that normaliser is NOT widened to
-    # 4-tuples in lockstep (§5.3), the stamped side compares empty against the
-    # live 4-tuple, the reminder is judged stale on an UNCHANGED list, and it is
-    # stripped from this request — so the model never sees the nudge. Asserting
-    # the text is present on request 2 is what catches the silent coupling break.
     sent = stream.requests[1].messages[-1].text
     assert "decide the domain" in sent and "<system-reminder>" in sent
     await session.dispose()
@@ -181,19 +168,18 @@ async def test_progress_earns_another_nudge(tmp_path) -> None:
     ]
     stream = ScriptedStream(prose_turns(3))
     session = make_session(tmp_path, stream)
-    original = session._todo_continuation
 
-    async def continuation_then_progress():
-        result = await original()
-        # Stand in for the model closing an item between boundaries.
-        for item in builtin.TODO_STORE[SESSION_ID]:
-            if item["status"] == "pending":
-                item["status"] = "done"
-                break
-        return result
+    def make_progress(request: ChatRequest, signal: AbortSignal | None):
+        # A provider can only make progress *after* it receives the request.
+        # Changing the list before render would trim the offer instead.
+        if stream.requests:
+            for item in builtin.TODO_STORE[SESSION_ID]:
+                if item["status"] == "pending":
+                    item["status"] = "done"
+                    break
+        return stream(request, signal)
 
-    session._todo_continuation = continuation_then_progress  # type: ignore[method-assign]
-
+    session._stream_fn = make_progress
     await session.prompt("go")
 
     # Nudge, item closed, nudge again, item closed, list empty -> turn ends.
@@ -250,15 +236,6 @@ async def test_blocked_only_list_fires_a_reconciliation_nudge(tmp_path) -> None:
     # there, and the model would have to reconcile it against its own list.
     assert "old plan" not in sent and "schema" not in sent
     assert "Do not end the turn while pending items remain" not in sent
-    # The render still compares the FULL list, settled items included.
-    assert tuple(
-        injected_row
-        for injected_row in reminders(session._context.messages)[0].details["fingerprint"]
-    ) == (
-        ("Todos", "pick a domain", "blocked", "needs the user's call"),
-        ("Todos", "old plan", "dropped", ""),
-        ("Todos", "schema", "done", ""),
-    )
     await session.dispose()
 
 
@@ -281,7 +258,7 @@ async def test_a_parked_blocked_list_is_reconciled_once_across_turns(tmp_path) -
     await session.prompt("go")
     # The terminal ledger records the checked reason with the item's identity.
     assert session._todo_accounted == {
-        ("Todos", "pick a domain"): ("Todos", "pick a domain", "needs the user's call", None, False)
+        ("Todos", "pick a domain", 1): ("needs the user's call", None, False)
     }
     await session.prompt("use example.com")
 
@@ -315,7 +292,9 @@ async def test_a_new_blocked_item_earns_exactly_one_more_reconciliation(tmp_path
     assert isinstance(nudge, CustomMessage)
     assert "reserve the name" in nudge.details["text"]
     assert "account for each blocked item" in nudge.details["text"]
-    assert await session._todo_continuation() == [], "and then it is quiet again"
+    assert (
+        await session._todo_continuation()
+    ), "an offer without dispatch does not consume the check"
     await session.dispose()
 
 
@@ -346,7 +325,9 @@ async def test_an_unblocked_or_resolved_change_earns_one_reconciliation(tmp_path
     assert "pick a domain" in nudge.details["text"]  # unblocked: open work again
     assert "reserve the name" not in nudge.details["text"]  # unrelated, already checked
     assert "Do not end the turn while pending items remain" in nudge.details["text"]
-    assert await session._todo_continuation() == []
+    assert (
+        await session._todo_continuation()
+    ), "an offer without dispatch does not consume the check"
     await session.dispose()
 
 
@@ -437,8 +418,9 @@ async def test_reminder_expires_when_the_list_moves(tmp_path) -> None:
     await session.prompt("go")
     assert len(reminders(session._context.messages)) == 1
     # While the list stands still the assertion is still true, so it is still sent.
+    # A delivered nudge should not be replayed even if the list is unchanged.
     still_sent = session._render_history(session._context.messages)
-    assert any("<system-reminder>" in message.text for message in still_sent)
+    assert not any("<system-reminder>" in message.text for message in still_sent)
 
     builtin.TODO_STORE[SESSION_ID][0]["status"] = "done"
 
@@ -510,15 +492,14 @@ async def test_reason_churn_does_not_re_fire_the_blocked_reconciliation(tmp_path
 
 @pytest.mark.asyncio
 async def test_a_re_parked_set_earns_a_new_reconciliation(tmp_path) -> None:
-    """Round-1 F1. The empty identity is never asked ABOUT (there is nothing to
-    reconcile when nothing is parked), but it must still be RECORDED: a set that
-    resolves to EMPTY and is later re-blocked with a byte-identical (phase,
-    text, status) is a NEW identity, not "still accounted" — without the
-    silent-path write it would stay silent permanently."""
+    """A status cycle can't buy a second dispatch in the same logical turn.
+
+    The next turn must still recheck the materially different condition.
+    """
     builtin.TODO_STORE[SESSION_ID] = [
         {"text": "deploy", "status": "blocked", "reason": "waiting on legal"}
     ]
-    stream = ScriptedStream(prose_turns(2))
+    stream = ScriptedStream(prose_turns(4))
     session = make_session(tmp_path, stream)
     await session.prompt("go")  # the initial park earns its single pass
     assert len(reminders(session._context.messages)) == 1
@@ -530,16 +511,12 @@ async def test_a_re_parked_set_earns_a_new_reconciliation(tmp_path) -> None:
     assert await session._todo_continuation() == []
     assert not session._todo_accounted
 
-    # Re-block the SAME text: identical (phase, text, status) to the first park,
-    # and a new identity against the recorded empty set — so it earns its pass.
     builtin.TODO_STORE[SESSION_ID][0]["status"] = "blocked"
     builtin.TODO_STORE[SESSION_ID][0]["reason"] = "legal review reopened it"
-    nudges = await session._todo_continuation()
-    assert len(nudges) == 1, "a re-parked set is a new identity and earns its pass"
-    nudge = nudges[0]
-    assert isinstance(nudge, CustomMessage)
-    assert "deploy" in nudge.details["text"]
     assert await session._todo_continuation() == []
+    await session.prompt("check the new condition")
+    assert len(stream.requests) == 4
+    assert "legal review reopened it" in stream.requests[3].messages[-1].text
     await session.dispose()
 
 

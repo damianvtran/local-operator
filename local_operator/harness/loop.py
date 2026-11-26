@@ -4405,7 +4405,15 @@ class AgentLoop:
                 # (the repeated-error recovery notice's shape below), not an
                 # invisible injection, so exactly one AgentEndEvent still ends
                 # the run and a resumed transcript explains the continuation.
-                if config.final_response_gate is not None:
+                # A contract certifies the completed turn, not just parseable
+                # text. Never put a success payload on the wire for unfinished work.
+                terminal_cut_off = config.terminal_cut_off
+                cut_off_cause = (
+                    OUTPUT_LIMIT_CAUSE
+                    if length_silent_cut_off or length_answer_cut_off
+                    else terminal_cut_off(context.quiet_candidate) if terminal_cut_off else ""
+                )
+                if config.final_response_gate is not None and not cut_off_cause:
                     gate = config.final_response_gate
                     final_response_attempts += 1
                     # None means no assistant message at all ("" is a value:
@@ -4452,11 +4460,6 @@ class AgentLoop:
             # continuation guard uses: the loop stamps the token and the
             # involuntariness, the classifier renders the sentence
             # (``Session._classify_cut_off``, ``tests/unit/session/test_cut_off_turns.py``).
-            if length_silent_cut_off or length_answer_cut_off:
-                cut_off_cause = OUTPUT_LIMIT_CAUSE
-            else:
-                terminal_cut_off = config.terminal_cut_off
-                cut_off_cause = terminal_cut_off() if terminal_cut_off is not None else ""
             yield AgentEndEvent(
                 messages=new_messages,
                 aborted=bool(cut_off_cause),

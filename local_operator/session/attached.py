@@ -9065,6 +9065,7 @@ class AttachedSession:
         aborted: bool = True,
         error: str | None = None,
         force: bool = False,
+        retains_prior_outcome: bool = False,
     ) -> None:
         """End an in-flight turn the owner can no longer end itself.
 
@@ -9109,14 +9110,25 @@ class AttachedSession:
         """
         if not self._streaming and not force:
             return
-        end = AgentEndEvent(aborted=aborted, generation=0, error=error)
+        end = AgentEndEvent(
+            aborted=aborted,
+            generation=0,
+            error=error,
+            notify=not retains_prior_outcome,
+            quiet_accepted=retains_prior_outcome,
+            retains_prior_outcome=retains_prior_outcome,
+        )
         if error:
             # The cause rides WITH the sentence, so a consumer that only has the
             # event (the phone's projection, a log line, a test) can classify it
             # without re-parsing operator-facing prose. ``cause_from_reason``
             # inverts ``format_cut_off_notice``'s own rendering, which is what
             # keeps the two from drifting into a vocabulary nobody can read.
-            from local_operator.incidents import cause_from_reason
+            from local_operator.incidents import (
+                TODO_INCOMPLETE_CAUSE,
+                cause_from_reason,
+                todo_incomplete_notice,
+            )
 
             # NO ``or "owner-lost"`` FALLBACK. `cause_from_reason` is the
             # inverse of `format_cut_off_notice`, so an empty answer means the
@@ -9126,15 +9138,28 @@ class AttachedSession:
             # placeholder for a provider error, which then carried
             # `cut_off_cause="owner-lost"` on a row that was never cut off
             # (review round 1, MINOR-3).
-            end = end.model_copy(update={"cut_off_cause": cause_from_reason(error)})
+            cause = cause_from_reason(error)
+            if cause == TODO_INCOMPLETE_CAUSE:
+                # The snapshot carries the durable reason, without the live
+                # next step. This is not owner death and needs no witness row.
+                end = end.model_copy(
+                    update={
+                        "error": todo_incomplete_notice(error),
+                        "cut_off": error,
+                        "cut_off_cause": cause,
+                        "notify": False,
+                    }
+                )
+            else:
+                end = end.model_copy(update={"cut_off_cause": cause})
             # A CUT-OFF VERDICT, and only a cut-off verdict, is also journalled
             # for every other surface rather than only painted in the frame this
             # viewer owns (UX round 2, U6). A `turn failed` placeholder carries
             # no cause — the event's error is not a cut-off sentence — so the
             # hook stays off it: this facade has no standing to publish an
             # outcome for an end it cannot name.
-            if end.cut_off_cause:
-                self._journal_witnessed_cut_off(cause=str(end.cut_off_cause))
+            if cause and cause != TODO_INCOMPLETE_CAUSE:
+                self._journal_witnessed_cut_off(cause=cause)
         # THE STATE CHANGE IS THE CONTRACT; ONLY THE NOTIFICATION IS
         # BEST-EFFORT (review round 2, MAJOR-2). `_deliver` calls handlers
         # synchronously with no guard of its own, and
@@ -9321,18 +9346,26 @@ class AttachedSession:
             return
         outcome = ""
         cut_off = ""
+        retains_prior_outcome = False
         store = self._frontend_store
         if store is not None:
-            outcome = str(getattr(store.state, "last_turn_outcome", "") or "")
-            cut_off = str(getattr(store.state, "last_turn_cut_off", "") or "")
+            state = store.state
+            outcome = str(getattr(state, "last_turn_outcome", "") or "")
+            cut_off = str(getattr(state, "last_turn_cut_off", "") or "")
+            retains_prior_outcome = bool(getattr(state, "last_turn_retained_outcome", False))
         # ``force`` because ``_apply_frontend_facades`` already cleared
         # ``_streaming`` when the snapshot says the turn ended, and the
         # usual early-return would swallow the synthesised end.
         self._end_turn_locally(
             direct=True,
-            aborted=outcome in ("aborted", ""),
-            error=(cut_off or "turn failed") if outcome == "error" else None,
+            aborted=not retains_prior_outcome and outcome in ("aborted", ""),
+            error=(
+                (cut_off or "turn failed")
+                if outcome == "error" and not retains_prior_outcome
+                else None
+            ),
             force=True,
+            retains_prior_outcome=retains_prior_outcome,
         )
         # A successor turn may already be live (generation moved). The
         # synthesised end is for the *suspect* turn; do not clear the
