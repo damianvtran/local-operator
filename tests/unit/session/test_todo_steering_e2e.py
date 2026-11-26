@@ -1278,7 +1278,9 @@ async def test_duplicate_blocked_rows_use_the_exact_prior_condition_before_mutat
         return await builtin.execute_todo(
             "setup",
             {"op": "block", "items": list(items or ("deploy",)), "reason": reason},
-            context=session._build_tool_context(),
+            None,
+            None,
+            session._build_tool_context(),
         )
 
     source = wake("w1", 'For "deploy", await source and await destination.')
@@ -1323,7 +1325,9 @@ async def test_duplicate_blocked_rows_use_the_exact_prior_condition_before_mutat
         result = await builtin.execute_todo(
             "phase",
             {"op": "block", "phase": "Todos", "reason": phase_reason},
-            context=session._build_tool_context(),
+            None,
+            None,
+            session._build_tool_context(),
         )
         assert not result.is_error
         assert [block[-1] for block in session._todo_state()[1].values()] == [False, True]
@@ -1332,7 +1336,7 @@ async def test_duplicate_blocked_rows_use_the_exact_prior_condition_before_mutat
         # Both deploy rows now have the same condition. Reject an explicit
         # duplicate selector without even partially mutating another named item.
         await builtin.execute_todo(
-            "add", {"op": "add", "items": ["verify"]}, context=session._build_tool_context()
+            "add", {"op": "add", "items": ["verify"]}, None, None, session._build_tool_context()
         )
         before = builtin.todo_snapshot("e2e")
         assert (await block(phase_reason, "verify", "deploy")).is_error
