@@ -76,9 +76,13 @@ your chief of staff, says hello and helps you set up your first agents and
 teams. `esc` stops the agent, `/help` lists commands, `lop update` upgrades.
 
 <p align="center">
-  <img src="./static/ui-desktop-app.png" alt="The Local Operator desktop app: a navigation rail with chats, agents and teams, a session transcript with tool receipts, and a run pane with subagents and a to-do list" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./static/ui-desktop-app-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="./static/ui-desktop-app-light.webp">
+    <img src="./static/ui-desktop-app-light.webp" alt="The Local Operator desktop app with a navigation rail, two workspace tabs in the title bar, a release checklist conversation, and an inset message composer." width="720">
+  </picture>
 </p>
-<p align="center"><i>Desktop app</i></p>
+<p align="center"><i>Local Operator v0.64.8 with a sample conversation.</i></p>
 
 <p align="center">
   <img src="./static/tui-welcome.png" alt="The Local Operator terminal UI welcome screen with tips and the composer ready for a first prompt" width="860">

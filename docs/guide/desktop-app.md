@@ -8,10 +8,14 @@ application for macOS, Windows, and Linux that drives the same sessions, teams,
 schedules, and configuration, and adds the surfaces a terminal cannot draw.
 
 <p align="center">
-  <img src="../../static/ui-desktop-app.png" alt="The desktop app on the Invoices workspace session: the rail (New chat, Search, Aida, Agents, Projects, Schedules, Browser, Agent hub, Mesh) above the Agents and Teams sections; the transcript's reconcile request, Read invoices/march.csv and Ran python reconcile.py receipts, and the streamed write-up; the Run details pane with two subagents running (one drafting the summary, one auditing) and the shared to-do list; and the composer holding a draft." width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="../../static/ui-desktop-app-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="../../static/ui-desktop-app-light.webp">
+    <img src="../../static/ui-desktop-app-light.webp" alt="The Local Operator desktop app with a navigation rail, two workspace tabs in the title bar, a release checklist conversation, and an inset message composer." width="720">
+  </picture>
 </p>
 
-<p align="center"><i>The desktop app on the Invoices workspace: the rail with its chats, agents, teams, and mesh; the transcript's tool receipts and streamed write-up; two subagents running above the shared to-do list; and the composer holding a draft. Fixture-driven like the mesh figures below — the real interface over the app's own fixtures, not a live session.</i></p>
+<p align="center"><i>Local Operator v0.64.8 with a sample conversation.</i></p>
 
 What the app adds:
 
