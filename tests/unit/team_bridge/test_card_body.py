@@ -1908,7 +1908,7 @@ def _purge_by_account_switch(root: Path, key: str) -> None:
 
 
 def _expire_memo_key(root: Path, key: str) -> None:
-    # The key ages out at the row TTL, like the rows it digests.
+    # The key has its own 90-day TTL from minting; a row's TTL does not touch it.
     import sqlite3
 
     from local_operator.team_bridge.display_bodies import TTL_SECONDS

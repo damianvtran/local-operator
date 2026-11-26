@@ -91,10 +91,14 @@ _SCHEMA = (
     "PRIMARY KEY (owner_key, message_id))"
 )
 #: The per-owner key ``card_projection.ExcerptMemo`` HMACs its body digests
-#: with. It lives HERE, beside the bodies, so whatever ends a body's retention
-#: ends the key too: ``purge`` deletes it with the rows, and it expires at the
-#: same TTL as a row. A memo file left in a session directory then holds
-#: digests no one can test a guessed body against (review R1-1 on PR #4629).
+#: with. It lives HERE, beside the bodies. ``purge`` destroys it with the rows
+#: (bridge off, consent revoke, sign-out, account switch), and it expires on
+#: its own 90-day TTL measured from its creation. It SURVIVES ``delete`` of a
+#: single hub-deleted row, the 64 MiB eviction and a row's TTL, so a keyed
+#: digest of a gone body can remain in a session's memo file until that
+#: session next resumes, when the entry drops. Acceptable because confirming a
+#: guess needs the key, which sits in the owner-only local database, and the
+#: memo file is device-local and never synced (review R1-1, R2-1 on PR #4629).
 _MEMO_KEY_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS excerpt_memo_keys ("
     "owner_key TEXT PRIMARY KEY, key BLOB NOT NULL, created_at REAL NOT NULL)"

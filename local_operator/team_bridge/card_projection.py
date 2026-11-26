@@ -244,10 +244,13 @@ class ExcerptMemo(MutableMapping[str, _HistoryExcerpt]):
     ``body_sha256`` under the owner's memo key
     (``DisplayBodyStore.memo_key``). No body or card text. A plain digest of a
     short body ("ok") could be confirmed by guessing; the key lives in the
-    display store and every purge of it (opt-out, consent revoke, sign-out,
-    account switch) deletes the key, which also expires at the row TTL. A file
-    left in a session that never resumes then holds digests nothing can test
-    a guess against (review R1-1 on PR #4629). The excerpt text is rebuilt
+    display store, every purge of it (opt-out, consent revoke, sign-out,
+    account switch) destroys it, and it expires on its own 90-day TTL measured
+    from its creation. Hub delete, the 64 MiB eviction and a row's TTL leave it
+    alive, so a keyed digest of a gone body can sit in the file of a session
+    that never resumes. Confirming a guess needs that key, which stays in this
+    device's owner-only display store, and the file is never synced
+    (review R1-1, R2-1 on PR #4629). The excerpt text is rebuilt
     with :func:`bounded_excerpt` from the row whose keyed digest still
     matches; a row deleted or rewritten since, or a key purged since, drops
     the excerpt exactly as a deleted row does for an in-memory decision.
