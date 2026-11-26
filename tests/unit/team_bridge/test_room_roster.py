@@ -1,25 +1,26 @@
-"""Run the bridge tool, persisted authority fence, and real client over loopback.
+"""Exercise the tool and persisted fence against synthetic hub and OAuth state.
 
-The synthetic hub only serves GETs. Record every request to prove the new read
-never probes an unclassified id or runs a collection preflight of its own.
+The client uses MockTransport, with no socket or live credentials. Every GET
+is recorded to pin the contract without touching real rooms or transports.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
 from typing import Any
-from urllib.parse import urlsplit
 
+import httpx
 import pytest
 
 from local_operator.aida.state import write_state
 from local_operator.harness.types import ToolContext
+from local_operator.providers.auth_store import AuthStore
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
@@ -60,17 +61,41 @@ def member(account: str, *, state: str = "active", **extra: Any) -> dict[str, An
 
 @dataclass
 class WireHub:
-    base: str = ""
+    base: str = "https://roster.fixture.test/v1"
     calls: list[tuple[str, str, str, int]] = field(default_factory=list)
     page: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
+    list_status: int = 200
     detail_status: int = 200
-    before_detail: Callable[[], None] | None = None
+    after_list: Callable[[], None] | None = None
+    after_detail: Callable[[], None] | None = None
+
+    def answer(self, req: httpx.Request) -> httpx.Response:
+        assert req.method == "GET"  # neither discovery nor roster may mutate a room
+        path, query = req.url.path, req.url.query.decode("ascii")
+        is_list = path == LIST_PATH
+        if req.headers.get("Authorization") != "Bearer fixture-only":
+            status, body = 401, {"code": "unauthorized"}
+        elif query != (f"tenant_id={TENANT}&limit=50" if is_list else f"tenant_id={TENANT}"):
+            status, body = 403, {"code": "invalid_tenant"}
+        else:
+            status = self.list_status if is_list else self.detail_status
+            body = (
+                {"msg": "ok", "result": self.page if is_list else self.details}
+                if status == 200
+                else {"code": "conversation_not_found", "error": "fixture-private-name"}
+            )
+        self.calls.append((req.method, path, query, status))
+        hook = self.after_list if is_list else self.after_detail
+        if hook is not None:
+            hook()
+        logger.debug("fixture request GET %s?%s => %s %s", path, query, status, json.dumps(body))
+        return httpx.Response(status, json=body)
 
 
 @pytest.fixture
-def hub() -> Iterator[WireHub]:
-    hub = WireHub(
+def hub() -> WireHub:
+    return WireHub(
         page={
             "conversations": [
                 room(),
@@ -96,55 +121,13 @@ def hub() -> Iterator[WireHub]:
         },
     )
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            req = urlsplit(self.path)
-            if self.headers.get("Authorization") != "Bearer fixture-only":
-                status, body = 401, {"code": "unauthorized"}
-            elif req.query != f"tenant_id={TENANT}" and not (
-                req.path == LIST_PATH and req.query == f"tenant_id={TENANT}&limit=50"
-            ):
-                status, body = 403, {"code": "invalid_tenant"}
-            elif req.path == LIST_PATH:
-                status, body = 200, {"msg": "ok", "result": hub.page}
-            else:
-                if hub.before_detail is not None:
-                    hub.before_detail()
-                status = hub.detail_status
-                body = (
-                    {"msg": "ok", "result": hub.details}
-                    if status == 200
-                    else {"code": "conversation_not_found", "error": "fixture-private-name"}
-                )
-            hub.calls.append((self.command, req.path, req.query, status))
-            payload = json.dumps(body).encode("utf-8")
-            logger.debug("fixture wire GET %s => %s %s", self.path, status, payload.decode())
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            pass  # The structured calls above deliberately omit auth headers.
-
-    with HTTPServer(("127.0.0.1", 0), Handler) as http:
-        hub.base = f"http://127.0.0.1:{http.server_port}/v1"
-        thread = Thread(target=http.serve_forever)
-        thread.start()
-        try:
-            yield hub
-        finally:
-            http.shutdown()
-            thread.join()
-
 
 @pytest.fixture
 def runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: WireHub
 ) -> tuple[BridgeRuntime, FakeStore]:
-    # Override destination trust only for this exact synthetic TCP fixture; the
-    # production client, local account/tenant fence and bearer pin still run.
+    # Override the normal destination allowlist only for the synthetic fixture;
+    # the real client still checks exact enrollment, authority and bearer pin.
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda url: url == hub.base)
     (tmp_path / "config.yml").write_text("values:\n  team_bridge:\n    enabled: true\n")
     write_state(tmp_path, {"session_id": COS})
@@ -160,7 +143,13 @@ def runtime(
         owner, OwnerReceipt("bridge_consent_v1", "fixture"), cos_session_id=COS
     )
     auth = FakeStore(rows=[FakeRow(1, data={"access": "fixture-only", "account_id": OWNER})])
-    client = TeamBridgeClient(tmp_path, base_url=hub.base, credential_id=1, store=auth)
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url=hub.base,
+        credential_id=1,
+        store=auth,
+        transport=httpx.MockTransport(hub.answer),
+    )
     return BridgeRuntime(client, tmp_path, TENANT, owner, COS, admission="admitted"), auth
 
 
@@ -182,15 +171,26 @@ async def test_roster_through_actual_tool_uses_exact_hub_state_and_minimal_field
     assert tool.call_approval_tier is not None
     assert tool.call_approval_tier({"op": "channel_members"}) == "read"
     assert "channel_members" in tool.parameters["properties"]["op"]["enum"]
-    child = build_bridge_tool(
-        ToolContext(bridge_runtime=rt, session_id=COS, ancestor_session_ids=("sess_parent",))
+    child_ctx = ToolContext(
+        bridge_runtime=rt, session_id=COS, ancestor_session_ids=("sess_parent",)
     )
+    child = build_bridge_tool(child_ctx)
     assert child is not None
     expected = json.loads(json.dumps(tool.parameters))
     expected["properties"]["op"]["enum"].remove("channel_members")
     assert child.parameters == expected
 
     await list_rooms(rt)
+    # Schema visibility is not authority: a forwarded call with inherited
+    # runtime and CoS ID still must not consume the parent's certified page.
+    assert child.execute is not None
+    for receiver, call_ctx in ((child, child_ctx), (tool, child_ctx)):
+        assert receiver.execute is not None
+        refused = await receiver.execute(
+            "child-roster", {"op": "channel_members", "channel_id": ROOM}, None, None, call_ctx
+        )
+        assert refused.is_error and refused.details is not None
+        assert refused.details["code"] == "not_chief_of_staff"
     result = await tool.execute(
         "fixture-roster", {"op": "channel_members", "channel_id": ROOM}, None, None, ctx
     )
@@ -292,8 +292,8 @@ async def test_designation_is_rechecked_at_dispatch_and_after_response(runtime, 
     await list_rooms(rt)
     fresh = auth.ensure_oauth_fresh_or_raise
 
-    async def designate_elsewhere(credential_id: int, *, force: bool = False):
-        result = await fresh(credential_id, force=force)
+    async def designate_elsewhere(credential_id: int, *, force: bool = False, row_guard=None):
+        result = await fresh(credential_id, force=force, row_guard=row_guard)
         write_state(rt.config_dir, {"session_id": "sess_other_cos"})
         return result
 
@@ -303,11 +303,212 @@ async def test_designation_is_rechecked_at_dispatch_and_after_response(runtime, 
     assert len(hub.calls) == 1  # just the explicit list; no roster GET left the client
 
     write_state(rt.config_dir, {"session_id": COS})
-    hub.before_detail = lambda: write_state(rt.config_dir, {"session_id": "sess_other_cos"})
+    await list_rooms(rt)  # the observed authority loss invalidated the prior certification
+    hub.after_detail = lambda: write_state(rt.config_dir, {"session_id": "sess_other_cos"})
     refusal = await roster(rt)
     assert refusal["code"] == "not_chief_of_staff"
     assert "content" not in refusal
     assert hub.calls[-1] == ("GET", f"{LIST_PATH}/{ROOM}", f"tenant_id={TENANT}", 200)
+
+
+@pytest.mark.asyncio
+async def test_discovery_drops_the_page_on_designation_or_generation_drift(runtime, hub):
+    rt, auth = runtime
+    native = Store(rt.config_dir)
+    await list_rooms(rt)
+    hub.after_list = lambda: native.update_designated_session(rt.owner, "sess_other_cos")
+    outcome = await execute_bridge(rt, {"op": "channels"})
+    assert outcome["code"] == "not_designated" and "content" not in outcome
+    assert rt.roster_discovery is None
+    native.update_designated_session(rt.owner, COS)
+    before = (len(hub.calls), len(auth.refresh_calls))
+    assert (await roster(rt))["code"] == "conversation_not_found"
+    assert before == (len(hub.calls), len(auth.refresh_calls))
+
+    rebound = replace(rt.owner, enrollment_generation=2)
+    hub.after_list = lambda: native.commit_enrollment(
+        rebound, OwnerReceipt("bridge_consent_v1", "other-incarnation"), cos_session_id=COS
+    )
+    outcome = await execute_bridge(rt, {"op": "channels"})
+    assert outcome["code"] == "owner_changed" and "content" not in outcome
+    assert rt.roster_discovery is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_rechecks_authority_before_dispatch(runtime, hub, monkeypatch):
+    rt, auth = runtime
+    fresh = auth.ensure_oauth_fresh_or_raise
+
+    async def move_designation(credential_id: int, *, force: bool = False, row_guard=None):
+        result = await fresh(credential_id, force=force, row_guard=row_guard)
+        Store(rt.config_dir).update_designated_session(rt.owner, "sess_other_cos")
+        return result
+
+    monkeypatch.setattr(auth, "ensure_oauth_fresh_or_raise", move_designation)
+    outcome = await execute_bridge(rt, {"op": "channels"})
+    assert outcome["code"] == "not_designated"
+    assert hub.calls == [] and rt.roster_discovery is None
+
+
+@pytest.mark.asyncio
+async def test_allowed_but_unenrolled_destination_never_resolves_credentials(
+    runtime, hub, monkeypatch
+):
+    rt, auth = runtime
+    await list_rooms(rt)
+    before = (auth.resolve_requests, len(auth.refresh_calls), len(hub.calls))
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda url: True)
+    # Same origin alone is insufficient: the canonical API base includes its path.
+    for base in ("https://other.fixture.test/v1", "https://roster.fixture.test/v2"):
+        swapped = replace(
+            rt,
+            client=TeamBridgeClient(
+                rt.config_dir,
+                base_url=base,
+                credential_id=1,
+                store=auth,
+                transport=httpx.MockTransport(hub.answer),
+            ),
+        )
+        assert (await roster(swapped))["code"] == "bridge_destination_refused"
+        assert (await execute_bridge(swapped, {"op": "channels"}))[
+            "code"
+        ] == "bridge_destination_refused"
+        assert swapped.roster_discovery is None
+    assert before == (auth.resolve_requests, len(auth.refresh_calls), len(hub.calls))
+
+
+@pytest.mark.asyncio
+async def test_discovery_is_bound_to_exact_client_and_credential_row(runtime, hub):
+    rt, auth = runtime
+    await list_rooms(rt)
+    auth.rows.append(FakeRow(2, data={"access": "fixture-only", "account_id": OWNER}))
+    before = (auth.resolve_requests, len(auth.refresh_calls), len(hub.calls))
+    for pin, code in ((1, "conversation_not_found"), (2, "bridge_signin_required")):
+        swapped = replace(
+            rt,
+            client=TeamBridgeClient(
+                rt.config_dir,
+                base_url=hub.base,
+                credential_id=pin,
+                store=auth,
+                transport=httpx.MockTransport(hub.answer),
+            ),
+        )
+        assert (await roster(swapped))["code"] == "conversation_not_found"
+        if pin == 2:
+            assert (await execute_bridge(swapped, {"op": "channels"}))["code"] == code
+    assert before == (auth.resolve_requests, len(auth.refresh_calls), len(hub.calls))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["channels", "channel_members"])
+@pytest.mark.parametrize("drift", ["account", "designation", "consent"])
+async def test_401_revalidates_authority_and_exact_row_before_refresh(
+    runtime, hub, operation, drift
+):
+    rt, auth = runtime
+    if operation == "channel_members":
+        await list_rooms(rt)
+    before, fresh_before = len(hub.calls), len(auth.refresh_calls)
+
+    def change_binding() -> None:
+        if drift == "account":
+            auth.rows[0].data["account_id"] = "acc_wrong"
+        elif drift == "designation":
+            Store(rt.config_dir).update_designated_session(rt.owner, "sess_other_cos")
+        else:
+            with Store(rt.config_dir)._connect() as conn:
+                conn.execute("UPDATE enrollments SET consent_version=NULL, consent_ref=NULL")
+
+    hub.list_status = hub.detail_status = 401
+    hub.after_list = hub.after_detail = change_binding
+    outcome = await execute_bridge(rt, {"op": operation, "channel_id": ROOM})
+    assert (
+        outcome["code"]
+        == {
+            "account": "account_mismatch",
+            "designation": "not_designated",
+            "consent": "consent_revoked",
+        }[drift]
+    )
+    assert "content" not in outcome
+    assert [request[-1] for request in hub.calls[before:]] == [401]
+    assert auth.refresh_calls[fresh_before:] == [(1, False)]  # no forced refresh
+
+
+@pytest.mark.asyncio
+async def test_wrong_expired_account_is_refused_before_store_freshness(runtime, hub, monkeypatch):
+    rt, auth = runtime
+    await list_rooms(rt)
+    before = len(hub.calls)
+    auth.rows[0].data.update(account_id="acc_wrong", expires=0, refresh="fixture-grant")
+
+    async def unexpected_freshness(*args, **kwargs):
+        pytest.fail("another account's exact row must not enter freshness")
+
+    monkeypatch.setattr(auth, "ensure_oauth_fresh_or_raise", unexpected_freshness)
+    assert (await roster(rt))["code"] == "account_mismatch"
+    assert (await execute_bridge(rt, {"op": "channels"}))["code"] == "account_mismatch"
+    assert len(hub.calls) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drift", ["account", "designation", None])
+async def test_roster_refresh_rechecks_the_real_store_snapshot_under_lock(
+    runtime, hub, monkeypatch, drift
+):
+    rt, _ = runtime
+    auth = AuthStore(db_path=Path(rt.config_dir) / "fixture-auth.db")
+    row = auth.upsert_credential(
+        "radient",
+        {"access": "fixture-only", "refresh": "synthetic", "expires": 0, "account_id": OWNER},
+    )
+    assert row.id == rt.owner.credential_id
+    rt.client = TeamBridgeClient(
+        rt.config_dir,
+        base_url=hub.base,
+        credential_id=row.id,
+        store=auth,
+        transport=httpx.MockTransport(hub.answer),
+    )
+    requested_refresh = asyncio.Event()
+    original = auth._refresh_lock_for
+    calls: list[str] = []
+
+    def observed_lock(credential_id: int):
+        requested_refresh.set()
+        return original(credential_id)
+
+    async def synthetic_refresh(creds):
+        calls.append(creds["account_id"])
+        return {"access": "fixture-only", "expires": int(time.time() * 1000) + 3600_000}
+
+    monkeypatch.setattr(auth, "_refresh_lock_for", observed_lock)
+    monkeypatch.setattr(auth, "_refresh_fn", lambda provider: synthetic_refresh)
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            async with original(row.id):
+                listing = tasks.create_task(execute_bridge(rt, {"op": "channels"}))
+                await asyncio.wait_for(requested_refresh.wait(), timeout=5)
+                if drift == "account":
+                    assert auth._update_payload(
+                        row.id, lambda data: data.update(account_id="acc_wrong") is None
+                    )
+                elif drift == "designation":
+                    Store(rt.config_dir).update_designated_session(rt.owner, "sess_other_cos")
+        outcome = listing.result()
+        if drift is None:
+            assert calls == [OWNER]
+            assert outcome["ok"] and rt.roster_discovery is not None
+            assert [call[-1] for call in hub.calls] == [200]
+        else:
+            assert outcome["code"] == (
+                "account_mismatch" if drift == "account" else "not_designated"
+            )
+            assert calls == [] and hub.calls == [] and rt.roster_discovery is None
+    finally:
+        auth.close()
 
 
 @pytest.mark.asyncio

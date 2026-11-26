@@ -203,6 +203,8 @@ def test_shipped_wire_namespaces_exist() -> None:
         # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger
         # hashes do not move. Carried by all seven locales.
         "wire.tool_rows.bridge.skipped",
+        # The private roster row has complete phrases and its own audit hash.
+        "wire.tool_rows.bridge.roster",
         # The sessions tool's own operator-visible stop receipts (agent review
         # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
         # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY

@@ -64,7 +64,7 @@ def _owner() -> OwnerSnapshot:
         account_id="acc_1",
         tenant_id=TENANT,
         endpoint_id="bep_1",
-        canonical_base_url="https://hub.example",
+        canonical_base_url="https://hub.example/v1",
         enrollment_generation=1,
     )
 
@@ -87,6 +87,7 @@ def _runtime(tmp_path: Path, handler: Any = _hub) -> BridgeRuntime:
     client = TeamBridgeClient(
         tmp_path,
         base_url="https://hub.example/v1",
+        credential_id=1,
         store=FakeStore(),
         transport=httpx.MockTransport(handler),
     )
@@ -102,9 +103,10 @@ def _runtime(tmp_path: Path, handler: Any = _hub) -> BridgeRuntime:
 async def _classify(runtime: BridgeRuntime, args: dict[str, Any]) -> tuple[Message, bool, bool]:
     """Run one call through the tool; return the live message and its two verdicts."""
 
-    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    context = ToolContext(bridge_runtime=runtime, session_id=runtime.session_id)
+    tool = build_bridge_tool(context)
     assert tool is not None
-    result = await tool.execute("call_1", args, None, None, ToolContext(bridge_runtime=runtime))
+    result = await tool.execute("call_1", args, None, None, context)
     message = Message.tool_result(result)
     payload = message.model_dump(mode="json", exclude_none=True)
     payload["kind"] = "message"
@@ -135,6 +137,9 @@ async def test_a_real_call_of_each_op_is_classified_as_expected(tmp_path: Path, 
     # exercises confirmed working→done rather than a locally held claim.
     ack_hub = StubHub()
     runtime = _runtime(tmp_path, ack_hub if op == "ack" else _hub)
+    if op == "channel_members":
+        discovery, _, _ = await _classify(runtime, _args("channels"))
+        assert (discovery.provider_payload or {})["details"]["ok"] is True
     if op == "ack":
         working, _, _ = await _classify(
             runtime, {"op": "ack", "message_id": "bmsg_1", "state": "working"}
@@ -147,6 +152,10 @@ async def test_a_real_call_of_each_op_is_classified_as_expected(tmp_path: Path, 
     # Not vacuous: the op ran to its success shape, it was not refused before it started.
     assert details.get("ok") is True, (op, details)
     assert live is durable is OP_LATCHES[op], (op, details)
+    if op == "channel_members":
+        # `directory` uses a top-level members array that is explicitly
+        # exempt. A private roster must never adopt that permissive shape.
+        assert "members" not in details and '"state": "active"' in details["content"]
     if op == "ack":
         assert details["hub_ack"] == "confirmed"
         assert [post["state"] for post in ack_hub.posts] == ["working", "done"]

@@ -27,6 +27,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from local_operator.i18n.keys import wire_tool_rows_bridge as _k
+from local_operator.i18n.keys import wire_tool_rows_bridge_roster as _kr
 from local_operator.i18n.keys import wire_tool_rows_bridge_skipped as _ks
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr
@@ -38,6 +39,8 @@ _t = tr("wire.tool_rows.bridge")
 #: hash and un-ships every audited locale until all 85 keys are re-audited. A
 #: child carries only the three new strings, so its audit is three strings.
 _ts = tr("wire.tool_rows.bridge.skipped")
+# Same audit boundary as skipped; a roster does not invalidate existing row copy.
+_tr = tr("wire.tool_rows.bridge.roster")
 
 #: ``action`` token → its (settled, running, failed) verb keys. The composite
 #: actions spell a dash on the wire (``react-remove``) and an underscore in the
@@ -160,7 +163,7 @@ def _count_text(action: str, count: object) -> str:
         return ""
     if action in ("channel_history", "channel_thread", "shared_history"):
         return _t(_k.count_messages(count=count))
-    if action == "directory":
+    if action in ("directory", "channel_members"):
         return _t(_k.count_members(count=count))
     if action in ("channels", "shared_conversations"):
         return _t(_k.count_conversations(count=count))
@@ -233,6 +236,15 @@ def render_bridge_row(
     action = str(row.get("action") or "")
     outcome = row.get("outcome")
     in_thread = in_thread and action == "channel_post"
+    if action == "channel_members":
+        # These are complete phrases across locales. A roster row never prints
+        # its room or member identities, even if old replay details contain them.
+        if running:
+            return _tr(_kr.verb_running()), "", None
+        word = outcome_word(row)
+        if outcome in _FAILED_OUTCOMES or outcome == "skipped" or failed:
+            return _tr(_kr.verb_failed()), "", word
+        return _tr(_kr.verb_settled()), _count_text(action, row.get("count")), word
     keys = _VERBS.get(action)
     known = keys is not None
     settled, live, failed_verb = keys if keys is not None else _UNKNOWN_VERBS

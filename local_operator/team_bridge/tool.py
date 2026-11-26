@@ -213,6 +213,7 @@ from .client import (
     ATTACHMENT_MAX_COUNT,
     BridgeRefusal,
     BridgeSignInRequired,
+    RosterReadBinding,
     TeamBridgeClient,
 )
 from .emoji_names import ACCEPTED_FORMS_HINT, normalize_reaction_emoji
@@ -234,6 +235,7 @@ from .types import (
     SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
     NameResolution,
+    OwnerSnapshot,
     RecipientNameRefused,
     decode_recipient_argument,
     is_account_id,
@@ -488,6 +490,16 @@ _INLINE_DATA_KEY = "_content_without_inline_data"
 CLAIM_TTL_S = 3600.0
 
 
+@dataclass(frozen=True)
+class _RosterDiscovery:
+    """Only the type of each ordinary room, bound to the client that listed it."""
+
+    client: TeamBridgeClient
+    owner: OwnerSnapshot
+    session_id: str
+    room_kinds: dict[str, str]
+
+
 @dataclass
 class BridgeRuntime:
     """Everything the tool needs, constructed by the session that owns it.
@@ -516,7 +528,7 @@ class BridgeRuntime:
     # Only IDs/kinds from the last explicit, owner-pinned `channels` page. This
     # proves immutable room type before a detail GET, which can write on a
     # built-in ID. It never proves current membership or retains any roster.
-    roster_room_kinds: dict[str, str] = field(default_factory=dict)
+    roster_discovery: _RosterDiscovery | None = None
     # Run-local dispatch evidence, never inferred from persisted conversation
     # text. Remains true after owed cards clear; the session resets at boundaries.
     bridge_input_presented: bool = False
@@ -2158,35 +2170,55 @@ def _roster_not_found() -> dict[str, Any]:
     # Do not distinguish an absent room, a private non-member, a foreign id or
     # an out-of-scope room. No guessing built-in ids (they use the same grammar).
     return _error(
-        "room roster unavailable; use the room id from the latest channels page",
+        "room roster unavailable for this id; use an open group or channel "
+        "you can still read from the latest channels page",
         code="conversation_not_found",
     )
 
 
-async def _channel_members(
-    runtime: BridgeRuntime, conversation_id: str, kind: str
-) -> dict[str, Any]:
-    account_id = runtime.owner.account_id
+class _RosterReadRefused(Exception):
+    def __init__(self, outcome: dict[str, Any]) -> None:
+        self.outcome = outcome
 
-    class DispatchRefused(Exception):
-        def __init__(self, outcome: dict[str, Any]) -> None:
-            self.outcome = outcome
 
-    def pre_http_guard() -> None:
-        # The initial fence protects credential resolution. Its conclusion can
-        # go stale while OAuth is awaited; recheck before each physical GET.
+def _roster_binding(runtime: BridgeRuntime, client: TeamBridgeClient) -> RosterReadBinding:
+    owner, session = runtime.owner, runtime.session_id
+
+    def check_authority() -> None:
+        # The existing strict fence checks persisted consent, generation and
+        # designation. Also refuse swapping the runtime under an in-flight GET;
+        # a valid result for a different enrollment cannot certify this one.
+        if runtime.client is not client or runtime.owner != owner or runtime.session_id != session:
+            runtime.roster_discovery = None
+            raise _RosterReadRefused(
+                _error("the room roster binding changed", code="owner_changed")
+            )
         refused = _shared_read_fence(runtime)
         if refused is not None:
-            raise DispatchRefused(refused)
+            runtime.roster_discovery = None
+            raise _RosterReadRefused(refused)
 
+    check_authority()
+    client.require_roster_destination(owner)
+    return RosterReadBinding(owner=owner, check_authority=check_authority)
+
+
+def _roster_destination_refused() -> dict[str, Any]:
+    # Do not echo either base. In particular a refused URL may contain secrets.
+    return _error("check your Team Bridge hub configuration", code="bridge_destination_refused")
+
+
+async def _channel_members(
+    client: TeamBridgeClient, binding: RosterReadBinding, conversation_id: str, kind: str
+) -> dict[str, Any]:
+    account_id = binding.owner.account_id
+    tenant_id = binding.owner.tenant_id
     try:
-        view = await runtime.client.conversation(
-            conversation_id,
-            tenant_id=runtime.tenant_id,
-            expected_account_id=account_id,
-            pre_http_guard=pre_http_guard,
+        view = await client.conversation(
+            conversation_id, tenant_id=tenant_id, roster_binding=binding
         )
-    except DispatchRefused as failure:
+        binding.check_authority()
+    except _RosterReadRefused as failure:
         return failure.outcome
     except BridgeSignInRequired:
         return _error("sign in to read a room roster", code="bridge_signin_required")
@@ -2200,18 +2232,18 @@ async def _channel_members(
             return _error(
                 "sign in as the enrolled account to read a room roster", code=failure.code
             )
-        return _error("could not read the room roster", code="list_failed")
-    # An in-flight GET cannot be retracted; a designation change still keeps
-    # its answer from reaching the former chief of staff's transcript.
-    refused = _shared_read_fence(runtime)
-    if refused is not None:
-        return refused
+        if failure.code == "bridge_destination_refused":
+            return _roster_destination_refused()
+        return _error(
+            "could not read the room roster; try again or check your Team Bridge connection",
+            code="list_failed",
+        )
     # The kind/ID/tenant receipt prevents built-in lookup side effects. It does
     # NOT authorize disclosure: only this fresh human Get and its active caller
     # row do. No raw conversation data (labels can even be emails) reaches the model.
     if (
         view.get("id") != conversation_id
-        or view.get("tenant_id") != runtime.tenant_id
+        or view.get("tenant_id") != tenant_id
         or view.get("kind") != kind
         or "builtin" in view
         or view.get("status") != "open"
@@ -3512,10 +3544,25 @@ async def execute_bridge(
     # a colleague's task session can reach teammates without ever acquiring the
     # owner's inbox or their shared conversations.
     roster_room_kind = ""
+    roster_binding = None
+    roster_client = runtime.client
+    capture_roster_scope = False
+    if op == "channels":
+        from local_operator.aida.state import is_aida_session
+
+        # A failed replacement is not evidence for the previous page, even
+        # when the failure is local and happens before credential resolution.
+        runtime.roster_discovery = None
+        capture_roster_scope = is_aida_session(runtime.config_dir, runtime.session_id)
+    if op == _CHANNEL_MEMBERS_OP or capture_roster_scope:
+        try:
+            roster_binding = _roster_binding(runtime, roster_client)
+        except _RosterReadRefused as failure:
+            return failure.outcome
+        except BridgeRefusal:
+            runtime.roster_discovery = None
+            return _roster_destination_refused()
     if op == _CHANNEL_MEMBERS_OP:
-        fence = _shared_read_fence(runtime)
-        if fence is not None:
-            return fence
         conversation_id = args.get("channel_id")
         if not isinstance(conversation_id, str) or not _CONVERSATION_ID.fullmatch(conversation_id):
             return _error(
@@ -3524,10 +3571,17 @@ async def execute_bridge(
         # Never run List as a preflight: it may provision/reconcile all built-ins.
         # Without classification already learned by `channels`, stop before even
         # scheduling admission I/O or resolving credentials for Get.
-        roster_room_kind = runtime.roster_room_kinds.get(conversation_id, "")
+        page = runtime.roster_discovery
+        if (
+            page is not None
+            and page.client is roster_client
+            and page.owner == runtime.owner
+            and page.session_id == runtime.session_id
+        ):
+            roster_room_kind = page.room_kinds.get(conversation_id, "")
         if not roster_room_kind:
             return _roster_not_found()
-    else:
+    elif roster_binding is None:
         fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
         if fence is not None:
             return _error(fence["error"], code=fence["code"])
@@ -3612,7 +3666,10 @@ async def execute_bridge(
     is_read = op in READ_OPS
     refusal = admission_refusal(runtime, is_read=is_read)
     if refusal is not None:
-        admit_soon(runtime)
+        # Do not let a roster read initiate a status call under the ordinary
+        # (outbound-only) authority. Normal boundaries still drive admission.
+        if roster_binding is None:
+            admit_soon(runtime)
         return _error(refusal["error"], code=refusal["code"])
 
     if named_recipient:
@@ -3862,37 +3919,55 @@ async def execute_bridge(
         }
 
     if params.op == _CHANNEL_MEMBERS_OP:
-        return await _channel_members(runtime, params.channel_id, roster_room_kind)
+        assert roster_binding is not None  # admitted only by the strict read above
+        return await _channel_members(
+            roster_client, roster_binding, params.channel_id, roster_room_kind
+        )
 
     if params.op == "channels":
-        from local_operator.aida.state import is_aida_session
-
-        capture_roster_scope = is_aida_session(runtime.config_dir, runtime.session_id)
-        # A replacement page is not evidence until it has arrived under the
-        # same account pin. Only CoS pages qualify; other lists stay unchanged.
-        runtime.roster_room_kinds.clear()
         if not 1 <= int(params.limit) <= CONVERSATION_PAGE_MAX:
             return _error(f"channels limit must be 1..{CONVERSATION_PAGE_MAX}")
         try:
             # No ``status``: the server's default is ``open``, so archived
             # conversations are intentionally invisible to the agent (module
             # docstring, "channels", for why it is not a published option).
-            result = await runtime.client.conversations(
-                tenant_id=runtime.tenant_id,
-                limit=int(params.limit),
-                cursor=params.cursor or None,
-                **(
-                    {"expected_account_id": runtime.owner.account_id}
-                    if capture_roster_scope
-                    else {}
-                ),
-            )
+            if roster_binding is None:
+                result = await roster_client.conversations(
+                    tenant_id=runtime.tenant_id,
+                    limit=int(params.limit),
+                    cursor=params.cursor or None,
+                )
+            else:
+                result = await roster_client.conversations(
+                    tenant_id=roster_binding.owner.tenant_id,
+                    limit=int(params.limit),
+                    cursor=params.cursor or None,
+                    roster_binding=roster_binding,
+                )
+                # Neither return the page nor certify any IDs unless the same
+                # generation/designation still owns it after the await.
+                roster_binding.check_authority()
+                runtime.roster_discovery = _RosterDiscovery(
+                    roster_client,
+                    roster_binding.owner,
+                    runtime.session_id,
+                    _roster_room_kinds(result, roster_binding.owner.tenant_id),
+                )
+        except _RosterReadRefused as failure:
+            return failure.outcome
         except Exception as failure:
+            if roster_binding is not None:
+                if isinstance(failure, BridgeSignInRequired):
+                    return _error("sign in to list conversations", code="bridge_signin_required")
+                if isinstance(failure, BridgeRefusal):
+                    if failure.code == "bridge_destination_refused":
+                        return _roster_destination_refused()
+                    if failure.code == ACCOUNT_MISMATCH_CODE:
+                        return _error("sign in as the enrolled account", code=ACCOUNT_MISMATCH_CODE)
+                return _error("could not list conversations", code="list_failed")
             return _error(
                 f"could not list conversations: {_failure_text(failure)}", code="list_failed"
             )
-        if capture_roster_scope:
-            runtime.roster_room_kinds = _roster_room_kinds(result, runtime.tenant_id)
         # Pass-through, deliberately: ``discoverable``/``member``/``member_count``
         # are the server's answer for a caller who may not be a human member, and
         # re-deriving them here would be a second, wrong authorization opinion.
@@ -5286,6 +5361,18 @@ async def _history_images(
     return out
 
 
+def _roster_tool_context(context: ToolContext, runtime: BridgeRuntime) -> bool:
+    """An inherited CoS runtime is not proof that this is the CoS tool audience."""
+    from local_operator.aida.state import is_aida_session
+
+    return bool(
+        not context.ancestor_session_ids
+        and context.session_id
+        and context.session_id == getattr(runtime, "session_id", None)
+        and is_aida_session(runtime.config_dir, context.session_id)
+    )
+
+
 def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     """createIf: absent without a bridge runtime (unsigned / not designated).
 
@@ -5295,6 +5382,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
     runtime = getattr(context, "bridge_runtime", None)
     if runtime is None:
         return None
+    roster_audience = _roster_tool_context(context, runtime)
 
     async def _execute(
         tool_call_id: str,
@@ -5303,7 +5391,15 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         on_update: Any,
         context: ToolContext,
     ) -> ToolResult:
-        if str(args.get("op") or "") in COMMUNITY_OPS:
+        op = str(args.get("op") or "")
+        if op == _CHANNEL_MEMBERS_OP and (
+            not roster_audience or not _roster_tool_context(context, runtime)
+        ):
+            outcome = _error(
+                "room rosters belong only to the designated chief of staff",
+                code="not_chief_of_staff",
+            )
+        elif op in COMMUNITY_OPS:
             # The chief's community ops (RFC v2.4 §5.9, ``community/agent_ops.py``):
             # routed before ``execute_bridge`` because they are not
             # ``BridgeToolParams`` ops — they exist only while the community is
@@ -5429,18 +5525,12 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             is_error=True,
         )
 
-    from local_operator.aida.state import is_aida_session
-
     schema = BridgeToolParams.model_json_schema()
-    # The enum word is billed only where usable, not in the child schema. As
-    # with other bridge ops, advertising an op is not the call-time fence.
-    if (
-        context.ancestor_session_ids
-        or not context.session_id
-        or context.session_id != getattr(runtime, "session_id", None)
-        or not is_aida_session(runtime.config_dir, context.session_id)
-    ):
-        schema["properties"]["op"]["enum"].remove(_CHANNEL_MEMBERS_OP)
+    # The enum word is billed only where usable, not in the child schema. The
+    # wrapper still checks its audience; execute_bridge checks durable authority.
+    if not roster_audience:
+        op_schema = schema["properties"]["op"]
+        op_schema["enum"] = [op for op in op_schema["enum"] if op != _CHANNEL_MEMBERS_OP]
     return AgentTool(
         name="bridge",
         label="Team Bridge",

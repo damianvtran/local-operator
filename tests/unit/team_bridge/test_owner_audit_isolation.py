@@ -182,6 +182,7 @@ OP_ARGS: dict[str, dict[str, Any]] = {
     "channel_create": {"kind": "channel", "name": "audit-probe", "visibility": "tenant"},
     "channel_post": {"channel_id": CID, "body": "hello"},
     "channel_history": {"channel_id": CID, "limit": 5},
+    "channel_members": {"channel_id": CID},
     "react": {"channel_id": CID, "message_id": ROOT, "emoji": "👍"},
     "channel_thread": {"channel_id": CID, "thread_root_id": ROOT},
     "directory": {"limit": 5},
@@ -210,6 +211,14 @@ def _hub_answer(request: httpx.Request) -> httpx.Response:
     """Plausible hub answers so each op runs to completion where it can."""
 
     path = request.url.path
+    room = {
+        "id": CID,
+        "tenant_id": TENANT,
+        "kind": "channel",
+        "status": "open",
+        "discoverable": False,
+        "member": True,
+    }
     if path.endswith("/directory"):
         result: Any = {
             "members": [
@@ -227,6 +236,15 @@ def _hub_answer(request: httpx.Request) -> httpx.Response:
         result = {"root": {"id": ROOT, "seq": 1}, "replies": [], "has_more": False}
     elif path.endswith("/messages") and request.method == "GET":
         result = {"messages": [], "has_more": False}
+    elif path == "/v1/messaging/conversations" and request.method == "GET":
+        result = {"conversations": [room], "has_more": False}
+    elif path == f"/v1/messaging/conversations/{CID}" and request.method == "GET":
+        result = {
+            **room,
+            "members": [
+                {"kind": "human", "account_id": "acc_1", "role": "owner", "state": "active"}
+            ],
+        }
     elif path.endswith("/conversations") and request.method == "GET":
         result = {"conversations": [], "has_more": False}
     elif path.endswith("/conversations"):
@@ -272,6 +290,7 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
     client = TrippedClient(
         tmp_path,
         base_url="https://hub.example/v1",
+        credential_id=1,
         store=FakeStore(),
         transport=httpx.MockTransport(handler),
     )
@@ -284,7 +303,7 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
             account_id="acc_1",
             tenant_id=TENANT,
             endpoint_id="bep_1",
-            canonical_base_url="https://hub.example",
+            canonical_base_url=client.base_url,
             enrollment_generation=1,
         ),
         session_id="sess_1",
@@ -292,7 +311,14 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None
 
-    new_ops = {"directory", "dm", "shared_conversations", "shared_history"}
+    new_ops = {
+        "channels",
+        "channel_members",
+        "directory",
+        "dm",
+        "shared_conversations",
+        "shared_history",
+    }
     for op, args in OP_ARGS.items():
         # New ops must complete, not merely avoid the audit by failing before
         # dispatch. Keep the legacy pair-lane exception policy unchanged.
@@ -301,6 +327,11 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
             result = await execute_bridge(runtime, {"op": op, **args})
             assert result["ok"] is True, (op, result)
             assert len(requests) > before, op
+            if op == "channel_members":
+                assert [(r.method, r.url.path) for r in requests[before:]] == [
+                    ("GET", f"/v1/messaging/conversations/{CID}")
+                ]
+                assert json.loads(result["content"])["members"][0]["account_id"] == "acc_1"
             continue
         try:
             await execute_bridge(runtime, {"op": op, **args})

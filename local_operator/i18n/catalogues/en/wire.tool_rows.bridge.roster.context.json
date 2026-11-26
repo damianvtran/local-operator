@@ -1,0 +1,17 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": {
+    "role": "Collapsed Team Bridge roster tool row (TUI and phone transcript)",
+    "tone": "plain, neutral refusal",
+    "note": "A complete phrase for a failed or refused read-only attempt to list members of an existing group or channel. Do not name or imply access to a specific room. No noun or count follows it; keep it short. No ICU arguments."
+  },
+  "wire.tool_rows.bridge.roster.verb.running": {
+    "role": "Collapsed Team Bridge roster tool row (TUI and phone transcript)",
+    "tone": "plain, in progress",
+    "note": "A complete phrase while a read-only request for the member list of an existing group or channel is pending. No noun or count follows it; keep it short. No ICU arguments."
+  },
+  "wire.tool_rows.bridge.roster.verb.settled": {
+    "role": "Collapsed Team Bridge roster tool row (TUI and phone transcript)",
+    "tone": "plain, completed action",
+    "note": "A complete phrase after a successful read of members of an existing group or channel. The room is unnamed. A separately localized count, for example (3 members), may follow. Keep it short. No ICU arguments."
+  }
+}

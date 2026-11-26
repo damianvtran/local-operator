@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.tool_rows.bridge.roster",
+  "history_sha256": "165706023d9ac3901bbcdcfe66dc2f0e95cf6cbd327722a9e70fbf9007616eb9",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.tool_rows.bridge.roster",
+      "source_sha256": "8346dd5abebdb22060bed56132daf21e69d369d21ddfb8af7be0bb1fca2f828f",
+      "translator": {
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-26",
+        "fallback_used": false,
+        "agent": "i18n-translator",
+        "session": "988767da72e9",
+        "job": "3c23584d268e"
+      },
+      "auditor": {
+        "model": "openai/gpt-6.2-sol",
+        "date": "2026-11-26",
+        "fallback_used": false,
+        "agent": "i18n-auditor",
+        "session": "e725d7c0341a",
+        "job": "02d426fe4b6a",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent text audit, round 2 (terminal). Umbrella conversation wording covers groups and channels; no private label or identifier. No ICU arguments, placeholders, or manual bidi controls. This receipt is text-only, not native rendering proof. Context sha256 ea5db0932b5bf4cb05d89c4b59c0ac9b483659d753eda94d52ba05a4e70e34cb; locale sha256 2ae604f1ffa8dac00c2185b846624b6035b38c89905697bd9a98efd4c3d60e6d."
+    }
+  ]
+}

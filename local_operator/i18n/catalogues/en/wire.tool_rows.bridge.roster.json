@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": "Couldn't read room members",
+  "wire.tool_rows.bridge.roster.verb.running": "Reading room members",
+  "wire.tool_rows.bridge.roster.verb.settled": "Read room members"
+}

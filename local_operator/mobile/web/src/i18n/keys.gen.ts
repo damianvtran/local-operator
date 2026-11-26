@@ -2579,6 +2579,9 @@ export type MessageParams = {
   "wire.tool_rows.bridge.verb_settled.shared_history": undefined;
   "wire.tool_rows.bridge.verb_settled.take_up": undefined;
   "wire.tool_rows.bridge.verb_settled.unknown": undefined;
+  "wire.tool_rows.bridge.roster.verb.failed": undefined;
+  "wire.tool_rows.bridge.roster.verb.running": undefined;
+  "wire.tool_rows.bridge.roster.verb.settled": undefined;
   "wire.tool_rows.bridge.skipped.expanded": undefined;
   "wire.tool_rows.bridge.skipped.verb.channel_post": undefined;
   "wire.tool_rows.bridge.skipped.verb.dm": undefined;

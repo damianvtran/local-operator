@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": "Не удалось получить список участников разговора",
+  "wire.tool_rows.bridge.roster.verb.running": "Получает список участников разговора",
+  "wire.tool_rows.bridge.roster.verb.settled": "Получил список участников разговора"
+}

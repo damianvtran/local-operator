@@ -818,6 +818,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 ),
             ),
             ToolDocOp(
+                op="channel_members",
+                gated=True,
+                blurb=(
+                    "Designated chief of staff only: read active members and pending invitations "
+                    "in an open group/channel you belong to. Pass the `id` from the latest "
+                    "`channels` page as `channel_id`; use `directory` to look up names."
+                ),
+            ),
+            ToolDocOp(
                 op="channel_create",
                 blurb=(
                     "Open a group or channel as this agent; the creator agent "

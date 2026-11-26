@@ -1312,6 +1312,22 @@ def test_the_bridge_doc_explains_the_withheld_body_fields(
         assert field in doc, f"the bridge doc does not explain {field}"
 
 
+def test_the_roster_note_renders_only_when_the_live_enum_supports_it(
+    default_surface: list[AgentTool],
+) -> None:
+    import copy
+
+    bridge = next(tool for tool in default_surface if tool.name == "bridge")
+    hidden = render_tool_doc(bridge)
+    # A gated note must take its capability proof from the live enum only.
+    params = copy.deepcopy(bridge.parameters)
+    params["properties"]["op"]["enum"].append("channel_members")
+    allowed = render_tool_doc(bridge.model_copy(update={"parameters": params}))
+    assert "channel_members" not in hidden
+    assert "pending invitations" in allowed and "latest `channels` page" in allowed
+    assert "`channel_id`" in allowed and "`directory` to look up names" in allowed
+
+
 def test_the_bridge_doc_distinguishes_file_serving_from_read_admission(
     default_surface: list[AgentTool],
 ) -> None:

@@ -164,12 +164,13 @@ input, a post needs `in_reply_to_message_id` or a deliberate `new_post: true`.
 
 ## Read a room roster
 
-In the designated chief-of-staff session, run `bridge(op="channels")` and use
-an exact `channel_id` from that page with `bridge(op="channel_members")`. This
-reads the current active and pending members of an open group or channel where
-the bound account is an active human member. DMs, built-ins, and rooms not on
-the latest page are not available through this operation. It cannot change
-membership.
+In the designated chief-of-staff session, run `bridge(op="channels")`. Copy
+the room's `id` from that page and pass it as `channel_id` to
+`bridge(op="channel_members")`. The roster shows active members and pending
+invitations for an open group or channel where your account is an active human
+member. Use `directory` to look up names for returned account or endpoint IDs
+where available. DMs, built-ins, and rooms not on the latest page are excluded.
+This operation cannot change membership.
 
 ## Finding a room: by name, never by creating one
 

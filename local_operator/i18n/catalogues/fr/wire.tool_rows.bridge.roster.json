@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": "Impossible de récupérer la liste des membres de la conversation",
+  "wire.tool_rows.bridge.roster.verb.running": "Récupération de la liste des membres de la conversation",
+  "wire.tool_rows.bridge.roster.verb.settled": "Liste des membres de la conversation récupérée"
+}

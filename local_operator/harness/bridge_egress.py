@@ -241,7 +241,8 @@ def bridge_result_is_inbound(provider_payload: Any) -> bool:
     * a directory listing: ``ok`` true and a ``members`` list.
 
     Everything else (``take_up``, history and thread pages, ``react``,
-    ``channels``, the shared reads, a missing, empty or unrecognised ``details``)
+    ``channels``, private room rosters, the shared reads, a missing, empty or
+    unrecognised ``details``)
     returns ``True``: a new op or a changed shape fails closed. The receipt,
     ``members`` and ``skipped`` shapes are therefore load-bearing; an op that
     returns inbound text must never reuse them (``team_bridge/tool.py``

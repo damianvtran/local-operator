@@ -85,7 +85,11 @@ from local_operator.env import (
     DEFAULT_RADIENT_API_BASE_URL,
     resolve_radient_api_base_url,
 )
-from local_operator.providers.auth_store import AuthStoreError, OAuthAccess
+from local_operator.providers.auth_store import (
+    AuthStoreError,
+    OAuthAccess,
+    StoredCredential,
+)
 from local_operator.providers.radient_credentials import (
     org_destination_refused_sentence,
     org_oauth_destination_allowed,
@@ -120,6 +124,7 @@ from local_operator.team_bridge.settings import (
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    OwnerSnapshot,
     ScreeningObservation,
     reply_window_params,
     validate_member_mention,
@@ -2107,6 +2112,18 @@ DIRECTORY_CACHE_MAX_ENTRIES = 64
 _DIRECTORY_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
 
+@dataclass(frozen=True)
+class RosterReadBinding:
+    """The enrollment and live local authority for a roster-certified human GET.
+
+    Only roster detail and the CoS discovery that certifies it use this binding.
+    Ordinary conversations keep their existing account and refresh semantics.
+    """
+
+    owner: OwnerSnapshot
+    check_authority: Callable[[], None]
+
+
 class TeamBridgeClient:
     """Authenticated HTTPS for the hub's ``/v1/messaging`` surface.
 
@@ -2304,8 +2321,66 @@ class TeamBridgeClient:
                 return str(section["text"])
         return ""
 
+    def require_roster_destination(self, owner: OwnerSnapshot) -> None:
+        # An allowed alternate hub is not proof of enrollment there. Compare
+        # the complete API base used by _dispatch (including its path), not an
+        # env value or just the host. Enrollment records this same client URL.
+        if self._base_url != owner.canonical_base_url:
+            raise BridgeRefusal(
+                "bridge_destination_refused",
+                "the configured Team Bridge hub does not match this enrollment",
+            )
+        self._require_destination()
+
+    @staticmethod
+    def _check_roster_row(row: StoredCredential, owner: OwnerSnapshot) -> None:
+        if (
+            row.id != owner.credential_id
+            or row.provider != "radient"
+            or row.credential_type != "oauth"
+            or row.disabled_cause is not None
+        ):
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        if not isinstance(row.data, Mapping) or row.data.get("account_id") != owner.account_id:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+
+    def _roster_pinned_row(self, binding: RosterReadBinding) -> StoredCredential:
+        binding.check_authority()
+        self.require_roster_destination(binding.owner)
+        # No sole-row fallback: even a different row for the same account is
+        # not the login that committed this enrollment.
+        if self._pinned_credential_id != binding.owner.credential_id:
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        row = self._pinned_row()
+        if row is None:
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        self._check_roster_row(row, binding.owner)
+        return row
+
+    async def _fresh_roster_access(
+        self, binding: RosterReadBinding, *, force: bool = False
+    ) -> OAuthAccess:
+        row = self._roster_pinned_row(binding)
+
+        def check_refresh_row(current: StoredCredential) -> None:
+            binding.check_authority()
+            self.require_roster_destination(binding.owner)
+            self._check_roster_row(current, binding.owner)
+
+        return await self._fresh_pinned_access(
+            row.id,
+            expected_account_id=binding.owner.account_id,
+            force=force,
+            row_guard=check_refresh_row,
+        )
+
     async def _fresh_pinned_access(
-        self, credential_id: int, *, expected_account_id: str, force: bool = False
+        self,
+        credential_id: int,
+        *,
+        expected_account_id: str,
+        force: bool = False,
+        row_guard: Callable[[StoredCredential], None] | None = None,
     ) -> OAuthAccess:
         """Refresh-and-read the EXACT pinned row; any failure is terminal.
 
@@ -2331,7 +2406,9 @@ class TeamBridgeClient:
 
         store = self._auth_store()
         try:
-            data = await store.ensure_oauth_fresh_or_raise(credential_id, force=force)
+            data = await store.ensure_oauth_fresh_or_raise(
+                credential_id, force=force, **({"row_guard": row_guard} if row_guard else {})
+            )
         except AuthStoreError as failure:
             raise BridgeSignInRequired(SIGN_IN_SENTENCE) from failure
         if not isinstance(data, Mapping) or not data.get("access"):
@@ -2529,6 +2606,7 @@ class TeamBridgeClient:
         refresh_on_401: bool = True,
         content: bytes | None = None,
         pre_http_guard: Callable[[], None] | None = None,
+        roster_binding: RosterReadBinding | None = None,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -2551,6 +2629,7 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
             pre_http_guard=pre_http_guard,
             refresh_on_401=refresh_on_401,
+            roster_binding=roster_binding,
         )
         if response.status_code >= 400:
             if response.status_code == 400 and body is not None and _observation.WIRE_KEY in body:
@@ -2641,6 +2720,7 @@ class TeamBridgeClient:
         oversize_code: str = "attachment_too_large",
         oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
         refresh_on_401: bool = True,
+        roster_binding: RosterReadBinding | None = None,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -2655,8 +2735,19 @@ class TeamBridgeClient:
         # including when an internal caller already resolved that snapshot; the
         # attachment byte read needs this exact discipline too, which is why the
         # guard lives in the shared helper rather than only in ``_send``.
-        guarded = await self._guarded_access(expected_account_id, access=access)
-        pinned = guarded if guarded is not None else await self.current_access()
+        if roster_binding is None:
+            guarded = await self._guarded_access(expected_account_id, access=access)
+            pinned = guarded if guarded is not None else await self.current_access()
+            dispatch_guard = pre_http_guard
+        else:
+            pinned = await self._fresh_roster_access(roster_binding)
+
+            def roster_dispatch_guard() -> None:
+                if pre_http_guard is not None:
+                    pre_http_guard()
+                self._roster_pinned_row(roster_binding)
+
+            dispatch_guard = roster_dispatch_guard
         try:
             response = await self._dispatch(
                 method,
@@ -2667,7 +2758,7 @@ class TeamBridgeClient:
                 content=content,
                 max_response_bytes=max_response_bytes,
                 accept=accept,
-                pre_http_guard=pre_http_guard,
+                pre_http_guard=dispatch_guard,
                 files=files,
                 extra_headers=extra_headers,
                 oversize_code=oversize_code,
@@ -2678,7 +2769,13 @@ class TeamBridgeClient:
         # An admission-bound display read must observe the first refusal;
         # refreshing would erase that authority signal and replay the GET.
         if response.status_code == 401 and refresh_on_401:
-            refreshed = await self._refreshed_access(pinned)
+            # A 401 says nothing about local consent or the identity now on
+            # disk. The strict path rechecks both *before* forced freshness.
+            refreshed = (
+                await self._fresh_roster_access(roster_binding, force=True)
+                if roster_binding is not None
+                else await self._refreshed_access(pinned)
+            )
             try:
                 response = await self._dispatch(
                     method,
@@ -2689,7 +2786,7 @@ class TeamBridgeClient:
                     content=content,
                     max_response_bytes=max_response_bytes,
                     accept=accept,
-                    pre_http_guard=pre_http_guard,
+                    pre_http_guard=dispatch_guard,
                     files=files,
                     extra_headers=extra_headers,
                     oversize_code=oversize_code,
@@ -2701,6 +2798,10 @@ class TeamBridgeClient:
                 # The second failure STOPS the bridge (no loop) and surfaces the
                 # sign-in state: retrying again cannot mint a working bearer.
                 raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        if roster_binding is not None:
+            # A valid response may arrive after the local grant was withdrawn.
+            # Do not pass even its envelope to the tool in that case.
+            self._roster_pinned_row(roster_binding)
         return response
 
     async def _refreshed_access(self, pinned: OAuthAccess) -> OAuthAccess:
@@ -4075,6 +4176,7 @@ class TeamBridgeClient:
         status: Literal["open", "archived"] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        roster_binding: RosterReadBinding | None = None,
     ) -> dict[str, Any]:
         """One page of the caller's conversations, newest activity first.
 
@@ -4113,6 +4215,7 @@ class TeamBridgeClient:
             params=params or None,
             access=access,
             expected_account_id=expected_account_id,
+            roster_binding=roster_binding,
         )
 
     async def conversation(
@@ -4123,6 +4226,7 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         pre_http_guard: Callable[[], None] | None = None,
+        roster_binding: RosterReadBinding | None = None,
     ) -> dict[str, Any]:
         """One conversation with its members and the caller's read state."""
 
@@ -4134,6 +4238,7 @@ class TeamBridgeClient:
             access=access,
             expected_account_id=expected_account_id,
             pre_http_guard=pre_http_guard,
+            roster_binding=roster_binding,
         )
 
     async def create_conversation(
