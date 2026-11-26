@@ -26,6 +26,12 @@ import { describe, expect, it } from "vitest";
 const SRC = join(__dirname);
 const REFUSED = /\boverflow-x-(?:auto|scroll)\b|\bwhitespace-pre(?![-\w])/g;
 const INLINE_GRID_RAIL = '<div className={wide ? "overflow-x-auto rounded-md focus-visible:outline-accent" : undefined} {...(wide ? {';
+/* The inline chart's "Chart data" table (PR #4631, R2-1) fits the column by
+   default: text cells break anywhere, numbers stay whole. The rail applies
+   only when the browser measures that the whole numbers alone overflow, e.g.
+   a 24-column hourly heatmap at 328px; breaking `12` into `1`/`2` would be a
+   false reading, the same reason as the data grid's rail above. */
+const CHART_TABLE_RAIL = '<div id={tableId} hidden={!open} className={wide ? "mt-2 overflow-x-auto rounded-sm focus-visible:outline-accent" : "mt-2 min-w-0"} {...(wide ? {';
 
 function sources(directory: string): string[] {
 	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -64,6 +70,7 @@ describe("the phone never scrolls sideways", () => {
 					const code = stripComments(line);
 					for (const match of code.matchAll(REFUSED)) {
 						if (name === "components/inline-ui.tsx" && code.trim() === INLINE_GRID_RAIL && match[0] === "overflow-x-auto") continue;
+						if (name === "components/inline-chart-frame.tsx" && code.trim() === CHART_TABLE_RAIL && match[0] === "overflow-x-auto") continue;
 						offenders.push(`${name}:${index + 1}: ${match[0]}`);
 					}
 				});

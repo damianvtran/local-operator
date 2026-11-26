@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "Retir\u00e9 \u2014 l\u2019agent n\u2019attend plus de r\u00e9ponse",
     },
   },
+  "relay.chart": {
+    "fr": {
+      "relay.chart.also": "\u00c9galement\u202f: {items}",
+      "relay.chart.axis_value": "{label}\u202f: {value}",
+      "relay.chart.data_toggle": "Donn\u00e9es du graphique",
+      "relay.chart.more": "+{count} autres",
+      "relay.chart.no_data": "Aucune donn\u00e9e",
+      "relay.chart.other": "Autres ({count})",
+      "relay.chart.position": "{index} sur {count}",
+      "relay.chart.right_axis": "{label} \u00b7 axe de droite",
+      "relay.chart.role": "graphique",
+      "relay.chart.share": "{share} du total",
+      "relay.chart.total": "Total",
+    },
+  },
   "relay.chrome": {
     "fr": {
       "relay.chrome.appearance.group_by_tag": "Grouper les conversations par tag",

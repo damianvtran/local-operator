@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "\u0935\u093e\u092a\u0938 \u0932\u093f\u092f\u093e \u0917\u092f\u093e \u2014 \u090f\u091c\u0947\u0902\u091f \u0915\u094b \u0905\u092c \u0909\u0924\u094d\u0924\u0930 \u0928\u0939\u0940\u0902 \u091a\u093e\u0939\u093f\u090f",
     },
   },
+  "relay.chart": {
+    "hi": {
+      "relay.chart.also": "\u0907\u0938\u0915\u0947 \u0905\u0932\u093e\u0935\u093e: {items}",
+      "relay.chart.axis_value": "{label}: {value}",
+      "relay.chart.data_toggle": "\u091a\u093e\u0930\u094d\u091f \u0915\u093e \u0921\u0947\u091f\u093e",
+      "relay.chart.more": "+{count} \u0914\u0930",
+      "relay.chart.no_data": "\u0915\u094b\u0908 \u0921\u0947\u091f\u093e \u0928\u0939\u0940\u0902",
+      "relay.chart.other": "\u0905\u0928\u094d\u092f ({count})",
+      "relay.chart.position": "\u0915\u094d\u0930\u092e {index}, \u0915\u0941\u0932 {count}",
+      "relay.chart.right_axis": "{label} \u00b7 \u0926\u093e\u092f\u093e\u0901 \u0905\u0915\u094d\u0937",
+      "relay.chart.role": "\u091a\u093e\u0930\u094d\u091f",
+      "relay.chart.share": "\u0915\u0941\u0932 \u0915\u093e {share}",
+      "relay.chart.total": "\u0915\u0941\u0932",
+    },
+  },
   "relay.chrome": {
     "hi": {
       "relay.chrome.appearance.group_by_tag": "\u091f\u0948\u0917 \u0915\u0947 \u0905\u0928\u0941\u0938\u093e\u0930 \u092c\u093e\u0924\u091a\u0940\u0924 \u0915\u094b \u0938\u092e\u0942\u0939\u094b\u0902 \u092e\u0947\u0902 \u0926\u093f\u0916\u093e\u090f\u0901",

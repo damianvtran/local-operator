@@ -175,6 +175,21 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "Withdrawn \u2014 the agent no longer needs an answer",
     },
   },
+  "relay.chart": {
+    "en": {
+      "relay.chart.also": "Also: {items}",
+      "relay.chart.axis_value": "{label}: {value}",
+      "relay.chart.data_toggle": "Chart data",
+      "relay.chart.more": "+{count} more",
+      "relay.chart.no_data": "No data",
+      "relay.chart.other": "Other ({count})",
+      "relay.chart.position": "{index} of {count}",
+      "relay.chart.right_axis": "{label} \u00b7 right axis",
+      "relay.chart.role": "chart",
+      "relay.chart.share": "{share} of total",
+      "relay.chart.total": "Total",
+    },
+  },
   "relay.chrome": {
     "en": {
       "relay.chrome.appearance.group_by_tag": "Group conversations by tag",

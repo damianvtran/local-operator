@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "另有：{items}",
+  "relay.chart.axis_value": "{label}：{value}",
+  "relay.chart.data_toggle": "图表数据",
+  "relay.chart.more": "还有 {count} 项",
+  "relay.chart.no_data": "无数据",
+  "relay.chart.other": "其他（{count}）",
+  "relay.chart.position": "第 {index} 项，共 {count} 项",
+  "relay.chart.right_axis": "{label} · 右轴",
+  "relay.chart.role": "图表",
+  "relay.chart.share": "占总数 {share}",
+  "relay.chart.total": "合计"
+}

@@ -1,0 +1,68 @@
+{
+  "relay.chart.also": {
+    "role": "caption",
+    "tone": "A short lead-in; keep the colon.",
+    "maxCells": 60,
+    "note": "One line under a donut chart listing the slices too small (< 3%) to carry their own label, e.g. 'Also: Rent 2.1%, Fees 0.8%'. {items} is an ALREADY-FORMATTED, comma-separated list of slice names and percentages supplied by the caller; do not translate or reorder it."
+  },
+  "relay.chart.axis_value": {
+    "role": "tooltip row",
+    "tone": "An axis name, a colon, then a number.",
+    "maxCells": 40,
+    "note": "One tooltip line for a point in a scatter chart, e.g. 'Time: 12' and 'Count: 19'. {label} is the axis name the assistant wrote (do not translate it); {value} is an already-formatted number, possibly with a unit."
+  },
+  "relay.chart.data_toggle": {
+    "role": "button label (disclosure)",
+    "tone": "Sentence-case noun phrase, no punctuation.",
+    "maxCells": 20,
+    "note": "Collapsed button under every inline chart in an assistant reply on the phone. Expanding it shows a small table with every exact value the chart draws. Same wording as the native app's 'Chart data' disclosure. Wording reused from the native app's audited mobile.session.inline_chart_data in every locale."
+  },
+  "relay.chart.more": {
+    "role": "tooltip row",
+    "tone": "Terse count, no full stop.",
+    "maxCells": 16,
+    "note": "Last row of the tooltip for a donut chart's 'Other' slice when it folds more items than the tooltip lists, e.g. '+3 more'. {count} is an already-formatted whole number >= 1."
+  },
+  "relay.chart.no_data": {
+    "role": "tooltip text",
+    "tone": "Short statement, no punctuation.",
+    "maxCells": 16,
+    "note": "Tooltip and table text for an empty heatmap cell: the assistant supplied no value for that row and column (not zero)."
+  },
+  "relay.chart.other": {
+    "role": "chart category label",
+    "tone": "Noun plus a count in parentheses.",
+    "maxCells": 16,
+    "note": "Name of the grey slice of a donut chart that groups the smaller items together when there are too many to draw separately. {count} is an already-formatted whole number >= 2: how many items it groups. Appears in the legend, the slice label and the tooltip."
+  },
+  "relay.chart.position": {
+    "role": "screen-reader announcement fragment",
+    "tone": "Neutral, like a list position.",
+    "maxCells": 24,
+    "note": "Spoken by a screen reader (never shown) at the end of the announcement for the focused point of a chart, e.g. 'Nov 18, Spend, 140.61 USD, 3 of 9'. {index} and {count} are already-formatted whole numbers: the point's position and how many points there are."
+  },
+  "relay.chart.right_axis": {
+    "role": "legend label",
+    "tone": "Series name, a middle dot, then a short phrase.",
+    "maxCells": 40,
+    "note": "Legend entry for a series drawn against the chart's right-hand vertical scale when a chart has two scales (e.g. cost on the left in USD, mass on the right in kg). {label} is the series name the assistant wrote; do not translate it. The dot separator may be localized if your language uses another."
+  },
+  "relay.chart.role": {
+    "role": "accessible role description",
+    "tone": "One lower-case common noun.",
+    "maxCells": 16,
+    "note": "Read by screen readers as the kind of object (aria-roledescription) when focus lands on an inline chart, e.g. 'Monthly spend, chart'. Use the everyday word for a chart or graph."
+  },
+  "relay.chart.share": {
+    "role": "tooltip row",
+    "tone": "Terse, no full stop.",
+    "maxCells": 24,
+    "note": "Tooltip line under a value in a pie, stacked or 100% chart giving its share of the whole, e.g. '38.2% of total'. {share} is an ALREADY-FORMATTED percentage including its % sign; do not reformat it."
+  },
+  "relay.chart.total": {
+    "role": "tooltip row label",
+    "tone": "One word.",
+    "maxCells": 12,
+    "note": "Label of the last tooltip row in a stacked bar chart: the sum of every series at that category."
+  }
+}

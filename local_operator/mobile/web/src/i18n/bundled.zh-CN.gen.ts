@@ -175,6 +175,21 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.asks.status.withdrawn": "\u5df2\u64a4\u56de\u2014\u2014\u667a\u80fd\u4f53\u4e0d\u518d\u9700\u8981\u56de\u7b54",
     },
   },
+  "relay.chart": {
+    "zh-CN": {
+      "relay.chart.also": "\u53e6\u6709\uff1a{items}",
+      "relay.chart.axis_value": "{label}\uff1a{value}",
+      "relay.chart.data_toggle": "\u56fe\u8868\u6570\u636e",
+      "relay.chart.more": "\u8fd8\u6709 {count} \u9879",
+      "relay.chart.no_data": "\u65e0\u6570\u636e",
+      "relay.chart.other": "\u5176\u4ed6\uff08{count}\uff09",
+      "relay.chart.position": "\u7b2c {index} \u9879\uff0c\u5171 {count} \u9879",
+      "relay.chart.right_axis": "{label} \u00b7 \u53f3\u8f74",
+      "relay.chart.role": "\u56fe\u8868",
+      "relay.chart.share": "\u5360\u603b\u6570 {share}",
+      "relay.chart.total": "\u5408\u8ba1",
+    },
+  },
   "relay.chrome": {
     "zh-CN": {
       "relay.chrome.appearance.group_by_tag": "\u6309\u6807\u7b7e\u5206\u7ec4\u5bf9\u8bdd",

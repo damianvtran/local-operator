@@ -153,6 +153,17 @@ export type MessageParams = {
   "relay.asks.status.queued_deadline_passed": undefined;
   "relay.asks.status.timed_out": undefined;
   "relay.asks.status.withdrawn": undefined;
+  "relay.chart.also": { "items": string };
+  "relay.chart.axis_value": { "label": string; "value": string };
+  "relay.chart.data_toggle": undefined;
+  "relay.chart.more": { "count": string };
+  "relay.chart.no_data": undefined;
+  "relay.chart.other": { "count": string };
+  "relay.chart.position": { "index": string; "count": string };
+  "relay.chart.right_axis": { "label": string };
+  "relay.chart.role": undefined;
+  "relay.chart.share": { "share": string };
+  "relay.chart.total": undefined;
   "relay.chrome.appearance.group_by_tag": undefined;
   "relay.chrome.appearance.off": undefined;
   "relay.chrome.appearance.on": undefined;

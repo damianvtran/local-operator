@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "इसके अलावा: {items}",
+  "relay.chart.axis_value": "{label}: {value}",
+  "relay.chart.data_toggle": "चार्ट का डेटा",
+  "relay.chart.more": "+{count} और",
+  "relay.chart.no_data": "कोई डेटा नहीं",
+  "relay.chart.other": "अन्य ({count})",
+  "relay.chart.position": "क्रम {index}, कुल {count}",
+  "relay.chart.right_axis": "{label} · दायाँ अक्ष",
+  "relay.chart.role": "चार्ट",
+  "relay.chart.share": "कुल का {share}",
+  "relay.chart.total": "कुल"
+}
