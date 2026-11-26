@@ -2760,6 +2760,9 @@ class ToolContext(BaseModel):
     # Monitor scheduling — the wake field's twin. ``None`` means the host has
     # no monitor scheduler; the monitor tool is then not advertised at all.
     monitor_scheduler: MonitorSchedulerProtocol | None = None
+    #: Host-only resolver for an exact ``todo block`` receipt. Resolved at the
+    #: write, so a persisted block cannot inherit a later reuse of the handle.
+    bind_todo_block: Callable[[str, str], str | None] | None = Field(default=None, exclude=True)
     #: The session's effective action class, resolved FRESH by the host each
     #: time this context is built (``local_operator.action_class``). The
     #: ``patience`` tool's createIf reads it (reactive sessions are never

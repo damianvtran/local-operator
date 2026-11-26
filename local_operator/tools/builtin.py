@@ -15542,8 +15542,21 @@ def build_grep_tool() -> AgentTool:
 #: dict once a phase's ``items`` list is in hand. A flat ``init`` becomes ONE
 #: implicit phase named ``"Todos"`` (rendered headerless, so an existing
 #: caller sees the identical panel it saw before phases existed).
-TodoItem = dict[str, str]  # {"text", "status"[, "reason"]} — UNCHANGED
+# The marker identifies a producer receipt, not an arbitrary handle in prose.
+TODO_BLOCK_REF = re.compile(r"^\[(wake|monitor|ask):([A-Za-z0-9_-]+)\](?:\s|$)")
+TodoItem = dict[str, str]  # {"text", "status"[, "reason", "block_binding"]}
 TodoPhase = dict[str, Any]  # {"name": str, "items": list[TodoItem]}
+
+
+def todo_block_condition(reason: str) -> str:
+    """The blocker itself; a producer handle is not part of its purpose."""
+    return TODO_BLOCK_REF.sub("", reason.strip(), count=1).strip()
+
+
+def todo_condition_phrase(condition: str) -> str:
+    """Compare whole blockers without case, wrapping or sentence endings."""
+    return " ".join(condition.casefold().split()).rstrip(".!?。！？").rstrip()
+
 
 #: The sentinel name of the implicit phase a flat ``init`` (or a bare ``add``)
 #: writes into. The panel special-cases exactly this single-phase case to stay
@@ -15982,7 +15995,11 @@ def _find_or_create_phase(phases: list[TodoPhase], name: str) -> TodoPhase:
 
 
 def _match_todos(
-    current: list[dict[str, str]], texts: list[str], *, target: str
+    current: list[TodoItem],
+    texts: list[str],
+    *,
+    target: str,
+    select_scoped: Callable[[list[TodoItem]], list[TodoItem]] | None = None,
 ) -> tuple[list[dict[str, str]], list[str]]:
     """Resolve item texts to items: ``(matched, missing_texts)``.
 
@@ -15997,6 +16014,8 @@ def _match_todos(
     missing: list[str] = []
     for text in texts:
         candidates = [item for item in current if item["text"] == text]
+        if select_scoped is not None and len(candidates) > 1:
+            candidates = select_scoped(candidates)
         if not candidates:
             missing.append(text)
             continue
@@ -16155,6 +16174,63 @@ async def execute_todo(
             )
         target = {"done": "done", "block": "blocked", "drop": "dropped"}[params.op]
         verb = {"done": "Marked done", "block": "Blocked", "drop": "Dropped"}[params.op]
+        bind = context.bind_todo_block if context is not None else None
+        scoped = target == "blocked" and TODO_BLOCK_REF.match(reason) is not None
+        bindings: dict[int, str] = {}
+        if scoped and bind is not None:
+            open_by_text: dict[str, list[TodoItem]] = {}
+            for row in current:
+                if row["status"] in ("pending", "blocked"):
+                    open_by_text.setdefault(row["text"], []).append(row)
+            condition = todo_condition_phrase(todo_block_condition(reason))
+            for text, candidates in open_by_text.items():
+                if len(candidates) > 1:
+                    # Prose can name a task and its blocker, not an occurrence.
+                    # Disambiguate against the pre-write conditions, before an
+                    # incarnation check could mask an otherwise ambiguous row.
+                    candidates = [
+                        row
+                        for row in candidates
+                        if todo_condition_phrase(todo_block_condition(row.get("reason", "")))
+                        == condition
+                    ]
+                if len(candidates) != 1:
+                    continue
+                (row,) = candidates
+                binding = bind(text, reason)
+                old = row.get("block_binding", "")
+                if binding and (
+                    not old
+                    or old.split(":", 2)[:2] != binding.split(":", 2)[:2]
+                    or old.rsplit(":", 1)[0] == binding.rsplit(":", 1)[0]
+                ):
+                    bindings[id(row)] = binding
+
+        rejected_scope = False
+
+        def select_scoped(candidates: list[TodoItem]) -> list[TodoItem]:
+            nonlocal rejected_scope
+            matches = [item for item in candidates if id(item) in bindings]
+            # Never fall back to the first duplicate on an ambiguous or stale
+            # selector, even in a call that names other, unique task texts.
+            if not matches:
+                rejected_scope = True
+            return matches
+
+        def resolve_item(item: TodoItem) -> None:
+            item["status"] = target
+            if target == "blocked":
+                binding = bindings.get(id(item))
+                old_binding = item.get("block_binding", "")
+                item["reason"] = reason
+                if binding is not None:
+                    item["block_binding"] = binding
+                elif not reason.startswith(f"[{':'.join(old_binding.split(':', 2)[:2])}]"):
+                    item.pop("block_binding", None)
+            else:
+                # A resolved item keeps neither the condition nor its receipt.
+                item.pop("reason", None)
+                item.pop("block_binding", None)
 
         if not params.items:
             # Phase-target form: resolve EVERY currently-open item in the named
@@ -16177,12 +16253,10 @@ async def execute_todo(
             matched = [
                 item for item in named["items"] if item.get("status") in ("pending", "blocked")
             ]
+            # An explicit phase selects the state change for every open row.
+            # The receipt decides coverage per row, never phase membership.
             for item in matched:
-                item["status"] = target
-                if target == "blocked":
-                    item["reason"] = reason
-                else:
-                    item.pop("reason", None)
+                resolve_item(item)
             if not matched:
                 return _text(
                     tool_call_id,
@@ -16198,15 +16272,13 @@ async def execute_todo(
 
         # Text form: search across ALL phases (the flat ``current`` view), so a
         # model echoing a text need not know which phase holds it.
-        matched, missing = _match_todos(current, params.items, target=target)
+        matched, missing = _match_todos(
+            current, params.items, target=target, select_scoped=select_scoped if scoped else None
+        )
+        if rejected_scope:
+            return _todo_miss_error(tool_call_id, params.op, [], missing, current)
         for item in matched:
-            item["status"] = target
-            if target == "blocked":
-                item["reason"] = reason
-            else:
-                # A resolved item keeps no stale blocker: the reason described
-                # a wait that is over, and the panel would still render it.
-                item.pop("reason", None)
+            resolve_item(item)
         if matched:
             changed()
         if missing:
