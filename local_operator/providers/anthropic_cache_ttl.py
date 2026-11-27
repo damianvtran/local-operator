@@ -148,6 +148,12 @@ def mark_automation_session(session: object) -> None:
 
 def cache_role(purpose: str, delegated: bool) -> CacheRole:
     """Classify a request for the TTL policy from facts the request carries."""
+    if purpose == "cache_keepalive":
+        # The keep-alive exists to refresh the MAIN thread's 1h entry, so its
+        # markers must be written at the turn's TTL: the auxiliary 5m would
+        # leave its own tail on the short cache, and it is unmeasured whether
+        # a 5m-marked read resets a 1h entry to a full hour.
+        return "main"
     if purpose != "turn":
         return "auxiliary"
     return "subagent" if delegated else "main"

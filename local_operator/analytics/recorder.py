@@ -867,6 +867,11 @@ class AnalyticsRecorder:
             logger.debug("analytics: tool-call enqueue failed", exc_info=True)
 
     @property
+    def store(self) -> AnalyticsStore:
+        """The store this recorder writes, for a reader that must see the same file."""
+        return self._store
+
+    @property
     def dropped(self) -> int:
         """How many samples were dropped for a full queue (0 on a healthy run)."""
         return self._dropped

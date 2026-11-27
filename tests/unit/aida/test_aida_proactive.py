@@ -625,3 +625,29 @@ async def test_a_mid_drain_refusal_restores_from_the_exact_position(
     assert restored["wakes"] == [
         duplicate
     ], "exactly the refused second entry goes back — not the processed first one too"
+
+
+def test_hidden_internal_rows_hold_no_escalation_slot(isolated_root: Path) -> None:
+    """The 16-row cap counts VISIBLE rows: a cache keep-alive must not crowd her out."""
+    _root_with_session(isolated_root)
+    _pin_cadence_away_from_now(isolated_root)
+    now = int(time.time() * 1000)
+    far = now + 30 * 86_400_000
+    rows = [WakeSchedule(id=f"w{i}", message="user", next_due_at=far + i) for i in range(15)]
+    rows.append(
+        WakeSchedule(
+            id="cache-keepalive:1",
+            message="prompt-cache keep-alive",
+            next_due_at=now + 3_300_000,
+            kind="cache_keepalive",
+            hidden=True,
+        )
+    )
+    state.write_json(
+        state.escalate_path(isolated_root),
+        {"wakes": [{"in": "4h", "message": "check the deploy"}]},
+    )
+    # At the tray check: 15 visible rows, 16 with the hidden one (the cadence
+    # row is ensured after the tray, so it is not in the count yet).
+    result = proactive.reconcile(rows, config_dir=isolated_root, session_id=SESSION_ID, now_ms=now)
+    assert "aida-extra-1" in {row.id for row in result.schedules}, result.notes

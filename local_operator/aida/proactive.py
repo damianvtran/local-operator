@@ -75,7 +75,7 @@ from typing import Any, Mapping, Sequence
 from local_operator.aida import state
 from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES, WakeSchedule
 from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable
-from local_operator.wakes.store import is_patience_row
+from local_operator.wakes.store import is_patience_row, scheduled_rows
 
 logger = logging.getLogger(__name__)
 
@@ -1030,7 +1030,9 @@ def reconcile(
                             f"({pol.max_extra_per_day}/day)."
                         )
                         continue
-                    if len(kept) + taken >= MAX_WAKE_SCHEDULES:
+                    # The cap is on VISIBLE rows (the wake tool's own rule):
+                    # hidden internal timers must not crowd out her slots.
+                    if len(scheduled_rows(kept)) + taken >= MAX_WAKE_SCHEDULES:
                         notes.append("escalation request refused: the schedule list is full.")
                         continue
                     due, message, refusal = _parse_extra_due(request, now)
@@ -1354,7 +1356,7 @@ def consume_triggers(
         # check-in.
         return TriggerConsume(schedules=current, notes=[], changed=False, settle=token)
 
-    if len(current) >= MAX_WAKE_SCHEDULES:
+    if len(scheduled_rows(current)) >= MAX_WAKE_SCHEDULES:
         # Observable, not silent (design §3.2): the note is journaled and the
         # record stays pending — a later consume with room arms it.
         return TriggerConsume(
@@ -1947,6 +1949,8 @@ async def _drain_tray_external(
     notes: list[str] = []
     entry = wake_store.read_entry(root, session_id)
     ids = _row_ids(entry)
+    # Visible rows only, as in ``reconcile``: internal timers hold no slot.
+    visible = len(wake_store.scheduled_rows((entry or {}).get("schedules") or ()))
     taken = 0
     # ACQUIRED OFF THE LOOP — `wakes.lock`'s own documented pattern for a lock
     # held across awaits (``WakeWriteLock``'s docstring; ``state.wake_lock``
@@ -1994,7 +1998,7 @@ async def _drain_tray_external(
                     f"({pol.max_extra_per_day}/day)."
                 )
                 continue
-            if len(ids) + taken >= MAX_WAKE_SCHEDULES:
+            if visible + taken >= MAX_WAKE_SCHEDULES:
                 notes.append("escalation request refused: the schedule list is full.")
                 continue
             due, message, refusal = _parse_extra_due(request, now)

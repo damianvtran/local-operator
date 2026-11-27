@@ -5882,6 +5882,12 @@ class Session:
         self._advisor_calls = 0  # against settings.advisor_max_calls
         self._advisor_last_turn = -(10**9)  # turn index of the last call, for every_n_turns
         self._advisor_cooldown_until = -1  # turn index the cooldown expires at
+        # Cache keep-alive (``compaction/keepalive.py``). The turn-end count
+        # lets a ping's late write tell that a turn ended while it streamed
+        # (that turn's arm owns the row then); the Team Bridge half of the
+        # mode is resolved once per session, not per turn end (review R1-4).
+        self._keepalive_turn_ends = 0
+        self._keepalive_bridge_covered: bool | None = None
         # Kill switch. An advisor-triggered pass that fails to clear the
         # recovery band proved the advice was not merely early but wrong about
         # there being headroom to reclaim, and repeating it is a compaction
@@ -8451,6 +8457,27 @@ class Session:
             details={"text": text, "blocks": changes},
         )
 
+    async def _read_only_system_blocks(self) -> tuple[list[str], list[str]]:
+        """``(desired, sent)`` system blocks for a read-only request.
+
+        ``sent`` is what goes on the wire (the frozen epoch unless the head
+        block moved); ``desired`` is the fresh render the state delta compares.
+        Split out of :meth:`_read_only_prompt` so the cache keep-alive's prefix
+        digest hashes exactly the blocks its ping would send.
+        """
+        desired = self._system_blocks()
+        if inspect.isawaitable(desired):
+            desired = await desired
+        # An aside runs against the same tools as the turn beside it, so it
+        # gets the same reconciled inventory (it just never journals one).
+        desired = self._reconcile_tool_inventory(list(desired))
+        blocks = list(self._frozen_system_blocks or desired)
+        if desired[:1] != blocks[:1]:
+            # Helpers do not journal, but they must obey a new standing rule
+            # immediately too. The real turn commits this epoch independently.
+            blocks = list(desired)
+        return desired, blocks
+
     async def _read_only_prompt(
         self, turns: Sequence[AgentMessage]
     ) -> tuple[list[str], list[Message]]:
@@ -8460,18 +8487,8 @@ class Session:
         state newer than the last committed snapshot is appended only to this
         request. The next real turn still performs its own durable publication.
         """
-        desired = self._system_blocks()
-        if inspect.isawaitable(desired):
-            desired = await desired
-        # An aside runs against the same tools as the turn beside it, so it
-        # gets the same reconciled inventory (it just never journals one).
-        desired = self._reconcile_tool_inventory(list(desired))
+        desired, blocks = await self._read_only_system_blocks()
         history = self._wire_legal_snapshot()
-        blocks = list(self._frozen_system_blocks or desired)
-        if desired[:1] != blocks[:1]:
-            # Helpers do not journal, but they must obey a new standing rule
-            # immediately too. The real turn commits this epoch independently.
-            blocks = list(desired)
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))
@@ -23356,6 +23373,48 @@ class Session:
             finally:
                 self._turn_lock.release()
 
+    async def _await_declared_mcp_ready(self) -> None:
+        """Hold for a declared MCP server that is still connecting; raise if it never does.
+
+        Shared by the turn pipeline and the cache keep-alive's fire, which must
+        see the same tool array the next turn will publish before it hashes it.
+        Once per runtime: a success latches ``_named_mcp_ready_checked``.
+        """
+        if (
+            self._first_turn_mcp_wait != "off"
+            and not self._named_mcp_ready_checked
+            and not self._mcp_reach_inherited
+        ):
+            from local_operator.session.declared_mcp_ready import (
+                DECLARED_MCP_READY_TIMEOUT_S,
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                wait_for_all=self._first_turn_mcp_wait == "all",
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+                timeout_s=(
+                    DECLARED_MCP_READY_TIMEOUT_S
+                    if self._first_turn_mcp_timeout_s is None
+                    else self._first_turn_mcp_timeout_s
+                ),
+            )
+
     async def _run_turn_pipeline(
         self,
         initial: list[AgentMessage],
@@ -23412,40 +23471,7 @@ class Session:
         # gate settled the borrowed manager, and the gate's grant step would
         # widen the child's surface past what its parent allowed.
         # ``"off"`` is an SDK caller's explicit opt-out (``set_first_turn_mcp_wait``).
-        if (
-            self._first_turn_mcp_wait != "off"
-            and not self._named_mcp_ready_checked
-            and not self._mcp_reach_inherited
-        ):
-            from local_operator.session.declared_mcp_ready import (
-                DECLARED_MCP_READY_TIMEOUT_S,
-                await_named_mcp_servers,
-            )
-
-            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
-            # the TUI/desktop subscribed to this runtime) merges a late
-            # ``preload_tools`` server mid-session, the contract documented on
-            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
-            # a headless host (exec, SDK, scheduler) holds the turn for one.
-            # The same "no UI, no attach subscriber" test the turn-end
-            # checkpoint uses to tell a headless store apart (review R4).
-            store = getattr(self, "_frontend_state_store", None)
-            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
-            self._named_mcp_ready_checked = await await_named_mcp_servers(
-                self.mcp_manager,
-                declared=self._declared_tools,
-                reachable=lambda: self.tool_inventory,
-                materialize=self.materialize_declared_tools,
-                wait_for_preload=not front_end,
-                wait_for_all=self._first_turn_mcp_wait == "all",
-                # Esc lands here as the sticky flag (no turn signal exists yet).
-                cancelled=lambda: self._abort_requested,
-                timeout_s=(
-                    DECLARED_MCP_READY_TIMEOUT_S
-                    if self._first_turn_mcp_timeout_s is None
-                    else self._first_turn_mcp_timeout_s
-                ),
-            )
+        await self._await_declared_mcp_ready()
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -25277,6 +25303,9 @@ class Session:
 
             await self._refresh_context_metadata()
             await self._maybe_compact()
+            # After compaction, which may have rewritten the prefix this keeps
+            # warm. Every main-thread turn end, wakes and quiet turns included.
+            self._arm_cache_keepalive()
         finally:
             runtime = getattr(self, "bridge_runtime", None)
             if runtime is not None:
@@ -31244,7 +31273,14 @@ class Session:
         ttl = self._idle_cache_ttl_s
         if anchor <= 0 or not ttl or median_gap_ms <= 0:
             return False
-        return int(time.time() * 1000) + int(median_gap_ms) > anchor + int(ttl * 1000)
+        expiry = anchor + int(ttl * 1000)
+        # The cache keep-alive extends the warm window by one ping interval per
+        # ping this turn end will buy; without it the cold shortcut would be
+        # taken for a miss the keep-alive prevents.
+        from local_operator.compaction.keepalive import KEEPALIVE_PING_INTERVAL_S
+
+        expiry += self._keepalive_remaining_pings() * int(KEEPALIVE_PING_INTERVAL_S * 1000)
+        return int(time.time() * 1000) + int(median_gap_ms) > expiry
 
     async def _economic_exact_residual(
         self, plan: _CompactionPlan, *, prefix_tokens: int, provider_context: int
@@ -31756,6 +31792,448 @@ class Session:
             or self._pending_compaction is not None
             or self._advisor_in_flight
         )
+
+    # -- prompt-cache keep-alive (``compaction/keepalive.py``) ----------------
+    #
+    # A hidden wake row per session, armed at every main-thread turn end for
+    # 55 minutes after the request that last touched the 1h cache. When it
+    # fires (usually in a runtime the supervisor relaunched for it), ONE
+    # read-only request re-reads the prefix and the row is re-armed from that
+    # request's start, up to ``keepalive_max_consecutive`` times per gap. The
+    # ping joins nothing: no conversation row, no event, no ``_last_usage``; the
+    # analytics ledger's ``purpose=cache_keepalive`` row is its only record.
+    # The fire does rewrite the transcript's ``wake_schedules`` entry (retire
+    # plus re-arm), because the wake index is derived from it.
+
+    def _keepalive_settings(self) -> Any | None:
+        """Compaction settings when this session may keep its cache warm, else ``None``.
+
+        Never a subagent: a child's context dies with its job. The identity
+        half of the mode is :meth:`_keepalive_covers`.
+        """
+        if self._disposed or self._parent_session_id:
+            return None
+        from local_operator.compaction import api as compaction_api
+
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        mode = str(getattr(settings, "keepalive_mode", "off") or "off")
+        if mode == "off" or not self._keepalive_covers(mode):
+            return None
+        return settings
+
+    def _keepalive_covers(self, mode: str) -> bool:
+        """``chief_of_staff``: her session. ``always_on``: hers or Team Bridge's."""
+        if self._aida_is_hers():
+            return True
+        if mode != "always_on" or not self._session_id:
+            return False
+        if self._keepalive_bridge_covered is None:
+            # Only a read that COMPLETED is cached: a failed one leaves this
+            # ``None`` so the next turn end asks again rather than muting this
+            # runtime's keep-alive (review R2-2).
+            self._keepalive_bridge_covered = self._keepalive_is_bridge_session()
+        return bool(self._keepalive_bridge_covered)
+
+    def _keepalive_is_bridge_session(self) -> bool | None:
+        """Whether ``team_bridge.session`` names this session, read once.
+
+        From THIS session's config root (``self._config_dir``), as
+        :meth:`_aida_filter_rows` does, so a session built against an injected
+        root does not answer from the process-global one. Cached by the caller:
+        a relaunched runtime (where every ping runs) reads it fresh, and a
+        rebind mid-runtime costs at most that runtime's chain.
+
+        ``None`` when the read did not complete (no answer to cache).
+        ``read_config_values`` returns that same ``None`` for a file it cannot
+        read or parse right now, and its contract is that the caller keeps what
+        it had rather than treating a torn read as "everything unset" — so the
+        caller retries instead of remembering "not covered" (review R2-2).
+        """
+        try:
+            from local_operator.config import read_config_values
+            from local_operator.team_bridge.settings import TeamBridgeSettings
+
+            values = read_config_values(self._config_dir)
+            if values is None:
+                logger.debug("cache keep-alive: team_bridge.session unreadable; not cached")
+                return None
+            return TeamBridgeSettings.from_values(values).session == self._session_id
+        except Exception:  # noqa: BLE001 — a lookup; failing closed sends nothing
+            logger.debug("cache keep-alive: could not read team_bridge.session", exc_info=True)
+            return None
+
+    def _keepalive_saver_active(self) -> bool:
+        """Whether Radient Saver reduces, or may reduce, this session's turns.
+
+        Asked of the stream (``SessionStreamFn.saver_may_reduce``), which owns
+        the chain and the resolver inputs. A stream without the hook (an SDK
+        or test ``stream_fn``) has no Saver. A failure counts as active: the
+        cost of a wrong "no" is a full write per gap, of a wrong "yes" one
+        cold start.
+        """
+        probe = getattr(self._stream_fn, "saver_may_reduce", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe(self._model))
+        except Exception:  # noqa: BLE001 - fail closed: no ping
+            logger.debug("cache keep-alive: saver probe failed", exc_info=True)
+            return True
+
+    def _keepalive_route_matches(self, usage: Usage | None) -> bool:
+        """Whether a ping on ``self._model`` would land in ``usage``'s cache namespace.
+
+        The ping is ``same_route_retry`` (one attempt, no fallback) on the
+        primary model, so a prefix a pinned fallback wrote is not reachable.
+        """
+        if usage is None or self._active_fallback is not None:
+            return False
+        route = (
+            usage.provider or self._model.provider,
+            usage.model_id or self._model.model_id,
+        )
+        return route == (self._model.provider, self._model.model_id)
+
+    async def _keepalive_prefix_digest(self) -> str:
+        """The digest of the prefix a ping would send NOW (system, tools, history tail)."""
+        from local_operator.compaction import keepalive
+
+        _desired, blocks = await self._read_only_system_blocks()
+        last_id = next(
+            (
+                str(message.id)
+                for message in reversed(self._context.messages)
+                if getattr(message, "id", None)
+            ),
+            None,
+        )
+        return keepalive.prefix_digest(blocks, self._side_channel_tools(), last_id)
+
+    def _keepalive_arm_check(
+        self,
+        settings: Any,
+        *,
+        usage: Usage | None,
+        ttl_s: float | None,
+        anchor_ms: int,
+        attempt: int,
+    ) -> Any:
+        from local_operator.compaction import keepalive
+        from local_operator.wakes.store import is_cache_keepalive_row
+
+        if self._compaction_pass_in_flight or self._pending_compaction is not None:
+            # The pass lands at the next turn edge and rewrites the prefix, so a
+            # ping now would keep warm a prefix the next request will not send.
+            return keepalive.KeepaliveDecision(False, "compaction_pending")
+        other_due = min(
+            (
+                row.next_due_at
+                for row in self._wake.armed_schedules
+                if not is_cache_keepalive_row(row)
+            ),
+            default=None,
+        )
+        return keepalive.arm_decision(
+            mode=str(settings.keepalive_mode),
+            covered=True,
+            is_subagent=bool(self._parent_session_id),
+            ttl_s=ttl_s,
+            anchor_ms=int(anchor_ms or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+            cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0) or 0),
+            route_matches=self._keepalive_route_matches(usage),
+            other_wake_due_ms=other_due,
+            remaining_pings=int(settings.keepalive_max_consecutive) - int(attempt),
+            saver_active=self._keepalive_saver_active(),
+        )
+
+    def _keepalive_remaining_pings(self) -> int:
+        """Pings a turn end ending now would buy, for the economic cold-next estimate."""
+        try:
+            settings = self._keepalive_settings()
+            if settings is None:
+                return 0
+            decision = self._keepalive_arm_check(
+                settings,
+                usage=self._last_usage,
+                ttl_s=self._idle_cache_ttl_s,
+                anchor_ms=self._idle_cache_anchor_ms,
+                attempt=0,
+            )
+            return int(settings.keepalive_max_consecutive) if decision.ok else 0
+        except Exception:  # noqa: BLE001 - an estimate input; 0 is today's behaviour
+            logger.debug("cache keep-alive: remaining-ping estimate failed", exc_info=True)
+            return 0
+
+    def _arm_cache_keepalive(self) -> None:
+        """Turn end: arm, replace or clear this session's keep-alive row. Never raises.
+
+        Runs at EVERY main-thread turn end, after compaction settled the
+        prefix. Spawned rather than awaited: the write goes through the wake
+        scheduler's lock, which a wake delivery's pump may be holding.
+        """
+        if self._disposed or self._parent_session_id:
+            return
+        # Synchronously, before the spawn: a ping streaming right now must see
+        # this turn end when its own write lands, whichever lands first.
+        self._keepalive_turn_ends += 1
+        try:
+            self._spawn_background(
+                self._rearm_cache_keepalive(
+                    usage=self._last_usage,
+                    ttl_s=self._idle_cache_ttl_s,
+                    anchor_ms=int(self._idle_cache_anchor_ms or 0),
+                    attempt=0,
+                )
+            )
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("cache keep-alive: arm spawn failed", exc_info=True)
+
+    async def _rearm_cache_keepalive(
+        self,
+        *,
+        usage: Usage | None,
+        ttl_s: float | None,
+        anchor_ms: int,
+        attempt: int,
+        turn_epoch: int | None = None,
+        clear_only: bool = False,
+    ) -> None:
+        """Replace this session's keep-alive row with a fresh one, or clear it. Total.
+
+        A FRESH id per write (``cache-keepalive:<anchor_ms>``) and a drop of
+        every earlier keep-alive row in the same locked write, so the pump
+        retiring the row that just fired can never remove its successor. Under
+        ``_ask_wake_lock`` as well, because the ask queue's writers snapshot
+        the full list there and would otherwise write this row back out.
+
+        ``turn_epoch`` is set by a ping's write (re-arm or chain end): the
+        turn-end count when the fire began. If a turn ended since, or a row
+        with a newer anchor is already there, that turn's arm owns the row:
+        this write adds nothing and drops only rows no newer than its own
+        anchor (review R1-3). A turn-end write (``None``) always owns it.
+
+        ``clear_only`` is a chain's end, for every stop reason: an explicit
+        clear rather than a bare return, so a fired row that a stale full-list
+        snapshot (``arm_ask_wake``, the wake tool) wrote back cannot fire again
+        outside the consecutive count (review R1-5).
+        """
+        from local_operator.compaction import keepalive
+        from local_operator.wakes.store import is_cache_keepalive_row
+
+        try:
+            settings = self._keepalive_settings()
+            row: WakeSchedule | None = None
+            if settings is not None and not clear_only:
+                decision = self._keepalive_arm_check(
+                    settings, usage=usage, ttl_s=ttl_s, anchor_ms=anchor_ms, attempt=attempt
+                )
+                logger.debug("cache keep-alive arm (attempt %d): %s", attempt, decision.reason)
+                if decision.ok:
+                    row = WakeSchedule(
+                        id=keepalive.row_id(anchor_ms),
+                        message="prompt-cache keep-alive",
+                        next_due_at=int(anchor_ms + keepalive.KEEPALIVE_PING_INTERVAL_S * 1000),
+                        created_at=int(time.time() * 1000),
+                        kind="cache_keepalive",
+                        hidden=True,
+                        # Engine text: nothing a person wrote is in this message.
+                        origin="tool",
+                        attempt=attempt,
+                        cache_anchor_ms=int(anchor_ms),
+                        prefix_digest=await self._keepalive_prefix_digest(),
+                    )
+            async with self._ask_wake_lock:
+                keep_newer_than: int | None = None
+                if turn_epoch is not None and (
+                    turn_epoch != self._keepalive_turn_ends
+                    or any(
+                        int(r.cache_anchor_ms) > anchor_ms
+                        for r in self._wake.schedules
+                        if is_cache_keepalive_row(r)
+                    )
+                ):
+                    row = None
+                    keep_newer_than = anchor_ms
+
+                def drop(r: WakeSchedule) -> bool:
+                    if not is_cache_keepalive_row(r):
+                        return False
+                    return keep_newer_than is None or int(r.cache_anchor_ms) <= keep_newer_than
+
+                if row is None and not any(drop(r) for r in self._wake.schedules):
+                    # Nothing to clear: not a wake-list write at all.
+                    return
+                await self._wake.replace_rows(drop, [row] if row else [])
+        except Exception:  # noqa: BLE001 - best effort, like every wake-index writer
+            logger.warning("cache keep-alive: could not write the wake row", exc_info=True)
+
+    async def _deliver_cache_keepalive(self, due: DueWake) -> None:
+        """A fired keep-alive row. Returns at once; the ping runs off the pump.
+
+        The pump holds the scheduler's write lock for the whole delivery, and
+        the re-arm needs it, so the work is spawned. The pump's own advance has
+        already retired the fired one-shot by the time the re-arm lands.
+        """
+        self._spawn_background(self._run_cache_keepalive(due.schedule))
+
+    async def _run_cache_keepalive(self, row: WakeSchedule) -> None:
+        """Gate, ping, re-arm. Total: any refusal or failure ends the chain."""
+        epoch = self._keepalive_turn_ends
+        if await self._cache_keepalive_fire(row, epoch=epoch):
+            # Re-armed, or cleared by the re-arm's own refusal (a spent chain).
+            return
+        # Every stop reason ends in an explicit clear (review R1-5).
+        await self._rearm_cache_keepalive(
+            usage=None,
+            ttl_s=None,
+            anchor_ms=int(row.cache_anchor_ms),
+            attempt=int(row.attempt),
+            turn_epoch=epoch,
+            clear_only=True,
+        )
+
+    async def _cache_keepalive_fire(self, row: WakeSchedule, *, epoch: int) -> bool:
+        """The fire's body: ``True`` once the chain is re-armed, ``False`` when it ends."""
+        from local_operator.compaction import keepalive
+
+        try:
+            settings = self._keepalive_settings()
+            if settings is None:
+                logger.debug("cache keep-alive %s: mode no longer covers this session", row.id)
+                return False
+            # The next turn waits for its declared MCP tools before publishing
+            # its array; hashing before they connect would compare a smaller
+            # array than either side sends.
+            await self._await_declared_mcp_ready()
+            digest = await self._keepalive_prefix_digest()
+            daily = await asyncio.to_thread(self._keepalive_daily_count)
+            decision = keepalive.fire_decision(
+                now_ms=int(time.time() * 1000),
+                anchor_ms=int(row.cache_anchor_ms),
+                attempt=int(row.attempt),
+                max_consecutive=int(settings.keepalive_max_consecutive),
+                daily_count=daily,
+                daily_max=int(settings.keepalive_daily_max),
+                stored_digest=row.prefix_digest,
+                current_digest=digest,
+                route_matches=self._keepalive_route_matches(self._last_usage),
+                busy=not self._idle_may_proceed(self._generation),
+                saver_active=self._keepalive_saver_active(),
+            )
+            if not decision.ok:
+                logger.info("cache keep-alive %s: not sent (%s)", row.id, decision.reason)
+                return False
+            started_ms = int(time.time() * 1000)
+            usage = await self._cache_keepalive_ping()
+        except Exception:  # noqa: BLE001 - a 429/provider error retires the chain
+            logger.warning("cache keep-alive %s: ping failed; chain ended", row.id, exc_info=True)
+            return False
+        if usage is None:
+            logger.warning("cache keep-alive %s: no usage reported; chain ended", row.id)
+            return False
+        context = int(getattr(self._last_usage, "context_tokens", 0) or 0)
+        read = int(usage.cache_read_tokens or 0)
+        logger.info(
+            "cache keep-alive %s: attempt=%d cache_read=%d cache_write=%d context=%d",
+            row.id,
+            row.attempt + 1,
+            read,
+            int(usage.cache_write_tokens or 0),
+            context,
+        )
+        if read * 2 < context:
+            # The prefix was not reused, so every further ping would write it
+            # again: one wasted write per chain is the bound.
+            logger.warning(
+                "cache keep-alive %s: read %d of a %d-token context; chain ended",
+                row.id,
+                read,
+                context,
+            )
+            return False
+        from local_operator.compaction.idle import cache_ttl_from_usage
+
+        await self._rearm_cache_keepalive(
+            usage=usage,
+            # A read-only ping refreshes the lifetime the entry was written with,
+            # which was 1h or this row would not exist.
+            ttl_s=cache_ttl_from_usage(usage) or keepalive.KEEPALIVE_TTL_S,
+            anchor_ms=started_ms,
+            attempt=int(row.attempt) + 1,
+            turn_epoch=epoch,
+        )
+        return True
+
+    def _keepalive_daily_count(self) -> int | None:
+        """This session's keep-alive requests in the trailing 24 h, or ``None``.
+
+        Read from the analytics ledger, the only record a ping leaves; off the
+        loop (sqlite). ``None`` (unreadable) refuses the ping.
+        """
+        from local_operator.analytics.recorder import get_recorder
+        from local_operator.compaction import keepalive
+
+        if not self._session_id:
+            return None
+        try:
+            return get_recorder().store.count_purpose_calls(
+                self._session_id,
+                keepalive.KEEPALIVE_PURPOSE,
+                int(time.time() * 1000) - 86_400_000,
+            )
+        except Exception:  # noqa: BLE001 - unreadable refuses
+            logger.debug("cache keep-alive: ledger read failed", exc_info=True)
+            return None
+
+    async def _cache_keepalive_ping(self) -> Usage | None:
+        """ONE read-only request over the current prefix; the usage, or ``None`` on failure.
+
+        :meth:`advise_compaction`'s request, for its reasons (append-only on the
+        turn's prefix, the side-channel tool array, the frozen blocks, the
+        latched head row, ``tool_choice="none"``), with three deltas:
+        ``same_route_retry`` so the one attempt can never hop to a fallback
+        route (that would write the whole prefix in another namespace), a
+        small generation bound, and NOT ``replayable`` (a second attempt is a
+        second bill). The thinking configuration is the model spec's, exactly
+        as the turn's, because a thinking change invalidates the cached
+        messages. Text is discarded; nothing here reaches the conversation.
+        """
+        from local_operator.compaction import keepalive
+
+        blocks, messages = await self._read_only_prompt(
+            [Message.user(keepalive.KEEPALIVE_TURN_TEXT)]
+        )
+        hint = self._context_tokens_hint
+        if hint is None and self._last_usage is not None and self._last_usage.context_tokens:
+            # A relaunched runtime has not adopted a reading yet; the restored
+            # last usage is this conversation's size, and the TTL decision reads it.
+            hint = int(self._last_usage.context_tokens)
+        request = ChatRequest(
+            model=self._model,
+            purpose=keepalive.KEEPALIVE_PURPOSE,
+            system_blocks=list(blocks),
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
+            messages=messages,
+            tools=self._side_channel_tools(),
+            tool_choice="none",
+            max_tokens=keepalive.KEEPALIVE_MAX_TOKENS,
+            same_route_retry=True,
+            isolated=False,
+            context_tokens_hint=hint,
+        )
+        usage: Usage | None = None
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamUsageEvent):
+                usage = event.usage
+            elif isinstance(event, StreamEndEvent):
+                if event.stop_reason == "error":
+                    return None
+                if event.usage is not None:
+                    usage = event.usage
+        return usage
 
     async def _journal_idle_decline(self, context_tokens: int, why: str) -> None:
         """Durably record "not now" so the advisor waits for ``G`` more growth."""
@@ -38658,10 +39136,20 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
+        from local_operator.wakes.store import (
+            is_ask_timeout_row,
+            is_cache_keepalive_row,
+            is_patience_row,
+        )
+
+        if is_cache_keepalive_row(due.schedule):
+            # FIRST, ahead of the refetch below: a keep-alive delivers nothing
+            # into the session, so the context did not move.
+            await self._deliver_cache_keepalive(due)
+            return
         # A delivery into the session is one of the design's refetch moments
         # (§D.5): the context moved, and the operator may look next.
         await self._mark_code_requests_dirty()
-        from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
 
         if is_ask_timeout_row(due.schedule):
             # A queued ask's DEADLINE. The fire carries no payload on purpose

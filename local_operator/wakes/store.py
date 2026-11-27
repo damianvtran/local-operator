@@ -187,9 +187,20 @@ def is_ask_timeout_row(row: Any) -> bool:
     return str(kind or "") == "ask_timeout"
 
 
+def is_cache_keepalive_row(row: Any) -> bool:
+    """Whether ``row`` is a HIDDEN prompt-cache keep-alive (model or dumped dict).
+
+    Armed by the session at turn end (``compaction/keepalive.py``) so the
+    supervisor relaunches a runtime to re-read the cached prefix before it
+    expires. A mechanism, like ``ask_timeout``: no human surface may show it.
+    """
+    kind = row.get("kind") if isinstance(row, Mapping) else getattr(row, "kind", None)
+    return str(kind or "") == "cache_keepalive"
+
+
 def is_internal_wake_row(row: Any) -> bool:
     """Whether ``row`` is one of the HIDDEN internal timers (patience ∪
-    ask_timeout).
+    ask_timeout ∪ cache_keepalive).
 
     ONE predicate for every HUMAN-SURFACE subtraction — the picker's armed-wake
     count, the CLI listing, the desktop listing and feed, the wake tool's own
@@ -202,7 +213,7 @@ def is_internal_wake_row(row: Any) -> bool:
     ``is_patience_row`` directly. Only the question "may a human see this?"
     takes the union.
     """
-    return is_patience_row(row) or is_ask_timeout_row(row)
+    return is_patience_row(row) or is_ask_timeout_row(row) or is_cache_keepalive_row(row)
 
 
 def scheduled_rows(rows: Sequence[Any]) -> list[Any]:
