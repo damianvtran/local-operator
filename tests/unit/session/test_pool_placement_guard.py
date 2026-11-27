@@ -7,12 +7,14 @@ whole mobility design exists to prevent, one directory apart rather than one dev
 
 THREE DIRECTIONS ARE ASSERTED, because the guard's cost is in the one that allows:
 
-* a live member whose announced frontier this device has not reached REFUSES, and says
-  which member and why (the operator's next move depends on that);
-* an ``expired`` member, a missing member row, or a cold fully-synced copy ALLOWS —
+* a live (``active``/``draining``/``provisioning``) member REFUSES — including when a
+  completed flush brought this copy to the frontier that member announced, because
+  that frontier is where the member WAS and it keeps appending after it;
+* an ``expired`` member, a missing member row, or a drain's rewritten stamp ALLOWS —
   R22 exists so that ``/resume <id>`` works at home with the same id (§6.4);
-* a session no pool produced answers ``""`` at the first read (one ``stat``), which is
-  every install that never joined a mesh.
+* the MEMBER ITSELF may engage its own copy (§4.2 point 2: home is never the member),
+  and a session no pool produced answers ``""`` at the first read, which is every
+  install that never joined a mesh.
 
 The engage half is exercised through the REAL ``launch.engage_runtime``: the guard runs
 before a candidate is spawned, so a refusal is observable without starting a runtime.
@@ -83,12 +85,12 @@ def _stamp(root: Path, *, mode: str = "pool", member: str = MEMBER) -> None:
     )
 
 
-def _network(root: Path, *members: MemberRecord) -> None:
+def _network(root: Path, *members: MemberRecord, self_device: str = HOME) -> None:
     store.save(
         NetworkRecord(
             network_id=NETWORK,
             name="probe",
-            self_device_id=HOME,
+            self_device_id=self_device,
             members=list(members),
         ),
         root,
@@ -145,31 +147,57 @@ def test_a_member_that_is_leaving_or_still_forming_refuses(tmp_path: Path, lifec
     assert pool_guard_refusal(tmp_path, SESSION_ID)
 
 
-def test_a_cursor_that_outlived_the_transcript_refuses(tmp_path: Path) -> None:
-    """A compaction rewrites the file, so a cursor longer than the file is stale.
+def test_a_fully_synced_copy_of_a_live_member_still_refuses(tmp_path: Path) -> None:
+    """THE FRONTIER IS WHERE THE MEMBER WAS, not where it stopped (round 1, MAJOR-1).
 
-    That is the corruption a byte-offset cursor would cause, caught at the guard
-    instead: refusing costs a sentence, proceeding writes a second trajectory over a
-    copy that no longer holds what the cursor claims.
+    A completed flush leaves exactly this cursor, and the member keeps appending after
+    it. So "this copy reached the frontier that member announced" is evidence that a
+    copy landed, never that the writer is done — and engaging on it is the second
+    writer the guard exists to rule out.
     """
-    _stamp(tmp_path)
-    long_payload = _rows(12)
-    _transcript(tmp_path, payload=_rows(3))
-    _network(tmp_path, _member("active"))
-    _cursor(tmp_path, long_payload)
-
-    assert pool_guard_refusal(tmp_path, SESSION_ID)
-
-
-def test_a_cursor_from_another_device_refuses(tmp_path: Path) -> None:
-    """The frontier that matters is the one THIS member announced, not any owner's."""
     payload = _rows()
     _stamp(tmp_path)
     _transcript(tmp_path, payload=payload)
     _network(tmp_path, _member("active"))
-    _cursor(tmp_path, payload, member="dev_someone_else")
+    _cursor(tmp_path, payload)
+
+    refusal = pool_guard_refusal(tmp_path, SESSION_ID)
+
+    assert refusal
+    assert MEMBER in refusal
+    assert "active" in refusal
+
+
+def test_a_malformed_cursor_does_not_raise_out_of_the_guard(tmp_path: Path) -> None:
+    """``prefix_bytes`` is peer-shaped JSON: a string there must never be a ValueError.
+
+    The guard's answer to an unreadable cursor is a refusal, not an exception that
+    reaches ``engage_runtime`` on every engage until someone deletes the file.
+    """
+    _stamp(tmp_path)
+    _transcript(tmp_path, payload=_rows())
+    _network(tmp_path, _member("active"))
+    sync.write_replica_cursor(
+        tmp_path,
+        SESSION_ID,
+        {
+            "owner_device": MEMBER,
+            "cursor": {"prefix_bytes": "abc", "prefix_digest": "sha256:deadbeef"},
+        },
+    )
 
     assert pool_guard_refusal(tmp_path, SESSION_ID)
+
+
+def test_the_member_itself_may_engage_its_own_copy(tmp_path: Path) -> None:
+    """§4.2 point 2: home is never the member, so a stamp naming THIS device is the
+    copy the member is running — and refusing there locks a device out of its own
+    session (round 1, MINOR-4)."""
+    _stamp(tmp_path, member=MEMBER)
+    _transcript(tmp_path)
+    _network(tmp_path, _member("active"), self_device=MEMBER)
+
+    assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -192,20 +220,6 @@ def test_a_member_row_that_is_gone_allows_the_resume(tmp_path: Path) -> None:
     _network(tmp_path)
 
     assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
-
-
-def test_a_cold_fully_synced_copy_allows_the_resume(tmp_path: Path) -> None:
-    """§6.5: "a cold, fully-synced copy *is* engageable, which is the whole point of R22"."""
-    payload = _rows()
-    _stamp(tmp_path)
-    path = _transcript(tmp_path, payload=payload)
-    _network(tmp_path, _member("active"))
-    _cursor(tmp_path, payload)
-
-    assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
-    # The bytes the cursor describes are the bytes on disk: that is what makes the
-    # answer a fact about the copy rather than about a file that once matched.
-    assert path.read_bytes().startswith(payload)
 
 
 def test_a_rewritten_placement_lifts_the_guard(tmp_path: Path) -> None:
@@ -240,21 +254,48 @@ def test_a_pool_stamp_naming_no_member_is_not_guarded(tmp_path: Path) -> None:
     assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
 
 
-def test_a_corrupt_network_record_reads_as_no_row(tmp_path: Path) -> None:
-    """The STORE's rule, not a new one: an unparsable record is set aside, so the
-    network it described is no longer listed and it cannot name a live member.
+def test_a_corrupt_network_record_fails_closed(tmp_path: Path) -> None:
+    """ABSENT AND CORRUPT ARE DIFFERENT ANSWERS (round 1, MAJOR-4).
 
-    Refusing instead would block every pool resume behind a file whose remedy
-    (delete it) also destroys the membership.
+    A record this device never had means it never joined the network, so no row can
+    name a live member. A record that is THERE and unparsable is the state in which
+    this device least knows whether a writer is live — the handoff guard's asymmetry
+    applies, and the venue is the one where proceeding spawns the second writer.
     """
     _stamp(tmp_path)
     _transcript(tmp_path)
-    (tmp_path / "network" / "networks").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "network" / "networks" / f"{NETWORK}.json").write_text(
-        "{not json", encoding="utf-8"
-    )
+    networks = tmp_path / "network" / "networks"
+    networks.mkdir(parents=True, exist_ok=True)
+    (networks / f"{NETWORK}.json").write_text("{not json", encoding="utf-8")
 
-    assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
+    refusal = pool_guard_refusal(tmp_path, SESSION_ID)
+
+    assert refusal and "network records" in refusal
+    assert f"{NETWORK}.json" in refusal
+
+
+def test_an_unsafe_network_id_fails_closed(tmp_path: Path) -> None:
+    """The id comes from a stamp and becomes a path component: ``..`` must never be read.
+
+    ``store.safe_component`` is the store's own rule; the guard applies it before the
+    path is built rather than after, so nothing outside ``networks/`` is opened.
+    """
+    write_stamp(
+        tmp_path,
+        MeshStamp(
+            session_id=SESSION_ID,
+            network_id="../../etc",
+            home_device=HOME,
+            placement=SessionPlacement(mode="pool", network_id="../../etc", home_device=HOME),
+            pool_member=MEMBER,
+        ),
+    )
+    _transcript(tmp_path)
+
+    refusal = pool_guard_refusal(tmp_path, SESSION_ID)
+
+    assert refusal and "network records" in refusal
+    assert "../../etc" in refusal
 
 
 def test_a_store_read_that_fails_fails_closed(

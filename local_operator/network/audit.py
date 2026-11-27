@@ -605,7 +605,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # did not finish, because a number a reader might sum is worse than no number.
     # ``trigger`` is the design's closed set (idle|expiry|user|error) and ``cut``
     # names the sessions whose in-flight turn the grace ended.
-    "drain_started": frozenset({"member", "sessions", "grace_s", "trigger"}),
+    # ``lifecycle_written`` is the one non-observational field: ``False`` says the
+    # member row could not be moved to ``draining``, so placements were still being
+    # admitted while this drain ran (``pool_drain``, review round 1 MAJOR-3).
+    "drain_started": frozenset({"member", "sessions", "grace_s", "trigger", "lifecycle_written"}),
     "pool_member_expired": frozenset({"member", "sessions", "cut"}),
     "drain_barrier_timeout": frozenset({"member", "pending", "pending_count", "deadline_s", "cut"}),
     "session_sync_completed": frozenset({"peer", "reason", "mode", "bytes", "placement"}),

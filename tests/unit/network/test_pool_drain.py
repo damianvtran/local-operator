@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -87,12 +89,12 @@ def _pool_stamp(root: Path, session_id: str = SESSION_ID, *, mode: str = "pool")
     )
 
 
-def _network(root: Path, lifecycle: str = "active") -> None:
+def _network(root: Path, lifecycle: str = "active", *, self_device: str = HOME) -> None:
     store.save(
         NetworkRecord(
             network_id=NETWORK,
             name="probe",
-            self_device_id=MEMBER,
+            self_device_id=self_device,
             members=[
                 MemberRecord(
                     device_id=MEMBER,
@@ -163,6 +165,16 @@ class _Clock:
         self.now += max(0.0, seconds)
 
 
+class _RealClock:
+    """The real clock, for the one bound that is only observable in real time."""
+
+    def __call__(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(max(0.0, seconds))
+
+
 # ---------------------------------------------------------------------------
 # The flush (R22), at home
 # ---------------------------------------------------------------------------
@@ -174,7 +186,14 @@ def test_a_flush_brings_home_to_the_frontier_and_keeps_the_id(tmp_path: Path) ->
     home.mkdir()
     _pool_stamp(home)
 
-    result = pool_drain.flush_session_home(home, SESSION_ID, ask=_ask(member), member_device=MEMBER)
+    result = pool_drain.flush_session_home(
+        home,
+        SESSION_ID,
+        ask=_ask(member),
+        member_device=MEMBER,
+        rewrite_placement=True,
+        sync_reason="pre_spindown",
+    )
 
     copied = home / "sessions" / SESSION_ID
     assert (copied / "transcript.jsonl").read_bytes() == (source / "transcript.jsonl").read_bytes()
@@ -211,7 +230,14 @@ def test_the_guard_lifts_once_the_flush_has_landed(tmp_path: Path) -> None:
 
     assert placement.pool_guard_refusal(home, SESSION_ID), "a live member must refuse first"
 
-    pool_drain.flush_session_home(home, SESSION_ID, ask=_ask(member), member_device=MEMBER)
+    pool_drain.flush_session_home(
+        home,
+        SESSION_ID,
+        ask=_ask(member),
+        member_device=MEMBER,
+        rewrite_placement=True,
+        sync_reason="pre_spindown",
+    )
 
     assert placement.pool_guard_refusal(home, SESSION_ID) == ""
 
@@ -294,9 +320,11 @@ def test_the_tick_flushes_a_dirty_session_and_skips_an_unchanged_one(tmp_path: P
     _session(tmp_path)
     calls: list[str] = []
 
-    def flush(session_id: str) -> bool:
+    def flush(session_id: str) -> str:
         calls.append(session_id)
-        return True
+        # The ack names the frontier the copy was verified to — what a real flush
+        # returns (``make_flush``), not a bare ``True``.
+        return pool_drain._region_digest(tmp_path / "sessions" / session_id)
 
     assert pool_drain.pool_sync_tick(tmp_path, [SESSION_ID], flush=flush) == (SESSION_ID,)
     assert calls == [SESSION_ID]
@@ -313,11 +341,47 @@ def test_the_tick_flushes_a_dirty_session_and_skips_an_unchanged_one(tmp_path: P
     assert calls == [SESSION_ID, SESSION_ID]
 
 
+def test_bytes_appended_during_a_flush_stay_dirty_for_the_next_tick(tmp_path: Path) -> None:
+    """THE ACK'S FRONTIER, NOT A RE-HASH AFTER IT (review round 1, MINOR-2).
+
+    A real flush lands at home, and one more row arrives on home's copy while the ack
+    is in flight — the shape a member appending mid-copy leaves behind. The marker
+    must describe what the flush VERIFIED: re-hashing the transcript after it returns
+    records the new row as carried, and the next tick skips the very bytes that were
+    not.
+    """
+    member, home = tmp_path / "member", tmp_path / "home"
+    _session(member)
+    home.mkdir()
+    _pool_stamp(home)
+    real = pool_drain.make_flush(
+        home, ask_for=lambda _session_id: _ask(member), member_device=MEMBER
+    )
+    acked: list[str] = []
+
+    def flush(session_id: str) -> str:
+        digest = real(session_id)
+        assert digest, "the real flush must ack a frontier"
+        acked.append(digest)
+        # The member writes one more row between the frontier the copy verified and
+        # the ack reaching the cadence — the race a re-hash after the ack swallows.
+        with (member / "sessions" / session_id / "transcript.jsonl").open("ab") as handle:
+            handle.write(
+                json.dumps({"id": "e9", "type": "message", "content": "late"}).encode() + b"\n"
+            )
+        return digest
+
+    assert pool_drain.pool_sync_tick(member, [SESSION_ID], flush=flush) == (SESSION_ID,)
+    # The marker describes the frontier the copy was verified to, and nothing else.
+    assert pool_drain.flushed_digest(member, SESSION_ID) == acked[0]
+    assert pool_drain.unsynced(member, SESSION_ID) is True, "the late row was never carried"
+
+
 def test_the_tick_does_not_record_an_ack_that_never_came(tmp_path: Path) -> None:
     """A marker written over a FAILED flush would make the next tick skip lost bytes."""
     _session(tmp_path)
 
-    assert pool_drain.pool_sync_tick(tmp_path, [SESSION_ID], flush=lambda _id: False) == ()
+    assert pool_drain.pool_sync_tick(tmp_path, [SESSION_ID], flush=lambda _id: "") == ()
     assert pool_drain.flushed_digest(tmp_path, SESSION_ID) == ""
     assert pool_drain.unsynced(tmp_path, SESSION_ID) is True
 
@@ -329,13 +393,47 @@ def test_a_session_with_no_transcript_is_never_dirty(tmp_path: Path) -> None:
     assert pool_drain.unsynced(tmp_path, SESSION_ID) is False
 
 
+def test_a_cadence_tick_flushes_bytes_without_lifting_the_guard(tmp_path: Path) -> None:
+    """A TICK IS A COPY, NOT A DRAIN (review round 1, BLOCKER-1).
+
+    §6.3 gives the tick one job — carry the bytes — and §6.5 rule 4 puts the placement
+    rewrite inside the drain. A tick that also rewrote home's stamp would clear
+    ``pool_member`` and switch the two-writer guard off, permanently, while the member
+    is still ``active`` and still appending: the copy would have disabled the rule it
+    exists to make safe.
+    """
+    member, home = _both_ends(tmp_path)
+    assert placement.pool_guard_refusal(home, SESSION_ID), "a live member must refuse first"
+
+    # THE TICK RUNS ON THE MEMBER (§6.3): the source is what "unsynced" is about, and
+    # the flush it drives lands at home.
+    flush = pool_drain.make_flush(home, ask_for=lambda _id: _ask(member), member_device=MEMBER)
+    assert pool_drain.pool_sync_tick(member, [SESSION_ID], flush=flush) == (SESSION_ID,)
+
+    # THE BYTES MOVED ...
+    assert (home / "sessions" / SESSION_ID / "transcript.jsonl").read_bytes() == (
+        member / "sessions" / SESSION_ID / "transcript.jsonl"
+    ).read_bytes()
+    # ... AND NOTHING ELSE DID.
+    stamp = read_stamp(home, SESSION_ID)
+    assert stamp is not None
+    assert stamp.placement.mode == "pool"
+    assert stamp.pool_member == MEMBER
+    events = _events(home)
+    assert "session_placement_changed" not in [event for event, _detail in events]
+    assert [d.get("reason") for e, d in events if e == "session_sync_completed"] == ["cadence"]
+    assert _lifecycle(member) == "active"
+    # THE GUARD IS STILL ARMED, on a copy that is at the member's frontier.
+    assert placement.pool_guard_refusal(home, SESSION_ID)
+
+
 # ---------------------------------------------------------------------------
 # The barrier (§6.2), both outcomes
 # ---------------------------------------------------------------------------
 
 
 def _coordinator(
-    tmp_path: Path, clock: _Clock, **overrides: Any
+    tmp_path: Path, clock: _Clock | _RealClock, **overrides: Any
 ) -> tuple[pool_drain.PoolDrainCoordinator, Path]:
     member, home = tmp_path / "member", tmp_path / "home"
     source = member / "sessions" / SESSION_ID
@@ -345,7 +443,7 @@ def _coordinator(
         "network_id": NETWORK,
         "sessions": lambda: [SESSION_ID],
         "flush": pool_drain.make_flush(
-            home, ask_for=lambda _session_id: _ask(member), member_device=MEMBER
+            home, ask_for=lambda _session_id: _ask(member), member_device=MEMBER, drain=True
         ),
         "clock": clock,
         "sleep": clock.sleep,
@@ -360,7 +458,8 @@ def _both_ends(tmp_path: Path) -> tuple[Path, Path]:
     _session(member)
     home.mkdir()
     _pool_stamp(home)
-    _network(member)
+    # The MEMBER's own record names itself (§4.2 point 2): home is the other end.
+    _network(member, self_device=MEMBER)
     _network(home)
     return member, home
 
@@ -501,6 +600,102 @@ def test_an_unreachable_home_exits_on_the_deadline_without_hanging(tmp_path: Pat
     assert rows["drain_barrier_timeout"]["pending_count"] == 1
     assert rows["drain_barrier_timeout"]["deadline_s"] == 900.0
     assert "pool_member_expired" not in rows
+
+
+def test_a_wedged_flush_cannot_outlive_the_barrier_deadline(tmp_path: Path) -> None:
+    """THE BOUND IS PER ATTEMPT (review round 1, MAJOR-2).
+
+    A home that takes the link and then stalls costs one full round trip per attempt,
+    so consulting the deadline only between rounds overshot the barrier by one per
+    session — measured at 2x the configured deadline. Here the handler never returns
+    at all and the drain still ends on its deadline.
+    """
+    member, _home = _both_ends(tmp_path)
+    gate = threading.Event()
+    attempts: list[str] = []
+
+    def wedged(session_id: str) -> str:
+        attempts.append(session_id)
+        gate.wait()
+        return ""
+
+    coordinator, _source = _coordinator(
+        tmp_path,
+        _RealClock(),
+        flush=wedged,
+        busy=lambda _id: False,
+        sync_drain_deadline_s=2.0,
+        poll_s=0.05,
+    )
+    started = time.monotonic()
+    outcome = coordinator.drain()
+    elapsed = time.monotonic() - started
+    gate.set()
+
+    assert outcome.drained is False
+    assert outcome.barrier_expired is True
+    assert outcome.pending == (SESSION_ID,)
+    assert attempts == [SESSION_ID], "one attempt, abandoned when the budget ran out"
+    assert elapsed < 2.0 + 1.0, f"the barrier outlived its deadline ({elapsed:.2f}s)"
+    assert "drain_barrier_timeout" in dict(_events(member))
+
+
+def test_a_failed_expiry_write_is_not_reported_as_drained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AN AUDIT ROW MUST NOT CLAIM WHAT THE STORE DOES NOT SAY (round 1, MAJOR-3).
+
+    The copies are safe either way. What must not ship is ``pool_member_expired`` and
+    ``drained=True`` beside a member row that still reads ``active`` — two records of
+    one fact, contradicting each other, and the row is the one home's guard reads.
+    """
+    member, _home = _both_ends(tmp_path)
+    real_save = store.save
+
+    def failing_save(record: Any, root: Any = None) -> Any:
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(store, "save", failing_save)
+    coordinator, _source = _coordinator(tmp_path, _Clock(), busy=lambda _id: False)
+
+    outcome = coordinator.drain()
+
+    assert outcome.flushed == (SESSION_ID,), "the bytes still went home"
+    assert outcome.drained is False
+    assert outcome.expire_failed is True
+    assert _lifecycle(member) == "active"
+    rows = dict(_events(member))
+    assert "pool_member_expired" not in rows
+    # ... and the drain says out loud that it could not close placements.
+    assert rows["drain_started"]["lifecycle_written"] is False
+    assert store.save is failing_save
+    monkeypatch.setattr(store, "save", real_save)
+
+
+def test_only_the_expiry_write_failing_still_keeps_the_barrier_honest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The narrow case: ``draining`` landed, ``expired`` did not."""
+    member, _home = _both_ends(tmp_path)
+    real_save = store.save
+
+    def save_unless_expired(record: Any, root: Any = None) -> Any:
+        row = record.member(MEMBER)
+        if row is not None and str(row.lifecycle) == "expired":
+            raise OSError("the store is read-only")
+        return real_save(record, root)
+
+    monkeypatch.setattr(store, "save", save_unless_expired)
+    coordinator, _source = _coordinator(tmp_path, _Clock(), busy=lambda _id: False)
+
+    outcome = coordinator.drain()
+
+    assert dict(_events(member))["drain_started"]["lifecycle_written"] is True
+    assert outcome.flushed == (SESSION_ID,)
+    assert outcome.drained is False
+    assert outcome.expire_failed is True
+    assert _lifecycle(member) == "draining"
+    assert "pool_member_expired" not in [event for event, _detail in _events(member)]
 
 
 def test_one_unacked_session_does_not_expire_the_member(tmp_path: Path) -> None:

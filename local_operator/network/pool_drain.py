@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +107,8 @@ def flush_session_home(
     *,
     ask: Callable[[dict[str, Any]], dict[str, Any]],
     member_device: str,
+    rewrite_placement: bool = False,
+    sync_reason: str = "cadence",
 ) -> dict[str, Any]:
     """Bring home's copy of ``session_id`` to the member's frontier. Same id.
 
@@ -126,6 +129,14 @@ def flush_session_home(
 
     Raises ``sync.SyncRefused`` (or an OSError) when the copy cannot be made; the
     caller decides whether that is a retry inside the barrier or a pending entry.
+
+    ``rewrite_placement`` IS THE DRAIN'S, AND ONLY THE DRAIN'S (§6.5 rule 4). A
+    cadence tick is a copy and nothing else (§6.3): rewriting home's stamp to
+    ``local`` and clearing ``pool_member`` is the statement "the member has left",
+    and a tick that said it while the member is still ``active`` would switch off
+    :func:`pool_guard_refusal` — permanently — with the very copy it exists to make
+    safe (review round 1, BLOCKER-1). ``sync_reason`` rides the audit row for the
+    same reason: ``pre_spindown`` is a fact about a drain, ``cadence`` about a tick.
     """
     from local_operator.network import sync
 
@@ -141,7 +152,7 @@ def flush_session_home(
     # PLACEMENT LAST, so a crash between the bytes and the stamp leaves a copy that
     # the launch guard still refuses (mode ``pool`` + a live member), never a
     # ``local`` stamp over a half-copied transcript.
-    rewritten = _rewrite_placement_local(config_dir, session_id)
+    rewritten = _rewrite_placement_local(config_dir, session_id) if rewrite_placement else False
     _audit(
         "session_sync_completed",
         config_dir,
@@ -149,7 +160,7 @@ def flush_session_home(
         network_id=_network_of(config_dir, session_id),
         detail={
             "peer": member_device,
-            "reason": "pre_spindown",
+            "reason": sync_reason,
             "mode": "flush",
             "bytes": int(result.get("bytes") or 0),
             "placement": "local" if rewritten else "",
@@ -212,28 +223,42 @@ def make_flush(
     *,
     ask_for: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]],
     member_device: str,
-) -> Callable[[str], bool]:
-    """A coordinator ``flush`` backed by real transfers: acked, or not.
+    drain: bool = False,
+) -> Callable[[str], str]:
+    """A coordinator ``flush`` backed by real transfers: the acked frontier, or ``""``.
 
     ``ask_for`` supplies the member's ``net_sync`` frame handler for one session —
     the relay's, in production, which is why it is a callback and not a call this
-    module makes. Every failure is a NOT-acked answer rather than a raise: inside
-    the barrier a refused copy is one more polling round, and an exception escaping
+    module makes. Every failure is an EMPTY answer rather than a raise: inside the
+    barrier a refused copy is one more polling round, and an exception escaping
     here would abort a drain that should have kept trying until its deadline.
+
+    THE RETURN VALUE IS THE FRONTIER THE COPY WAS VERIFIED TO, not a bare ``True``:
+    the cadence records exactly that digest as "home holds this much", so bytes the
+    member appends while the ack is in flight stay dirty for the next tick instead
+    of being re-hashed away (review round 1, MINOR-2).
+
+    ONE BOOLEAN, NOT TWO ARGUMENTS: §6.5 rule 4's placement rewrite and the
+    ``pre_spindown`` audit reason travel together — only a drain may say the member
+    left — so there is no spelling here that rewrites home's stamp without also
+    recording why. ``drain=False``, the safe half, is what a cadence tick wants.
     """
 
-    def flush(session_id: str) -> bool:
+    def flush(session_id: str) -> str:
         try:
-            flush_session_home(
+            result = flush_session_home(
                 config_dir,
                 session_id,
                 ask=ask_for(session_id),
                 member_device=member_device,
+                rewrite_placement=drain,
+                sync_reason="pre_spindown" if drain else "cadence",
             )
         except Exception:  # noqa: BLE001 — see the docstring
             logger.debug("pool drain: flush of %s was not acked", session_id, exc_info=True)
-            return False
-        return True
+            return ""
+        cursor = result.get("cursor")
+        return str((cursor if isinstance(cursor, dict) else {}).get("prefix_digest") or "")
 
     return flush
 
@@ -281,19 +306,21 @@ def flushed_path(config_dir: Path, session_id: str) -> Path:
     return sync.network_dir(config_dir) / FLUSHED_DIRNAME / store.safe_component(session_id)
 
 
-def record_flushed(config_dir: Path, session_id: str) -> str:
-    """Note that home has pulled this session as of now. Returns the digest recorded.
+def record_flushed(config_dir: Path, session_id: str, digest: str) -> str:
+    """Record the frontier digest a flush ACKED. Returns it, or ``""`` when empty.
 
-    THE DIGEST IS THE INVARIANT: it is the safe region's sha256 at the moment the
-    copy was acked, so a later comparison answers "did I write anything since"
+    THE ARGUMENT IS THE INVARIANT: it is the safe region's sha256 the copy was
+    verified against, so a later comparison answers "did I write anything since"
     without a second cursor and without trusting a byte offset — the same reason
-    ``sync``'s own cursor is a digest (§7.3). Written after the ack, never before:
-    a marker on a failed flush would make the next tick skip the very bytes that
-    were lost.
-    """
-    from local_operator.network import sync
+    ``sync``'s own cursor is a digest (§7.3). This used to re-hash home's transcript
+    after the ack returned, which recorded bytes that landed BETWEEN the verified
+    frontier and that read as synced; the next tick then skipped exactly them
+    (review round 1, MINOR-2). Nothing here re-reads the file.
 
-    digest = _region_digest(sync.session_dir(config_dir, session_id))
+    Written after the ack, never before: a marker on a failed flush would make the
+    next tick skip the very bytes that were lost.
+    """
+
     if not digest:
         return ""
     target = flushed_path(config_dir, session_id) / FLUSHED_NAME
@@ -342,7 +369,7 @@ def pool_sync_tick(
     config_dir: Path,
     session_ids: Iterable[str],
     *,
-    flush: Callable[[str], bool],
+    flush: Callable[[str], str],
 ) -> tuple[str, ...]:
     """Flush every session whose bytes moved, and return the ones that acked.
 
@@ -352,14 +379,22 @@ def pool_sync_tick(
     unchanged session costs one read and one string compare, and is SKIPPED rather
     than re-sent: a tick that re-flushed everything would spend the member's
     bandwidth on conversations nobody touched.
+
+    ``flush`` MUST BE A CADENCE FLUSH (``make_flush``'s default; ``drain=False``).
+    A tick is a copy and nothing else (§6.3): handing it a drain flush would rewrite
+    home's stamp to ``local`` and lift the two-writer guard on a live member, which
+    is the failure this split exists to make unspellable (review round 1,
+    BLOCKER-1).
     """
     flushed: list[str] = []
     for session_id in session_ids:
         if not unsynced(config_dir, session_id):
             continue
-        if flush(session_id):
-            record_flushed(config_dir, session_id)
-            flushed.append(session_id)
+        digest = flush(session_id)
+        if not digest:
+            continue
+        record_flushed(config_dir, session_id, digest)
+        flushed.append(session_id)
     return tuple(flushed)
 
 
@@ -383,6 +418,9 @@ class DrainOutcome:
     cut: tuple[str, ...]
     drained: bool
     barrier_expired: bool
+    #: The member row could not be moved to ``expired``, so nothing here claims it was:
+    #: the barrier completed but the durable record of it does not exist (§6.2 step 5).
+    expire_failed: bool = False
 
 
 @dataclass
@@ -406,7 +444,11 @@ class PoolDrainCoordinator:
     member_id: str
     network_id: str
     sessions: Callable[[], Sequence[str]]
-    flush: Callable[[str], bool]
+    #: Ask home to pull one session and answer the frontier it verified, or ``""``
+    #: when the copy was not acked. ``make_flush(..., drain=True)`` in production:
+    #: the placement rewrite (§6.5 rule 4) is part of the drain, so a cadence flush
+    #: here would copy the bytes and leave home's stamp claiming a live member.
+    flush: Callable[[str], str]
     #: Commit one placed session's runtime to leaving (§3.6 step 1). It takes the
     #: session and the CAUSE, because the cause is this module's to state and the
     #: runtime's leaving ladder keys on it (``types.PRE_SPINDOWN_DRAIN_CAUSE``):
@@ -439,7 +481,13 @@ class PoolDrainCoordinator:
         #    (§3.4: "no new turns are admitted"), so it is written before anything
         #    is signalled — a session told to drain while the member still reads
         #    ``active`` is a session that can be re-placed underneath the drain.
-        self._set_lifecycle("draining")
+        #    A WRITE THAT FAILS DOES NOT STOP THE DRAIN: copying the bytes off a pod
+        #    that is powering off is worth more than the row, and home's guard is
+        #    what refuses an engage while the row still reads ``active``. The failure
+        #    is recorded here rather than swallowed, because it is the durable
+        #    "placements were still allowed during this drain" (review round 1,
+        #    MAJOR-3 gap 1).
+        announced = self._set_lifecycle("draining")
         _audit(
             "drain_started",
             self.config_dir,
@@ -450,6 +498,7 @@ class PoolDrainCoordinator:
                 "sessions": list(placed),
                 "grace_s": float(self.drain_grace_s),
                 "trigger": self.trigger,
+                "lifecycle_written": announced,
             },
         )
         for session_id in placed:
@@ -488,8 +537,22 @@ class PoolDrainCoordinator:
                 barrier_expired=True,
             )
 
-        # 4. ACKED → EXPIRED (§6.2 step 5).
-        self._set_lifecycle("expired")
+        # 4. ACKED → EXPIRED (§6.2 step 5), AND ONLY IF THE ROW SAYS SO. Shipping
+        #    ``pool_member_expired`` (and ``drained=True``) beside a member row that
+        #    still reads ``active``/``draining`` is two contradictory records of one
+        #    fact — and the row is the one home's guard reads (review round 1,
+        #    MAJOR-3). The copies are safe; what is missing is the claim.
+        if not self._set_lifecycle("expired"):
+            return DrainOutcome(
+                member_id=self.member_id,
+                sessions=placed,
+                flushed=flushed,
+                pending=(),
+                cut=cut,
+                drained=False,
+                barrier_expired=False,
+                expire_failed=True,
+            )
         _audit(
             "pool_member_expired",
             self.config_dir,
@@ -530,11 +593,20 @@ class PoolDrainCoordinator:
     def _flush_until(self, placed: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """Flush until every session acks or the deadline expires.
 
-        Every session is attempted at least once even when the deadline is already
-        spent (a zero-length barrier is still a best-effort flush), and a session
-        that refuses is retried on the next round rather than dropped: the pod's
-        next action on a failure is to power off, so a retry is free and a
+        THE DEADLINE BOUNDS EACH ATTEMPT, not only the rounds: one home that is
+        asleep costs a full ``net_sync`` round trip per session, so consulting the
+        clock only between rounds let a wedged home overshoot a 900 s barrier by
+        ``len(pending)`` attempts of it (review round 1, MAJOR-2 — measured at 2x the
+        configured deadline). Each attempt therefore gets the budget that is LEFT,
+        and a session that refuses is retried on the next round rather than dropped:
+        the pod's next action on a failure is to power off, so a retry is free and a
         premature give-up is not.
+
+        A SPENT BUDGET MEANS NO ATTEMPT. The old "every session is attempted at
+        least once even when the deadline is already spent" promise is the one that
+        made the bound unkeepable — an attempt with no budget left is the unbounded
+        wait this deadline exists to prevent, so those sessions stay pending and the
+        caller reports them (``drain_barrier_timeout``).
         """
         deadline = self.clock() + float(self.sync_drain_deadline_s)
         acked: list[str] = []
@@ -542,7 +614,11 @@ class PoolDrainCoordinator:
         while pending:
             still: list[str] = []
             for session_id in pending:
-                (acked if self._flush_one(session_id) else still).append(session_id)
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    still.append(session_id)
+                    continue
+                (acked if self._flush_one(session_id, remaining) else still).append(session_id)
             pending = still
             if not pending:
                 break
@@ -567,12 +643,33 @@ class PoolDrainCoordinator:
             logger.debug("pool drain: could not ask about %s", session_id, exc_info=True)
             return False
 
-    def _flush_one(self, session_id: str) -> bool:
-        try:
-            return bool(self.flush(session_id))
-        except Exception:  # noqa: BLE001
-            logger.debug("pool drain: flush of %s failed", session_id, exc_info=True)
+    def _flush_one(self, session_id: str, budget_s: float) -> bool:
+        """One flush attempt, bounded by what is left of the barrier budget.
+
+        THE HANDLER IS THE CALLER'S, so it may block for as long as its own link
+        allows (``sync.SYNC_OP_DEADLINE_S`` is 60 s per round trip). Running it
+        inline would make "bounded by ``sync_drain_deadline_s``" a claim about the
+        handler rather than about this loop, so the attempt runs in a DAEMON thread
+        and is ABANDONED — not killed, nothing can kill it — when the budget runs
+        out. Daemon because an abandoned attempt must not be able to hold the
+        process open past the barrier: the member is powering off regardless.
+        """
+        answer: dict[str, Any] = {}
+
+        def attempt() -> None:
+            try:
+                answer["acked"] = bool(self.flush(session_id))
+            except Exception:  # noqa: BLE001
+                logger.debug("pool drain: flush of %s failed", session_id, exc_info=True)
+                answer["acked"] = False
+
+        worker = threading.Thread(target=attempt, name=f"pool-flush-{session_id}", daemon=True)
+        worker.start()
+        worker.join(max(0.0, budget_s))
+        if worker.is_alive():
+            logger.warning("pool drain: the flush of %s outlived the barrier budget", session_id)
             return False
+        return bool(answer.get("acked", False))
 
     def _cut_turn(self, session_id: str) -> None:
         if self.cut is not None:
@@ -583,14 +680,26 @@ class PoolDrainCoordinator:
         _record_drain_cut(self.config_dir, session_id, now=self.wall_clock())
 
     def _set_lifecycle(self, lifecycle: MemberLifecycle) -> bool:
-        """Move the member row to ``lifecycle``. Returns whether it changed."""
+        """Move the member row to ``lifecycle``. True iff the durable row says so.
+
+        THE ANSWER IS THE EFFECT, not "no exception was raised": the caller gates
+        ``pool_member_expired`` and ``drained`` on it, and a row that still reads
+        ``active`` beneath an audit log claiming the barrier completed is the
+        contradiction review round 1 (MAJOR-3) found. A row that already reads
+        ``lifecycle`` is the same durable fact, so an idempotent retry answers True.
+        """
         from local_operator.network import store
 
         try:
             with store.mutate(self.network_id, self.config_dir) as record:
                 row = record.member(self.member_id)
-                if row is None or row.lifecycle == lifecycle:
+                if row is None:
+                    logger.warning(
+                        "pool drain: %s has no member row to mark %s", self.member_id, lifecycle
+                    )
                     return False
+                if row.lifecycle == lifecycle:
+                    return True
                 row.lifecycle = lifecycle
                 store.save(record, self.config_dir)
         except (OSError, ValueError, FileNotFoundError):
@@ -638,7 +747,6 @@ def _record_drain_cut(config_dir: Path, session_id: str, *, now: float | None = 
             "ended_at": stamped,
             "open": False,
             "end_cause": SIGNAL_DRAIN_CAUSE,
-            "updated_at": stamped,
         }
     )
     try:
