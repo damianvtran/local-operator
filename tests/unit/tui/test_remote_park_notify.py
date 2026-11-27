@@ -43,6 +43,8 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator.config import ConfigManager
+from local_operator.paths import config_dir
 from local_operator.resume import SessionRow
 from local_operator.tui.app import REMOTE_PARK_POLL_S, OperatorApp
 from local_operator.tui.notify import remote_park_banner, remote_park_card
@@ -215,6 +217,9 @@ async def test_an_attached_viewer_is_not_told_about_its_own_card() -> None:
     them to. The card is staged through the real mount (``_stage_card``), not
     assumed: with no card up this app must be TOLD (the F-A cells below).
     """
+    # AttachedFake supplies peer identity but stages the card through the local
+    # approval callback, not an owner snapshot. Save Ask so it actually mounts.
+    ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     app = OperatorApp(lambda: _factory(AttachedFake()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
