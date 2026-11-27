@@ -357,6 +357,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only the mkstemp temp FILE this call created in the config dir's team_bridge/",
     ),
+    # Radient Guard's file-backed install key (``LOCAL_OPERATOR_GUARD_KEY_STORE=file``,
+    # the fallback when no Keychain exists). Its only path is ``key_file(config_dir)``
+    # = ``<config_dir>/guard/install.key`` -- the constant KEY_FILENAME under the
+    # fixed ``guard`` component -- plus that name's per-writer temp sibling
+    # ``install.key.<16 hex>.tmp``, created O_EXCL by the same ``store`` call. No
+    # caller input names either path, ``guard/`` is not ``sessions/``, and both
+    # targets are regular FILES: ``os.replace`` publishes the temp file onto the key
+    # file (twice: stale-key replace and the no-hard-link fallback), the ``store``
+    # unlink drops the temp NAME after the publish, and ``delete`` unlinks the key file.
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.store",
+        "os.replace",
+        "Publishes its own O_EXCL temp FILE onto <config>/guard/install.key; never a session path",
+        2,
+    ),
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.store",
+        "<path>.unlink",
+        "Removes only the install.key.<hex>.tmp FILE this call created in <config>/guard/",
+    ),
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.delete",
+        "<path>.unlink",
+        "Removes the fixed <config>/guard/install.key FILE; never a session path",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only

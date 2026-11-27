@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ class _Fixture:
         self.grant_reply: tuple[int, dict[str, Any]] = (201, {"result": {"consent": {}}})
         self.revoke_reply: tuple[int, dict[str, Any]] = (200, {"result": {"revoked": True}})
         self.lock = threading.Lock()
+        # Set by ``fixture_server`` once the server is bound to its ephemeral port.
+        self.base = ""
 
     def guard_requests(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -53,7 +56,7 @@ class _Fixture:
 
 def _handler(fx: _Fixture) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args: Any) -> None:  # quiet
+        def log_message(self, format: str, *args: Any) -> None:  # quiet
             return
 
         def _reply(self, status: int, body: dict[str, Any]) -> None:
@@ -106,7 +109,7 @@ def fixture_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(fx))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    fx.base = f"http://127.0.0.1:{server.server_address[1]}/v1"  # type: ignore[attr-defined]
+    fx.base = f"http://127.0.0.1:{server.server_address[1]}/v1"
     try:
         yield fx
     finally:
@@ -138,7 +141,7 @@ class CountingKeyStore:
 
 
 @pytest.fixture
-def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     from local_operator.operator import trust
 
     root = tmp_path / "config"
@@ -176,6 +179,14 @@ def _offer(**over: Any) -> dict[str, Any]:
     }
     body.update(over)
     return body
+
+
+def _state(host: C.GuardConsentHost, tenant: str = TENANT) -> str:
+    """The stored consent's state; fails the test when no row exists at all."""
+
+    row = host.consent(tenant)
+    assert row is not None, f"no consent row for {tenant}"
+    return row["state"]
 
 
 def _client(fx: _Fixture) -> RadientClient:
@@ -458,7 +469,7 @@ def test_widening_keep_current_suppresses_same_scopes_and_prompts_only_the_diffe
     assert queued.status == "queued"
     assert queued.row is not None and queued.row.asked_scopes == ("review_cycles",)
     assert queued.row.grant_scopes == ("decisions", "review_cycles", "task_time")
-    assert host.consent(TENANT)["state"] == "live"
+    assert _state(host) == "live"
     assert [n["kind"] for n in host.notices()] == ["grant"]
 
 
@@ -474,7 +485,7 @@ def test_revoke_is_jwt_only_sticky_and_noticed(config_dir: Path, fixture_server:
         {"tenant": TENANT},
     )
     assert "signature" not in json.dumps(revoke["body"])
-    assert host.consent(TENANT)["state"] == "revoked"
+    assert _state(host) == "revoked"
     assert host.sticky(TENANT) == "revoked"
     assert host.offer(C.ConsentOffer.from_wire(_offer(collection_rev=2))).status == (
         "suppressed_sticky"
@@ -490,10 +501,10 @@ def test_revoke_that_cannot_reach_radient_stays_pending_and_retries(
     host.accept(TENANT, 1, capability=True, signature=None, source="tui")
     fixture_server.revoke_reply = (503, {"error": "refused", "code": "unavailable"})
     assert host.revoke(TENANT).status == "failed"
-    assert host.consent(TENANT)["state"] == "revoke_pending"
+    assert _state(host) == "revoke_pending"
     fixture_server.revoke_reply = (200, {"result": {}})
     host.retry_pending_revokes()
-    assert host.consent(TENANT)["state"] == "revoked"
+    assert _state(host) == "revoked"
 
 
 def test_console_revoke_observed_on_accept_is_sticky(
@@ -622,7 +633,7 @@ def test_share_again_after_revoke_re_grants_at_the_same_rev(
     )
     grants = [r for r in fixture_server.guard_requests() if r["path"] == "/v1/guard/consents"]
     assert [g["body"]["payload"]["revocation_gen"] for g in grants] == [0, 1]
-    assert host.consent(TENANT)["state"] == "live"
+    assert _state(host) == "live"
 
 
 def test_pending_row_is_refreshed_when_the_server_offer_changes_at_the_same_rev(
@@ -664,7 +675,7 @@ def test_revoke_during_an_in_flight_grant_wins_locally(config_dir: Path) -> None
     # The grant landed, so the revoke is sent AGAIN after it: the first one may
     # have reached the server before the grant did.
     assert transport.calls == ["grant", "revoke", "revoke"]
-    assert host.consent(TENANT)["state"] == "revoked"
+    assert _state(host) == "revoked"
     assert host.sticky(TENANT) == "revoked"
     assert host.prompt(TENANT, 1).state == "superseded"  # type: ignore[union-attr]
     assert "grant" not in [n["kind"] for n in host.notices()]
@@ -759,7 +770,7 @@ def test_failed_revoke_is_retried_after_the_team_membership_lapses(boundary_rig:
     assert C.check_point(root, boundary="tick") == []
     sent = fx.guard_requests()[before:]
     assert [(r["method"], r["path"]) for r in sent] == [("POST", "/v1/guard/consents/revoke")]
-    assert host.consent(TENANT)["state"] == "revoked"
+    assert _state(host) == "revoked"
 
 
 # ---------------------------------------------------------------------------

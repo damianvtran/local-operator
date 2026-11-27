@@ -230,7 +230,9 @@ async def test_typed_accept_signs_once_and_sends_exactly_one_signed_grant(
     assert [(r["method"], r["path"]) for r in grants] == [("POST", "/v1/guard/consents")]
     assert grants[0]["body"]["payload"]["scopes"] == ["decisions", "task_time"]
     assert "enroll" in grants[0]["body"]["payload"]
-    assert C.GuardConsentHost(root).consent(TENANT)["state"] == "live"
+    consent = C.GuardConsentHost(root).consent(TENANT)
+    assert consent is not None
+    assert consent["state"] == "live"
     assert C.GuardConsentHost(root).pending() == []
     # The install key went to the 0600 file store (BACKEND_ENV=file), never Keychain.
     assert install_key.key_file(root).is_file()
