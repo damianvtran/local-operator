@@ -496,3 +496,40 @@ def test_repeated_large_body_stays_fast(ctx: CallContext) -> None:
     )
     assert time.monotonic() - started < 8.0
     assert verdict.risk == Risk.CRITICAL
+
+
+# Field case (PR #4475's agent, guard 0.112.5 → 0.113.17): a script that posts
+# PR comments through a helper function was refused as dangerous-delete with
+# "shell function post_and_verify recurses". The helper validated the posted
+# URL with ``case "$url" in "https://github.com/$repo/pull/$pr#…"*) ;;``: the
+# legacy segmentation read that pattern as a command word holding an
+# expansion, so it "reached" every defined function — including the one being
+# walked, reported as recursion. Bash cannot run a word ending in an unquoted
+# ``)`` (a syntax error outside a case), so such a word is only a pattern.
+_CASE_IN_FUNCTION = (
+    'f() {\n  case "$1" in\n    "x/$y"*) ;;\n    *) return 1 ;;\n  esac\n}\nf a',
+    'f() {\n  case "$1" in\n    x/$y*) ;;\n  esac\n}\nf a',
+    'g() { echo ok; }\nf() {\n  g\n  case "$u" in\n    "https://h/$r/pull/$p#c-"*) ;;\n'
+    '    *) printf "bad\\n" >&2; return 1 ;;\n  esac\n}\nf a\nf b',
+)
+
+
+@pytest.mark.parametrize("command", _CASE_IN_FUNCTION, ids=["dq-var", "bare-var", "helper"])
+def test_case_pattern_with_expansion_is_not_a_dynamic_command_word(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A real dynamic command word still reaches the functions it may run.
+        'f() { rm -rf ~/x; }\ncmd=f\n"$cmd"',
+        # A delete inside the matching arm is still ranked.
+        'f() {\n  case "$1" in\n    "x/$y"*) rm -rf ~ ;;\n  esac\n}\nf a',
+    ],
+    ids=["dynamic-word", "delete-in-arm"],
+)
+def test_case_pattern_fix_keeps_real_reaches(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict
