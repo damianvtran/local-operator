@@ -622,6 +622,7 @@ def _member_state(config_dir: Path, stamp: MeshStamp, member: str) -> _MemberSta
     apart, because ``store.load`` maps both to ``FileNotFoundError``.
     """
     from local_operator.network import store
+    from local_operator.network.projection import self_device_id
     from local_operator.network.types import MeshRefusal
 
     network_id = stamp.placement.network_id or stamp.network_id
@@ -642,11 +643,22 @@ def _member_state(config_dir: Path, stamp: MeshStamp, member: str) -> _MemberSta
             [store.load(network_id, config_dir)] if network_id else store.list_networks(config_dir)
         )
     except FileNotFoundError as exc:
-        if network_id and store.record_path(network_id, config_dir).exists():
+        record_file = store.record_path(network_id, config_dir) if network_id else None
+        if record_file is not None and record_file.exists():
             raise _MembershipUnreadable(
-                f"the network record {store.record_path(network_id, config_dir).name} exists "
-                "but could not be parsed"
+                f"the network record {record_file.name} exists but could not be parsed"
             ) from exc
+        # A QUARANTINED RECORD IS THE SAME ANSWER AS A CORRUPT ONE (round 2, MINOR-2):
+        # ``store.list_networks`` moves an unparsable record to
+        # ``<id>.json.corrupt``, so the next read finds no ``record_path`` at all and
+        # would read "this device never joined" for a record it had and cannot read.
+        if record_file is not None:
+            quarantined = record_file.with_name(record_file.name + store.CORRUPT_SUFFIX)
+            if quarantined.exists():
+                raise _MembershipUnreadable(
+                    f"the network record {record_file.name} could not be parsed and was "
+                    f"set aside as {quarantined.name}"
+                ) from exc
         return _MemberState()
     except (OSError, ValueError, TypeError) as exc:
         # A record that IS there and cannot be interpreted is the other answer, and the
@@ -655,9 +667,21 @@ def _member_state(config_dir: Path, stamp: MeshStamp, member: str) -> _MemberSta
         raise _MembershipUnreadable(str(exc)) from exc
     for record in records:
         row = record.member(member)
-        self_device = str(record.self_device_id or "")
+        # THE RECORD'S ID WHEN IT HAS ONE, the identity file when it does not (a record
+        # written by an older build): ``self_device_id`` reads that identity without
+        # minting one, so a read path still creates nothing.
+        self_device = str(record.self_device_id or "") or self_device_id(config_dir)
         if row is not None:
-            return _MemberState(lifecycle=str(row.lifecycle), is_self=self_device == member)
+            # THE ROW'S ID, NOT THE STAMP'S (round 2, MAJOR-1). ``record.member``
+            # resolves ``previous_ids``, so a stamp written before a key rotation names
+            # the id this device had THEN. Comparing that id with ``self_device`` is
+            # what refused a member its own copy, i.e. locked the one writer out of the
+            # conversation it is appending to; the row's ``device_id`` is the id this
+            # device answers to now.
+            return _MemberState(
+                lifecycle=str(row.lifecycle),
+                is_self=bool(self_device) and row.device_id == self_device,
+            )
         if self_device == member:
             # The member's own copy, with its row already pruned: still its own session.
             return _MemberState(is_self=True)

@@ -200,6 +200,33 @@ def test_the_member_itself_may_engage_its_own_copy(tmp_path: Path) -> None:
     assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
 
 
+def test_a_rotated_member_key_still_recognises_its_own_copy(tmp_path: Path) -> None:
+    """A ROTATION MOVES ``device_id`` AND KEEPS THE OLD ONE IN ``previous_ids`` (round 2,
+    MAJOR-1).
+
+    A stamp written before the rotation still names the id this device had then, and
+    ``record.member`` resolves that alias to the live row — so comparing the STAMP's id
+    with ``self_device_id`` refused the member its own copy, locking the one writer out
+    of the conversation it is appending to. The row's own ``device_id`` is the id this
+    device answers to now, and home is still refused.
+    """
+    rotated = MemberRecord(
+        device_id="dev_pod_1_rotated",
+        kind="pool",
+        lifecycle="active",
+        name="pod",
+        previous_ids=[MEMBER],
+    )
+    _stamp(tmp_path, member=MEMBER)  # written BEFORE the rotation, so it names the old id
+    _transcript(tmp_path)
+
+    _network(tmp_path, rotated, self_device="dev_pod_1_rotated")
+    assert pool_guard_refusal(tmp_path, SESSION_ID) == ""
+
+    _network(tmp_path, rotated, self_device=HOME)
+    assert pool_guard_refusal(tmp_path, SESSION_ID), "home is the other end; it must refuse"
+
+
 # ---------------------------------------------------------------------------
 # The allowing answers (R22's whole point)
 # ---------------------------------------------------------------------------
@@ -272,6 +299,26 @@ def test_a_corrupt_network_record_fails_closed(tmp_path: Path) -> None:
 
     assert refusal and "network records" in refusal
     assert f"{NETWORK}.json" in refusal
+
+
+def test_a_quarantined_network_record_fails_closed(tmp_path: Path) -> None:
+    """A RECORD SET ASIDE IS STILL A RECORD THIS DEVICE CANNOT READ (round 2, MINOR-2).
+
+    ``store.list_networks`` moves an unparsable record to ``<id>.json.corrupt``, so the
+    next read finds no ``record_path`` at all. Reading that as "this device never
+    joined the network" is reading a quarantine as a clean install, and it allows the
+    engage the corrupt case refuses.
+    """
+    _stamp(tmp_path)
+    _transcript(tmp_path)
+    networks = tmp_path / "network" / "networks"
+    networks.mkdir(parents=True, exist_ok=True)
+    (networks / f"{NETWORK}.json{store.CORRUPT_SUFFIX}").write_text("{not json", encoding="utf-8")
+
+    refusal = pool_guard_refusal(tmp_path, SESSION_ID)
+
+    assert refusal and "network records" in refusal
+    assert f"{NETWORK}.json{store.CORRUPT_SUFFIX}" in refusal
 
 
 def test_an_unsafe_network_id_fails_closed(tmp_path: Path) -> None:

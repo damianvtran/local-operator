@@ -581,7 +581,7 @@ def test_an_unreachable_home_exits_on_the_deadline_without_hanging(tmp_path: Pat
     coordinator, _source = _coordinator(
         tmp_path,
         clock,
-        flush=lambda _session_id: False,
+        flush=lambda _session_id, _cancellation=None: False,
         busy=lambda _id: False,
         sync_drain_deadline_s=900.0,
     )
@@ -614,7 +614,7 @@ def test_a_wedged_flush_cannot_outlive_the_barrier_deadline(tmp_path: Path) -> N
     gate = threading.Event()
     attempts: list[str] = []
 
-    def wedged(session_id: str) -> str:
+    def wedged(session_id: str, _cancellation: Any = None) -> str:
         attempts.append(session_id)
         gate.wait()
         return ""
@@ -638,6 +638,71 @@ def test_a_wedged_flush_cannot_outlive_the_barrier_deadline(tmp_path: Path) -> N
     assert attempts == [SESSION_ID], "one attempt, abandoned when the budget ran out"
     assert elapsed < 2.0 + 1.0, f"the barrier outlived its deadline ({elapsed:.2f}s)"
     assert "drain_barrier_timeout" in dict(_events(member))
+
+
+def test_an_abandoned_flush_cannot_rewrite_home_after_the_barrier_expires(
+    tmp_path: Path,
+) -> None:
+    """AN ABANDONED ATTEMPT STILL FINISHES, AND MUST NOT SAY THE MEMBER LEFT (round 2,
+    MAJOR-2).
+
+    ``_flush_one`` abandons a slow attempt at the barrier budget and nothing can kill
+    it, so the transfer completes after ``drain()`` has already reported
+    ``barrier_expired=True``. Ungated, that late completion ran the drain's placement
+    rewrite: home's stamp went ``local`` with ``pool_member`` cleared, switching off
+    ``pool_guard_refusal`` on behalf of a member whose row still reads ``draining`` —
+    the drain's own ``drain_barrier_timeout`` row contradicting it.
+    """
+    member, home = _both_ends(tmp_path)
+    release = threading.Event()
+    entered = threading.Event()
+    ask = _ask(member)
+
+    def blocking_ask(frame: dict[str, Any]) -> dict[str, Any]:
+        if str(frame.get("phase") or "") == "plan":
+            entered.set()
+            release.wait(30.0)
+        return ask(frame)
+
+    coordinator, _source = _coordinator(
+        tmp_path,
+        _RealClock(),
+        flush=pool_drain.make_flush(
+            home, ask_for=lambda _session_id: blocking_ask, member_device=MEMBER, drain=True
+        ),
+        busy=lambda _id: False,
+        sync_drain_deadline_s=2.0,
+        poll_s=0.05,
+    )
+
+    outcome = coordinator.drain()
+
+    assert outcome.barrier_expired is True
+    assert outcome.pending == (SESSION_ID,)
+    assert entered.is_set(), "the attempt must have been mid-transfer when the budget ran out"
+
+    # LET THE ABANDONED ATTEMPT RUN TO COMPLETION — the claim is about what it does
+    # after the barrier has already reported that it expired.
+    release.set()
+    workers = [thread for thread in threading.enumerate() if thread.name.startswith("pool-flush-")]
+    assert workers, "the attempt runs in the coordinator's own daemon thread"
+    for worker in workers:
+        worker.join(30.0)
+        assert not worker.is_alive(), "the abandoned attempt must have finished"
+
+    stamp = read_stamp(home, SESSION_ID)
+    assert stamp is not None
+    assert stamp.placement.mode == "pool", "the late attempt rewrote home's placement"
+    assert stamp.pool_member == MEMBER
+    assert [
+        detail for event, detail in _events(home) if event == "session_placement_changed"
+    ] == [], "a drain that reported the barrier expired must not record a placement change"
+    assert placement.pool_guard_refusal(
+        home, SESSION_ID
+    ), "home's two-writer guard must still refuse"
+    assert (home / "sessions" / SESSION_ID / "transcript.jsonl").read_bytes() == (
+        member / "sessions" / SESSION_ID / "transcript.jsonl"
+    ).read_bytes(), "the bytes still went home; only the stamp's claim is gated"
 
 
 def test_a_failed_expiry_write_is_not_reported_as_drained(
@@ -708,7 +773,7 @@ def test_one_unacked_session_does_not_expire_the_member(tmp_path: Path) -> None:
         tmp_path,
         clock,
         sessions=lambda: [SESSION_ID, OTHER_ID],
-        flush=lambda session_id: session_id == SESSION_ID,
+        flush=lambda session_id, _cancellation=None: session_id == SESSION_ID,
         busy=lambda _id: False,
         sync_drain_deadline_s=10.0,
     )

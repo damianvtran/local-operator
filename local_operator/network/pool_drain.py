@@ -42,9 +42,9 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Protocol, Sequence
 
 from local_operator.atomic_files import atomic_write_text
 from local_operator.network.types import MemberLifecycle
@@ -101,6 +101,51 @@ def _audit(event: str, root: Path | None, **fields: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+class DrainCancellation:
+    """The drain's abandonment gate: shut once, checked under the same lock as the act.
+
+    A BARE ``threading.Event`` IS NOT ENOUGH, and the gap is the whole finding: a late
+    attempt that read ``is_set()`` a microsecond before the barrier expired would
+    still rewrite home's stamp AFTER ``drain()`` returned ``barrier_expired=True``.
+    That stamp is the one ``pool_guard_refusal`` reads, so the rewrite would lift the
+    two-writer guard on behalf of a member whose row still reads ``draining`` — the
+    drain's own next audit row contradicting it (round 2, MAJOR-2).
+    :meth:`unless_cancelled` takes the lock :meth:`cancel` takes, so the two outcomes
+    are exclusive: the rewrite lands before the barrier expires, or not at all.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+
+    def unless_cancelled(self, act: Callable[[], bool]) -> bool:
+        """Run ``act`` and return its answer, or ``False`` once cancelled."""
+        with self._lock:
+            if self._cancelled:
+                return False
+            return act()
+
+
+class FlushAttempt(Protocol):
+    """One flush of one session, with the drain's gate when there is one.
+
+    THE GATE IS OPTIONAL so the cadence (``pool_sync_tick``) drives the same object
+    with only the session id: a tick is not a drain, holds no barrier and therefore
+    has nothing to cancel.
+    """
+
+    def __call__(self, session_id: str, cancellation: DrainCancellation | None = ...) -> str: ...
+
+
 def flush_session_home(
     config_dir: Path,
     session_id: str,
@@ -109,6 +154,7 @@ def flush_session_home(
     member_device: str,
     rewrite_placement: bool = False,
     sync_reason: str = "cadence",
+    cancellation: DrainCancellation | None = None,
 ) -> dict[str, Any]:
     """Bring home's copy of ``session_id`` to the member's frontier. Same id.
 
@@ -137,6 +183,12 @@ def flush_session_home(
     :func:`pool_guard_refusal` — permanently — with the very copy it exists to make
     safe (review round 1, BLOCKER-1). ``sync_reason`` rides the audit row for the
     same reason: ``pre_spindown`` is a fact about a drain, ``cadence`` about a tick.
+
+    ``cancellation`` IS THE DRAIN'S GATE, and the only caller that passes one is the
+    barrier: its attempts run in threads it abandons at the deadline but cannot kill,
+    so a transfer that finishes late must still not write the placement (§6.5 rule 4)
+    after the drain reported the barrier expired (round 2, MAJOR-2). The BYTES land
+    either way — a copy is never harmful — and only the stamp's claim is gated.
     """
     from local_operator.network import sync
 
@@ -151,8 +203,16 @@ def flush_session_home(
     )
     # PLACEMENT LAST, so a crash between the bytes and the stamp leaves a copy that
     # the launch guard still refuses (mode ``pool`` + a live member), never a
-    # ``local`` stamp over a half-copied transcript.
-    rewritten = _rewrite_placement_local(config_dir, session_id) if rewrite_placement else False
+    # ``local`` stamp over a half-copied transcript. Gated when a drain asked: an
+    # attempt it has already given up on must not say the member left.
+    rewritten = False
+    if rewrite_placement:
+        if cancellation is None:
+            rewritten = _rewrite_placement_local(config_dir, session_id)
+        else:
+            rewritten = cancellation.unless_cancelled(
+                lambda: _rewrite_placement_local(config_dir, session_id)
+            )
     _audit(
         "session_sync_completed",
         config_dir,
@@ -224,7 +284,7 @@ def make_flush(
     ask_for: Callable[[str], Callable[[dict[str, Any]], dict[str, Any]]],
     member_device: str,
     drain: bool = False,
-) -> Callable[[str], str]:
+) -> FlushAttempt:
     """A coordinator ``flush`` backed by real transfers: the acked frontier, or ``""``.
 
     ``ask_for`` supplies the member's ``net_sync`` frame handler for one session —
@@ -244,7 +304,7 @@ def make_flush(
     recording why. ``drain=False``, the safe half, is what a cadence tick wants.
     """
 
-    def flush(session_id: str) -> str:
+    def flush(session_id: str, cancellation: DrainCancellation | None = None) -> str:
         try:
             result = flush_session_home(
                 config_dir,
@@ -253,6 +313,7 @@ def make_flush(
                 member_device=member_device,
                 rewrite_placement=drain,
                 sync_reason="pre_spindown" if drain else "cadence",
+                cancellation=cancellation,
             )
         except Exception:  # noqa: BLE001 — see the docstring
             logger.debug("pool drain: flush of %s was not acked", session_id, exc_info=True)
@@ -447,8 +508,10 @@ class PoolDrainCoordinator:
     #: Ask home to pull one session and answer the frontier it verified, or ``""``
     #: when the copy was not acked. ``make_flush(..., drain=True)`` in production:
     #: the placement rewrite (§6.5 rule 4) is part of the drain, so a cadence flush
-    #: here would copy the bytes and leave home's stamp claiming a live member.
-    flush: Callable[[str], str]
+    #: here would copy the bytes and leave home's stamp claiming a live member. It is
+    #: handed this barrier's :class:`DrainCancellation`, because the attempt runs in a
+    #: thread the barrier abandons but cannot kill.
+    flush: FlushAttempt
     #: Commit one placed session's runtime to leaving (§3.6 step 1). It takes the
     #: session and the CAUSE, because the cause is this module's to state and the
     #: runtime's leaving ladder keys on it (``types.PRE_SPINDOWN_DRAIN_CAUSE``):
@@ -475,7 +538,16 @@ class PoolDrainCoordinator:
     wall_clock: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
 
+    #: THIS BARRIER'S GATE, created per :meth:`drain` rather than once per coordinator:
+    #: an attempt abandoned by an earlier drain keeps the object it was handed, so a
+    #: retried barrier cannot un-cancel a thread that is still running.
+    _cancellation: DrainCancellation = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._cancellation = DrainCancellation()
+
     def drain(self) -> DrainOutcome:
+        self._cancellation = DrainCancellation()
         placed = tuple(dict.fromkeys(str(item) for item in self.sessions() if str(item)))
         # 1. ANNOUNCE. The lifecycle IS the refusal for new placements and turns
         #    (§3.4: "no new turns are admitted"), so it is written before anything
@@ -626,6 +698,12 @@ class PoolDrainCoordinator:
             if now >= deadline:
                 break
             self.sleep(min(self.poll_s, deadline - now))
+        if pending:
+            # THE BARRIER IS OVER AND ITS ATTEMPTS MUST KNOW IT (round 2, MAJOR-2):
+            # anything still in flight here was abandoned by ``_flush_one``, may be
+            # blocked in a transfer, and cannot be killed. Shutting the gate is what
+            # keeps its late placement rewrite out of home's stamp.
+            self._cancellation.cancel()
         return tuple(acked), tuple(pending)
 
     # -- collaborator calls, each one non-fatal ----------------------------
@@ -658,7 +736,7 @@ class PoolDrainCoordinator:
 
         def attempt() -> None:
             try:
-                answer["acked"] = bool(self.flush(session_id))
+                answer["acked"] = bool(self.flush(session_id, self._cancellation))
             except Exception:  # noqa: BLE001
                 logger.debug("pool drain: flush of %s failed", session_id, exc_info=True)
                 answer["acked"] = False
@@ -667,6 +745,12 @@ class PoolDrainCoordinator:
         worker.start()
         worker.join(max(0.0, budget_s))
         if worker.is_alive():
+            # SHUT THE GATE BEFORE THE BUDGET RUNS OUT FOR GOOD: this attempt is now
+            # abandoned and will finish later, possibly after ``drain()`` has reported
+            # ``barrier_expired=True``. Its bytes are welcome; its placement rewrite is
+            # not, because home's stamp is what ``pool_guard_refusal`` reads (round 2,
+            # MAJOR-2).
+            self._cancellation.cancel()
             logger.warning("pool drain: the flush of %s outlived the barrier budget", session_id)
             return False
         return bool(answer.get("acked", False))
