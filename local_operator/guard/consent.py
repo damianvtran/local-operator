@@ -346,11 +346,18 @@ class GuardConsentStore:
             if existed and version == 1:
                 # Generation 1 (L2a) -> 2: the per-claim token column. Additive
                 # and NULL for every existing row, which reads as "unclaimed".
+                # The version is re-read UNDER the write lock (L2b review round 2,
+                # R2-1): several ``lop`` sessions open the store at the first
+                # boundary after an upgrade, and one that read 1 before another
+                # migrated would otherwise ALTER an already-migrated table and
+                # raise an untyped ``duplicate column name``.
                 conn.execute("BEGIN IMMEDIATE")
-                conn.execute("ALTER TABLE prompts ADD COLUMN claim TEXT")
-                conn.execute(f"PRAGMA user_version = {GUARD_CONSENT_SCHEMA_VERSION}")
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                if version == 1:
+                    conn.execute("ALTER TABLE prompts ADD COLUMN claim TEXT")
+                    conn.execute(f"PRAGMA user_version = {GUARD_CONSENT_SCHEMA_VERSION}")
+                    version = GUARD_CONSENT_SCHEMA_VERSION
                 conn.execute("COMMIT")
-                version = GUARD_CONSENT_SCHEMA_VERSION
             if existed and version != GUARD_CONSENT_SCHEMA_VERSION:
                 raise GuardConsentRefused(
                     "consent_store_damaged",
@@ -358,9 +365,12 @@ class GuardConsentStore:
                 )
             if not version:
                 conn.execute("BEGIN IMMEDIATE")
-                for statement in _DDL:
-                    conn.execute(statement)
-                conn.execute(f"PRAGMA user_version = {GUARD_CONSENT_SCHEMA_VERSION}")
+                # Same race as the migration (R2-1): a concurrent first open may
+                # have created the schema while this one waited on the lock.
+                if not conn.execute("PRAGMA user_version").fetchone()[0]:
+                    for statement in _DDL:
+                        conn.execute(statement)
+                    conn.execute(f"PRAGMA user_version = {GUARD_CONSENT_SCHEMA_VERSION}")
                 conn.execute("COMMIT")
         except BaseException:
             conn.close()
@@ -1073,8 +1083,16 @@ class GuardConsentHost:
             # claim, with no sticky state and not superseded, was released by the
             # lease and answered (or is answerable) again -- another answer, not
             # a revoke. It is settled below without a revoke the member never gave.
+            # L2b security round 2, S-9: a row DECLINED while this grant was in
+            # flight (a lease-released widening answered "Keep current", which
+            # writes ``declined_scopes`` and no sticky row) is also the member's
+            # later answer. The server now holds scopes they declined, so it
+            # takes the revoke-wins arm: share less than asked, never more, and
+            # the revoke receipt tells them it stopped.
             revoked_meanwhile = (
-                sticky is not None or current is None or current["state"] == PROMPT_SUPERSEDED
+                sticky is not None
+                or current is None
+                or current["state"] in (PROMPT_SUPERSEDED, PROMPT_DECLINED)
             )
             settled_elsewhere = not revoked_meanwhile and not mine
             if revoked_meanwhile and sticky is not None:
@@ -1157,7 +1175,9 @@ class GuardConsentHost:
                 " state) VALUES (?, ?, ?, ?, 'live')",
                 (row.tenant, row.collection_rev, json.dumps(list(row.grant_scopes)), now),
             )
-            conn.execute("DELETE FROM sticky WHERE tenant = ?", (row.tenant,))
+            # No ``DELETE FROM sticky`` here (L2b review round 2, R2-4): any sticky
+            # row sends this grant down the revoke-wins arm above, so none can
+            # exist on the success path.
             # The receipt notice (§5.7c, §15.4' C3): first grant vs widening.
             conn.execute(
                 "INSERT INTO notices (tenant, kind, org_display_name, scopes, at)"

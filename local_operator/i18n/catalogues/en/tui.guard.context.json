@@ -307,7 +307,7 @@
   "tui.guard.report_confirmed": {
     "role": "TUI agent-drafted report card on /guard",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "{kind} is one of the report_kind_* strings (already localized); {org} is the organization's display name."
+    "note": "{kind} is one of the report_kind_* strings (already localized) and leads the sentence; {org} is the organization's display name. Must not promise an automatic send: the person is asked again before any report leaves this computer."
   },
   "tui.guard.report_discarded": {
     "role": "TUI agent-drafted report card on /guard",
@@ -337,7 +337,7 @@
   "tui.guard.card_footer": {
     "role": "TUI non-Team card (RFC §15.4' C1)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": ""
+    "note": "{org} is the display name of the organization this card is about (one that is not on Radient Team). The line is scoped to that org on purpose: the same account may share with a different Team org from this computer."
   },
   "tui.guard.scope_label_decisions": {
     "role": "TUI /guard consent card text (RFC §15.4' C4, copy-reviewer approved verbatim)",
@@ -417,7 +417,7 @@
   "tui.guard.readonly_agent": {
     "role": "Line on a read-only Guard decision card when /guard runs inside an agent's shell or a desktop console pane (security S-1)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "No placeholders."
+    "note": "No placeholders. 'lop' is the command name and /guard a slash command; keep both verbatim. Shown in the person's OWN desktop console pane too, so it must not say the terminal IS an agent's."
   },
   "tui.guard.indicator_paused_plain": {
     "role": "TUI passive Guard indicator for an unknown pause reason (copy C3)",
@@ -452,16 +452,21 @@
   "tui.guard.screen_unavailable": {
     "role": "Guard screen body when the local consent or report store can't be read (review R1-3)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "No placeholders."
+    "note": "No placeholders. Says only what this screen did not do; a local stop may already have been saved."
   },
   "tui.guard.receipt_grant": {
     "role": "One-line grant receipt in the transcript (RFC §15.4' C3)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local HH:MM time. /guard is a slash command; keep it verbatim."
+    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local time: HH:MM for today, YYYY-MM-DD HH:MM for an earlier day. /guard is a slash command; keep it verbatim."
   },
   "tui.guard.receipt_widen": {
     "role": "One-line widening receipt in the transcript (RFC §15.4' C3)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local HH:MM time. /guard is a slash command; keep it verbatim."
+    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local time: HH:MM for today, YYYY-MM-DD HH:MM for an earlier day. /guard is a slash command; keep it verbatim."
+  },
+  "tui.guard.screen_prompt_changed": {
+    "role": "TUI /guard prompt card line when the org replaced the request between showing it and the answer (review R2-3)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{org} is the organization's display name. The new request is rendered directly below this line."
   }
 }

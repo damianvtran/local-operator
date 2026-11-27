@@ -335,3 +335,11 @@ def test_status_never_hands_the_model_a_raw_pause_enum(root: Path) -> None:
         surface.OrgState(TENANT, "Acme", "member", surface.STATE_PAUSED, "org_off")
     )
     assert "org_off" not in line and "the org turned Guard off" in line
+
+
+def test_an_unknown_pause_reason_is_never_given_a_cause() -> None:
+    """Copy round 2, C13: "paused (paused)" -> "paused (no reason given)"."""
+
+    state = surface.OrgState("ten_x", "Acme", "member", surface.STATE_PAUSED, "a_future_reason")
+    line = guard_tool._status_line(state)
+    assert "paused (no reason given)" in line and "paused (paused)" not in line

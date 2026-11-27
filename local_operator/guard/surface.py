@@ -27,6 +27,7 @@ only when they already exist.
 from __future__ import annotations
 
 import datetime as _dt
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -347,6 +348,14 @@ class NonTeamCard:
     #: ``None`` = "See Radient Team"; an int = "Start {trial_days}-day free trial".
     trial_days: int | None
     url: str
+    #: The org this card is about: the eligibility read's ``tenant_name`` (the
+    #: caller's home tenant, agent-server ``responses.TeamTrialEligibility``).
+    #: ``None`` until that read answers -- and then the footer is NOT shown.
+    #: The footer is scoped to one org on purpose (user-console#98 copy round,
+    #: C2): "nothing is collected from this ACCOUNT" is false for an account
+    #: that shares with a different Team org from this computer, and with no
+    #: org name to scope it to, saying nothing beats over-claiming.
+    org: str | None = None
 
 
 def non_team_card(eligibility: Mapping[str, Any] | None) -> NonTeamCard:
@@ -362,7 +371,16 @@ def non_team_card(eligibility: Mapping[str, Any] | None) -> NonTeamCard:
         raw = eligibility.get("trial_days")
         if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
             days = raw
-    return NonTeamCard(trial_days=days, url=team_url())
+    org: str | None = None
+    if isinstance(eligibility, Mapping) and isinstance(eligibility.get("tenant_name"), str):
+        # An org-supplied name: one line, no control characters, capped (the
+        # S-3 shape; the TUI renders it with markup off).
+        flat = "".join(
+            " " if unicodedata.category(ch)[0] == "C" else ch for ch in eligibility["tenant_name"]
+        )
+        flat = " ".join(flat.split())
+        org = (flat[:79] + "…" if len(flat) > 80 else flat) or None
+    return NonTeamCard(trial_days=days, url=team_url(), org=org)
 
 
 __all__ = [

@@ -3887,6 +3887,17 @@ GuardScreen .guard-card {
     color: $lo-fg;
     background: $lo-overlay;
     scrollbar-size-vertical: 1;
+    /* The lop palette, not stock Textual blue (design round 2, D7). At 80x24
+     * this thumb is the main cue that the "Never sent" lines sit below the
+     * fold, so it must clear WCAG 1.4.11's 3:1 against its track. It is
+     * deliberately LOUDER than the transcript's `edge` thumb (1.55:1 there,
+     * fine for a gutter that is always present): measured dark `dim` on `bg`
+     * 4.55:1, paper `dim` on `paper` 3.77:1. Hover/grab step up neutrally,
+     * no accent (the transcript's D1 rule). */
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-dim;
+    scrollbar-color-hover: $lo-muted;
+    scrollbar-color-active: $lo-fg;
 }
 
 .guard-line {

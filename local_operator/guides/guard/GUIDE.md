@@ -8,8 +8,8 @@ requires: radient-guard
 
 The user's Radient Team organization turned on Radient Guard. Guard gives the
 org's admins guardrail stats from members who opt in, and lets members send
-one-shot reports (report sending isn't live yet; a confirmed report waits on
-this computer until it is). You help by **drafting** reports; the user decides
+one-shot reports (report sending isn't live yet: a confirmed report stays on
+this computer, and the user is asked once more before it is sent). You help by **drafting** reports; the user decides
 whether to send them.
 
 ## When to draft a report

@@ -404,9 +404,17 @@ class GuardScreen(ModalScreen[str]):
             )
             return lines + [body, _t(_keys.revoke_retained()), _t(_keys.revoke_totals())]
         if self._mode == "card":
-            return lines + [_t(_keys.card_body()), "", _t(_keys.card_footer())]
+            lines += [_t(_keys.card_body())]
+            if self._card is not None and self._card.org:
+                # Only with the org it is about (see ``NonTeamCard.org``).
+                lines += ["", _t(_keys.card_footer(org=self._card.org))]
+            return lines
         if not self._states:
             return lines + [_t(_keys.screen_none())]
+        if not self._capable and self._stopped() is not None:
+            # Read-only overview with a stopped org (UX round 2, U12): Share
+            # again is hidden here, so say where answering lives instead.
+            lines += [_t(_keys.readonly_agent()), ""]
         for state in self._states:
             lines.append(indicator_text(state))
             if state.answered_via and state.answered_via != "tui":
@@ -550,6 +558,17 @@ class GuardScreen(ModalScreen[str]):
                     else _t(_keys.card_cta_see())
                 )
                 button.disabled = False
+            if self._card.org:
+                # Appended in place, like the CTA: a recompose would move focus.
+                body = self.query("#guard-body")
+                if body:
+                    footer = _t(_keys.card_footer(org=self._card.org))
+                    await body.first().mount_all(
+                        [
+                            Static(Content(""), classes="guard-line", markup=False),
+                            Static(Content(footer), classes="guard-line", markup=False),
+                        ]
+                    )
 
     async def _recheck(self) -> None:
         """Close a card answered on another surface with "Answered on <surface>"."""
@@ -624,11 +643,21 @@ class GuardScreen(ModalScreen[str]):
         except Exception:  # noqa: BLE001 - the next admission point retries
             return
         if not self._busy:
+            self._load()
+            if self._mode == "prompt":
+                # The request it announced is here (UX round 2, U10): "will ask
+                # you again soon" above the question itself reads as stale.
+                self._message = ""
             await self._rerender()
 
     def action_later(self) -> None:
         # Esc and "Decide later" are one decision (§5.2.3), so they give the
         # same feedback (UX round 1, U4).
+        if self._busy:
+            # An answer is in flight (UX round 2, U9): closing now would hide
+            # its outcome, and a share pressed in regret would still land.
+            # "Working…" stays until the result shows.
+            return
         if self._mode in ("prompt", "report"):
             self.app.notify(_t(_keys.screen_later()))
         if self._mode == "revoke":
@@ -655,6 +684,8 @@ class GuardScreen(ModalScreen[str]):
             )
 
     async def _answer(self, *, yes: bool) -> None:
+        from local_operator.guard.consent import GuardConsentRefused
+
         self._busy = True
         self._show_working()
         revoke_tenant = ""
@@ -680,6 +711,16 @@ class GuardScreen(ModalScreen[str]):
                     )
                 else:
                     self._message = ""
+        except GuardConsentRefused as exc:
+            # The org replaced the request between render and answer (the
+            # digest-bound claim, review R2-3): the re-render shows the new one,
+            # so say why it swapped rather than "Try again".
+            if revoke_tenant:
+                self._message = self._indicator_for(revoke_tenant)
+            elif exc.code == "guard_prompt_changed" and self._row is not None:
+                self._message = _t(_keys.screen_prompt_changed(org=self._row.org_display_name))
+            else:
+                self._message = _t(_keys.screen_failed())
         except Exception:  # noqa: BLE001 - say so
             if revoke_tenant:
                 # ``revoke`` commits the local stop BEFORE its request, so "nothing
@@ -760,11 +801,27 @@ def receipt_text(notice: Mapping[str, Any]) -> str | None:
         return None
     org = str(notice.get("org_display_name") or "")
     at = float(notice.get("at") or 0.0)
-    when = time.strftime("%H:%M", time.localtime(at)) if at else ""
+    when = _receipt_time(at)
     device = _device_name()
     if kind == "widen":
         return _t(_keys.receipt_widen(org=org, device=device, time=when))
     return _t(_keys.receipt_grant(org=org, device=device, time=when))
+
+
+def _receipt_time(at: float, now: float | None = None) -> str:
+    """ "06:41" for a grant made today, "2026-11-25 06:41" otherwise (copy round 2, C14).
+
+    A receipt can surface a grant made while this TUI was not running, days
+    ago; "Not you?" only helps if the person can place the time.
+    """
+
+    if not at:
+        return ""
+    stamp = time.localtime(at)
+    today = time.localtime(time.time() if now is None else now)
+    if stamp[:3] == today[:3]:
+        return time.strftime("%H:%M", stamp)
+    return time.strftime("%Y-%m-%d %H:%M", stamp)
 
 
 def _device_name() -> str:

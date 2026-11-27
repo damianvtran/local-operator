@@ -201,7 +201,7 @@ async def test_an_agent_driven_terminal_cannot_accept_and_the_prompt_stays_pendi
         assert not screen.query("#guard-yes")  # read-only: no Share button
         assert screen.query("#guard-no") and screen.query("#guard-later")
         lines = [str(w.render()) for w in screen.query(".guard-line")]
-        assert any("agent's terminal" in line for line in lines)
+        assert any("an agent may be driving this terminal" in line for line in lines)
         # Even an increasing answer that reaches the engine is refused there.
         clock.now += DEBOUNCE_S + 0.01
         await screen._answer(yes=True)
@@ -421,7 +421,12 @@ async def test_the_confirmed_message_names_the_kind(root: Path) -> None:
         for _ in range(4):
             await pilot.pause()
         lines = [str(w.render()) for w in screen.query(".guard-line")]
-    assert any("not sent yet: A suspected exposed key or credential" in line for line in lines)
+    assert any(
+        line.startswith("A suspected exposed key or credential: saved on this computer, not sent.")
+        for line in lines
+    )
+    # Copy round 2, C11: never a promise that Guard sends it on its own.
+    assert any("Guard asks you once more before sending it to Acme" in line for line in lines)
 
 
 def test_the_badge_names_a_waiting_report() -> None:
@@ -464,3 +469,159 @@ async def test_the_cta_slot_holds_its_place_while_eligibility_loads(
         assert "30" in str(cta.label) and not cta.disabled
         assert cta.region.width == width
         assert screen.query_one("#guard-close", Button).region.x == close_x
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "footer"),
+    [
+        ({"eligible": True, "trial_days": 21, "tenant_name": "Dana\nHome"}, True),
+        ({"eligible": True, "trial_days": 21}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_team_footer_names_the_org_or_says_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: dict[str, object], footer: bool
+) -> None:
+    """user-console#98 copy C2 (shared string): scoped to the org the card is
+    about, never "this account"; no org name -> no footer, and focus stays put."""
+
+    monkeypatch.setattr(surface, "_team_orgs", lambda _r: [])
+    monkeypatch.setattr(guard_view, "_has_team", lambda _r: False)
+    app = _Host(GuardScreen(tmp_path, eligibility_loader=lambda: body, clock=_Clock()))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        focused = app.screen.focused
+        for _ in range(6):
+            await pilot.pause()
+        lines = [str(w.render()) for w in app.screen.query(".guard-line")]
+        assert app.screen.focused is focused
+    assert not any("this account" in line for line in lines)
+    expected = "Guard collects nothing for Dana Home."  # one line: the newline is inert
+    assert (expected in lines) is footer
+    assert footer or not any("collects nothing" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_escape_while_an_answer_is_in_flight_keeps_the_card(root: Path) -> None:
+    """UX round 2, U9: Esc during "Working…" must not hide the outcome."""
+
+    _queue(root)
+    screen = GuardScreen(root, clock=_Clock())
+    app = _Host(screen)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen._busy = True
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.screen is screen and app.result == []
+        screen._busy = False
+        await pilot.press("escape")
+        await pilot.pause()
+    assert app.result == ["later"]
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_that_follows_share_again_clears_the_will_ask_line(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 2, U10: the card that arrives replaces "will ask you again soon"."""
+
+    host = _queue(root)
+    host.decline(TENANT, 1, surface="tui")
+    screen = GuardScreen(root, clock=_Clock())
+    app = _Host(screen)
+
+    def org_re_offers(_root: Path, *, boundary: str) -> None:
+        del boundary
+        host.offer(
+            C.ConsentOffer.from_wire(
+                {
+                    "tenant": TENANT,
+                    "org_display_name": "Acme",
+                    "collection_rev": 2,
+                    "revocation_gen": 0,
+                    "scopes": ["decisions"],
+                    "added_scopes": [],
+                    "rendered_terms_digest": "sha256:" + "ab" * 32,
+                    "reason": "new_org",
+                }
+            )
+        )
+
+    monkeypatch.setattr(C, "check_point", org_re_offers)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen._armed_at = 0.0
+        screen.query_one("#guard-again", Button).press()
+        for _ in range(8):
+            await pilot.pause()
+        lines = [str(w.render()) for w in screen.query(".guard-line")]
+        assert screen._mode == "prompt"
+    assert not any("will ask you again soon" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_overview_with_a_stopped_org_says_where_to_answer(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 2, U12: Share again is hidden, so the line says where it lives."""
+
+    _queue(root).decline(TENANT, 1, surface="tui")
+    screen = GuardScreen(root, clock=_Clock(), can_answer=False)
+    app = _Host(screen)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not screen.query("#guard-again")
+        lines = [str(w.render()) for w in screen.query(".guard-line")]
+    assert any("run lop in a separate terminal window" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_request_replaced_before_the_answer_says_so(root: Path) -> None:
+    """Review round 2, R2-3: the digest-bound claim's refusal explains the swap."""
+
+    host = _queue(root)
+    screen = GuardScreen(root, clock=_Clock())
+    app = _Host(screen)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # The org replaces the request (same rev, new immutables) after render.
+        host.offer(
+            C.ConsentOffer.from_wire(
+                {
+                    "tenant": TENANT,
+                    "org_display_name": "Acme",
+                    "collection_rev": 1,
+                    "revocation_gen": 3,
+                    "scopes": ["decisions"],
+                    "added_scopes": [],
+                    "rendered_terms_digest": "sha256:" + "ab" * 32,
+                    "reason": "new_org",
+                }
+            )
+        )
+        screen._armed_at = 0.0
+        screen.query_one("#guard-yes", Button).press()
+        for _ in range(6):
+            await pilot.pause()
+        lines = [str(w.render()) for w in screen.query(".guard-line")]
+    assert "Acme changed this request. Check the new one below." in lines
+    assert _prompt_state(host) == "pending"
+
+
+def test_a_receipt_from_an_earlier_day_carries_its_date() -> None:
+    """Copy round 2, C14: "Not you?" only helps if the person can place the time."""
+
+    import time as _time
+
+    now = _time.mktime((2026, 11, 27, 12, 0, 0, 0, 0, -1))
+    today = _time.mktime((2026, 11, 27, 6, 41, 0, 0, 0, -1))
+    earlier = _time.mktime((2026, 11, 25, 6, 41, 0, 0, 0, -1))
+    assert guard_view._receipt_time(today, now) == "06:41"
+    assert guard_view._receipt_time(earlier, now) == "2026-11-25 06:41"
+    assert guard_view._receipt_time(0.0, now) == ""

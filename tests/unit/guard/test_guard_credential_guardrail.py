@@ -85,6 +85,31 @@ REFUSED = [
         "bash",
         {"command": "rg x | python3 -c 'from local_operator.guard import consent_op'"},
     ),
+    # L2b security round 2, S-8: a ``-c`` that EXECUTES its input runs the pipe.
+    (
+        "bash",
+        {
+            "command": "echo 'from local_operator.guard.consent import GuardConsentHost' | "
+            "python3 -c 'import sys; exec(sys.stdin.read())'"
+        },
+    ),
+    (
+        "bash",
+        {
+            "command": "printf 'from local_operator.guard import consent_op' | "
+            "python3 -c 'exec(input())'"
+        },
+    ),
+    (
+        "bash",
+        {
+            "command": "echo 'import local_operator.guard.consent' | "
+            "python3 -c 'import runpy;runpy.run_path(\"/dev/stdin\")'"
+        },
+    ),
+    # L2b review round 2, R2-2: the bare glob of the temp after a ``cd``.
+    ("bash", {"command": "cd ~/.local-operator/guard && cat install.key.*.tmp"}),
+    ("bash", {"command": "cd ~/.local-operator/guard && cat install.key.[0-9a-f]*.tmp"}),
 ]
 
 ALLOWED = [

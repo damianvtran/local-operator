@@ -1005,6 +1005,79 @@ def test_a_lease_released_grant_that_nobody_re_answered_is_recorded(config_dir: 
     assert host.prompt(TENANT, 1).state == "accepted"  # type: ignore[union-attr]
 
 
+def test_a_keep_current_answer_during_an_in_flight_widening_wins(config_dir: Path) -> None:
+    """L2b security round 2, S-9 (the reviewer's probe): a later "Keep current"
+    on the widening this grant carries is never answered with a silent ``granted``."""
+
+    now = [1_000_000.0]
+    transport = _Hooked()
+    host = C.GuardConsentHost(
+        config_dir, transport=transport, key_store=CountingKeyStore(), clock=lambda: now[0]
+    )
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )
+    widened = _offer(
+        collection_rev=2,
+        scopes=["decisions", "posture", "task_time"],
+        added_scopes=["posture"],
+        reason="widened",
+    )
+    assert host.offer(C.ConsentOffer.from_wire(widened)).status == "queued"
+
+    def lease_expires_then_member_keeps_current() -> None:
+        now[0] += C.CLAIM_LEASE_S + 1
+        host.fold_desktop_answers()
+        host.decline(TENANT, 2, surface="desktop")  # "Keep current": no sticky row
+
+    transport.during_grant = lease_expires_then_member_keeps_current
+    outcome = host.accept(TENANT, 2, capability=True, signature=None, source="tui")
+    assert outcome.status == "revoked_first"
+    # The widened grant reached the server, so it is undone, never left standing.
+    assert transport.calls == ["grant", "grant", "revoke"]
+    assert _state(host) != "live"
+    assert [n["kind"] for n in host.notices()] == ["grant", "revoke"]
+
+
+def test_two_openers_of_a_generation_1_store_never_race_the_migration(
+    config_dir: Path,
+) -> None:
+    """L2b review round 2, R2-1: the opener that waited on the lock re-reads the
+    version and skips the ``ALTER`` the other opener already ran."""
+
+    import sqlite3
+
+    host = C.GuardConsentHost(config_dir, transport=_Hooked(), key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    path = C.guard_consent_path(config_dir)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("ALTER TABLE prompts DROP COLUMN claim")
+    conn.execute("PRAGMA user_version = 1")
+    # The other opener: holds the write lock across this opener's version read.
+    conn.execute("BEGIN IMMEDIATE")
+    result: dict[str, Any] = {}
+
+    def second_opener() -> None:
+        try:
+            C.GuardConsentStore(config_dir).connect().close()
+            result["ok"] = True
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            result["error"] = exc
+
+    thread = threading.Thread(target=second_opener)
+    thread.start()
+    thread.join(0.5)  # it has read version 1 and now waits on BEGIN IMMEDIATE
+    assert thread.is_alive()
+    conn.execute("ALTER TABLE prompts ADD COLUMN claim TEXT")
+    conn.execute(f"PRAGMA user_version = {C.GUARD_CONSENT_SCHEMA_VERSION}")
+    conn.execute("COMMIT")
+    conn.close()
+    thread.join(10)
+    assert result == {"ok": True}
+    assert [p.claim for p in host.pending()] == [""]
+
+
 def test_a_revoke_during_a_grant_writes_one_revoke_receipt(config_dir: Path) -> None:
     """L2a QA Q5: one stop, one receipt (the re-send after the grant writes none)."""
 

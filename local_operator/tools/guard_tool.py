@@ -340,7 +340,7 @@ def _status_line(state: Any) -> str:
             "not sharing; the user asked to be asked again, and the org's next prompt "
             "will appear in /guard"
         ),
-        surface.STATE_PAUSED: f"paused ({_PAUSED_PLAIN.get(state.reason, 'paused')})",
+        surface.STATE_PAUSED: f"paused ({_PAUSED_PLAIN.get(state.reason, 'no reason given')})",
     }.get(state.state, "unknown")
     return f"{_org_label(state.org)} (tenant {_tenant_label(state.tenant)}): {text}"
 

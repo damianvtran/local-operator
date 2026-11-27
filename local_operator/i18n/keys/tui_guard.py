@@ -85,8 +85,8 @@ def card_cta_trial(*, trial_days: str) -> Msg:
     return Msg("tui.guard.card_cta_trial", {"trial_days": trial_days})
 
 
-def card_footer() -> Msg:
-    return Msg("tui.guard.card_footer", {})
+def card_footer(*, org: str) -> Msg:
+    return Msg("tui.guard.card_footer", {"org": org})
 
 
 def card_title() -> Msg:
@@ -339,6 +339,10 @@ def screen_later() -> Msg:
 
 def screen_none() -> Msg:
     return Msg("tui.guard.screen_none", {})
+
+
+def screen_prompt_changed(*, org: str) -> Msg:
+    return Msg("tui.guard.screen_prompt_changed", {"org": org})
 
 
 def screen_revoked(*, org: str) -> Msg:

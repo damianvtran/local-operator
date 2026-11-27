@@ -3010,6 +3010,16 @@ _INLINE_PYTHON = re.compile(
 #: is data. Text BEFORE such an invocation (``rg GuardConsentHost src | python3
 #: -c 'print(len(sys.stdin.read()))'``) is not code it runs (L2a review NIT-R2-1).
 _PYTHON_DASH_C = re.compile(r"(?i)^\|\s*(python[\d.]*|uv\s+run|ipython)\b[^\n|;&]*?\s-[a-z]*c\b")
+#: A ``-c`` argument that can turn its input back into CODE (L2b security round
+#: 2, S-8): ``exec(sys.stdin.read())``, ``exec(input())``,
+#: ``runpy.run_path("/dev/stdin")``, or a shell it hands the input to. With one
+#: of these the pipe is not data any more, so the engine name anywhere counts
+#: again. Deliberately NOT bare ``stdin``/``input``: reading the pipe is what
+#: the NIT-R2-1 false positive (``print(len(sys.stdin.read()))``) does.
+_DASH_C_EVALUATES_INPUT = re.compile(
+    r"(?i)\b(exec|eval|compile|runpy|__import__|importlib|execfile|interact|"
+    r"system|popen|subprocess|spawn[a-z]*|pickle|marshal)\b|/dev/(stdin|fd/0)"
+)
 
 
 def _runs_engine_inline(text: str) -> bool:
@@ -3024,7 +3034,7 @@ def _runs_engine_inline(text: str) -> bool:
 
     for match in _INLINE_PYTHON.finditer(text):
         tail = text[match.start() :]
-        if _PYTHON_DASH_C.match(tail):
+        if _PYTHON_DASH_C.match(tail) and not _DASH_C_EVALUATES_INPUT.search(tail):
             if _GUARD_ENGINE.search(tail):
                 return True
             continue
@@ -3091,12 +3101,18 @@ def _names_key_file(token: str) -> bool:
         return True
     if not any(ch in token for ch in "*?["):
         return False
-    return fnmatch.fnmatchcase(KEY_FILE_NAME, token.lower())
+    # A glob is matched against BOTH real names (L2b review round 2, R2-2):
+    # ``install.key.*.tmp`` after a ``cd`` globs only to the temp, so a sample
+    # temp name stands in for the ``<hex>`` the writer picks.
+    pattern = token.lower()
+    return any(fnmatch.fnmatchcase(name, pattern) for name in (KEY_FILE_NAME, _KEY_TEMP_SAMPLE))
 
 
 #: The fallback key file's name (``guard.install_key.KEY_FILENAME``), kept
 #: here as a literal so the guard never imports the module it protects.
 KEY_FILE_NAME = "install.key"
+#: A representative per-writer temp name (``install.key.<hex>.tmp``) for globs.
+_KEY_TEMP_SAMPLE = "install.key.0a1b2c3d.tmp"
 
 
 def _key_file_hit(text: str, *, executing: bool) -> bool:
