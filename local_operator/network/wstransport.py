@@ -43,7 +43,7 @@ import errno
 import http
 import ipaddress
 import logging
-import select
+import selectors
 import socket
 import threading
 import time
@@ -109,10 +109,11 @@ ACCEPT_THREAD_JOIN_S = 5.0
 #: How long the library may spend on ONE connection's opening handshake. It bounds a
 #: socket that says NOTHING: the library's default is 10 s, which outlives
 #: :data:`ACCEPT_THREAD_JOIN_S` and lets a stranger that never sends a byte keep a
-#: thread (and a teardown) waiting. Measured on loopback through
-#: :class:`WebSocketAcceptServer` (n=200 dials): median 0.21 ms, p95 0.35 ms, max
-#: 0.93 ms — this is a >2000x bound over the slowest real upgrade, not a budget one
-#: can spend. Strictly below :data:`ACCEPT_THREAD_JOIN_S` on purpose.
+#: thread (and a teardown) waiting. On an idle loopback (n=200 dials) a real upgrade
+#: completes in well under a millisecond, so this leaves a margin of roughly 100x or
+#: more — and a load-bound CI box eats most of that: it is a ceiling on a stranger's
+#: silence, not a budget a healthy handshake is expected to spend. Strictly below
+#: :data:`ACCEPT_THREAD_JOIN_S` on purpose.
 WS_OPEN_TIMEOUT_S = 2.0
 
 #: Messages the library may queue per connection before it stops reading. Small on
@@ -576,9 +577,9 @@ class _TrackedListenSocket:
         self._socket = sock
         self._max_pre_upgrade = max(1, int(max_pre_upgrade))
         # A non-blocking listener keeps ``accept`` from PARKING: the loop below only
-        # ever accepts what ``select`` reported, but a connection reset in between would
-        # otherwise leave the accept thread blocked in the kernel, where a close from
-        # another thread does not reliably wake it on macOS or Linux.
+        # ever accepts what the selector reported, but a connection reset in between
+        # would otherwise leave the accept thread blocked in the kernel, where a close
+        # from another thread does not reliably wake it on macOS or Linux.
         self._socket.setblocking(False)
         self._lock = threading.Lock()
         #: Accepted but not yet upgraded sockets, keyed by identity so an id cannot be
@@ -587,6 +588,10 @@ class _TrackedListenSocket:
         #: Wakes :meth:`accept` when the listener stops, for the same reason: teardown
         #: must not depend on ``close`` interrupting a blocked ``accept``.
         self._wake_reader, self._wake_writer = socket.socketpair()
+        #: Sockets :meth:`stop` shut down but did NOT close, so the library's own poller
+        #: -- which registered that descriptor -- is the one that observes the end. They
+        #: are closed in :meth:`close_wakeup`, once nothing can be waiting on them.
+        self._closing: list[socket.socket] = []
 
     def __getattr__(self, name: str) -> Any:
         # Underscored names are this wrapper's own plumbing, and delegating one from a
@@ -601,31 +606,41 @@ class _TrackedListenSocket:
 
     def accept(self) -> tuple[socket.socket, Any]:
         """Accept one connection that may upgrade, refusing the excess before a thread."""
-        while True:
-            readable, _, _ = select.select([self._socket, self._wake_reader], [], [])
-            if self._wake_reader in readable:
-                raise OSError(errno.EBADF, "the WebSocket listener is stopping")
-            try:
-                connection, address = self._socket.accept()
-            except BlockingIOError:
-                # ``select`` woke on a connection that was gone before ``accept``: there
-                # is nothing to admit, and the next ``select`` decides what happens next.
-                continue
-            # A BSD-derived kernel hands the accepted socket the LISTENER's
-            # ``O_NONBLOCK`` (Linux does not), and the library needs a blocking socket —
-            # it lets ``BlockingIOError`` out of ``sendall`` otherwise. Normalised here,
-            # once, rather than by giving up an interruptible accept loop.
-            connection.setblocking(True)
-            with self._lock:
-                self._prune_locked()
-                refuse = len(self._parked) >= self._max_pre_upgrade
-                if not refuse:
-                    self._parked[id(connection)] = connection
-            if refuse:
-                # The library never sees this socket, so it never spends a thread on it.
-                connection.close()
-                continue
-            return connection, address
+        # A SELECTOR, NOT ``select.select``: this runs inside the long-lived supervisor,
+        # which holds far more than ``FD_SETSIZE`` (1024) descriptors, and ``select``
+        # raises ``ValueError`` for any of them instead of waiting
+        # (``tests/unit/test_no_select_select.py`` pins that). Closed on every exit, so
+        # the accept loop leaks no descriptor on the stopping path.
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._socket, selectors.EVENT_READ)
+            selector.register(self._wake_reader, selectors.EVENT_READ)
+            while True:
+                ready = selector.select()
+                if any(key.fileobj is self._wake_reader for key, _mask in ready):
+                    raise OSError(errno.EBADF, "the WebSocket listener is stopping")
+                try:
+                    connection, address = self._socket.accept()
+                except (BlockingIOError, ConnectionAbortedError):
+                    # The wait woke on a connection that was gone before ``accept`` —
+                    # reset by the peer, or already reaped — so there is nothing to
+                    # admit, and the next wait decides what happens next.
+                    continue
+                # A BSD-derived kernel hands the accepted socket the LISTENER's
+                # ``O_NONBLOCK`` (Linux does not), and the library needs a blocking
+                # socket — it lets ``BlockingIOError`` out of ``sendall`` otherwise.
+                # Normalised here, once, rather than by giving up an interruptible
+                # accept loop.
+                connection.setblocking(True)
+                with self._lock:
+                    self._prune_locked()
+                    refuse = len(self._parked) >= self._max_pre_upgrade
+                    if not refuse:
+                        self._parked[id(connection)] = connection
+                if refuse:
+                    # The library never sees this socket, so it never spends a thread.
+                    connection.close()
+                    continue
+                return connection, address
 
     def upgraded(self, sock: Any) -> None:
         """Hand the ledger's entry back once a request has arrived for ``sock``."""
@@ -633,11 +648,22 @@ class _TrackedListenSocket:
             self._parked.pop(id(sock), None)
 
     def stop(self) -> None:
-        """Wake the accept loop and close every socket still parked before the upgrade.
+        """Wake the accept loop and shut down every socket still parked before the upgrade.
 
-        Closing them is what keeps teardown prompt: a parked connection is blocked in
-        the library's handshake read, which would otherwise last until
+        Shutting them down is what keeps teardown prompt: a parked connection is blocked
+        in the library's handshake read, which would otherwise last until
         :data:`WS_OPEN_TIMEOUT_S` — or, on the library's own default, ten seconds.
+
+        THE SHUTDOWN IS OURS, THE CLOSE IS THE LIBRARY'S. That handler does not sit in
+        ``recv``: the library's own poller registered the raw descriptor and waits on
+        it, so closing that descriptor from this thread is a race — the close can retire
+        the registration before the hang-up is delivered, the poller then never wakes,
+        and the join waits out ``open_timeout`` instead (measured before this split:
+        4 of 20 stops behind ten silent sockets took ~1.9 s). ``shutdown`` delivers the
+        hang-up, the poller wakes, and the library closes the connection it owns.
+        Anything still open is closed in :meth:`close_wakeup`, after the server's own
+        ``shutdown`` has joined the handlers — so no thread can be watching the
+        descriptor when its number is released, and nothing leaks either.
         """
         try:
             self._wake_writer.send(b"x")
@@ -646,26 +672,35 @@ class _TrackedListenSocket:
         with self._lock:
             parked = list(self._parked.values())
             self._parked.clear()
+            self._closing.extend(parked)
         for sock in parked:
             try:
-                # ``shutdown`` BEFORE ``close``: the library's handshake read runs on
-                # another thread, and closing a socket does not interrupt a ``recv``
-                # blocked on it (macOS and Linux both) — a shutdown does, so the park
-                # ends now rather than at :data:`WS_OPEN_TIMEOUT_S`.
+                # ``SHUT_RDWR`` and not ``SHUT_RD``: the library both reads and may write
+                # (a 503 or a closing frame), and a half-closed socket would surface as
+                # a send error rather than as the clean end this is meant to be.
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:  # already shut down or closed by the library
                 pass
-            try:
-                sock.close()
-            except OSError:  # the library closed it first
-                pass
 
     def close_wakeup(self) -> None:
-        """Release the wake-up pair — only once no thread can still be selecting on it."""
+        """Release the wake-up pair and any parked socket still open.
+
+        Only once no thread can still be waiting on either: the accept loop has ended
+        and the server's ``shutdown`` has joined the connection handlers, so a
+        descriptor closed here is one nobody can be selecting on.
+        """
         for sock in (self._wake_reader, self._wake_writer):
             try:
                 sock.close()
             except OSError:
+                pass
+        with self._lock:
+            closing = self._closing
+            self._closing = []
+        for sock in closing:
+            try:
+                sock.close()
+            except OSError:  # the library closed it first
                 pass
 
     def _prune_locked(self) -> None:
@@ -762,31 +797,52 @@ class WebSocketAcceptServer:
             max_pre_upgrade=self._max_connections,
         )
         self._listen = listen
-        self._server = serve(
-            self._handle,
-            # The cast states the seam: the library asks the socket it is handed to
-            # accept, close and be named, and the ledger does exactly that (delegating
-            # the rest), but it is deliberately not a ``socket.socket`` subclass.
-            sock=cast(socket.socket, listen),
-            # A connection that says nothing is closed by the ledger above or, if it
-            # gets a slot, bounded here — never left on the library's 10 s default.
-            open_timeout=WS_OPEN_TIMEOUT_S,
-            compression=None,
-            max_size=MAX_MESSAGE_BYTES,
-            max_queue=MAX_QUEUED_MESSAGES,
-            # The pre-upgrade cap, and the slot it took handed back when the
-            # upgrade does not become a connection.
-            process_request=self._hold_slot_or_refuse,
-            process_response=self._release_refused_slot,
-            ping_interval=None,
-            close_timeout=CLOSE_TIMEOUT_S,
-        )
-        host, port = listen.getsockname()[:2]
-        self._address = (str(host), int(port))
-        self._thread = threading.Thread(
-            target=self._serve_forever, name="mesh-ws-accept", daemon=True
-        )
-        self._thread.start()
+        try:
+            self._server = serve(
+                self._handle,
+                # The cast states the seam: the library asks the socket it is handed to
+                # accept, close and be named, and the ledger does exactly that (delegating
+                # the rest), but it is deliberately not a ``socket.socket`` subclass.
+                sock=cast(socket.socket, listen),
+                # A connection that says nothing is closed by the ledger above or, if it
+                # gets a slot, bounded here — never left on the library's 10 s default.
+                open_timeout=WS_OPEN_TIMEOUT_S,
+                compression=None,
+                max_size=MAX_MESSAGE_BYTES,
+                max_queue=MAX_QUEUED_MESSAGES,
+                # The pre-upgrade cap, and the slot it took handed back when the
+                # upgrade does not become a connection.
+                process_request=self._hold_slot_or_refuse,
+                process_response=self._release_refused_slot,
+                ping_interval=None,
+                close_timeout=CLOSE_TIMEOUT_S,
+            )
+            host, port = listen.getsockname()[:2]
+            self._address = (str(host), int(port))
+            self._thread = threading.Thread(
+                target=self._serve_forever, name="mesh-ws-accept", daemon=True
+            )
+            self._thread.start()
+        except BaseException:
+            # A start that raised owes nobody a listener: the caller has no handle to
+            # stop, so the descriptor and the wake pair are released HERE or not at all.
+            # BaseException, not Exception, so an interrupt mid-start cannot leak them.
+            server, thread = self._server, self._thread
+            self._server, self._thread, self._listen = None, None, None
+            if server is not None and thread is not None and thread.is_alive():
+                # ``serve_forever`` is running, so its ``shutdown`` can complete and
+                # closes the listening socket it was handed.
+                try:
+                    server.shutdown()
+                except Exception:  # noqa: BLE001 — already on a failure path
+                    logger.exception("a half-started WebSocket listener refused to stop")
+            else:
+                # ``serve_forever`` never ran, and its ``shutdown`` waits on an event
+                # only that loop sets — so close the listener directly instead.
+                listen.close()
+            listen.stop()
+            listen.close_wakeup()
+            raise
         return self._address
 
     def _serve_forever(self) -> None:
@@ -893,8 +949,7 @@ class WebSocketAcceptServer:
         """
         self._stopping.set()
         server, thread, listen = self._server, self._thread, self._listen
-        if server is None:
-            return
+        self._server, self._thread = None, None
         with self._lock:
             peers = list(self._peers)
             # Nothing holds a slot once this listener is stopping, and a handler
@@ -903,22 +958,24 @@ class WebSocketAcceptServer:
         for peer in peers:
             peer.close()
         if listen is not None:
-            # Wakes the accept loop out of its select and closes every socket still
+            # Wakes the accept loop out of its wait and shuts down every socket still
             # parked before the upgrade — the part of teardown that a stranger holding
             # an empty connection would otherwise dictate.
             listen.stop()
-        try:
-            # NO ``close_connections`` ARGUMENT: that keyword arrives with
-            # ``websockets`` 17 and the declared floor is 15.0.1, where ``shutdown()``
-            # only stops the accept loop (a ``TypeError`` there used to be swallowed
-            # below and left the loop running until its join timed out). The links are
-            # closed above, which is the part of a shutdown this class owns; the
-            # library closes anything still open on the versions that can.
-            server.shutdown()
-        except Exception:  # noqa: BLE001 — teardown must not raise into a stop path
-            logger.exception("the WebSocket accept server refused to stop")
+        if server is not None:
+            try:
+                # NO ``close_connections`` ARGUMENT: that keyword arrives with
+                # ``websockets`` 17 and the declared floor is 15.0.1, where ``shutdown()``
+                # only stops the accept loop (a ``TypeError`` there used to be swallowed
+                # below and left the loop running until its join timed out). The links are
+                # closed above, which is the part of a shutdown this class owns; the
+                # library closes anything still open on the versions that can.
+                server.shutdown()
+            except Exception:  # noqa: BLE001 — teardown must not raise into a stop path
+                logger.exception("the WebSocket accept server refused to stop")
         if thread is not None:
             thread.join(timeout=ACCEPT_THREAD_JOIN_S)
-            if listen is not None:
-                # Only now is no thread left that could be selecting on the pair.
-                listen.close_wakeup()
+        if listen is not None:
+            # Only now is no thread left that could be waiting on the wake pair or on a
+            # parked socket's descriptor — its close is deferred to here for that reason.
+            listen.close_wakeup()

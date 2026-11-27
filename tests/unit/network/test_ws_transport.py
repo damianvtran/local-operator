@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import select
 import socket
 import subprocess
 import sys
@@ -32,6 +31,7 @@ import pytest
 
 from local_operator.network import relay, store, types, wire
 from local_operator.network import wstransport as ws
+from tests.fd_readiness import is_readable
 from tests.unit.network.conftest import wait_for
 
 REPO = Path(__file__).resolve().parents[3]
@@ -907,9 +907,11 @@ def _refused_count(socks: list[socket.socket]) -> int:
 
     Nothing was ever sent on them, so readability can only be end-of-stream (EOF or a
     reset from a close with nothing read). A socket still parked before the upgrade is
-    not readable at all.
+    not readable at all. ``is_readable``, not ``select.select``: an xdist worker's fresh
+    descriptor can sit above ``FD_SETSIZE``, where ``select`` raises instead of answering
+    (``tests/unit/test_no_select_select.py``).
     """
-    return sum(1 for sock in socks if select.select([sock], [], [], 0)[0])
+    return sum(1 for sock in socks if is_readable(sock, 0))
 
 
 def test_a_silent_socket_does_not_hold_stop_open() -> None:
@@ -917,7 +919,7 @@ def test_a_silent_socket_does_not_hold_stop_open() -> None:
     so the pre-upgrade slot has nothing to count and the library parks it — and the
     threads behind it — in the opening handshake. The library's own bound for that is
     ``open_timeout`` (10 s by default, longer than ``ACCEPT_THREAD_JOIN_S``), so
-    ``stop`` has to close the raw socket rather than wait the stranger out."""
+    ``stop`` has to shut the raw socket down rather than wait the stranger out."""
     server, _link, _keys = _one_slot_server(max_connections=2)
     baseline = set(threading.enumerate())
     silent = socket.create_connection(("127.0.0.1", server.address[1]), timeout=5.0)
@@ -928,7 +930,10 @@ def test_a_silent_socket_does_not_hold_stop_open() -> None:
         started = time.monotonic()
         server.stop()
         elapsed = time.monotonic() - started
-        assert elapsed < 2.5, f"stop took {elapsed:.2f}s behind one silent socket"
+        # Measured (n=20 stops, one silent socket): median 0.110 s, max 0.110 s; a park
+        # that outlives the shutdown waits out ``open_timeout`` instead and lands near
+        # 1.9 s. 1.0 s sits between the two, well clear of the healthy path.
+        assert elapsed < 1.0, f"stop took {elapsed:.2f}s behind one silent socket"
         assert elapsed < ws.ACCEPT_THREAD_JOIN_S
         assert wait_for(
             lambda: not _threads_since(baseline)
@@ -942,7 +947,14 @@ def test_silent_sockets_past_the_cap_never_reach_a_handler_thread() -> None:
     """MAJOR: ten silent sockets against ``max_connections=2``. The ledger on the
     listening socket counts them BEFORE the upgrade, so the excess are closed at
     ``accept()`` — no thread, no read buffer — and teardown stays prompt. Twenty
-    threads for ten strangers would be the failure this bounds."""
+    threads for ten strangers would be the failure this bounds.
+
+    THE BOUND IS ALSO A RACE DETECTOR (QA Q3-1). Closing a parked socket right after
+    shutting it down retired the descriptor before the library's poller delivered the
+    hang-up, so the join waited out ``open_timeout`` instead: 4 of 20 measured stops
+    took ~1.9 s behind these ten sockets. ``stop`` now shuts them down and leaves the
+    close to ``close_wakeup``; 20 of 20 stops then finish in 0.100-0.110 s.
+    """
     capped = 2
     server, _link, _keys = _one_slot_server(max_connections=capped)
     baseline = set(threading.enumerate())
@@ -958,7 +970,7 @@ def test_silent_sockets_past_the_cap_never_reach_a_handler_thread() -> None:
         started = time.monotonic()
         server.stop()
         elapsed = time.monotonic() - started
-        assert elapsed < 2.5, f"stop took {elapsed:.2f}s behind ten silent sockets"
+        assert elapsed < 1.0, f"stop took {elapsed:.2f}s behind ten silent sockets"
         assert wait_for(
             lambda: not _threads_since(baseline)
         ), f"threads outlived stop: {_threads_since(baseline)}"
@@ -966,6 +978,45 @@ def test_silent_sockets_past_the_cap_never_reach_a_handler_thread() -> None:
         for sock in silent:
             sock.close()
         server.stop()
+
+
+def test_a_start_that_raises_releases_the_listener_it_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MINOR 1: a ``start`` that fails AFTER the listener exists strands nothing.
+
+    The real socket and the wake-up pair are created before the library is called, so a
+    library that refuses to serve used to leave three descriptors behind with no handle
+    the caller could ever stop — a failed start is exactly when nobody keeps one.
+    Patched at ``websockets.sync.server.serve`` because ``start`` imports it at call
+    time, keeping the library off the startup path.
+    """
+    from websockets.sync import server as ws_server
+
+    created: list[ws._TrackedListenSocket] = []
+    real_listener = ws._TrackedListenSocket
+
+    class _Recording(real_listener):  # type: ignore[misc, valid-type]
+        def __init__(self, sock: socket.socket, *, max_pre_upgrade: int) -> None:
+            super().__init__(sock, max_pre_upgrade=max_pre_upgrade)
+            created.append(self)
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("the library refused to serve")
+
+    monkeypatch.setattr(ws, "_TrackedListenSocket", _Recording)
+    monkeypatch.setattr(ws_server, "serve", refuse)
+    server = ws.WebSocketAcceptServer(lambda sock, addr: None, max_connections=1)
+    with pytest.raises(OSError, match="refused to serve"):
+        server.start()
+    assert len(created) == 1, created
+    listen = created[0]
+    assert listen.fileno() < 0, "the listening socket outlived a failed start"
+    assert listen._wake_reader.fileno() < 0, "the wake reader outlived a failed start"
+    assert listen._wake_writer.fileno() < 0, "the wake writer outlived a failed start"
+    assert server._listen is None and server._server is None
+    # A caller whose ``start`` raised may still stop it, and ``stop`` must not raise.
+    server.stop()
 
 
 def _frame_at_the_deliverable_ceiling() -> dict[str, Any]:
