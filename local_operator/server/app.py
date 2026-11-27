@@ -690,6 +690,21 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
         logger.warning("orphan sweep could not start", exc_info=True)
 
+    # RADIENT GUARD BACKGROUND PRODUCERS (slice L3). The loop's every tick
+    # first stats ``guard/consent.sqlite3`` and returns when it is absent, so a
+    # non-Team install (or a member who never consented) makes zero network
+    # calls and writes no file; see ``guard/producers.py``.
+    guard_producers_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.guard.producers import run_forever as run_guard_producers
+
+        guard_producers_task = asyncio.create_task(
+            run_guard_producers(app.state.config_manager.config_dir),
+            name="guard-producers",
+        )
+    except Exception:  # noqa: BLE001 - Guard telemetry never fails the daemon
+        logger.debug("guard producers could not start", exc_info=True)
+
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
@@ -791,6 +806,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if orphan_sweep_task is not None:
             orphan_sweep_task.cancel()
             await asyncio.gather(orphan_sweep_task, return_exceptions=True)
+        if guard_producers_task is not None:
+            guard_producers_task.cancel()
+            await asyncio.gather(guard_producers_task, return_exceptions=True)
         if temporary_sweeper_started:
             try:
                 from local_operator.session.cleanup import stop_temporary_sweeper

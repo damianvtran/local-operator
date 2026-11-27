@@ -934,6 +934,16 @@ def model_fallback_badge(
     return f"{str(requested).strip()} → {display} {FALLBACK_MARKER} fallback"
 
 
+def _guard_note_job_settled(job: AsyncJob) -> None:
+    # Imported lazily and guarded: Guard is optional telemetry, and a broken
+    # Guard package must never be able to stop a job from settling.
+    try:
+        from local_operator.guard.activity import note_job_settled
+    except Exception:  # noqa: BLE001
+        return
+    note_job_settled(job)
+
+
 class AsyncJobManager:
     """Registers and tracks background jobs with registrant-scoped delivery.
 
@@ -1947,6 +1957,9 @@ class AsyncJobManager:
             # Same transition as the settle stamp: after this line retention may
             # erase the row immediately without erasing its financial history.
             self._record_settled_accounting(job)
+            # Radient Guard task timing (slice L3): a no-op attribute read
+            # unless a live ``task_time`` consent installed the sink; never raises.
+            _guard_note_job_settled(job)
         event = self._settled_events.get(job.id)
         if event is not None:
             event.set()

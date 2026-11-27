@@ -1615,6 +1615,17 @@ class RadientClient:
             "POST", "consents", action="record your Radient Guard answer", json=dict(envelope)
         )
 
+    def guard_ingest(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        """``POST /v1/guard/ingest``: one install-key-signed background batch (slice L3).
+
+        Called only by ``guard.producers`` for an org with a LIVE consent; the
+        envelope's shape is ``guard/ingest.py``'s, pending agent-server A3.
+        """
+
+        return self._guard_call(
+            "POST", "ingest", action="send Radient Guard stats", json=dict(envelope)
+        )
+
     def guard_revoke(self, tenant_id: str) -> Dict[str, Any]:
         """``POST /v1/guard/consents/revoke``: JWT only, no device signature (§5.4)."""
 

@@ -493,6 +493,72 @@ class GuardConsentHost:
         finally:
             conn.close()
 
+    def live_consents(self) -> list[dict[str, Any]]:
+        """Consents in state ``live`` ONLY, with the revision the member was shown.
+
+        Slice L3's producers run only for these. ``revoke_pending`` is a STOPPED
+        state (carried precondition N-3): the member already asked to stop, so
+        nothing more may be collected or sent while the revoke is undelivered.
+        ``revocation_gen`` comes from the accepted prompt row -- the value the
+        grant signed -- because the ``consents`` row does not carry it.
+        """
+
+        if not self._store.exists():
+            return []
+        conn = self._store.connect()
+        try:
+            rows = conn.execute(
+                "SELECT c.tenant, c.collection_rev, c.scopes, c.granted_at,"
+                " p.revocation_gen FROM consents c JOIN prompts p"
+                " ON p.tenant = c.tenant AND p.collection_rev = c.collection_rev"
+                " WHERE c.state = 'live' ORDER BY c.tenant"
+            ).fetchall()
+            return [
+                {
+                    "tenant": r["tenant"],
+                    "collection_rev": int(r["collection_rev"]),
+                    "revocation_gen": int(r["revocation_gen"]),
+                    "scopes": tuple(json.loads(r["scopes"])),
+                    "granted_at": float(r["granted_at"]),
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    def enrolled_install_id(self) -> str | None:
+        """This install's id once the server has enrolled its key, else ``None``. No writes."""
+
+        if not self._store.exists():
+            return None
+        conn = self._store.connect()
+        try:
+            found = conn.execute("SELECT install_id, enrolled FROM install WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+        if found is None or not found["enrolled"]:
+            return None
+        return str(found["install_id"])
+
+    def observe_console_revoke(self, tenant: str) -> None:
+        """An ingest refusal said a revoke landed first (Console or another surface).
+
+        Same transition as a stale-``revocation_gen`` grant refusal (§5.2.6):
+        consent ``revoked``, sticky ``revoked`` (origin console), a calm notice.
+        """
+
+        if not self._store.exists():
+            return
+        conn = self._store.connect()
+        try:
+            found = conn.execute(
+                "SELECT * FROM prompts WHERE tenant = ? ORDER BY collection_rev DESC", (tenant,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if found is not None:
+            self._observe_console_revoke(_row(found))
+
     def mark_notice_shown(self, notice_id: int) -> None:
         self._exec("UPDATE notices SET shown = 1 WHERE id = ?", (notice_id,))
 
