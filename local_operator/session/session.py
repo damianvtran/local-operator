@@ -1392,7 +1392,29 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "generate_music",
     "modify_music",
     "music_status",
+    # Team Integrations provisioning (RFC "Radient Team Integrations" §8.1) is
+    # gated on THREE session-owned things: the ask hook, the consent seam
+    # (``_integration_consent_seam``: None for a child and under the blocking
+    # ask arm) and a Radient OAuth row. The first is installed by the front end
+    # AFTER ``__init__`` — so this entry alone is not enough, and
+    # ``ASK_HOOK_CAPABILITY_TOOLS`` below is what makes ``set_ask_handler``
+    # re-run it. Before it joined both lists the tool was built nowhere a live
+    # session looked: ``read tool://integrations`` answered "Unknown tool" in
+    # every interactive session while the stub-context QA passed. Appended last
+    # for the same prefix reason as ``sessions``.
+    "integrations",
 )
+
+#: The subset of :data:`SESSION_CAPABILITY_TOOLS` whose createIf reads the
+#: host's ask hook (``ToolContext.ask_user``), directly or through the queue and
+#: consent seam it creates. :meth:`Session.set_ask_handler` re-runs exactly
+#: these on install and drops exactly these on uninstall — one tuple for both
+#: arms so a tool cannot be rescued on install and then orphaned on uninstall.
+#: A SUBSET, not the whole merge set, so installing a question surface can never
+#: resurrect a ``wake``/``task`` that ``_build_child_session`` pruned. Every
+#: createIf condition stays in each builder: this only decides WHEN they re-run,
+#: so it widens nothing a child, headless responder or exec session can reach.
+ASK_HOOK_CAPABILITY_TOOLS: tuple[str, ...] = ("ask", "ask_withdraw", "integrations")
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
 #: a second pass over the same tool object cannot wrap it again. A double wrap is
@@ -14864,6 +14886,11 @@ class Session:
         ``_build_tool_context`` is not enough on its own — it decides what a
         tool RUNS against, never whether the tool was advertised.
 
+        ``integrations`` rode the same late-hook trap (its createIf also needs
+        ``ask_user``, plus the consent seam this hook's queue provides) and is
+        rescued, and dropped on uninstall, with ``ask``: see
+        ``ASK_HOOK_CAPABILITY_TOOLS``.
+
         Uninstalling drops it again for the same reason it was gated in the
         first place: a tool advertised with no hook behind it can only fail when
         the model calls it.
@@ -14876,13 +14903,15 @@ class Session:
             self._ask_queue.dispose()
             self._ask_queue = None
         if handler is not None:
-            # BOTH queued-ask tools are gated on the queue this hook creates, so
-            # installing the hook rescues the pair: §2.1's ``ask`` and §12's
-            # ``ask_withdraw``.
-            self._merge_capability_tools(("ask", "ask_withdraw"))
-        elif any(tool.name in ("ask", "ask_withdraw") for tool in self._tools):
+            # Every tool gated on this hook is rescued together: both queued-ask
+            # tools (§2.1's ``ask``, §12's ``ask_withdraw``) and Team
+            # Integrations, whose builder needs ``ask_user`` AND the consent seam
+            # the queue this hook creates provides. Each builder still applies
+            # its own refusals (a child, the blocking arm, no Radient login).
+            self._merge_capability_tools(ASK_HOOK_CAPABILITY_TOOLS)
+        elif any(tool.name in ASK_HOOK_CAPABILITY_TOOLS for tool in self._tools):
             self.refresh_tools(
-                [tool for tool in self._tools if tool.name not in ("ask", "ask_withdraw")]
+                [tool for tool in self._tools if tool.name not in ASK_HOOK_CAPABILITY_TOOLS]
             )
 
     # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
