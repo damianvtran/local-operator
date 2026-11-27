@@ -15008,15 +15008,23 @@ class Session:
         # was refused (S-2).
         if self._parent_session_id or self._origin_parent_session_id:
             return None
-        # No approval gate = no person who can be asked about the operations that
-        # never file a consent card of their own (``revoke``, ``draft_app``,
-        # ``status``, ``list``): the loop's write-tier card is skipped when
-        # ``request_approval`` is None, so they would run unattended. Unattended
-        # hosts (resume workers, agent-started workstreams, the moderation eval
-        # agent) install an ask handler that cannot be answered but no approval
-        # gate, which is exactly what this condition keeps out (S-1). An
-        # interactive ``--yolo`` session still holds its gate on the Session —
-        # yolo is applied where the loop is handed it — so it is unaffected.
+        # What this condition means: the HOST built an approval gate for this
+        # session (``_request_approval``) AND an ask queue exists. It does NOT mean a
+        # person is present: resume workers are factory-built with a headless gate
+        # (``session_factory``), and the moderation eval agent's gate is
+        # ``ApprovalPolicy.auto()``, a real non-None gate. Presence of a person is
+        # what the per-op consent card enforces: ``IntegrationConsent`` files it
+        # on the ask queue and the operations that file one run only on a human
+        # answer. The eval agent is therefore kept out by name
+        # (``evaluation/team_bridge_moderation/agent.py`` drops the ``integrations``
+        # tool), not by this condition.
+        #
+        # Why the gate is required at all (S-1): the operations that never file a
+        # consent card of their own (``revoke``, ``draft_app``, ``status``,
+        # ``list``) rely on the loop's write-tier card, which is skipped when
+        # ``request_approval`` is None, so a gate-less host would run them
+        # unattended. An interactive ``--yolo`` session still holds its gate on the
+        # Session (yolo is applied where the loop is handed it), so it is unaffected.
         if self._request_approval is None or self.ask_queue() is None:
             return None
         from local_operator.team_bridge.integration_consent import IntegrationConsent
