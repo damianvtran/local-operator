@@ -48,10 +48,13 @@ focused with the approval still unanswered.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator.config import ConfigManager
+from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -61,6 +64,13 @@ from .test_app_pilot import FakeSession, _factory
 
 def _app(**kwargs: Any) -> OperatorApp:
     return OperatorApp(lambda: _factory(FakeSession()), **kwargs)
+
+
+@pytest.fixture
+def ask_approvals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # These focus cases start with a live card; fresh Auto need not show one.
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("tool_approval_mode", "ask")
 
 
 async def _boot(pilot: Any, app: OperatorApp) -> None:
@@ -134,6 +144,7 @@ async def _a_multi_select(pilot: Any, app: OperatorApp) -> Any:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("ask_approvals")
 async def test_a_dock_click_does_not_steal_focus_from_a_live_approval() -> None:
     """THE blocker: clicking the dock while a destructive approval is up.
 
@@ -164,6 +175,7 @@ async def test_a_dock_click_does_not_steal_focus_from_a_live_approval() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("ask_approvals")
 async def test_clicking_the_approval_card_itself_leaves_it_focused() -> None:
     """The gesture is "read the question", and it must not disarm the question."""
     app = _app()
@@ -329,6 +341,7 @@ async def test_a_blank_transcript_click_does_not_steal_focus_from_a_live_prompt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("ask_approvals")
 async def test_a_transcript_row_click_does_not_steal_focus_from_a_live_prompt() -> None:
     """The MouseDown focus-walk, not just ``on_click``.
 

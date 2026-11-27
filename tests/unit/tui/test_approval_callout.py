@@ -975,7 +975,10 @@ async def test_queued_profile_gate_cannot_inherit_allow_all(config_dir):
         assert await asyncio.wait_for(second, 3) is False
 
 
-def test_approve_all_still_owes_profile_gate_card():
+@pytest.mark.parametrize(
+    "owns_runtime", [pytest.param(True, id="local-owner"), pytest.param(False, id="attached")]
+)
+def test_approve_all_still_owes_profile_gate_card(owns_runtime: bool):
     from types import SimpleNamespace
     from typing import cast
 
@@ -986,7 +989,7 @@ def test_approve_all_still_owes_profile_gate_card():
     app = SimpleNamespace(_ask_screen=None, _approval=None)
     source = SimpleNamespace(
         session=SimpleNamespace(
-            owns_runtime=False,
+            owns_runtime=owns_runtime,
             pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE),
         ),
         draft=SimpleNamespace(approve_all=True, approve_scope="session"),
@@ -994,10 +997,13 @@ def test_approve_all_still_owes_profile_gate_card():
     assert not OperatorApp._sidebar_gate_card_ready(
         cast(OperatorApp, app), cast(SessionInteraction, source)
     )
+    # Genuine local Auto owes no routine card; an attached projection's
+    # approve-all latch is not authority to grant even a routine request.
     source.session.pending_gate.title = "bash"
-    assert OperatorApp._sidebar_gate_card_ready(
+    ready = OperatorApp._sidebar_gate_card_ready(
         cast(OperatorApp, app), cast(SessionInteraction, source)
     )
+    assert ready is owns_runtime
 
 
 def test_approve_all_does_not_skip_prearming_profile_card():

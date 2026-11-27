@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.config import ConfigManager
+from local_operator.config import ConfigManager, read_config_values
 from local_operator.session.goal_judge import MAX_GOAL_REJUDGES
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 from tests.e2e.harness import NO_NOTIFY_ENV, provider_call_kinds, user_turns
@@ -769,22 +769,40 @@ def test_exec_profile_scout_shell_is_sandboxed_or_absent(exec_server, tmp_path, 
     print("SCOUT_BASH_RESULT", json.dumps(tool_results[0].get("content"))[:400])
 
 
-def test_exec_default_non_tty_denies_and_explicit_yolo_writes(exec_server, tmp_path):
-    run, requests, _ = exec_server
-    denied = run("exec", "WRITE_FIXTURE", "--name", "Deny fixture", stdin="")
-    assert denied.returncode == 0
-    assert not (tmp_path / "written.txt").exists()
-    # The refusal must reach the model as an UNANSWERABLE gate — "nobody can
-    # answer on this run" — not as a decision a user made. The headless gate
-    # used to render "User denied approval ..." for a call nobody had been
-    # asked about; the model-visible half of that fix is pinned here (this
-    # assertion previously looked for the word "denied").
-    payload = json.dumps(requests).lower()
-    assert "approval unavailable" in payload
-    assert "user denied approval" not in payload
-    allowed = run("exec", "WRITE_FIXTURE", "--yolo", "--name", "Allow fixture", stdin="")
-    assert allowed.returncode == 0
-    assert (tmp_path / "written.txt").read_text() == "side-effect"
+@pytest.mark.parametrize(
+    ("saved_approval_mode", "flags", "writes"),
+    [
+        pytest.param(None, (), True, id="fresh-auto"),
+        pytest.param("ask", (), False, id="saved-ask"),
+        pytest.param("ask", ("--yolo",), True, id="yolo-overrides-saved-ask"),
+    ],
+)
+def test_exec_non_tty_honors_approval_mode(
+    exec_server, tmp_path, saved_approval_mode, flags, writes
+):
+    # Each invocation gets its own HOME, output path and provider requests:
+    # neither a persisted choice nor a previous tool call can satisfy another case.
+    run, requests, root = exec_server
+    if saved_approval_mode is not None:
+        ConfigManager(root).set_config_value("tool_approval_mode", saved_approval_mode)
+    saved = read_config_values(root)
+    assert saved is not None
+    if saved_approval_mode is None:
+        assert "tool_approval_mode" not in saved
+    else:
+        assert saved["tool_approval_mode"] == saved_approval_mode
+    result = run("exec", "WRITE_FIXTURE", "--name", "Approval fixture", *flags, stdin="")
+    assert result.returncode == 0
+    written = tmp_path / "written.txt"
+    if writes:
+        assert written.read_text() == "side-effect"
+    else:
+        assert not written.exists()
+        # Empty piped stdin cannot answer Ask. The model must see an
+        # unanswerable gate, not a refusal that it attributes to the user.
+        payload = json.dumps(requests).lower()
+        assert "approval unavailable" in payload
+        assert "user denied approval" not in payload
 
 
 @pytest.mark.asyncio
@@ -1397,6 +1415,9 @@ def test_a_supervised_run_is_approved_through_the_handoff(exec_server, tmp_path)
     from tests.e2e.harness import wait_for_adoption
 
     run, _requests, root = exec_server
+    # Exercise the handoff for an approval that actually parks. Fresh Auto
+    # legitimately runs this routine write without asking anyone.
+    ConfigManager(root).set_config_value("tool_approval_mode", "ask")
     # THE DOCUMENTED ESCAPE HATCH, and the reason this cell needs it while its
     # sibling does not: `subprocess.run` in the fixture inherits the test process's
     # environment, and an agent's own shell carries `LOCAL_OPERATOR_AGENT_SHELL`,
