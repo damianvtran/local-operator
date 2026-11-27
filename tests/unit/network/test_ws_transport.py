@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -889,6 +890,81 @@ def test_a_plain_http_probe_does_not_consume_a_connection_slot() -> None:
         sock = _dial(server)
         sock.close()
     finally:
+        server.stop()
+
+
+def _threads_since(baseline: set[threading.Thread]) -> list[threading.Thread]:
+    """Threads this block started, by identity: everything not alive at ``baseline``.
+
+    ``websockets`` spends TWO per connection it accepts (its handler and its receive
+    loop), so the count is twice the parks, not the parks themselves.
+    """
+    return [thread for thread in threading.enumerate() if thread not in baseline]
+
+
+def _refused_count(socks: list[socket.socket]) -> int:
+    """How many silent sockets the listener has already let go.
+
+    Nothing was ever sent on them, so readability can only be end-of-stream (EOF or a
+    reset from a close with nothing read). A socket still parked before the upgrade is
+    not readable at all.
+    """
+    return sum(1 for sock in socks if select.select([sock], [], [], 0)[0])
+
+
+def test_a_silent_socket_does_not_hold_stop_open() -> None:
+    """MAJOR: a TCP connection that sends NO BYTES never reaches ``process_request``,
+    so the pre-upgrade slot has nothing to count and the library parks it — and the
+    threads behind it — in the opening handshake. The library's own bound for that is
+    ``open_timeout`` (10 s by default, longer than ``ACCEPT_THREAD_JOIN_S``), so
+    ``stop`` has to close the raw socket rather than wait the stranger out."""
+    server, _link, _keys = _one_slot_server(max_connections=2)
+    baseline = set(threading.enumerate())
+    silent = socket.create_connection(("127.0.0.1", server.address[1]), timeout=5.0)
+    try:
+        assert wait_for(
+            lambda: bool(_threads_since(baseline))
+        ), "the silent socket never reached the library"
+        started = time.monotonic()
+        server.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.5, f"stop took {elapsed:.2f}s behind one silent socket"
+        assert elapsed < ws.ACCEPT_THREAD_JOIN_S
+        assert wait_for(
+            lambda: not _threads_since(baseline)
+        ), f"threads outlived stop: {_threads_since(baseline)}"
+    finally:
+        silent.close()
+        server.stop()
+
+
+def test_silent_sockets_past_the_cap_never_reach_a_handler_thread() -> None:
+    """MAJOR: ten silent sockets against ``max_connections=2``. The ledger on the
+    listening socket counts them BEFORE the upgrade, so the excess are closed at
+    ``accept()`` — no thread, no read buffer — and teardown stays prompt. Twenty
+    threads for ten strangers would be the failure this bounds."""
+    capped = 2
+    server, _link, _keys = _one_slot_server(max_connections=capped)
+    baseline = set(threading.enumerate())
+    silent = [
+        socket.create_connection(("127.0.0.1", server.address[1]), timeout=5.0) for _ in range(10)
+    ]
+    try:
+        assert wait_for(
+            lambda: _refused_count(silent) >= 8
+        ), f"only {_refused_count(silent)} of 10 silent sockets were refused"
+        spent = _threads_since(baseline)
+        assert len(spent) <= 2 * capped, f"{len(spent)} threads for 10 silent sockets"
+        started = time.monotonic()
+        server.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.5, f"stop took {elapsed:.2f}s behind ten silent sockets"
+        assert wait_for(
+            lambda: not _threads_since(baseline)
+        ), f"threads outlived stop: {_threads_since(baseline)}"
+    finally:
+        for sock in silent:
+            sock.close()
         server.stop()
 
 
