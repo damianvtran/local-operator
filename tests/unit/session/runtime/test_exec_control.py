@@ -378,7 +378,7 @@ async def test_an_unsupervised_run_reports_the_gate_its_decisions_use(
     session's ORIGINAL headless gate was built from ``--yolo`` alone, so a
     config-``auto`` run with no ``--yolo`` had to report "non-TTY requests
     deny" — and did, while the deciding gate denied with it. The gate now
-    honours the file (``session_factory._approval_mode_is_auto``; the
+    honours the file (``ConfigManager.tool_approval_decision``; the
     2026-09-28 incident's addendum), so the report and the decisions agree on
     ONE value: the saved ``auto``. Reporting "--yolo is active" here would be
     the M1 false posture in a new costume — pinned by the negative assertion.

@@ -9113,7 +9113,7 @@ class OperatorApp(App[None]):
                 )
             )
         denied = source.turn.approvals_denied_epoch
-        auto = bool(source.draft.approve_all) and not (
+        auto = _draft_auto_applies(source) and not (
             denied is not None and source.turn.epoch <= denied
         )
         task = session.suspend_viewer_gates(auto_approve=auto, keep_answer=keep_answer)
@@ -9282,7 +9282,7 @@ class OperatorApp(App[None]):
             return self._ask_screen is None and self._approval is None
         if (
             gate.kind == "approval"
-            and bool(source.draft.approve_all)
+            and _draft_auto_applies(source)
             and not require_card
             # An account profile save is never auto-approved, so approve-all
             # does not discharge it: the card is still owed to a person. Nor
@@ -31414,7 +31414,7 @@ class OperatorApp(App[None]):
         if pending is None or getattr(pending, "kind", None) != "approval":
             return
         pending_latched = bool(getattr(pending, "bridge_latched", False))
-        if bool(source.draft.approve_all) and not requires_person(
+        if _draft_auto_applies(source) and not requires_person(
             str(getattr(pending, "title", "") or ""), bridge_latched=pending_latched
         ):
             return
@@ -31916,7 +31916,7 @@ class OperatorApp(App[None]):
 
         draft = source.draft
         return ApprovalGrant(
-            auto=bool(draft.approve_all),
+            auto=_draft_auto_applies(source),
             scope="global" if draft.approve_scope == "global" else "session",
         )
 
@@ -32075,7 +32075,7 @@ class OperatorApp(App[None]):
         default is a separate, deliberate ``/approvals default ask``, and a
         click on a status glyph must not rewrite ``config.yml``.
         """
-        self._cmd_approvals("ask", self._notice)
+        self._run_slash_command("/approvals ask")
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
         """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
@@ -32397,10 +32397,8 @@ class OperatorApp(App[None]):
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
 
-        The read-only half of the report above. ``None`` means "no watcher on
-        this process" (a test host, an embed) rather than "no value": the
-        caller falls back to its own cached default instead of inventing a
-        comparison against a file nobody is reading. Never constructs a
+        With no saved key (or no watcher), the caller uses its correctly
+        scoped boot default instead of inventing a file value. Never constructs a
         ``ConfigManager`` — see :meth:`_report_approvals` for why a report path
         must not.
         """
@@ -44630,7 +44628,14 @@ class OperatorApp(App[None]):
         being printed.
         """
         values = getattr(change, "values", {})
-        mode = str(values.get("tool_approval_mode", "")).strip().lower()
+        if "tool_approval_mode" in values:
+            mode = str(values["tool_approval_mode"]).strip().lower()
+        else:
+            # A reset removed the raw key. Resolve the local default for the
+            # TUI, then let the normal attribution checks decide what can apply.
+            from local_operator.session_factory import local_tool_approval_is_auto
+
+            mode = mode_word(local_tool_approval_is_auto())
         if mode not in ("auto", "ask"):
             # A typo on disk is not "ask" by accident: the watcher only
             # delivers parseable files, so the safe answer is to keep the mode
@@ -45375,6 +45380,20 @@ class OperatorApp(App[None]):
         text = str(outcome.get("text", "") or "")
         style = str(outcome.get("style", "info") or "info")
         data = outcome.get("data") or {}
+        if (
+            command == "/approvals"
+            and data.get("ok") is True
+            and data.get("approval_mode") == "ask"
+        ):
+            # Mirror the owner's confirmed Ask in the chip and next card, and
+            # clear the viewer's Allow All without settling any parked card.
+            if data.get("approval_provenance") == "session":
+                self._explicit_approvals_mode = "ask"
+            elif data.get("approval_provenance") == "global":
+                self._explicit_approvals_mode = None
+                self._approvals_default_auto = False
+            self._allow_approvals_again()
+            self._set_approve_all(False)
         if kind == "noop":
             # The invoker hosts the interactive surface itself (bare /model's
             # picker is opened up-front); nothing arrives to print.
@@ -66815,6 +66834,16 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     sixteen places to say the same thing.
     """
     return session is not None and not session.owns_runtime
+
+
+def _draft_auto_applies(source: SessionInteraction) -> bool:
+    # A pending owner request cannot be answered by this viewer's machine
+    # default. Keep a person's explicit Allow All in this conversation, but
+    # never translate a boot/default draft into a reply (visible or parked).
+    draft = source.draft
+    return bool(draft.approve_all) and (
+        not _is_viewer(source.session) or draft.approve_scope == "session"
+    )
 
 
 def _canonical_frontend(session: Any) -> bool:

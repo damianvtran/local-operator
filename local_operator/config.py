@@ -776,6 +776,19 @@ def missing_config_approval_mode(config_file: Path) -> str:
     return DEFAULT_TOOL_APPROVAL_MODE
 
 
+def _has_config_values(document: Any) -> bool:
+    values = document.get("values") if isinstance(document, dict) else None
+    return isinstance(values, dict) and bool(values)
+
+
+def _approval_default_from_document(document: Any) -> str:
+    # An empty or truncated values subtree cannot corroborate a fresh marker.
+    # Check the raw document, before load fills it with shipped defaults.
+    if _has_config_values(document):
+        return _approval_default_from_metadata(document.get("metadata"))
+    return _LEGACY_TOOL_APPROVAL_MODE
+
+
 def _approval_default_from_metadata(metadata: Any) -> str:
     if isinstance(metadata, dict) and metadata.get(_FRESH_APPROVAL_METADATA) is True:
         return DEFAULT_TOOL_APPROVAL_MODE
@@ -843,7 +856,7 @@ DEFAULT_CONFIG = Config(
             # (``exec_control.start_exec_control``; its gates then keep
             # following the file), and — since 2026-09-28 — by the PLAIN
             # headless gate itself, the one a ``lop exec`` running in CI
-            # decides on (``session_factory._approval_mode_is_auto``), which
+            # decides on (``ConfigManager.tool_approval_decision``), which
             # previously took only ``--yolo``. A saved ``auto`` is the
             # operator's standing instruction that a run with nobody to ask
             # must not park or deny; ``--yolo`` still wins for one run.
@@ -1340,11 +1353,8 @@ class ConfigManager:
             # the file it is about to replace may hold settings this manager never
             # saw. Truthiness of the document itself is not enough — a
             # metadata-only file is truthy and carries no settings at all.
-            self._loaded_from_disk = (
-                isinstance(loaded, dict)
-                and isinstance(loaded.get("values"), dict)
-                and bool(loaded["values"])
-            )
+            self._loaded_from_disk = _has_config_values(loaded)
+            approval_default = _approval_default_from_document(loaded)
             config_dict = loaded or {}
 
             # Check if config version is older than current version
@@ -1371,7 +1381,7 @@ class ConfigManager:
                 # refuse a config whose values subtree it cannot preserve.
                 self._loaded_from_disk = False
                 return _fresh_default_config(_LEGACY_TOOL_APPROVAL_MODE)
-            if not values:
+            if approval_default != DEFAULT_TOOL_APPROVAL_MODE:
                 metadata.pop(_FRESH_APPROVAL_METADATA, None)
             for key, value in DEFAULT_CONFIG.values.items():
                 if key != "tool_approval_mode" and key not in values:
@@ -1553,8 +1563,7 @@ class ConfigManager:
         # must not discard the marker the current file actually carries.
         # Only a write creating config can introduce the in-memory marker.
         if not still_fresh:
-            disk_metadata = disk_document.get("metadata") if disk_document else None
-            if _approval_default_from_metadata(disk_metadata) == DEFAULT_TOOL_APPROVAL_MODE:
+            if _approval_default_from_document(disk_document) == DEFAULT_TOOL_APPROVAL_MODE:
                 document["metadata"][_FRESH_APPROVAL_METADATA] = True
             else:
                 document["metadata"].pop(_FRESH_APPROVAL_METADATA, None)
@@ -1819,11 +1828,10 @@ class ConfigManager:
         # Do not reload here: a reset must refuse an unreadable file instead
         # of quarantining it and then writing over the recovery state.
         document = _read_config_document(self.config_file)
-        metadata = document.get("metadata") if document is not None else None
         if document is None and not self.config_file.exists():
             mode = missing_config_approval_mode(self.config_file)
         else:
-            mode = _approval_default_from_metadata(metadata)
+            mode = _approval_default_from_document(document)
         self.config = _fresh_default_config(mode)
         # Read from DISK, not from `self.config`: the manager may have been built
         # before a hand-edit, and the reset means "the file holds nothing of mine".
@@ -1856,13 +1864,23 @@ class ConfigManager:
                 return DEFAULT_TOOL_APPROVAL_MODE
         return _LEGACY_TOOL_APPROVAL_MODE
 
-    def uses_implicit_auto_approval(self) -> bool:
-        """Whether this snapshot would resolve Auto without an explicit setting."""
-        return (
-            not self._require_saved_approval
-            and "tool_approval_mode" not in self.config.values
-            and self.tool_approval_default() == DEFAULT_TOOL_APPROVAL_MODE
-        )
+    def tool_approval_decision(self, session_id: str) -> tuple[bool, bool]:
+        """Return (auto, implicit-local provenance) from one snapshot and scope check.
+
+        Provenance describes the candidate even if the scope check tightens it
+        to Ask. A second scope read cannot safely classify an earlier Auto.
+        """
+        key = "tool_approval_mode"
+        if key in self.config.values:
+            return str(self.config.values[key]).strip().lower() == "auto", False
+        if self._require_saved_approval or (
+            _approval_default_from_metadata(self.config.metadata) != DEFAULT_TOOL_APPROVAL_MODE
+        ):
+            return False, False
+
+        from local_operator.session.approval_policy import may_inherit_local_auto
+
+        return may_inherit_local_auto(self.config_dir, session_id), True
 
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration variable.

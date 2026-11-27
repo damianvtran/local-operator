@@ -212,7 +212,7 @@ async def start_exec_control(
     run whose owner had set full-auto. An UNSUPERVISED run now reads the same
     mode for the SAME reason (2026-09-28 addendum): its decisions are made by
     the session's ORIGINAL headless gate, which reads ``tool_approval_mode``
-    itself (``session_factory._approval_mode_is_auto``), so a handle seeded
+    itself (``ConfigManager.tool_approval_decision``), so a handle seeded
     from anything else would report a posture the decisions do not have — the
     M1 hazard reversed. The value is a one-shot read (no gates, no watcher):
     the launch-time mode governs, exactly as a ``--yolo`` flag does.
@@ -292,7 +292,7 @@ async def start_exec_control(
     # read the file: seeding this handle then changed no decision while making
     # ``/approvals`` report a posture the deciding gate did not have. The gate
     # now reads the key at its own construction
-    # (``session_factory._approval_mode_is_auto``), so the identical hazard
+    # (``ConfigManager.tool_approval_decision``), so the identical hazard
     # exists in the OPPOSITE direction if this handle keeps the flag's value —
     # the report would say ask while the decisions auto-approve.
     # Unsupervised still differs where it always did: no gates installed, no
@@ -329,20 +329,13 @@ async def start_exec_control(
                 config = ConfigManager(
                     config_dir=config_directory, require_saved_approval=require_saved_approval
                 )
-                saved_or_default = config.get_config_value("tool_approval_mode", "ask")
-                approval_mode = str(saved_or_default).strip().lower()
-                if approval_mode == "auto" and config.uses_implicit_auto_approval() is True:
-                    from local_operator.session.approval_policy import may_inherit_local_auto
-
-                    session_id = str(session.session_id)
-                    if may_inherit_local_auto(config_directory, session_id):
-                        implicit_local_approval_id = session_id
-                    else:
-                        approval_mode = "ask"
+                session_id = str(session.session_id)
+                auto_approve, implicit = config.tool_approval_decision(session_id)
+                if implicit:
+                    implicit_local_approval_id = session_id
             except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
                 logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
-                approval_mode = "ask"
-            auto_approve = approval_mode == "auto"
+                auto_approve = False
     # THE QUEUED ENGINE MUST BE ON (review round 1, MINOR-1 / QA Q1). With the
     # operator's kill switch (``LOP_ASK_NONBLOCKING=0``) the queue does not exist
     # at all, so an ask surface here could only advertise a tool whose single

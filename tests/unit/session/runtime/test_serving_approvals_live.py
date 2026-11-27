@@ -59,11 +59,12 @@ def _fresh_registry():
 
 
 @pytest.mark.asyncio
-async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp_path):
-    from local_operator.network import store as network_store
-    from local_operator.network.types import NetworkRecord
+async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp_path, monkeypatch):
+    from local_operator.session.runtime import serving
 
     root = tmp_path / "config"
+    can_inherit = True
+    monkeypatch.setattr(serving, "may_inherit_local_auto", lambda *_: can_inherit)
     handle = ServingSessionHandle(
         FakeSession(),
         asyncio.get_running_loop(),
@@ -74,19 +75,15 @@ async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp
     )
     try:
         assert await handle._approval_gate("bash", "before enrollment") is True
-        network_id = "n_0123456789abcdef0123456789abcdef"
-        enrolled = NetworkRecord(network_id=network_id, name="test", trust="active")
-        network_store.save(enrolled, root=root)
-        # No session stamp was added. A peer can prompt such an existing owner,
-        # so a post-join tool call must still lose implicit local authority.
+        can_inherit = False
         pending = asyncio.create_task(handle._approval_gate("bash", "after enrollment"))
         await asyncio.sleep(0)
         card = handle._fold.projection.pending
         assert card is not None, "implicit Auto survived enrollment"
         await handle.approval_answer(card.request_id, False, False)
         assert await pending is False
-        enrolled.trust = "disconnected"
-        network_store.save(enrolled, root=root)
+        assert handle._implicit_local_approval_id == "local-session"
+        can_inherit = True
         assert not handle._approval_grant().auto, "disconnect must not loosen a live gate"
     finally:
         await handle.dispose()

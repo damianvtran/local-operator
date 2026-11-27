@@ -264,6 +264,20 @@ def test_changed_keys_name_exactly_the_registry_keys_that_moved(tmp_path) -> Non
     assert change.values is watcher.values
 
 
+def test_an_explicit_auto_save_is_a_change_from_the_fresh_default(tmp_path) -> None:
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("conversation_length", 12)
+    assert manager.get_config_value("tool_approval_mode") == "auto"
+    watcher = ConfigWatcher(tmp_path)
+    assert "tool_approval_mode" not in watcher.values
+
+    _write(tmp_path, "tool_approval_mode", "auto")
+    change = watcher.poll_now()
+    assert change is not None
+    assert change.changed_keys == {"tool_approval_mode"}
+    assert change.values["tool_approval_mode"] == "auto"
+
+
 def test_an_unset_is_a_change(tmp_path) -> None:
     """Resetting a key to default on the page is an edit the consumers must
     see — the value they hold is no longer what the user wants."""

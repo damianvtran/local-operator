@@ -845,7 +845,7 @@ def test_an_offload_carries_the_devices_saved_auto_mode(
     the authority accepted at a create/move doorstep — so a locally-auto session
     with a plain stamp lost auto the moment it landed. The read goes through the
     ONE derivation (``session_factory.saved_tool_approval_is_auto`` → the same
-    ``_approval_mode_is_auto`` a locally-started session runs with) and this cell
+    saved value ``ConfigManager.tool_approval_decision`` uses locally) and this cell
     pins both directions: ``auto`` on the source travels True (and the destination
     stamps it), and a return to ``ask`` travels False — a read that drifted into
     "always true" goes red on the second half.

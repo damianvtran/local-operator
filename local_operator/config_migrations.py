@@ -363,7 +363,11 @@ def record_config_key_inventory(config_dir: Path, removed: "Sequence[Sequence[st
     No inventory yet: record the file as it stands, which is the baseline the next
     launch would have written anyway. Best-effort like the rest of this module.
     """
-    from local_operator.config import CONFIG_KEY_INVENTORY_NAME, _leaf_paths, read_config_values
+    from local_operator.config import (
+        CONFIG_KEY_INVENTORY_NAME,
+        _leaf_paths,
+        read_config_values,
+    )
 
     inventory_path = config_dir / CONFIG_KEY_INVENTORY_NAME
     previous = _read_key_inventory(inventory_path)

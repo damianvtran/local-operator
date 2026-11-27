@@ -7673,32 +7673,28 @@ async def test_the_projects_registry_reaches_the_session_and_its_tools(
 # ---------------------------------------------------------------------------
 
 
-def test_approval_mode_is_auto_reads_the_key_and_degrades_to_ask() -> None:
-    """The one reader behind the headless gate's config arm.
+def test_tool_approval_decision_keeps_mode_and_local_provenance_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.config import ConfigManager
+    from local_operator.session import approval_policy
 
-    ``auto`` (any case/whitespace) approves; ``ask``, a missing key and an
-    unreadable config all fall back to asking — the failure direction matters:
-    a broken config must never approve by accident.
-    """
-    from local_operator.session_factory import _approval_mode_is_auto
+    scopes = iter([True, False])
+    checks = []
 
-    class _Cfg:
-        def __init__(self, value: object) -> None:
-            self.value = value
+    def scope_check(root: Path, session_id: str) -> bool:
+        checks.append((root, session_id))
+        return next(scopes)
 
-        def get_config_value(self, key: str, default: object = None) -> object:
-            return default if self.value is None else self.value
-
-    assert _approval_mode_is_auto(_Cfg("auto")) is True
-    assert _approval_mode_is_auto(_Cfg(" Auto ")) is True
-    assert _approval_mode_is_auto(_Cfg("ask")) is False
-    assert _approval_mode_is_auto(_Cfg(None)) is False, "missing key means ask"
-
-    class _Boom:
-        def get_config_value(self, key: str, default: object = None) -> object:
-            raise RuntimeError("config unreadable")
-
-    assert _approval_mode_is_auto(_Boom()) is False, "an unreadable config must not approve"
+    monkeypatch.setattr(approval_policy, "may_inherit_local_auto", scope_check)
+    manager = ConfigManager(tmp_path)
+    assert manager.tool_approval_decision("local-fixture") == (True, True)
+    assert checks == [(tmp_path, "local-fixture")], "startup must sample scope once"
+    assert manager.tool_approval_decision("local-fixture") == (False, True)
+    manager.set_config_value("tool_approval_mode", " Auto ")
+    assert manager.tool_approval_decision("local-fixture") == (True, False)
+    manager.set_config_value("tool_approval_mode", "ask")
+    assert manager.tool_approval_decision("local-fixture") == (False, False)
 
 
 def test_saved_tool_approval_is_auto_answers_without_materialising_a_root(tmp_path: Path) -> None:

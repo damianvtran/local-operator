@@ -103,10 +103,10 @@ from local_operator.mobile.types import (
 # The conversation's own recorded approval choice: read at construction, written
 # by ``/approvals``. Module-scope because the module is stdlib-only (its docstring
 # explains why it must stay that way for the resume path).
-from local_operator.session.approval_policy import may_inherit_local_auto
 from local_operator.session.approval_policy import (
     OVERRIDE_FILENAME as _APPROVAL_OVERRIDE_FILENAME,
 )
+from local_operator.session.approval_policy import may_inherit_local_auto
 from local_operator.session.approval_policy import (
     read_override as _read_approval_override,
 )
@@ -1955,14 +1955,13 @@ class ServingSessionHandle(SessionHandle):
             and self._auto_approve
             and self._explicit_approvals_mode is None
             and (
-                self._config_dir is None
-                or not may_inherit_local_auto(self._config_dir, session_id)
+                self._config_dir is None or not may_inherit_local_auto(self._config_dir, session_id)
             )
         ):
             # A peer can prompt an existing local (unstamped) session after a
             # join. Recheck on the decision path, not only at owner boot. This
             # only tightens: leaving the mesh cannot re-enable Auto mid-session.
-            self._implicit_local_approval_id = None
+            # Retain provenance until an operator applies explicit authority.
             self._auto_approve = False
             self._default_approvals_mode = "ask"
             self._publish_approval_mode()
@@ -2273,12 +2272,15 @@ class ServingSessionHandle(SessionHandle):
         # holding its own override still needs the correct global half for its
         # provenance sentence, and the gate may not move this tick.
         self._default_approvals_mode = mode
-        if getattr(self, "_implicit_local_approval_id", None) and (
-            not wanted_auto
-            or _loosening_is_authorised(source=getattr(change, "source", "disk"), gate_is_here=True)
+        if (
+            getattr(self, "_implicit_local_approval_id", None)
+            and wanted_auto
+            and _loosening_is_authorised(
+                source=getattr(change, "source", "disk"), gate_is_here=True
+            )
         ):
-            # A disk-only Auto write must not upgrade an implicit local choice
-            # into unattended authority even when the visible mode is already Auto.
+            # Tightening or a disk-only Auto write is not an operator grant,
+            # even when it produces the same visible mode.
             self._implicit_local_approval_id = None
         if wanted_auto == self._auto_approve:
             return
@@ -12115,7 +12117,7 @@ class ServingSessionHandle(SessionHandle):
             #
             # THE SUFFIX NAMES THE REAL SOURCE (2026-09-28 addendum). The
             # original headless gate now reads ``tool_approval_mode``
-            # (session_factory._approval_mode_is_auto), so "auto" here has two
+            # (ConfigManager.tool_approval_decision), so "auto" here has two
             # possible sources and they must be told apart: the flag, which
             # pinned this run against the file, or the file itself, which the
             # gate consulted. Reporting "--yolo is active" for a run with no
@@ -12603,9 +12605,9 @@ class ServingSessionHandle(SessionHandle):
         never from a fresh ``ConfigManager``. Constructing one here would give
         a report path the power to MOVE A MALFORMED FILE ASIDE (the module
         docstring of ``config_watch`` explains why), so asking "what does the
-        file say?" could rewrite the user's config as a side effect. ``None``
-        when no watcher is running (a headless embed, a test host): the caller
-        then reports the live mode alone rather than inventing a comparison.
+        file say?" could rewrite the user's config as a side effect. With no
+        saved key (or no watcher) fall back to this owner's scoped boot default
+        rather than inventing a saved value.
         """
         try:
             from local_operator.config_watch import existing_watcher

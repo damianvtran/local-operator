@@ -8538,7 +8538,7 @@ def _offload(
     #   session running with no routine re-prompts HERE must keep doing so THERE,
     #   and the read goes through the ONE derivation a session started here would
     #   resolve (``session_factory.saved_tool_approval_is_auto`` →
-    #   ``_approval_mode_is_auto``, the same seam the headless gate and the spawned
+    #   ``ConfigManager.tool_approval_decision``, the same seam the headless gate and the spawned
     #   handles seed from), so the carry cannot drift from the mode this device
     #   actually applies. Its ONE stated gap: a LIVE session's gate can also be
     #   pinned per session (an explicit ``--yolo``, or ``/approvals`` typed in the

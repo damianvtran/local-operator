@@ -103,6 +103,7 @@ import sys
 import termios
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -663,7 +664,7 @@ def _marker_context(
     return "the marker is in no log file"
 
 
-def test_first_run_tui_runs_a_tool_without_an_approval_card(
+def test_first_run_tui_runs_a_tool_then_ask_parks_the_next_call(
     headless_tui_env: Path, tmp_path: Path
 ) -> None:
     from local_operator.config import ConfigManager
@@ -688,21 +689,43 @@ def test_first_run_tui_runs_a_tool_without_an_approval_card(
             assert terminal.type_until_echoed(b"[bash:0]", ECHO_TIMEOUT_S), terminal.tail()
             terminal.write(b"\r")
             transcript = root / "sessions" / session_id / "transcript.jsonl"
-            while time.monotonic() < deadline:
-                terminal.pump(0.2)
+
+            def bash_results() -> list[dict[str, Any]]:
                 if not transcript.is_file():
-                    continue
+                    return []
+                results = []
                 # Only complete JSONL lines count as committed results.
                 for line in transcript.read_text(encoding="utf-8").splitlines(keepends=True):
                     if not line.endswith("\n"):
                         continue
                     payload = json.loads(line).get("payload", {})
                     if payload.get("role") == "tool" and payload.get("tool_name") == "bash":
-                        details = payload.get("provider_payload", {}).get("details", {})
-                        assert details.get("exit_code") == 0, payload
-                        print("Fresh TUI: input [bash:0] reached the live owner; bash exit_code=0")
-                        return
-            pytest.fail(f"TUI never recorded a bash result; terminal tail:\n{terminal.tail()}")
+                        results.append(payload)
+                return results
+
+            while not (results := bash_results()) and time.monotonic() < deadline:
+                terminal.pump(0.2)
+            assert len(results) == 1, terminal.tail()
+            assert results[0].get("provider_payload", {}).get("details", {}).get("exit_code") == 0
+            print("Fresh TUI: input [bash:0] reached the live owner; bash exit_code=0")
+
+            # A receipt and sidecar alone do not prove the attached owner (or
+            # its viewer) respected the switch. Exercise the very next call.
+            terminal.write(b"/approvals ask\r")
+            override = transcript.with_name("approvals.json")
+            while not override.is_file() and time.monotonic() < deadline:
+                terminal.pump(0.2)
+            assert override.is_file(), terminal.tail()
+            assert json.loads(override.read_text(encoding="utf-8"))["override"] == "ask"
+            frame_start = len(terminal.output)
+            terminal.write(b"[bash:0]\r")
+            marker = b"waiting for approval"
+            while marker not in terminal.output[frame_start:] and time.monotonic() < deadline:
+                terminal.pump(0.2)
+                assert bash_results() == results, "the second tool ran after /approvals ask"
+            assert marker in terminal.output[frame_start:], terminal.tail()
+            assert bash_results() == results
+            print("Live /approvals ask: sidecar says ask; next call parked; no second bash result")
     finally:
         _stop_child(pid, terminal)
         terminal.close()

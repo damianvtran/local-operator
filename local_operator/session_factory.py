@@ -944,32 +944,6 @@ def _fullscreen_app_owns_terminal() -> bool:
     return active_app.get(None) is not None
 
 
-def _approval_mode_is_auto(config_manager: Any) -> bool:
-    """Whether the operator's saved default approves unattended runs.
-
-    ``tool_approval_mode: auto`` is the standing instruction that a run with
-    nobody to ask must not park or deny on an approval prompt — the same
-    semantic ``--yolo`` carries for a single run. The key is already read by
-    ``spawn_owned_session`` and ``exec_control.start_exec_control`` to seed the
-    gates of the runs THEY supervise ("same key, same default, same
-    degrade-to-ask"); the gate built HERE — the one a headless ``lop exec`` run
-    decides on when no front end has installed an approval handler — never read
-    it, so an operator whose config said auto still had every write/exec call
-    refused with "run with --yolo to auto-approve" (the 2026-09-28 incident's
-    addendum). Reading it at this ONE seam keeps the gate and every posture
-    readout equal by construction: there is no separate handle to report a
-    value the deciding gate ignores.
-
-    Degrades to ``ask`` — never a crash, and never an implicit approval: an
-    unreadable or unrecognized value must fail toward asking, not approving.
-    """
-    try:
-        stored = config_manager.get_config_value("tool_approval_mode", "ask")
-    except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
-        return False
-    return str(stored).strip().lower() == "auto"
-
-
 def _tool_approval_is_auto_at_root(root: Path | None, *, require_saved_approval: bool) -> bool:
     """Read the same policy as ConfigManager without changing the config root.
 
@@ -981,6 +955,7 @@ def _tool_approval_is_auto_at_root(root: Path | None, *, require_saved_approval:
         from local_operator.config import (
             CONFIG_FILE_NAME,
             Config,
+            _has_config_values,
             _parse_config_stream,
             missing_config_approval_mode,
         )
@@ -997,10 +972,7 @@ def _tool_approval_is_auto_at_root(root: Path | None, *, require_saved_approval:
                 and missing_config_approval_mode(config_file) == "auto"
                 and may_inherit_local_auto(base)
             )
-        if not isinstance(loaded, dict):
-            return False
-        values = loaded.get("values")
-        if not isinstance(values, dict) or not values:
+        if not _has_config_values(loaded) or not isinstance(loaded.get("metadata", {}), dict):
             return False
         config = Config(loaded)
         mode = config.tool_approval_mode(require_saved_approval=require_saved_approval)
@@ -5590,22 +5562,18 @@ async def _prepare(
     _persisted_approval, _approval_warning = read_approval_override(transcript_dir)
     if _approval_warning:
         print(f"\033[1;33mWarning: {_approval_warning}\033[0m", file=sys.stderr)
-    _approval_auto = (
-        _persisted_approval == "auto"
-        if _persisted_approval is not None
-        else _approval_mode_is_auto(config_manager)
-    )
     implicit_local_scope = None
-    if (
-        not yolo
-        and _approval_auto
-        and _persisted_approval is None
-        and config_manager.uses_implicit_auto_approval() is True
-    ):
-        implicit_local_scope = (config_manager.config_dir, transcript_dir.name)
-        _approval_auto = may_inherit_local_auto(*implicit_local_scope)
+    if yolo or _persisted_approval is not None:
+        _approval_auto = yolo or _persisted_approval == "auto"
+    else:
+        try:
+            _approval_auto, implicit = config_manager.tool_approval_decision(transcript_dir.name)
+            if implicit:
+                implicit_local_scope = (config_manager.config_dir, transcript_dir.name)
+        except Exception:  # noqa: BLE001 — an unreadable decision does not grant approval
+            _approval_auto = False
     request_approval = _make_request_approval(
-        yolo or _approval_auto, implicit_local_scope=implicit_local_scope
+        _approval_auto, implicit_local_scope=implicit_local_scope
     )
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and

@@ -1130,7 +1130,7 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     the declaration ``exec_startup.apply_startup`` lets stand as the approval
     exactly where nobody can be asked), or the operator's saved default —
     ``tool_approval_mode: auto``, which the headless gate itself reads (see
-    ``session_factory._approval_mode_is_auto``). Before this advisory the
+    ``ConfigManager.tool_approval_decision``). Before this advisory the
     operator's
     first evidence of the trap was a transcript of denials for calls no user
     had seen; this is the same news told BEFORE the run, which is the half
@@ -1153,7 +1153,7 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
         return None
     # THE SAVED DEFAULT IS AN ANSWER TOO (2026-09-28 addendum). The headless
     # gate reads ``tool_approval_mode`` now
-    # (``session_factory._approval_mode_is_auto``), so a config-``auto`` run's
+    # (``ConfigManager.tool_approval_decision``), so a config-``auto`` run's
     # calls answer inline — and warning "any tool call ... will be denied" over
     # it is the M2 hazard wearing its other face: telling a run that will work
     # that it will be denied. Best-effort on purpose; see the helper.

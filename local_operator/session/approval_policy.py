@@ -234,6 +234,7 @@ def resolve_effective(
 def may_inherit_local_auto(root: Path, session_id: str | None = None) -> bool:
     """Only an unstamped owner on a root without active mesh trust may inherit Auto."""
     from local_operator.network import store as network_store
+    from local_operator.network.types import MeshRefusal, trust_state
     from local_operator.session.placement import stamp_path
 
     # Presence, not a valid parsed stamp: unreadable, invalid and broken-link
@@ -261,9 +262,11 @@ def may_inherit_local_auto(root: Path, session_id: str | None = None) -> bool:
                 return False
             if path.suffix == ".json":
                 record = network_store.load(path.stem, root=root)
-                if record.trust == "active":
+                # The disk decoder can return raw values despite its annotation.
+                # Only schema-known inactive trust is evidence of a clear root.
+                if trust_state(record.trust) == "active":
                     return False
-    except (OSError, ValueError, TypeError):
-        # A disappearing or unreadable record is not proof of a clear root.
+    except (OSError, ValueError, TypeError, MeshRefusal):
+        # A disappearing, unreadable or unknown record is not proof of a clear root.
         return False
     return True

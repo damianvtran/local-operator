@@ -667,7 +667,9 @@ def _with_defaults(values: Mapping[str, Any]) -> dict[str, Any]:
 
     merged: dict[str, Any] = copy.deepcopy(dict(values))
     for key, default in DEFAULT_CONFIG.values.items():
-        if key not in merged:
+        # Like ConfigManager, keep the approval key raw. A first-use fallback
+        # is neither a saved setting nor a same-value save the diff can ignore.
+        if key != "tool_approval_mode" and key not in merged:
             merged[key] = copy.deepcopy(default)
     return merged
 
