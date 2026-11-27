@@ -2235,6 +2235,29 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
         if route not in {"disabled", "no-vertex"}:
             classifier.bind_advisory_route(Auth(), "synthetic")
         hooks = _hooks(classifier=None if route == "disabled" else classifier)
+        release_native_probe = asyncio.Event()
+        advisory_task = None
+        normal_wait = hooks.classification_wait_s
+        if route == "early":
+            provider_available = classifier.provider_available
+            recommend_resources = classifier.recommend_resources
+
+            async def gated_native_probe():
+                await release_native_probe.wait()
+                return await provider_available()
+
+            async def capture_advisory_task(*args, **kwargs):
+                nonlocal advisory_task
+                if kwargs.get("automatic"):
+                    advisory_task = asyncio.current_task()
+                return await recommend_resources(*args, **kwargs)
+
+            monkeypatch.setattr(classifier, "provider_available", gated_native_probe)
+            monkeypatch.setattr(classifier, "recommend_resources", capture_advisory_task)
+            # Force the foreground wait to expire while native discovery is still
+            # held. A late native miss leaves its sentinel task registered beside
+            # the detached Vertex task, regardless of how the runner is scheduled.
+            hooks.classification_wait_s = 0.0
         transcript = Transcript(root / "session")
 
         async def tool(call_id, *_args, **_kwargs):
@@ -2254,8 +2277,16 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
                     if route == "early":
                         # Arrange an answer between chat steps, not before
                         # first dispatch. Unlike product, the fixture may wait.
+                        hooks.classification_wait_s = normal_wait
+                        release_native_probe.set()
                         await request_started.wait()
-                        pending = hooks.classification_outstanding[0].task
+                        # Capture the caller at the advisory entry point, not
+                        # the HTTP worker or the first entry in the pending list.
+                        pending = advisory_task
+                        assert pending is not None
+                        assert any(
+                            call.task is pending for call in hooks.classification_outstanding
+                        )
                         finish_early.set()
                         result = await pending
                         assert result.resources
@@ -2352,6 +2383,7 @@ async def test_first_chat_dispatch_does_not_wait_for_vertex(tmp_path, monkeypatc
                     assert not oauth_started.is_set()
                     assert all("<resource_recommendations>" in prompts[i] for i in (2, 3))
         finally:
+            release_native_probe.set()
             probe_released.set()
             finish_early.set()
             release.set()
