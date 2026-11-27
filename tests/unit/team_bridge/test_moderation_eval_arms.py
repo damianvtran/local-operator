@@ -581,7 +581,9 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
         enroll_bridge,
     )
     from local_operator.evaluation.team_bridge_moderation.gates import Controls
+    from local_operator.harness.loop import LoopContext
     from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+    from local_operator.tools.tool_docs import render_tool_doc
 
     dataset = load_dataset(Path("evals/team_bridge_moderation").resolve())
     world = build_fixture(
@@ -623,18 +625,25 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
                 owner = enroll_bridge(
                     world, session_id=str(getattr(session, "session_id", "") or "")
                 )
+                # This is the actual registration seam, not a synthetic ToolContext.
+                assert isinstance(session._context, LoopContext)
                 leg._install_runtime(session, [], owner=owner)
-                after = {
-                    getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])
-                }
-                return after, leg.bridge_tool_state, leg.ask_surface
+                after = {tool.name: tool for tool in (session._tools or [])}
+                assert "bridge" in after, f"the model was offered no bridge tool: {sorted(after)}"
+                bridge = after["bridge"]
+                ops = bridge.parameters["properties"]["op"]["enum"]
+                assert {"channels", "send"}.issubset(ops)
+                assert "channel_members" not in ops
+                help_text = render_tool_doc(bridge)
+                assert "- channels:" in help_text
+                assert "channel_members" not in help_text
+                return set(after), leg.bridge_tool_state, leg.ask_surface
 
         after, bridge_state, ask_state = asyncio.run(run())
     finally:
         if previous_home is not None:
             os.environ["HOME"] = previous_home
 
-    assert "bridge" in after, f"the model was offered no bridge tool: {sorted(after)}"
     assert "ask" in after, f"the model was offered no ask tool: {sorted(after)}"
     assert bridge_state == "present"
     assert ask_state == "installed"

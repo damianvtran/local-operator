@@ -30,6 +30,7 @@ from local_operator.team_bridge.tool import (
     build_bridge_tool,
     execute_bridge,
 )
+from local_operator.tools.tool_docs import render_tool_doc
 from tests.unit.team_bridge.test_client import FakeRow, FakeStore
 
 ROOM = "bcv_testroom1"
@@ -336,6 +337,58 @@ async def test_pending_channels_discards_status_after_binding_changes(runtime, h
     await attempt
     assert rt.admission == "pending" and rt.roster_discovery is None
     assert status_calls == 1 and auth.refresh_calls == [(1, False)]  # no forced refresh/retry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    (
+        "other_session",
+        "stale_designation",
+        "inherited",
+        "missing",
+        "null",
+        "empty_list",
+        "empty_str",
+    ),
+)
+async def test_roster_tool_requires_positive_root_authority(runtime, hub, case):
+    rt, _ = runtime
+    root = ToolContext(bridge_runtime=rt, session_id=COS)
+    privileged = build_bridge_tool(root)
+    assert privileged is not None
+    assert "- channel_members:" in render_tool_doc(privileged)
+    await list_rooms(rt)
+    prior_calls = hub.calls.copy()
+
+    if case == "other_session":
+        denied = root.model_copy(update={"session_id": "sess_other"})
+    elif case == "stale_designation":
+        write_state(rt.config_dir, {"session_id": "sess_other"})
+        denied = root
+    else:
+        # Simulate corrupt host state without Pydantic normalizing supplied values.
+        ancestry = {"inherited": ("sess_parent",), "null": None, "empty_list": [], "empty_str": ""}
+        denied = root.model_copy(update={"ancestor_session_ids": ancestry.get(case)})
+        if case == "missing":
+            del denied.ancestor_session_ids
+            assert not hasattr(denied, "ancestor_session_ids")
+
+    ordinary = build_bridge_tool(denied)
+    assert ordinary is not None
+    ops = ordinary.parameters["properties"]["op"]["enum"]
+    assert "channels" in ops and "channel_members" not in ops
+    help_text = render_tool_doc(ordinary)
+    assert "- channels:" in help_text and "channel_members" not in help_text
+
+    # Even a forged call to a previously privileged tool cannot reach the hub.
+    args = {"op": "channel_members", "channel_id": ROOM}
+    for tool, context in ((ordinary, denied), (privileged, denied), (ordinary, root)):
+        assert tool.execute is not None
+        result = await tool.execute("forged-roster", args, None, None, context)
+        assert result.is_error and result.details is not None
+        assert result.details["code"] == "not_chief_of_staff"
+    assert hub.calls == prior_calls
 
 
 @pytest.mark.asyncio

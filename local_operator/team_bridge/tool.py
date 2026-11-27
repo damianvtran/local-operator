@@ -183,7 +183,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -245,6 +245,9 @@ from .types import (
     validate_recipient_shape,
     validate_send_recipient,
 )
+
+if TYPE_CHECKING:
+    from local_operator.harness.loop import LoopContext
 
 logger = logging.getLogger(__name__)
 
@@ -5369,24 +5372,29 @@ async def _history_images(
     return out
 
 
-def _roster_tool_context(context: ToolContext, runtime: BridgeRuntime) -> bool:
-    """An inherited CoS runtime is not proof that this is the CoS tool audience."""
+def _roster_tool_context(context: object, runtime: BridgeRuntime) -> bool:
+    """Only a trusted root ToolContext can carry roster authority."""
+    # The moderation evaluation registers ordinary Bridge from a LoopContext.
+    # A runtime on that context (or an inherited one on a child) is not proof
+    # of root ancestry. Only the host's canonical empty tuple establishes it.
+    if not isinstance(context, ToolContext):
+        return False
+    ancestry = getattr(context, "ancestor_session_ids", None)
+    if type(ancestry) is not tuple or ancestry:
+        return False
+    session_id = getattr(context, "session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        return False
+
     from local_operator.aida.state import is_aida_session
 
-    return bool(
-        not context.ancestor_session_ids
-        and context.session_id
-        and context.session_id == getattr(runtime, "session_id", None)
-        and is_aida_session(runtime.config_dir, context.session_id)
+    return session_id == getattr(runtime, "session_id", None) and is_aida_session(
+        runtime.config_dir, session_id
     )
 
 
-def build_bridge_tool(context: ToolContext) -> AgentTool | None:
-    """createIf: absent without a bridge runtime (unsigned / not designated).
-
-    The runtime is stashed by the session that owns one (``bridge_runtime``,
-    declared on ``ToolContext``); no probing beyond that one declared field.
-    """
+def build_bridge_tool(context: ToolContext | LoopContext) -> AgentTool | None:
+    """Register ordinary Bridge with a runtime; only ToolContext can add the roster."""
     runtime = getattr(context, "bridge_runtime", None)
     if runtime is None:
         return None
