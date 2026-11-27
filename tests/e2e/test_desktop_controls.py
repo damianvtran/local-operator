@@ -245,6 +245,12 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # /memory inspection is CLI/TUI-only; no desktop panel/adapter ships.
             assert withheld == {
                 "highlights",
+                # Radient Guard consent is enforced by the `lop` backend and
+                # `/guard` is only the TUI's consent/status screen. The desktop
+                # and mobile surfaces reach the same backend state through the
+                # settings API, not a mirrored command, so it is withheld from
+                # the desktop catalogue by decision (RFC v0.9 slice L2b).
+                "guard",
                 "hub",
                 # No desktop destination: the page reads and writes THIS
                 # terminal's source stores/config root. Withheld deliberately.
