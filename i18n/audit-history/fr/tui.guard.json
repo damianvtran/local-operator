@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.guard",
-  "history_sha256": "4db2f5b2dc6ead508bdf70cae7603102d9a833ed6cb852772eb81dc5df9344fd",
+  "history_sha256": "e1a6d15f1489e8597812dd9cbd716283c0c511397d6233295c8850e3cdfa76b5",
   "entries": [
     {
       "locale": "fr",
@@ -94,6 +94,104 @@
       "mechanical_checks": "94/94 keys; placeholder multiset identical to en for every key; literals /guard, lop, Console, Radient, Radient Guard, Radient Team preserved (scope_decisions translates the common noun 'Guardrail' per the shipped wire.guardrails rendering); screen_share_again quotes this locale's badge_waiting byte-for-byte; no bidi control characters; NFC; badge_waiting and badge_sharing within maxCells 28 by rich.cells.cell_len.",
       "rendered_evidence_executed": false,
       "note": "Independent audit 1 of 2 for tui.guard (fr), PR #4650 at worktree head 33c6f23fa2. All 94 values read against en + context. Auditor changed 1 value(s); see auditor_changes. Typography checked: U+202F before : ; ? and inside « », U+2019 apostrophes, vous register. Consent copy is high-visibility: a SECOND independent audit is required before merge, recorded as a further appended receipt for this same source_sha256 with audit_instance 'second-independent' (precedent: i18n/audit-history/es/wire.teams.effective.json). No rendered, RTL-visual or native-speaker review claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "08d4188471ac8debb6a753f57b4ef9f7f216336cf554620e44d212ab5aeb1390",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": "radientdev ux-reviewer (acting as second independent i18n auditor)",
+        "session": "e6ab8547b6b5",
+        "model": "openai/gpt-6.2-sol",
+        "actual_model_source": "Developer runtime declaration in this session",
+        "date": "2026-11-27",
+        "fallback_used": false,
+        "fallback_note": "No provider fallback observed.",
+        "independent_from_translator_session": "5bd246fcf195",
+        "independent_from_first_auditor_session": "d3661c1e5338",
+        "result": "passed",
+        "findings": 0,
+        "findings_fixed": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "audit_instance": "second-independent",
+      "second_independent_audit_required": true,
+      "second_independent_audit_completed": true,
+      "audit_scope": "translation_only",
+      "audit_date": "2026-11-27",
+      "key_count": 94,
+      "keys_read": 94,
+      "previous_receipt_target_sha256": "1fa12303210fa2a2d0dc409c432dad9a58ac362add3d17bb3a338cf407fa6bc8",
+      "auditor_changes": [
+        {
+          "key": "scope_decisions",
+          "before": "Résultats des garde-fous : si chaque contrôle a autorisé, demandé ou bloqué, et le type de règle",
+          "after": "Résultats des garde-fous : pour chaque contrôle, action autorisée, confirmation demandée ou action bloquée, et type de règle"
+        },
+        {
+          "key": "revoke_retained",
+          "before": "Les autres données déjà envoyées restent jusqu’à leur expiration : les statistiques après 90 jours, les signalements après 180 jours.",
+          "after": "Les autres données déjà envoyées sont conservées jusqu’à expiration : 90 jours pour les statistiques et 180 jours pour les signalements."
+        },
+        {
+          "key": "badge_sharing_pending",
+          "before": "Guard : partage · choix en attente",
+          "after": "Guard : partage · à décider"
+        }
+      ],
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.json",
+          "sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.context.json",
+          "sha256": "105858995d85c823fe9e159e745b7c3e50f5e27ccca435101d784f0720451106"
+        },
+        "glossary": {
+          "path": "i18n/glossary.md",
+          "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+        },
+        "style": {
+          "path": "i18n/style-guides/fr.md",
+          "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/fr/tui.guard.json",
+          "sha256": "08d4188471ac8debb6a753f57b4ef9f7f216336cf554620e44d212ab5aeb1390"
+        }
+      },
+      "safety_semantic_judgments": {
+        "minimums": "Visibility is restricted to at least 5 contributors for totals and 20 for setup-check estimates; report count is per kind and requires at least five senders that day.",
+        "retentions": "Step-by-step timing excludes contents and is kept 14 days. Already sent records retain the 90-day stats/180-day reports distinction; backup removal is within {backup_days} days.",
+        "never_sent": "All six categories remain inside the never-send clause: file paths, commands, prompts, code, model output, and tool arguments.",
+        "organization_scope": "The non-Team footer applies to the named {org}, not every organization, and neither organization admins nor other members can open the report.",
+        "report_confirmation": "Saved locally and not sent; sending is not live yet, and Guard asks the person again before sending to {org}. No automatic send is implied.",
+        "consent_condition": "Widening retains only prior scope until the person chooses; reactivation and lapsed plan require a fresh choice. The prospective sending list is not an unconditional claim."
+      },
+      "mechanical_checks": {
+        "key_and_parameter_parity": true,
+        "ordered_placeholder_parity": true,
+        "nfc": true,
+        "manual_bidi_controls": false,
+        "badge_widths": {
+          "badge_waiting": 27,
+          "badge_sharing": 21,
+          "badge_sharing_pending": 27
+        },
+        "badge_quote_matches": true
+      },
+      "rendered_evidence_executed": true,
+      "note": "Second independent audit of all 94 values against English catalogue and context, plus glossary and locale guide; PR #4650 starting head c3306301f1857d989ba7d33f533a3dc0cfd48ab0. Clarifies that a guardrail asks for confirmation; makes the two retention durations explicit; abbreviates the sharing-pending badge without saying sharing has stopped. No native-speaker review or native terminal shaping sign-off claimed. Scoped 80×24 OperatorApp consent-card walk, before/after; not a full visual test matrix."
     }
   ]
 }

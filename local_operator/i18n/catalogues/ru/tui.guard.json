@@ -90,7 +90,7 @@
   "tui.guard.badge_report_waiting": "Guard: отчёт ждёт в /guard",
   "tui.guard.card_cta_loading": "Проверка…",
   "tui.guard.screen_unavailable": "Guard не может прочитать свои настройки на этом компьютере. С этого экрана ничего не передано и не отправлено.",
-  "tui.guard.receipt_grant": "Guard начал передавать данные {org} с {device} в {time}. Это были не вы? Прекратите передачу в /guard.",
-  "tui.guard.receipt_widen": "Guard начал передавать {org} больше данных с {device} в {time}. Это были не вы? Прекратите передачу в /guard.",
+  "tui.guard.receipt_grant": "Guard начал передавать данные {org} с устройства «{device}» в {time}. Это были не вы? Прекратите передачу в /guard.",
+  "tui.guard.receipt_widen": "Guard начал передавать {org} больше данных с устройства «{device}» в {time}. Это были не вы? Прекратите передачу в /guard.",
   "tui.guard.screen_prompt_changed": "В {org} изменили этот запрос. Посмотрите новый ниже."
 }

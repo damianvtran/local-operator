@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.guard",
-  "history_sha256": "5f06f19cd33fec323098275cbc00fd5e6fe1212642bc32a7026ac37001b59da5",
+  "history_sha256": "ab66b457e7d98cd3d4625110d8308972162f147ae6f4cd813450904dad854a73",
   "entries": [
     {
       "locale": "vi",
@@ -94,6 +94,119 @@
       "mechanical_checks": "94/94 keys; placeholder multiset identical to en for every key; literals /guard, lop, Console, Radient, Radient Guard, Radient Team preserved (scope_decisions translates the common noun 'Guardrail' per the shipped wire.guardrails rendering); screen_share_again quotes this locale's badge_waiting byte-for-byte; no bidi control characters; NFC; badge_waiting and badge_sharing within maxCells 28 by rich.cells.cell_len.",
       "rendered_evidence_executed": false,
       "note": "Independent audit 1 of 2 for tui.guard (vi), PR #4650 at worktree head 33c6f23fa2. All 94 values read against en + context. Auditor changed 1 value(s); see auditor_changes. NFC verified; bạn register used sparingly; 'tác nhân' for agent, 'quy tắc bảo vệ' for guardrail rule as shipped. Consent copy is high-visibility: a SECOND independent audit is required before merge, recorded as a further appended receipt for this same source_sha256 with audit_instance 'second-independent' (precedent: i18n/audit-history/es/wire.teams.effective.json). No rendered, RTL-visual or native-speaker review claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "dff382b0830fde4621d3943e28838a235515b78bf78d77e881bad530df625218",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": "radientdev ux-reviewer (acting as second independent i18n auditor)",
+        "session": "e6ab8547b6b5",
+        "model": "openai/gpt-6.2-sol",
+        "actual_model_source": "Developer runtime declaration in this session",
+        "date": "2026-11-27",
+        "fallback_used": false,
+        "fallback_note": "No provider fallback observed.",
+        "independent_from_translator_session": "5bd246fcf195",
+        "independent_from_first_auditor_session": "d3661c1e5338",
+        "result": "passed",
+        "findings": 0,
+        "findings_fixed": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "audit_instance": "second-independent",
+      "second_independent_audit_required": true,
+      "second_independent_audit_completed": true,
+      "audit_scope": "translation_only",
+      "audit_date": "2026-11-27",
+      "key_count": 94,
+      "keys_read": 94,
+      "previous_receipt_target_sha256": "7c35e803ad91b1fe585e71cdeb7d490aa064a755ae9e8d4e6536871aa5da034d",
+      "auditor_changes": [
+        {
+          "key": "prompt_would_send",
+          "before": "Từ máy tính này, Guard sẽ gửi:",
+          "after": "Nếu bạn đồng ý, Guard sẽ gửi từ máy tính này:"
+        },
+        {
+          "key": "scope_posture",
+          "before": "Kiểm tra thiết lập: các cài đặt được khuyến nghị có bật hay không. Mỗi máy tính xáo trộn ngẫu nhiên câu trả lời trước khi gửi đi, nên quản trị viên chỉ thấy số ước tính, không thấy câu trả lời thật của ai. Quản trị viên có thể nhận ra khi một trong các cài đặt này thay đổi trên máy tính của bạn.",
+          "after": "Kiểm tra thiết lập: các cài đặt được khuyến nghị có bật hay không. Mỗi máy tính thêm nhiễu ngẫu nhiên vào câu trả lời trước khi gửi đi, nên quản trị viên chỉ thấy số ước tính, không thấy câu trả lời thật của ai. Quản trị viên có thể nhận ra khi một trong các cài đặt này thay đổi trên máy tính của bạn."
+        },
+        {
+          "key": "prompt_visibility_posture",
+          "before": "Quản trị viên chỉ thấy số tổng khi có ít nhất 5 người đóng góp, và chỉ thấy ước tính kiểm tra thiết lập khi có ít nhất 20 người. Không bao giờ thấy số liệu riêng của bạn.",
+          "after": "Quản trị viên chỉ thấy số tổng khi có ít nhất 5 người đóng góp, và chỉ thấy ước tính kiểm tra thiết lập khi có ít nhất 20 người đóng góp. Không bao giờ thấy số liệu riêng của bạn."
+        },
+        {
+          "key": "prompt_visibility_admin_share_posture",
+          "before": "Quản trị viên chỉ thấy số tổng khi có ít nhất 5 người đóng góp, và chỉ thấy ước tính kiểm tra thiết lập khi có ít nhất 20 người. Khi bạn chia sẻ thời gian từng bước, họ cũng thấy được thời gian của riêng bạn, nhưng không thấy nội dung các bước.",
+          "after": "Quản trị viên chỉ thấy số tổng khi có ít nhất 5 người đóng góp, và chỉ thấy ước tính kiểm tra thiết lập khi có ít nhất 20 người đóng góp. Khi bạn chia sẻ thời gian từng bước, họ cũng thấy được thời gian của riêng bạn, nhưng không thấy nội dung các bước."
+        },
+        {
+          "key": "revoke_retained",
+          "before": "Các bản ghi khác bạn đã gửi được giữ đến khi hết hạn: số liệu sau 90 ngày, báo cáo sau 180 ngày.",
+          "after": "Các bản ghi khác bạn đã gửi được giữ đến khi hết hạn: số liệu được giữ 90 ngày, báo cáo được giữ 180 ngày."
+        },
+        {
+          "key": "badge_sharing_pending",
+          "before": "Guard: đang chia sẻ · có mục mới",
+          "after": "Guard: chia sẻ · chờ chọn"
+        }
+      ],
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.json",
+          "sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.context.json",
+          "sha256": "105858995d85c823fe9e159e745b7c3e50f5e27ccca435101d784f0720451106"
+        },
+        "glossary": {
+          "path": "i18n/glossary.md",
+          "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+        },
+        "style": {
+          "path": "i18n/style-guides/vi.md",
+          "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/vi/tui.guard.json",
+          "sha256": "dff382b0830fde4621d3943e28838a235515b78bf78d77e881bad530df625218"
+        }
+      },
+      "safety_semantic_judgments": {
+        "minimums": "Visibility is restricted to at least 5 contributors for totals and 20 for setup-check estimates; report count is per kind and requires at least five senders that day.",
+        "retentions": "Step-by-step timing excludes contents and is kept 14 days. Already sent records retain the 90-day stats/180-day reports distinction; backup removal is within {backup_days} days.",
+        "never_sent": "All six categories remain inside the never-send clause: file paths, commands, prompts, code, model output, and tool arguments.",
+        "organization_scope": "The non-Team footer applies to the named {org}, not every organization, and neither organization admins nor other members can open the report.",
+        "report_confirmation": "Saved locally and not sent; sending is not live yet, and Guard asks the person again before sending to {org}. No automatic send is implied.",
+        "consent_condition": "Widening retains only prior scope until the person chooses; reactivation and lapsed plan require a fresh choice. The prospective sending list is not an unconditional claim."
+      },
+      "mechanical_checks": {
+        "key_and_parameter_parity": true,
+        "ordered_placeholder_parity": true,
+        "nfc": true,
+        "manual_bidi_controls": false,
+        "badge_widths": {
+          "badge_waiting": 24,
+          "badge_sharing": 19,
+          "badge_sharing_pending": 25
+        },
+        "badge_quote_matches": true
+      },
+      "rendered_evidence_executed": true,
+      "note": "Second independent audit of all 94 values against English catalogue and context, plus glossary and locale guide; PR #4650 starting head c3306301f1857d989ba7d33f533a3dc0cfd48ab0. Makes the send list conditional; describes random perturbation rather than shuffling; says the 20 people must contribute; makes retention durations explicit; shortens the pending-sharing badge. No native-speaker review or native terminal shaping sign-off claimed. Scoped 80×24 OperatorApp consent-card walk, before/after; not a full visual test matrix."
     }
   ]
 }
