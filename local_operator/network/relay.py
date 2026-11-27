@@ -1411,7 +1411,13 @@ def _dial_candidates(member: MemberRecord) -> list[str]:
     return candidates
 
 
-def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0.0.0.0") -> bool:
+def _reaches_own_listener(
+    endpoint: str,
+    own_port: int,
+    listen_address: str = "0.0.0.0",
+    *,
+    ws_port: int | None = None,
+) -> bool:
     """Whether dialling ``endpoint`` would connect to THIS relay's own listener.
 
     THE SELF-RACE (2026-11-02, Mac ⇄ lop-remote-node-2). ``probe_candidates`` races
@@ -1436,9 +1442,18 @@ def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0
     ago can be ours after a Wi-Fi rejoin — that is exactly how the 2026-11-02 link
     broke. An unreadable table (``interface_for_address`` → ``None``) filters
     nothing: dropping a candidate on a guess could strand a reachable peer.
+
+    ``ws_port`` IS A SECOND LISTENER, NOT A SECOND OPINION (ENG-4225 L1a). This
+    relay may hold the raw TCP listener on one port and the opt-in WebSocket one on
+    another, and a ``ws://127.0.0.1:<own ws port>`` candidate reaches the second
+    while comparing against the first never matches. The caller passes the port the
+    WS listener ACTUALLY bound (``RelayServer._redial_candidates`` reads it back from
+    the server it started), so each scheme is measured against the listener it would
+    reach: a ws endpoint against the ws port, anything else against ``own_port``.
     """
     host, sep, port = str(endpoint or "").rpartition(":")
     loopback = _is_loopback_endpoint(endpoint)
+    own = int(own_port)
     if ws.carries_ws_scheme(endpoint):
         # A WEBSOCKET CANDIDATE IS COMPARED BY ITS host:port (ENG-4225 L1a): the
         # URL spelling matches nothing in the interface table, so an
@@ -1452,9 +1467,11 @@ def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0
             return False
         host, sep, port = parsed.host, ":", str(parsed.port)
         loopback = _is_loopback_endpoint(f"{host}:{port}")
+        if ws_port is not None:
+            own = int(ws_port)
     if not sep or not port.isdigit():
         return loopback and listen_address == "0.0.0.0"
-    if int(port) != own_port:
+    if int(port) != own:
         return False
     host = host.strip("[]").lower()
     if listen_address != "0.0.0.0":
@@ -1470,17 +1487,23 @@ def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0
 
 
 def _dialable_candidates(
-    member: MemberRecord, own_port: int, listen_address: str = "0.0.0.0"
+    member: MemberRecord,
+    own_port: int,
+    listen_address: str = "0.0.0.0",
+    *,
+    ws_port: int | None = None,
 ) -> list[str]:
     """``_dial_candidates`` minus every address that would reach this relay itself.
 
     The redial schedule, session/listing dial and doctor share this filter, so
     "which candidates are us" has one answer even for a poisoned stored hint.
+    ``ws_port`` is this relay's WebSocket listener when it has one; see
+    :func:`_reaches_own_listener`.
     """
     return [
         endpoint
         for endpoint in _dial_candidates(member)
-        if not _reaches_own_listener(endpoint, own_port, listen_address)
+        if not _reaches_own_listener(endpoint, own_port, listen_address, ws_port=ws_port)
     ]
 
 
@@ -6659,7 +6682,15 @@ class RelayServer:
                 f"listening on {self._ws_server.address[0]}:{self._ws_server.address[1]}"
             )
         server = ws.WebSocketAcceptServer(
-            lambda sock, addr: self._admit_inbound(sock, addr), host=host, port=port
+            lambda sock, addr: self._admit_inbound(sock, addr),
+            # THE SAME NUMBER THE TCP LISTENER HONOURS. ``_admit_inbound`` refuses
+            # past ``max_handshakes``, but only once a connection exists; the WS
+            # listener holds that many connections pre-upgrade so the carrier cannot
+            # buy more threads than the raw one is allowed to (see
+            # ``wstransport.WebSocketAcceptServer``).
+            max_connections=self.settings.max_handshakes,
+            host=host,
+            port=port,
         )
         server.start()
         self._ws_server = server
@@ -7942,7 +7973,12 @@ class RelayServer:
             host, port = listener.getsockname()[:2]
         else:
             host, port = self.settings.listen_address, int(self.settings.port or 0)
-        return _dialable_candidates(member, int(port), str(host))
+        # THE WS LISTENER IS A SECOND PORT, read from the server that BOUND it: with
+        # ``serve_ws(port=0)`` the kernel chose the number, and a filter comparing
+        # against a configured zero would filter nothing at all.
+        ws_server = getattr(self, "_ws_server", None)
+        ws_port = int(ws_server.address[1]) if ws_server is not None else None
+        return _dialable_candidates(member, int(port), str(host), ws_port=ws_port)
 
     @staticmethod
     def _member_push_enabled(link: PeerLink) -> bool:
@@ -8117,6 +8153,17 @@ class RelayServer:
         WebSocket connection meets exactly the same stop check, admission flag,
         link cap and pre-auth handshake cap — a second copy of this gate beside
         the WS listener would be a policy that drifts.
+
+        THIS GATE IS POST-ACCEPT, WHICH IS WHY THE WS CARRIER ALSO HAS ONE OF ITS
+        OWN. By the time a socket is here the carrier has already spent a thread on
+        it — for TCP the accept loop's, and for WebSocket the library's per-connection
+        handler thread plus its read buffer — so a stranger with no key could buy
+        threads faster than this function refuses them. ``WebSocketAcceptServer``
+        therefore holds its own pre-upgrade cap (HTTP 503 in ``process_request``,
+        sized by ``serve_ws`` from ``max_handshakes``) and passes only the connections
+        under it on to here. This gate remains the authority on MEMBERSHIP and on how
+        many handshakes run at once; that one is the authority on how many
+        connections the listener holds at all.
         """
         if self._close_if_stopped(sock):
             return False

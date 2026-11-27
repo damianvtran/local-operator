@@ -181,7 +181,7 @@ def _start_echo_server(
     def on_accept(sock: Any, _addr: Any) -> None:
         threading.Thread(target=link.serve, args=(sock,), daemon=True).start()
 
-    server = ws.WebSocketAcceptServer(on_accept)
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
     host, port = server.start()
     assert host == "127.0.0.1", host
     return server, link, keys
@@ -259,7 +259,6 @@ def test_a_bare_loopback_ws_url_keeps_its_explicit_port() -> None:
 def test_an_address_that_is_not_a_mesh_websocket_endpoint_is_refused(address: str) -> None:
     with pytest.raises(ws.WebSocketEndpointError):
         ws.parse_ws_endpoint(address)
-    assert ws.is_ws_endpoint(address) is False
 
 
 def test_a_claimed_scheme_picks_the_carrier_even_when_the_url_is_malformed() -> None:
@@ -268,7 +267,6 @@ def test_a_claimed_scheme_picks_the_carrier_even_when_the_url_is_malformed() -> 
     re-read as ``host:port`` and dialled as a host named ``ws://user``."""
     assert ws.carries_ws_scheme("ws://user:pass@host:9000") is True
     assert ws.carries_ws_scheme("WSS://host.example") is True
-    assert ws.is_ws_endpoint("ws://user:pass@host:9000") is False
     assert ws.carries_ws_scheme("127.0.0.1:9000") is False
     assert ws.carries_ws_scheme("http://host.example") is False
 
@@ -411,7 +409,7 @@ def test_a_truncated_record_is_a_connection_error_not_a_hang() -> None:
 
         threading.Thread(target=run, daemon=True).start()
 
-    server = ws.WebSocketAcceptServer(on_accept)
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
     server.start()
     try:
         sock = _dial(server)
@@ -439,7 +437,7 @@ def test_an_over_cap_message_closes_the_link_instead_of_buffering() -> None:
 
         threading.Thread(target=run, daemon=True).start()
 
-    server = ws.WebSocketAcceptServer(on_accept)
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
     server.start()
     try:
         sock = _dial(server)
@@ -533,26 +531,62 @@ def test_the_raw_tcp_carrier_is_untouched(
 def test_a_websocket_candidate_naming_this_host_is_not_dialled(
     loopback_relays: tuple[relay.RelayServer, relay.RelayServer, str],
 ) -> None:
-    """The self-race guard must read a ws URL as the host:port it names, or a
-    poisoned row makes a relay handshake with itself."""
+    """The self-race guard must read a ws URL as the host:port it names, and it must
+    compare it against the port the WS listener BOUND — not against the TCP one, or
+    a stored ``ws://127.0.0.1:<our own ws port>`` is dialled and the relay handshakes
+    with itself.
+
+    Exercised through the server's own call shape (``_redial_candidates``), because a
+    filter that is only correct when a test passes the right port is not the filter
+    the relay runs.
+    """
     _dialer, listener, url = loopback_relays
     ws_server = listener._ws_server  # noqa: SLF001 — the bound WS listener
     assert ws_server is not None
     ws_port = ws_server.address[1]
-    assert relay._reaches_own_listener(url, ws_port, "127.0.0.1") is True  # noqa: SLF001
-    assert relay._reaches_own_listener(url, ws_port, "0.0.0.0") is True  # noqa: SLF001
-    # A different port is a different listener, whatever the spelling.
+    assert ws_port != listener.settings.port, "the rig must bind the two listeners apart"
     assert (
-        relay._reaches_own_listener(url, listener.settings.port, "127.0.0.1") is False
-    )  # noqa: SLF001
+        relay._reaches_own_listener(  # noqa: SLF001
+            url, listener.settings.port, "127.0.0.1", ws_port=ws_port
+        )
+        is True
+    )
     assert (
-        relay._reaches_own_listener("ws://10.0.0.5:9000", ws_port, "127.0.0.1") is False
-    )  # noqa: SLF001
+        relay._reaches_own_listener(  # noqa: SLF001
+            url, listener.settings.port, "0.0.0.0", ws_port=ws_port
+        )
+        is True
+    )
+    # WITHOUT THE WS PORT the filter cannot see this relay's WebSocket listener at
+    # all: that blindness IS the defect, so it stays pinned.
+    assert (
+        relay._reaches_own_listener(url, listener.settings.port, "127.0.0.1")  # noqa: SLF001
+        is False
+    )
+    # A third port is a different listener, whatever the spelling.
+    assert (
+        relay._reaches_own_listener(  # noqa: SLF001
+            url, listener.settings.port, "127.0.0.1", ws_port=ws_port + 1
+        )
+        is False
+    )
+    assert (
+        relay._reaches_own_listener(  # noqa: SLF001
+            "ws://10.0.0.5:9000", listener.settings.port, "127.0.0.1", ws_port=ws_port
+        )
+        is False
+    )
     record = store.load(store.list_networks(listener.root)[0].network_id, listener.root)
     member = record.member(listener.identity.device_id)
     assert member is not None
     member.endpoints = [url]
-    assert relay._dialable_candidates(member, ws_port, "127.0.0.1") == []  # noqa: SLF001
+    assert listener._redial_candidates(member) == []  # noqa: SLF001 — the real call
+    assert (
+        relay._dialable_candidates(  # noqa: SLF001
+            member, listener.settings.port, "127.0.0.1", ws_port=ws_port
+        )
+        == []
+    )
 
 
 def test_a_socket_option_is_answered_not_faked(
@@ -625,3 +659,406 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
     finally:
         sock.close()
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation: the carrier's own limits, and what the library does not
+# promise across the declared version floor
+# ---------------------------------------------------------------------------
+
+
+class _Redirector:
+    """A loopback HTTP server that answers any handshake with ``302 Location: <target>``.
+
+    The bypass it models is the one a check on the ADDRESS cannot see: the endpoint
+    dialled is loopback and stays loopback in the URL, while the upgrade the client is
+    told to follow lands somewhere else.
+    """
+
+    def __init__(self, target: str) -> None:
+        self.target = target
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(4)
+        self.port = int(self._listener.getsockname()[1])
+        self._thread = threading.Thread(target=self._serve, name="ws-redirector", daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                connection, _addr = self._listener.accept()
+            except OSError:
+                return  # the listener was closed: this server is done
+            with connection:
+                connection.settimeout(5.0)
+                try:
+                    connection.recv(65536)
+                    connection.sendall(
+                        b"HTTP/1.1 302 Found\r\n"
+                        b"Location: " + self.target.encode() + b"\r\n"
+                        b"Content-Length: 0\r\n"
+                        b"Connection: close\r\n\r\n"
+                    )
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        try:
+            self._listener.close()
+        except OSError:
+            pass
+
+
+def _stub_connection(method_calls: list[tuple[str, Any]]) -> Any:
+    """A connection-shaped object with only the attributes this adapter uses.
+
+    ``wait_closed`` is deliberately ABSENT: ``websockets`` grows it in 17.2 and this
+    package declares ``websockets>=15.0.1``, where the attribute does not exist.
+    """
+
+    class _Stub:
+        remote_address = ("127.0.0.1", 41000)
+        local_address = ("127.0.0.1", 41001)
+
+        def recv(self, timeout: Any = None) -> bytes:
+            method_calls.append(("recv", timeout))
+            return b""
+
+        def send(self, data: bytes) -> None:
+            method_calls.append(("send", data))
+
+        def close_socket(self) -> None:
+            method_calls.append(("close_socket", None))
+
+    return _Stub()
+
+
+def test_wait_closed_answers_its_own_event_not_an_optional_library_method() -> None:
+    """B1: ``self._conn.wait_closed`` does not exist before ``websockets`` 17.2.
+
+    The declared floor is 15.0.1, so the old implementation was an ``AttributeError``
+    on a supported install — raised in the accept handler, the one thread whose
+    survival keeps a live link open. The stub has no such attribute at all, which is
+    exactly the install the adapter has to work on.
+    """
+    calls: list[tuple[str, Any]] = []
+    connection = _stub_connection(calls)
+    assert not hasattr(connection, "wait_closed"), "the stub must model the 15.x API"
+    sock = ws.WebSocketPeerSocket(connection)
+    assert sock.wait_closed(0.01) is False, "a live adapter must not report itself closed"
+    released = threading.Event()
+
+    def wait() -> None:
+        sock.wait_closed()  # unbounded, as the accept handler calls it
+        released.set()
+
+    threading.Thread(target=wait, daemon=True).start()
+    assert not released.is_set(), "nothing has closed the adapter yet"
+    sock.close()
+    assert released.wait(5.0), "close() must release a waiter parked in wait_closed()"
+    assert sock.wait_closed(0.01) is True
+    assert calls == [("close_socket", None)], calls
+
+
+def test_a_loopback_redirect_cannot_move_a_plaintext_dial_off_loopback() -> None:
+    """M1: a ``302`` from a loopback server must not become a plaintext dial elsewhere.
+
+    The address check sees ``ws://127.0.0.1:<port>`` — loopback, allowed. The redirect
+    target is TEST-NET-1, which is neither this machine nor reachable, so the only
+    correct outcome is a refusal: either the library declines to re-dial a socket it
+    was handed (17.x) or it does not follow redirects at all (15.x). What must never
+    happen is a connection to the target.
+    """
+    target = f"ws://192.0.2.10:{_free_port()}"
+    redirector = _Redirector(target)
+    try:
+        with pytest.raises(ws.WebSocketDialError) as refused:
+            ws.dial_ws(f"ws://127.0.0.1:{redirector.port}", timeout=5.0)
+    finally:
+        redirector.close()
+    text = str(refused.value).lower()
+    assert "redirect" in text or "302" in text, f"refused for the wrong reason: {refused.value}"
+
+
+def test_a_plaintext_hop_whose_connected_peer_is_not_loopback_is_refused() -> None:
+    """The address check and the peer check answer different questions, and this is
+    the one only the connected socket can answer."""
+
+    def peer(ip: str) -> Any:
+        """A connected-socket stand-in: ``getpeername`` is all the check asks."""
+
+        class _Peer:
+            def getpeername(self) -> tuple[str, int]:
+                return (ip, 9100)
+
+        return cast(Any, _Peer())
+
+    endpoint = ws.parse_ws_endpoint("ws://localhost:9100")
+    with pytest.raises(ws.WebSocketDialError, match="not a loopback"):
+        ws._refuse_plaintext_off_loopback(endpoint, peer("10.0.0.5"))  # noqa: SLF001
+    # Loopback in both families, and a wss endpoint is not this function's business:
+    # its trust comes from the verified TLS context, whatever the peer IP is.
+    ws._refuse_plaintext_off_loopback(endpoint, peer("127.0.0.1"))  # noqa: SLF001
+    ws._refuse_plaintext_off_loopback(endpoint, peer("::1"))  # noqa: SLF001
+    ws._refuse_plaintext_off_loopback(  # noqa: SLF001
+        ws.parse_ws_endpoint("wss://localhost:9100"), peer("10.0.0.5")
+    )
+
+
+def test_a_plaintext_dial_to_localhost_is_still_admitted() -> None:
+    """The new pre-upgrade peer check must not refuse the one plaintext hop the mesh
+    actually uses: a loopback listener reached by a loopback NAME resolves to a
+    loopback peer, whoever resolves it."""
+    server, _link, keys = _start_echo_server()
+    try:
+        sock = ws.dial_ws(f"ws://localhost:{server.address[1]}", timeout=5.0)
+        try:
+            codec = wire.LinkCrypto(keys, role="dialer")
+            sock.sendall(codec.seal({"op": "hello"}))
+            reply = codec.open(_reader(sock).read_record_payload(wire.deadline_in(5)))
+            assert reply == {"echo": {"op": "hello"}}
+        finally:
+            sock.close()
+    finally:
+        server.stop()
+
+
+def _one_slot_server(
+    *, max_connections: int = 1
+) -> tuple[ws.WebSocketAcceptServer, _EchoLink, wire.LinkKeys]:
+    """A listener with an explicit, small pre-upgrade cap and an echo peer behind it."""
+    keys = wire.link_keys(os.urandom(32), b"t" * 32, b"l" * 16)
+    link = _EchoLink(keys)
+
+    def on_accept(sock: Any, _addr: Any) -> None:
+        threading.Thread(target=link.serve, args=(sock,), daemon=True).start()
+
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=max_connections)
+    host, _port = server.start()
+    assert host == "127.0.0.1", host
+    return server, link, keys
+
+
+def test_a_connection_beyond_the_pre_upgrade_cap_is_refused_with_503() -> None:
+    """M2: the listener holds ``max_connections`` and answers the next upgrade with
+    HTTP 503 BEFORE the handler exists — a stranger must not buy threads faster than
+    ``_admit_inbound`` can refuse them. The slot is handed back when the connection
+    ends, so the cap is a bound and not a leak."""
+    server, link, keys = _one_slot_server(max_connections=1)
+    try:
+        held = _dial(server)
+        try:
+            codec = wire.LinkCrypto(keys, role="dialer")
+            held.sendall(codec.seal({"op": "hello"}))
+            reply = codec.open(_reader(held).read_record_payload(wire.deadline_in(5)))
+            assert reply == {"echo": {"op": "hello"}}
+            with pytest.raises(ws.WebSocketDialError, match="503"):
+                ws.dial_ws(f"ws://127.0.0.1:{server.address[1]}", timeout=5.0)
+        finally:
+            held.close()
+        assert wait_for(link.finished.is_set), "the held link never ended"
+
+        def the_slot_came_back() -> bool:
+            try:
+                recovered = _dial(server)
+            except ws.WebSocketDialError:
+                return False
+            recovered.close()
+            return True
+
+        assert wait_for(the_slot_came_back), "the freed slot was never handed back"
+    finally:
+        server.stop()
+
+
+def test_a_plain_http_probe_does_not_consume_a_connection_slot() -> None:
+    """A refused or non-WebSocket handshake never reaches the handler, so its slot is
+    released in ``process_response``. Without that every health probe would shrink the
+    cap by one until the listener refused the peers it exists for."""
+    server, _link, _keys = _one_slot_server(max_connections=1)
+    try:
+        for attempt in range(3):
+            probe = socket.create_connection(("127.0.0.1", server.address[1]), timeout=5.0)
+            with probe:
+                probe.settimeout(5.0)
+                probe.sendall(b"GET /health HTTP/1.1\r\nHost: probe\r\n\r\n")
+                answer = probe.recv(64)
+            assert answer.startswith(b"HTTP/1.1 4"), (attempt, answer)
+        sock = _dial(server)
+        sock.close()
+    finally:
+        server.stop()
+
+
+def _frame_at_the_deliverable_ceiling() -> dict[str, Any]:
+    """A frame whose sealed record is EXACTLY ``ws.MAX_MESSAGE_BYTES``.
+
+    ``wire``'s reader bounds the LENGTH PREFIX — the ciphertext, GCM tag included —
+    by ``MAX_RECORD_BYTES``, so the largest plaintext it will accept back is that
+    ceiling minus the tag. The sealed record for it is one byte short of the library
+    bound this carrier declares, which is the boundary a library default (1 MiB)
+    would have refused and a bound of the plaintext ceiling would have miscounted.
+    """
+    plaintext = wire.MAX_RECORD_BYTES - ws.AEAD_TAG_BYTES
+    padding = plaintext - len(wire.encode_peer_payload({"op": "blob", "data": ""}))
+    frame = {"op": "blob", "data": "a" * padding}
+    assert len(wire.encode_peer_payload(frame)) == plaintext
+    return frame
+
+
+def test_the_largest_record_the_wire_accepts_round_trips_over_this_carrier() -> None:
+    """MINOR 1, MEASURED: what the carrier must not do is refuse a record the wire
+    itself delivers.
+
+    The message bound is ``wire``'s own: prefix plus ciphertext, tag included. This
+    pins the boundary from both sides — the largest deliverable record round-trips
+    byte-identically to a raw TCP socket, and its sealed length is exactly the bound
+    the library is given — so the carrier is neither tighter than TCP (a legal record
+    refused) nor wider than the wire (bytes buffered that the reader drops).
+    """
+    assert ws.MAX_MESSAGE_BYTES == wire.MAX_RECORD_BYTES + wire.LOCAL_PREFIX_LEN
+    keys = wire.link_keys(os.urandom(32), b"t" * 32, b"l" * 16)
+    frame = _frame_at_the_deliverable_ceiling()
+    codec = wire.LinkCrypto(keys, role="dialer")
+    sealed = codec.seal(frame)
+    assert len(sealed) == ws.MAX_MESSAGE_BYTES, (
+        "the rig must sit exactly at the carrier's bound, "
+        f"got {len(sealed)} of {ws.MAX_MESSAGE_BYTES}"
+    )
+
+    # THE SAME BYTES OVER A RAW SOCKET: the record is the wire's, not the carrier's.
+    left, right = socket.socketpair()
+    # A socket's buffers are far smaller than this record, so the write has to be
+    # concurrent with the read: ``sendall`` would block forever on a full buffer.
+    writer = threading.Thread(target=left.sendall, args=(sealed,), daemon=True)
+    writer.start()
+    try:
+        over_tcp = wire.LinkCrypto(keys, role="listener").open(
+            wire.FrameReader(right).read_record_payload(wire.deadline_in(30))
+        )
+    finally:
+        writer.join(timeout=30)
+        left.close()
+        right.close()
+    assert over_tcp == frame
+
+    received: list[dict[str, Any]] = []
+    done = threading.Event()
+
+    def on_accept(sock: Any, _addr: Any) -> None:
+        def serve() -> None:
+            try:
+                received.append(
+                    wire.LinkCrypto(keys, role="listener").open(
+                        wire.FrameReader(sock).read_record_payload(wire.deadline_in(30))
+                    )
+                )
+                sock.sendall(wire.LinkCrypto(keys, role="listener").seal({"ok": True}))
+            finally:
+                sock.close()
+                done.set()
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
+    server.start()
+    try:
+        sock = _dial(server)
+        try:
+            sock.sendall(sealed)
+            reply = codec.open(_reader(sock).read_record_payload(wire.deadline_in(30)))
+            assert reply == {"ok": True}
+        finally:
+            sock.close()
+        assert wait_for(done.is_set), "the ceiling-sized record never arrived"
+        assert received and received[0] == frame
+    finally:
+        server.stop()
+
+
+def test_a_text_frame_is_refused_rather_than_reinterpreted() -> None:
+    """Every byte a mesh link sends is binary. A serialiser that receives a text frame
+    must lose the link, never decode it as if it were a record."""
+    failure: list[BaseException] = []
+    done = threading.Event()
+
+    def on_accept(sock: Any, _addr: Any) -> None:
+        def serve() -> None:
+            try:
+                sock.recv(64)
+            except BaseException as exc:  # noqa: BLE001 — recorded, then asserted
+                failure.append(exc)
+            finally:
+                sock.close()
+                done.set()
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
+    server.start()
+    try:
+        from websockets.sync.client import connect
+
+        with connect(f"ws://127.0.0.1:{server.address[1]}", open_timeout=5) as raw:
+            raw.send("this is not a mesh record")
+        assert wait_for(done.is_set), "the text frame never reached the adapter"
+        assert failure and isinstance(failure[0], ConnectionError), failure
+        assert "text frame" in str(failure[0])
+    finally:
+        server.stop()
+
+
+def test_an_empty_binary_frame_is_not_read_as_end_of_stream() -> None:
+    """A zero-length message is legal and carries no bytes. Answering ``b""`` for one
+    would report a live link as gone, and ``FrameReader`` would fail a record that is
+    still on its way."""
+    done = threading.Event()
+
+    def on_accept(sock: Any, _addr: Any) -> None:
+        def serve() -> None:
+            try:
+                sock.sendall(b"")
+                sock.sendall(b"payload")
+            finally:
+                sock.close()
+                done.set()
+
+        threading.Thread(target=serve, daemon=True).start()
+
+    server = ws.WebSocketAcceptServer(on_accept, max_connections=relay.DEFAULT_MAX_HANDSHAKES)
+    server.start()
+    try:
+        sock = _dial(server)
+        try:
+            sock.settimeout(5.0)
+            assert sock.recv(64) == b"payload"
+        finally:
+            sock.close()
+        assert wait_for(done.is_set), "the empty-frame peer never finished"
+    finally:
+        server.stop()
+
+
+def test_stop_closes_an_open_link_before_the_library_join() -> None:
+    """MINOR 2: a handler parks in ``wait_closed`` for the life of its link, and the
+    library's shutdown JOINS those handlers. ``stop`` therefore closes the links this
+    server opened first, or teardown waits out a shutdown that cannot finish."""
+    server, _link, keys = _start_echo_server()
+    sock = _dial(server)
+    try:
+        codec = wire.LinkCrypto(keys, role="dialer")
+        sock.sendall(codec.seal({"op": "hello"}))
+        assert codec.open(_reader(sock).read_record_payload(wire.deadline_in(5)))["echo"] == {
+            "op": "hello"
+        }
+        started = time.monotonic()
+        server.stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < ws.ACCEPT_THREAD_JOIN_S, f"stop took {elapsed:.1f}s"
+        sock.settimeout(5.0)
+        assert sock.recv(64) == b"", "the stop must close the link it opened"
+    finally:
+        sock.close()
+        server.stop()

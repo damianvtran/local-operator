@@ -311,8 +311,9 @@ deliver.
 sessions needs and no more — plus, when its owner's broker is the model path,
 `broker_credential`. It may not list another member's sessions (`list` answers
 for the sessions placed on it and for nothing else, §6.2), may not archive,
-delete or move anything, may not mint invites, and may not act as a broker for
-anyone. If the member id is compromised, the blast radius is "the sessions that
+delete or move anything, may not mint invites, may not act as a broker for
+anyone, and may not rotate the network. If the member id is compromised, the
+blast radius is "the sessions that
 were placed there" — plus, at worst, whatever its owner's broker will grant a
 member of its own network within `grant_ttl_s` — not the network.
 
