@@ -764,7 +764,11 @@ def format_error(
         handle_status = (
             "The extension retired the handle; Chrome may still have the tab open."
             if error.data.get("surface_retired") is True
-            else "Do not retry the old handle. Use 'tabs' to check what the extension still lists."
+            else (
+                "Do not retry the old handle. Use 'tabs' to check your owned tab. "
+                "If it is no longer listed as yours, use 'open' with a URL for a new tab. "
+                "If it is still listed as yours, stop and ask the user to close that tab."
+            )
         )
         return (
             "Chrome refused debugger attachment to this tab. The refusal does not identify "

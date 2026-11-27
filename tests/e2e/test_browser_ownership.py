@@ -1402,6 +1402,59 @@ async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["read", "click"])
+async def test_retired_pin_does_not_reopen_pending_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, action: str
+) -> None:
+    from local_operator.browser_bridge.resources import (
+        HANDOFF_REFS_FIELD,
+        BrowserResource,
+        open_ask_ids,
+    )
+
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, "https://example.test/recorded")
+        resource = session._browser.resource
+        ask_id = await _ask(session, handoff=False)
+        assert resource.record[HANDOFF_REFS_FIELD][-1]["ask_id"] == ask_id
+        _control(protocol_peer, refuseAttach=True, captureCalls=True)
+        args = {"action": action, **({"selector": "a"} if action == "click" else {})}
+
+        refused = await _tool(session, "synthetic-refusal", "browser", args)
+        trace = _control(protocol_peer)
+        # Check the actual wire first: even a read-only replay is unrequested.
+        assert trace["calls"] == [{"method": action, "has_tab": True}]
+        assert trace["tabs"] == 1 and trace["removed"] == 0  # no physical closure
+        assert refused.is_error, refused.text
+        assert refused.details["error_code"] == "internal"
+        assert refused.details["surface_retired"] is True
+        assert "Chrome may still have the tab open" in refused.text
+        assert not session._browser.surface_id
+
+        reloaded = BrowserResource(resource.directory, resource.session_id)
+        reloaded.record = reloaded._load()
+        assert reloaded.record["surface_id"] == ""
+        assert HANDOFF_REFS_FIELD not in reloaded.record
+        assert reloaded.reopenable_handoff() is None
+        assert ask_id in open_ask_ids(resource.directory)
+
+        followup = await _tool(session, "synthetic-followup", "browser", args)
+        assert followup.is_error and "no browser surface open" in followup.text.lower()
+        assert _control(protocol_peer)["calls"] == trace["calls"]
+
+        opened = await _open(session, "https://example.test/explicit")
+        assert opened.details["url"] == "https://example.test/explicit"
+        assert _control(protocol_peer)["calls"] == [
+            *trace["calls"],
+            {"method": "open", "has_tab": False},
+        ]
+        assert ask_id in open_ask_ids(resource.directory)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("settle", ["withdrawn", "agent_moved_on"])
 async def test_no_reopen_for_a_withdrawn_ask_or_after_the_agent_chose_a_page(
     protocol_peer: tuple[int, str], headless_tui_env: Path, settle: str

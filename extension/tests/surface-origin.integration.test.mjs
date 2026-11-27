@@ -43,7 +43,10 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
   // `redirectTo`: where a navigation actually lands (a server redirect the
   // interceptor does not see), instead of the requested URL.
   const page = { tabUrl, docUrl, intercept: true, onCdp: null, redirectTo: null };
-  const calls = { scripts: 0, cdp: [], tabsGet: 0, attach: 0, removals: 0 };
+  const calls = {
+    scripts: 0, cdp: [], tabsGet: 0, attach: 0, removals: 0,
+    detach: 0, targets: 0, updates: [], creates: 0, windowUpdates: 0, frames: 0,
+  };
   const event = () => {
     const listeners = new Set();
     return {
@@ -83,7 +86,8 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
         calls.attach += 1;
         if (attachError) throw Error(attachError);
       },
-      detach: async () => {},
+      detach: async () => { calls.detach += 1; },
+      getTargets: async () => { calls.targets += 1; return []; },
       sendCommand: async (_target, method) => {
         calls.cdp.push(method);
         page.onCdp?.(method);
@@ -118,7 +122,9 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
       get: async (tabId) => { calls.tabsGet += 1; return { id: tabId, url: page.tabUrl, title: "Page" }; },
       // A navigation: Fetch pause (when intercepted), then the top-frame
       // commit, then completion — the order Chrome reports them in.
-      update: async (tabId, { url }) => {
+      update: async (tabId, options) => {
+        calls.updates.push(options);
+        const { url } = options;
         setTimeout(async () => {
           if (page.intercept) {
             cdpEvents.fire({ tabId }, "Fetch.requestPaused", { requestId: "doc-1", request: { url } });
@@ -133,13 +139,17 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
         }, 0);
         return {};
       },
+      create: async () => { calls.creates += 1; throw Error("unexpected new tab"); },
       remove: async () => { calls.removals += 1; },
       onRemoved: events.removed, onReplaced: events.replaced, onUpdated: events.updated,
     },
-    webNavigation: nav,
+    webNavigation: { ...nav, getAllFrames: async () => { calls.frames += 1; return []; } },
     tabGroups: undefined,
     notifications: { create: async () => {}, clear: async () => {}, onClicked: { addListener: () => {} } },
-    windows: { get: async () => ({ id: 1 }), getCurrent: async () => ({ id: 1 }) },
+    windows: {
+      get: async () => ({ id: 1 }), getCurrent: async () => ({ id: 1 }),
+      update: async () => { calls.windowUpdates += 1; },
+    },
     runtime: {
       getURL: (p) => `chrome-extension://test/${p}`,
       getManifest: () => ({ version: "0.1.7" }),
@@ -322,6 +332,48 @@ for (const retirementFails of [false, true]) {
         assert.equal(stale.error.code, "tab_closed");
         assert.equal(calls.attach, 1, "the retired token cannot drive another attach");
       }
+    } finally { worker.chromeState.restore(); }
+  });
+}
+
+for (const modern of [true, false]) {
+  test(`resumed open keeps the first attach refusal receipt (${modern ? "modern" : "legacy request"})`, async () => {
+    const proof = "a".repeat(40);
+    const owner = {
+      owner_proof: proof, requester: "session:synthetic", owner_generation: "g1", allocation_id: "a1",
+    };
+    const unrelatedNonce = "0".repeat(32);
+    const unrelatedToken = `bridge:43:${unrelatedNonce}`;
+    const unrelated = { ...surface(), tabId: 43, nonce: unrelatedNonce };
+    const worker = await loadWorker({
+      surfaces: { [TOKEN]: surface(), [unrelatedToken]: unrelated },
+      origins: approvedOnly, tabUrl: `${APPROVED}/docs`, attachError: CHROME_ATTACH_REFUSAL,
+      session: modern ? {
+        ownerScopes: {
+          [proof]: {
+            session: owner.requester, generation: owner.owner_generation,
+            allocations: { a1: { tab: TOKEN, state: "allocated" } },
+          },
+        },
+      } : {},
+    });
+    try {
+      const scoped = modern ? owner : {};
+      const result = await worker.request("open", { ...scoped, tab: TOKEN, url: `${APPROVED}/next` });
+      assert.equal(result.ok, false);
+      const { tabsGet, ...sideEffects } = worker.chromeState.calls;
+      assert.deepEqual(sideEffects, {
+        scripts: 0, cdp: [], attach: 1, removals: 0, detach: 0, targets: 0,
+        updates: [], creates: 0, windowUpdates: 0, frames: 0,
+      });
+      assert.deepEqual(result.error, {
+        code: "internal", message: "Chrome refused debugger attachment to this tab",
+        data: { undrivable_tab: "different_extension", surface_retired: true },
+      });
+      assert.deepEqual(worker.chromeState.surfaces(), { [unrelatedToken]: unrelated });
+      assert.equal(worker.frames.some((frame) => frame.event === "tab_closed"), false);
+      assert.equal((await worker.request("status", { ...scoped, tab: TOKEN })).error.code, "tab_closed");
+      assert.equal(worker.chromeState.calls.attach, 1);
     } finally { worker.chromeState.restore(); }
   });
 }

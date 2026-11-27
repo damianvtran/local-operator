@@ -1453,7 +1453,12 @@ def test_the_undrivable_tab_copy_names_no_opaque_handle(receipt: dict[str, bool]
     assert "another extension's page" not in rendered
     assert "(unknown)" not in rendered
     assert "bridge:12:deadbeef" not in rendered
-    assert "'open' with a URL" not in rendered  # The tool adds this only after retiring its pin.
+    if receipt.get("surface_retired") is True:
+        assert "'open' with a URL" not in rendered  # The tool adds this after clearing its pin.
+    else:
+        assert "Do not retry the old handle" in rendered
+        assert "If it is no longer listed as yours, use 'open' with a URL" in rendered
+        assert "If it is still listed as yours, stop and ask the user to close that tab" in rendered
 
 
 # --- Audit round 1: A1 — the generation fence -------------------------------

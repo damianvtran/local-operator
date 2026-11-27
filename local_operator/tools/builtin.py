@@ -27496,15 +27496,20 @@ def _bridge_failure_result(
     UI-only host, where the extension's remedy (reload the extension, restart
     the daemon) names processes the user does not have.
     """
-    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.backend import (
+        BridgeError,
+        format_error,
+        is_extension_attach_refusal,
+    )
 
     if isinstance(exc, BridgeError):
-        problem = _error(
-            tool_call_id, "browser", format_error(exc, action=action, host=_copy_host(host))
-        )
-        # The same typed code `_bridge_call` carries, so callers can branch on
-        # `extension_unresponsive` rather than substring-matching prose.
+        copy_host = _copy_host(host)
+        problem = _error(tool_call_id, "browser", format_error(exc, action=action, host=copy_host))
+        # Match `_bridge_call`: a typed refusal must not enter the reopen floor
+        # even when the failure came from ownership setup instead of dispatch.
         problem.details = {"error_code": exc.code.value}
+        if is_extension_attach_refusal(exc, host=copy_host):
+            problem.details["attach_refused"] = True
         return problem
     return _error(tool_call_id, "browser", str(exc))
 
@@ -27716,6 +27721,8 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        if attach_refused:
+            problem.details["attach_refused"] = True
         # Do not treat Chrome's error family alone as a retirement receipt. A
         # legacy worker or a failed cleanup supplies no positive evidence, and
         # an adoption/new allocation must not clear this session's other pin.
@@ -31915,6 +31922,10 @@ async def _reopen_handoff_if_gone(
     resource = getattr(state, "resource", None)
     if action in _REOPEN_EXEMPT_ACTIONS or resource is None or getattr(state, "surface_id", ""):
         return result
+    # A refusal is not evidence of closure. Keep the typed error even if no
+    # pin was held; the retirement transaction separately spends any old refs.
+    if (result.details or {}).get("attach_refused") is True:
+        return result
     try:
         ref = resource.reopenable_handoff()
     except Exception:  # noqa: BLE001 - the floor must never break the action it serves
@@ -32461,8 +32472,12 @@ async def _execute_browser_owned(
             resource.allocate()
         failed_close = False
         observed_url: Any = None
+        pin_before_dispatch = state.surface_id
+        retired_pin = ""
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
+            if not state.surface_id and (result.details or {}).get("surface_retired") is True:
+                retired_pin = pin_before_dispatch
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
             if not result.is_error:
                 # The page the tab last showed THIS session: an ask handoff is
@@ -32521,6 +32536,7 @@ async def _execute_browser_owned(
                     state.surface_id,
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
                     host=_host_of_surface(state.surface_id),
+                    retired_pin=retired_pin,
                 )
                 if observed_url or not state.surface_id:
                     resource.note_surface_origin(observed_url)

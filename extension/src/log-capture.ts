@@ -1,3 +1,4 @@
+import { BridgeCommandError } from "./driver/errors";
 import type { LogEntry } from "./protocol.gen";
 
 /**
@@ -264,6 +265,11 @@ function topFrame(stackTrace: unknown): { url: string; line: number } {
 
 let listenerBound = false;
 
+function isAttachRefusal(error: unknown): boolean {
+  return error instanceof BridgeCommandError && error.code === "internal"
+    && error.data.undrivable_tab === "different_extension";
+}
+
 /**
  * Begin capturing logs for a tab. Called from `open` right after the debugger
  * attaches, so buffering starts before the destination page runs any script.
@@ -290,7 +296,12 @@ export async function startLogCapture(
       const tree = (await cdp(tabId, "Page.getFrameTree")) as { frameTree?: { frame?: { id?: unknown } } } | undefined;
       const id = tree?.frameTree?.frame?.id;
       if (typeof id === "string") buffer.mainFrameId = id;
-    } catch { /* fail closed: no document origin, no entries returned */ }
+    } catch (error) {
+      // Unlike a best-effort domain probe, an attach refusal ends this open.
+      // Another CDP call would reattempt attach and lose the original cleanup receipt.
+      if (isAttachRefusal(error)) throw error;
+      // Fail closed: no document origin, no entries returned.
+    }
     // A NEW buffer on a session whose Runtime domain is already on (a resume
     // after the worker restarted while Chrome kept the debugger session):
     // V8 answers a repeated Runtime.enable without replaying
@@ -299,7 +310,12 @@ export async function startLogCapture(
     // navigation (review m3/Q4). Disable first to force the replay. Only for a
     // fresh buffer: on a live one the replay would duplicate console history.
     // On a brand-new session the disable is a harmless no-op.
-    try { await cdp(tabId, "Runtime.disable"); } catch { /* not enabled yet */ }
+    try {
+      await cdp(tabId, "Runtime.disable");
+    } catch (error) {
+      if (isAttachRefusal(error)) throw error;
+      // Otherwise best effort: the domain may not have been enabled yet.
+    }
   }
   await cdp(tabId, "Runtime.enable");
   await cdp(tabId, "Log.enable");

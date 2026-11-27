@@ -2484,6 +2484,7 @@ def test_a_malformed_locator_is_not_blamed_on_the_host() -> None:
     [
         ("extension", "bridge:9:nonce", {"surface_retired": True}, True),
         ("extension", "bridge:9:nonce", {"surface_retired": False}, False),
+        ("extension", "bridge:9:nonce", {"surface_retired": "true"}, False),
         ("extension", "bridge:9:nonce", {}, False),
         ("ui", "ui:9:nonce", {"surface_retired": True}, False),
     ],
@@ -2521,9 +2522,13 @@ def test_attachment_refusal_only_clears_confirmed_extension_pin(
     assert (result.details or {}).get("error_code") == "internal"
     assert ((result.details or {}).get("surface_retired") is True) == cleared
     assert context.browser.surface_id == ("" if cleared else pin)
-    assert ("'open' with a URL" in result.text) == cleared
+    assert ((result.details or {}).get("attach_refused") is True) == (host == "extension")
+    assert ("Chrome may still have the tab open. Use 'open'" in result.text) == cleared
     if host == "extension":
         assert "Chrome refused debugger attachment" in result.text
+        if not cleared:
+            assert "If it is no longer listed as yours, use 'open'" in result.text
+            assert "If it is still listed as yours, stop" in result.text
         assert "predates accessibility locators" not in result.text
         assert pin not in result.text
     else:
