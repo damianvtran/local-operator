@@ -496,3 +496,105 @@ def test_repeated_large_body_stays_fast(ctx: CallContext) -> None:
     )
     assert time.monotonic() - started < 8.0
     assert verdict.risk == Risk.CRITICAL
+
+
+# Field case (PR #4475's agent, guard 0.112.5 → 0.113.17): a script that posts
+# PR comments through a helper function was refused as dangerous-delete with
+# "shell function post_and_verify recurses". The helper validated the posted
+# URL with ``case "$url" in "https://github.com/$repo/pull/$pr#…"*) ;;``: the
+# legacy segmentation read that pattern as a command word holding an
+# expansion, so it "reached" every defined function — including the one being
+# walked, reported as recursion. Bash cannot run a word ending in an unquoted
+# ``)`` (a syntax error outside a case), so such a word is only a pattern.
+_CASE_IN_FUNCTION = (
+    'f() {\n  case "$1" in\n    "x/$y"*) ;;\n    *) return 1 ;;\n  esac\n}\nf a',
+    'f() {\n  case "$1" in\n    x/$y*) ;;\n  esac\n}\nf a',
+    'g() { echo ok; }\nf() {\n  g\n  case "$u" in\n    "https://h/$r/pull/$p#c-"*) ;;\n'
+    '    *) printf "bad\\n" >&2; return 1 ;;\n  esac\n}\nf a\nf b',
+)
+
+
+@pytest.mark.parametrize("command", _CASE_IN_FUNCTION, ids=["dq-var", "bare-var", "helper"])
+def test_case_pattern_with_expansion_is_not_a_dynamic_command_word(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+# #4646 R1-B1: a SUBSHELL ``( WORD )`` runs WORD and must keep reaching the
+# functions. The command name is NOT resolvable (``$(printf f)``), so the
+# dynamic-word path is the one exercised; ``cmd=f`` resolves straight to ``f``.
+_SUBSHELL_REACHES = (
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( "$cmd")',
+    "f() { rm -rf ~/x; }\ncmd=$(printf f)\n($cmd)",
+    "f() { rm -rf ~/x; }\n( $(printf f) )",
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( ( "$cmd" ) )',
+    'f() { rm -rf ~/x; }\ng() { ( "$1" ); }\ng "$(printf f)"',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( "$cmd" ) ;;\nesac',
+    # #4646 R2-B1: a dynamic word AFTER an operator inside a subshell is a
+    # ``"$cmd" )`` piece, the same shape as an arm pattern, but not in
+    # pattern position.
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( echo | "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true && "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\nx=$( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncat <( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ng() { ( true; "$1" ); }\ng "$(printf f)"',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( true; "$cmd" ) ;;\nesac',
+    # #4646 R3-B1: a bare ``-p`` is a command name, not ``time -p``, so this
+    # is no case header and the next piece is a command.
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( -p case x in\n"$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true; -p case x in\n"$cmd" )',
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    _SUBSHELL_REACHES,
+    ids=[
+        "spaced",
+        "tight-close",
+        "bare",
+        "subst",
+        "nested",
+        "in-function",
+        "in-arm",
+        "after-semicolon",
+        "after-pipe",
+        "after-and",
+        "in-cmd-subst",
+        "in-proc-subst",
+        "after-semicolon-in-function",
+        "after-semicolon-in-arm",
+        "bare-dash-p-header",
+        "bare-dash-p-header-after-semicolon",
+    ],
+)
+def test_subshell_with_dynamic_word_still_reaches_functions(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['f() { rm -rf ~/x; }\ncmd=$(printf f)\n"$cmd"'],
+    ids=["unresolvable-dynamic-word"],
+)
+def test_case_pattern_fix_keeps_unresolvable_reach(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A dynamic command word still reaches the functions it may run.
+        'f() { rm -rf ~/x; }\ncmd=f\n"$cmd"',
+        # A delete inside the matching arm is still ranked.
+        'f() {\n  case "$1" in\n    "x/$y"*) rm -rf ~ ;;\n  esac\n}\nf a',
+    ],
+    ids=["dynamic-word", "delete-in-arm"],
+)
+def test_case_pattern_fix_keeps_real_reaches(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict

@@ -3795,7 +3795,12 @@ def _case_header_end(text: str) -> int | None:
     scan(rest, spans=spans)
     at = 0
     for lo, hi in spans:
-        if rest[lo:hi] not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+        word = rest[lo:hi]
+        if word not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+            break
+        # ``-p`` leads only as ``time -p``; a bare ``-p`` is a command name,
+        # so ``-p case x in`` is no header (#4646 R3-B1).
+        if word == "-p" and (at == 0 or rest[slice(*spans[at - 1])] != "time"):
             break
         at += 1
     head = spans[at : at + 3]
@@ -3805,6 +3810,62 @@ def _case_header_end(text: str) -> int | None:
     if rest[a:b] == "case" and rest[e:f] == "in" and rest[c:d] not in {"(", ")"}:
         return len(text) - len(rest) + f
     return None
+
+
+def _case_pattern_positions(pieces: list[tuple[str, bool, str]]) -> list[bool]:
+    """Which pieces stand where bash accepts only a ``case`` pattern (or ``esac``).
+
+    That is the piece right after a bare ``case WORD in`` header, or after an
+    arm's ``;;`` while a case is open. ``;&``/``;;&`` are not distinguished
+    by the legacy lexer, so arms after them are NOT marked: they stay
+    dynamic words, judged (fail closed). See :func:`_case_pattern_head`.
+    """
+    marks = [False] * len(pieces)
+    open_cases = 0
+    after_header = False
+    for index, (text, _piped, op) in enumerate(pieces):
+        stripped = text.strip()
+        if after_header or (open_cases and index and pieces[index - 1][2] == ";;"):
+            marks[index] = True
+        after_header = False
+        if _CASE_END_RE.match(stripped):
+            open_cases = max(0, open_cases - 1)
+            continue
+        end = _case_header_end(stripped)
+        if end is not None:
+            open_cases += 1
+            after_header = not stripped[end:].strip()
+    return marks
+
+
+def _case_pattern_head(text: str) -> bool:
+    """Does this segment open with a ``case`` arm's pattern (``"x/$y"*)``)?
+
+    WHY (field case, PR #4475's agent, guards 0.112.5-0.113.17): the legacy
+    segmentation (``case_arms=False``, kept so a re-segmented arm can never
+    LOWER a rank) leaves an arm's closing ``)`` as the token right after its
+    pattern. A pattern holding an expansion then looked like a command word
+    only known at run time; inside a function body that "reached" every
+    defined function, the one being walked included, and a plain
+    PR-comment helper was refused as "shell function … recurses".
+
+    Bash cannot run a word followed by a BARE ``)``: outside a case arm that
+    is a syntax error, so nothing executes from it. Only that token shape
+    counts (the scanner keeps a quoted ``")"`` inside its word, and a
+    ``$(…)`` closes inside its own span), so every other dynamic word still
+    reaches the functions, failing closed. The arm's body is walked by the
+    ``case_arms=True`` pass, where a real dynamic word in it still reaches.
+    """
+    spans: list[tuple[int, int]] = []
+    scan(text, spans=spans)
+    tokens = [text[lo:hi] for lo, hi in spans]
+    # Only ``{`` is skipped: ``{ WORD )`` is a syntax error. A leading ``(``
+    # is NOT skipped (#4646 R1-B1): ``( "$cmd" )`` is a subshell that runs
+    # ``$cmd``, and reads exactly like the ``(pat)`` arm form. That form
+    # therefore stays a judged false positive, the safe side.
+    while tokens and tokens[0] == "{":
+        tokens = tokens[1:]
+    return len(tokens) >= 2 and tokens[0] != ")" and tokens[1] == ")"
 
 
 def _case_pattern(text: str) -> tuple[str, str] | None:
@@ -4322,6 +4383,12 @@ class _Walker:
             prior = definitions.get(at)
             opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
             nest_at.append(opened)
+        # #4646 R2-B1: a piece is in case-PATTERN position only right after
+        # a bare ``case … in`` header or an arm's ``;;`` while inside a case.
+        # Bash allows nothing but a pattern (or ``esac``) there, so a dynamic
+        # word in that position is never run. Anywhere else (``( true;
+        # "$cmd" )`` splits into a ``"$cmd" )`` piece) it is a command.
+        pattern_position = _case_pattern_positions(pieces)
         for index, (text, _flag, op) in enumerate(pieces):
             if op == "case-arm":
                 # Patterns may expand substitutions, but their literal words
@@ -4408,12 +4475,24 @@ class _Walker:
             if isolated:
                 snap = self._save()
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
                 self._restore(snap)
             else:
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
             produced = heredocs + _herestring_texts(text)
             upstream_bodies = upstream_bodies + produced
@@ -4456,7 +4535,14 @@ class _Walker:
             return
         self.functions_version += 1
 
-    def _function_call(self, raw_words: list[_RawWord], words: list[Expanded], depth: int) -> bool:
+    def _function_call(
+        self,
+        raw_words: list[_RawWord],
+        words: list[Expanded],
+        depth: int,
+        *,
+        case_pattern: bool = False,
+    ) -> bool:
         """Walk a called function's body here; ``True`` when the segment WAS a call.
 
         Also notes ``export -f`` and walks every body for calls it cannot pin
@@ -4482,7 +4568,7 @@ class _Walker:
         if name is not None and name in self.functions:
             self._call_candidates(name, depth)
             return True
-        self._opaque_function_call(raw_words, head, depth)
+        self._opaque_function_call(raw_words, head, depth, case_pattern=case_pattern)
         return False
 
     def _alias_targets(self, head: list[Expanded]) -> list[str]:
@@ -4627,7 +4713,12 @@ class _Walker:
                 self._call_candidates(name, depth)
 
     def _opaque_function_call(
-        self, raw_words: list[_RawWord], head: list[Expanded], depth: int
+        self,
+        raw_words: list[_RawWord],
+        head: list[Expanded],
+        depth: int,
+        *,
+        case_pattern: bool = False,
     ) -> None:
         """Walk every body when this segment could call one the walker can't name."""
         name = head[0].text if head and not head[0].opaque else ""
@@ -4659,8 +4750,12 @@ class _Walker:
             ),
             None,
         )
-        dynamic = command is not None and (
-            command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts)
+        # ``case_pattern`` (:func:`_case_pattern_head`): the "command word" is
+        # a case arm's pattern, which bash never runs.
+        dynamic = (
+            not case_pattern
+            and command is not None
+            and (command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts))
         )
         why: str | None = None
         if dynamic:
@@ -4835,7 +4930,11 @@ class _Walker:
         stdin_piped: bool = False,
         pipeline: str = "",
         feed: _Feed | None = None,
+        case_position: bool = False,
     ) -> None:
+        # Both the POSITION (``_case_pattern_positions``) and the shape: read
+        # before ``_strip_grouping``, which drops the arm's bare ``)``.
+        case_pattern = case_position and _case_pattern_head(text)
         text = _strip_grouping(text)
         if not text:
             return
@@ -4908,7 +5007,9 @@ class _Walker:
             if self.functions:
                 self._opaque_function_call(raw_words, words, depth)
             return
-        if self.functions is not None and self._function_call(raw_words, words, depth):
+        if self.functions is not None and self._function_call(
+            raw_words, words, depth, case_pattern=case_pattern
+        ):
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
