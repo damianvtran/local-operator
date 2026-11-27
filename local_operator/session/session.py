@@ -31828,10 +31828,13 @@ class Session:
         if mode != "always_on" or not self._session_id:
             return False
         if self._keepalive_bridge_covered is None:
+            # Only a read that COMPLETED is cached: a failed one leaves this
+            # ``None`` so the next turn end asks again rather than muting this
+            # runtime's keep-alive (review R2-2).
             self._keepalive_bridge_covered = self._keepalive_is_bridge_session()
-        return self._keepalive_bridge_covered
+        return bool(self._keepalive_bridge_covered)
 
-    def _keepalive_is_bridge_session(self) -> bool:
+    def _keepalive_is_bridge_session(self) -> bool | None:
         """Whether ``team_bridge.session`` names this session, read once.
 
         From THIS session's config root (``self._config_dir``), as
@@ -31839,6 +31842,12 @@ class Session:
         root does not answer from the process-global one. Cached by the caller:
         a relaunched runtime (where every ping runs) reads it fresh, and a
         rebind mid-runtime costs at most that runtime's chain.
+
+        ``None`` when the read did not complete (no answer to cache).
+        ``read_config_values`` returns that same ``None`` for a file it cannot
+        read or parse right now, and its contract is that the caller keeps what
+        it had rather than treating a torn read as "everything unset" — so the
+        caller retries instead of remembering "not covered" (review R2-2).
         """
         try:
             from local_operator.config import read_config_values
@@ -31846,11 +31855,12 @@ class Session:
 
             values = read_config_values(self._config_dir)
             if values is None:
-                return False
+                logger.debug("cache keep-alive: team_bridge.session unreadable; not cached")
+                return None
             return TeamBridgeSettings.from_values(values).session == self._session_id
         except Exception:  # noqa: BLE001 — a lookup; failing closed sends nothing
             logger.debug("cache keep-alive: could not read team_bridge.session", exc_info=True)
-            return False
+            return None
 
     def _keepalive_saver_active(self) -> bool:
         """Whether Radient Saver reduces, or may reduce, this session's turns.

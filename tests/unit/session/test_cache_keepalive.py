@@ -25,7 +25,13 @@ import httpx
 import pytest
 
 from local_operator.compaction import keepalive
-from local_operator.harness.types import AgentTool, ChatRequest, TextContent, ToolResult
+from local_operator.harness.types import (
+    AgentTool,
+    ChatRequest,
+    ModelSpec,
+    TextContent,
+    ToolResult,
+)
 from local_operator.harness.wake_types import WakeSchedule
 from local_operator.providers.clients import AnthropicClient
 from local_operator.session.session import Session
@@ -581,6 +587,47 @@ async def test_a_turn_ending_during_the_ping_keeps_its_fresher_row(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_whose_own_arm_is_refused_leaves_the_ping_nothing_to_re_arm(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R2-1: the case ONLY the turn-end counter covers.
+
+    The mid turn was served on a fallback route, so its own arm is refused
+    (``route_mismatch``) and its turn-end write CLEARS the fired row instead of
+    replacing it. The ping's own route does match, so its late write would
+    re-arm a chain that turn up had just retired — the anchor comparison cannot
+    see that, because the turn left no row to be newer than the ping's anchor.
+    """
+    wire = Wire([*TURN, PING, *TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    real_ping = Session._cache_keepalive_ping
+
+    async def ping_then_a_fallback_turn(self: Session) -> Any:
+        usage = await real_ping(self)
+        # A message lands in the relaunched runtime while the ping streamed,
+        # served by a pinned fallback (the ping's primary route then cannot see
+        # that prefix, so the turn end arms nothing).
+        self._active_fallback = ModelSpec(provider="openai", model_id="fallback-model")
+        try:
+            await self.prompt("mid")
+            await _drain(self)
+        finally:
+            self._active_fallback = None
+        return usage
+
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        monkeypatch.setattr(Session, "_cache_keepalive_ping", ping_then_a_fallback_turn)
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert _keepalive_rows(session) == [], "the ping does not re-arm a retired chain"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_chain_end_clears_a_fired_row_a_stale_writer_restored(tmp_path) -> None:
     """Review R1-5: a refusal is an explicit clear, not a bare return."""
     wire = Wire([*TURN])
@@ -605,7 +652,13 @@ async def test_a_chain_end_clears_a_fired_row_a_stale_writer_restored(tmp_path) 
 async def test_always_on_reads_the_sessions_own_root_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review R1-4: ``team_bridge.session`` from ``self._config_dir``, read once."""
+    """Review R1-4: ``team_bridge.session`` from ``self._config_dir``, read once.
+
+    Review R2-2: only a read that COMPLETED is cached. A failed one (the
+    ``None`` ``read_config_values`` returns for a file it cannot read right now)
+    covers nothing, and the next turn end asks again rather than keeping this
+    runtime's keep-alive off for good.
+    """
     import local_operator.config as config_mod
     from local_operator.compaction.api import CompactionSettings
     from local_operator.team_bridge.settings import SESSION_PATH
@@ -616,17 +669,22 @@ async def test_always_on_reads_the_sessions_own_root_once(
     own_root = tmp_path / "own-root"
     session._config_dir = own_root
     reads: list[Path] = []
+    failing = {"left": 1}
 
-    def read(root: Path) -> dict[str, Any]:
+    def read(root: Path) -> dict[str, Any] | None:
         reads.append(root)
+        if failing["left"]:
+            failing["left"] -= 1
+            return None  # a torn/unreadable config.yml, config.py's own contract
         return {SESSION_PATH[0]: {SESSION_PATH[1]: session._session_id}}
 
     monkeypatch.setattr(config_mod, "read_config_values", read)
     try:
         session._compaction_settings = CompactionSettings(keepalive_mode="always_on")
+        assert session._keepalive_settings() is None, "an unreadable read covers nothing"
+        assert session._keepalive_settings() is not None, "and is retried, not cached"
         assert session._keepalive_settings() is not None
-        assert session._keepalive_settings() is not None
-        assert reads == [own_root], "the session's own root, once"
+        assert reads == [own_root] * 2, "the session's own root, retried once after the failure"
         session._compaction_settings = CompactionSettings(keepalive_mode="chief_of_staff")
         assert session._keepalive_settings() is None
     finally:

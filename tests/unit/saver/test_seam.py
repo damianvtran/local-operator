@@ -310,6 +310,36 @@ async def test_saver_may_reduce_reports_a_reduced_session_to_the_cache_keepalive
 
 
 @pytest.mark.asyncio
+async def test_saver_may_reduce_answers_from_a_frozen_chain_with_the_resolver_off(
+    rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``frozen_ids`` branch of the probe on its own (PR #4657 review R2-3).
+
+    Saver switched off mid-session (or a config edit): the resolver says "off"
+    and ``configured_mode`` is not off, so the resolver IS reached — but a
+    frozen epoch on the chain is local proof that this conversation's turns go
+    out reduced, and the probe must answer from it without any of that.
+    """
+    from local_operator.saver import gate as gate_mod
+
+    server, store = rig
+    seen: list[tuple[str, ChatRequest]] = []
+    stream = create_stream_fn(store, ON, wrap_client=Provider(seen, set()).wrap)
+    try:
+        await _drive(stream, range(8, 14))
+        assert stream._saver_chain is not None and stream._saver_chain.frozen_ids
+        monkeypatch.setattr(gate_mod, "configured_mode", lambda settings: "auto")
+        monkeypatch.setattr(
+            gate_mod, "resolve_saver", lambda *a, **kw: gate_mod.SaverDecision(False, "gate")
+        )
+        assert stream.saver_may_reduce(PRIMARY) is True, "the frozen chain alone answers"
+        stream._saver_chain = None
+        assert stream.saver_may_reduce(PRIMARY) is False, "and with no chain the off resolver wins"
+    finally:
+        await stream.close()
+
+
+@pytest.mark.asyncio
 async def test_signed_out_or_no_credit_uploads_nothing(rig, monkeypatch) -> None:
     server, store = rig
     for availability in (
