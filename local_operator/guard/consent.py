@@ -1026,13 +1026,20 @@ class GuardConsentHost:
             (PROMPT_PENDING, PROMPT_COMMITTING, self._clock() - CLAIM_LEASE_S),
         )
 
-    def accept_signed(self, approval_id: str, expected: Mapping[str, Any]) -> AcceptOutcome:
+    def accept_signed(
+        self, approval_id: str, expected: Mapping[str, Any], *, source: str = "desktop"
+    ) -> AcceptOutcome:
         """The desktop typed op's apply: the card was signed through ``/approve-operation``.
 
         ``verify_for_run`` re-derives the record digest and re-verifies the
         operator signature against this machine's anchor; only a record that
         holds becomes ``signature=True``. A denied, unsigned or tampered card
         raises its own refusal and nothing is sent.
+
+        ``source`` is the surface that relayed the member's yes (``desktop``, or ``mobile`` for
+        the phone relay's Guard twin, which has the host sign): it is stored as the prompt's
+        ``decided_via`` so every surface says where the answer came from. It never changes the
+        admission, which is the verified signature alone.
         """
 
         from local_operator.network import approvals as A
@@ -1059,7 +1066,7 @@ class GuardConsentHost:
             row.collection_rev,
             capability=False,
             signature=True,
-            source="desktop",
+            source=source,
             expected_digest=row.digest,
         )
 

@@ -180,9 +180,12 @@ def test_the_route_set_is_exactly_the_contract_and_has_no_grant_route() -> None:
         )
 
 
-def test_the_capability_is_advertised_desktop_only() -> None:
+def test_the_capability_is_advertised_and_the_relay_may_republish_it() -> None:
     assert feature_flags()["guard"] == 1
-    assert "guard" in DESKTOP_ONLY_FEATURES  # the phone relay serves none of these routes
+    # L2d: the phone relay serves its own twin at /api/guard*, so the key is no longer
+    # desktop-only. The relay still withholds it unless the twin is mounted
+    # (tests/unit/mobile/test_guard_relay.py pins both directions).
+    assert "guard" not in DESKTOP_ONLY_FEATURES
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,9 @@ import hashlib
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -62,6 +65,35 @@ from local_operator.network.types import MeshRefusal
 from local_operator.network.wire import canonical_json
 
 #: Assurance levels the wire carries (machine tokens; the UI localizes the words).
+#: Which surface is answering a typed card, as the audit rows and (for ``guard_consent``) the
+#: queue's ``decided_via`` record it. ``desktop`` is every caller that does not say otherwise.
+#: ``mobile`` is the phone relay's Guard twin (``mobile/guard_relay.py``), which signs through
+#: this SAME engine on the host: the audit trail must say the phone asked, because "a person
+#: pressed a key on the computer" and "the paired phone relayed a yes" are different facts for
+#: an incident review. A ContextVar rather than a parameter on each of the five functions that
+#: write an audit row: it cannot be set by a request body, only by code that wraps the call in
+#: :func:`answering_as`, and an unknown value reads as ``desktop`` (the stricter reading).
+ANSWER_SURFACES = frozenset({"desktop", "mobile"})
+_ANSWER_SURFACE: ContextVar[str] = ContextVar("typed_approval_answer_surface", default="desktop")
+
+
+@contextmanager
+def answering_as(surface: str) -> Iterator[None]:
+    """Mark the typed approve/apply calls inside the block as answered from ``surface``."""
+
+    token = _ANSWER_SURFACE.set(surface if surface in ANSWER_SURFACES else "desktop")
+    try:
+        yield
+    finally:
+        _ANSWER_SURFACE.reset(token)
+
+
+def answer_surface() -> str:
+    """The surface the current typed call is answering for (``desktop`` unless wrapped)."""
+
+    return _ANSWER_SURFACE.get()
+
+
 ASSURANCE_PRESENCE = "presence"
 ASSURANCE_FILE_ONLY = "file_only"
 
@@ -599,7 +631,7 @@ def approve(
             approval_id,
             root,
             {
-                "surface": "desktop",
+                "surface": answer_surface(),
                 "operation": op,
                 "code": refusal.code,
                 "authority_level": authority_level,
@@ -683,7 +715,7 @@ def _approve_locked(
             approval_id,
             root,
             {
-                "surface": "desktop",
+                "surface": answer_surface(),
                 "assurance": level,
                 "operation": op,
                 "key_id": key_id,
@@ -740,7 +772,7 @@ def apply(
             "credential.desktop_apply_refused",
             approval_id,
             root,
-            {"surface": "desktop", "operation": op, "code": refusal.code},
+            {"surface": answer_surface(), "operation": op, "code": refusal.code},
         )
         raise
 
@@ -781,7 +813,12 @@ def _apply_checked(
         # Pre-apply refusals (digest, state, window) are NOT apply outcomes and carry none.
         exc.apply_outcome = approval_copy.outcome(exc.code)  # type: ignore[attr-defined]
         raise
-    _audit("credential.desktop_applied", approval_id, root, {"surface": "desktop", "operation": op})
+    _audit(
+        "credential.desktop_applied",
+        approval_id,
+        root,
+        {"surface": answer_surface(), "operation": op},
+    )
     state = approvals.load_record(approval_id, root=root).get("state")
     return {
         "approval_id": approval_id,

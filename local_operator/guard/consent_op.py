@@ -215,9 +215,15 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
     record = A._load_raw(approval_id, root)
     if expected_block != expected(record):
         raise _refuse("guard_consent_expected_mismatch", "this is not the reviewed Guard card")
+    from local_operator.network.credentials import desktop_approval
+
     host = GuardConsentHost(root, transport=lambda: default_transport(root))
     try:
-        outcome = host.accept_signed(approval_id, expected_block)
+        # Who relayed the yes: ``desktop`` unless the phone relay's twin wrapped this call in
+        # ``desktop_approval.answering_as("mobile")`` (an allow-listed set, never a request value).
+        outcome = host.accept_signed(
+            approval_id, expected_block, source=desktop_approval.answer_surface()
+        )
     except GuardConsentRefused as exc:
         raise _refuse(exc.code, str(exc)) from exc
     if outcome.status == "revoked_first":

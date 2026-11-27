@@ -225,8 +225,73 @@ class GuardNoticeDue(BaseModel):
     due: bool
 
 
+# ---------------------------------------------------------------------------
+# The phone relay's consent twin (``mobile/guard_relay.py``, slice L2d)
+#
+# These three models exist ONLY for the relay's ``/api/guard/consents/*`` routes. The desktop
+# answers the same card through ``GET /v1/desktop/approvals`` + ``approve-operation``/``deny``
+# (``typed_approval`` carries the same digests); the phone must not be a general approvals
+# proxy, so the relay exposes a Guard-only door and these are its whole vocabulary. They grant
+# nothing by themselves: ``GuardConsentAcceptRequest`` is the acknowledgment the typed engine
+# already requires (both digests, closed, no scope field), minus the ``operation`` the relay
+# fixes to ``guard_consent`` itself.
+# ---------------------------------------------------------------------------
+
+_DIGEST = r"^sha256:[0-9a-f]{64}$"
+
+
+class GuardConsentCard(BaseModel):
+    """What the member is being asked, read from the card the host filed (never a request body)."""
+
+    approval_id: str
+    #: The card's folded state (``requested`` while it can be answered; ``approved``,
+    #: ``denied``, ``expired``, ... once it cannot). A client offers an answer only for
+    #: ``requested``.
+    state: str
+    tenant: str
+    org: str
+    #: The queued prompt's reason (``new_org`` | ``widened`` | ...), an open string.
+    reason: str
+    widening: bool
+    #: What "Share" grants, all or nothing: the offered scopes, or the added ones on a widening.
+    asked_scopes: list[ScopeName]
+    #: Both are the engine's own digests over the record on disk; ``accept`` must echo them.
+    request_digest: str = Field(pattern=_DIGEST)
+    disclosure_digest: str = Field(pattern=_DIGEST)
+    #: False when this host would not sign this card (assurance policy, an expired or already
+    #: answered card, a card whose terms this build cannot describe). ``refusal`` is then the
+    #: engine's code.
+    signable: bool
+    refusal: str | None = None
+
+
+class GuardConsentAcceptRequest(BaseModel):
+    """``POST /api/guard/consents/{id}/accept``: exactly the two digests the card showed.
+
+    Closed (``extra: forbid``) and strict: no scope, no operation, no signature, no tenant. A
+    client cannot narrow, widen or retarget a grant; it can only say "I reviewed THIS card".
+    The host recomputes both digests from the record on disk and refuses a mismatch before it
+    signs (RFC §5.2.2, §5.9).
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    request_digest: str = Field(pattern=_DIGEST)
+    disclosure_digest: str = Field(pattern=_DIGEST)
+
+
+class GuardConsentAnswer(BaseModel):
+    """The outcome of ``accept`` (``granted``) or ``decline`` (``denied``)."""
+
+    approval_id: str
+    state: Literal["granted", "denied"]
+    tenant: str
+
+
 __all__ = [
     "GuardBadge",
+    "GuardConsentAcceptRequest",
+    "GuardConsentAnswer",
+    "GuardConsentCard",
     "GuardInsightsLink",
     "GuardMode",
     "GuardNonTeamCard",

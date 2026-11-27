@@ -394,7 +394,7 @@ def notice_due(root: Path, surface_name: str) -> dict[str, Any]:
 
     ``surface_name`` is the surface the authenticated caller IS. The plane has one shared
     bearer and no per-caller identity, so the request model binds it per capability: this
-    router is desktop-only (``features.guard`` is in ``DESKTOP_ONLY_FEATURES``), hence only
+    router serves the desktop only (the phone relay's twin has no notice route), hence only
     ``desktop`` is accepted and a caller cannot consume another surface's day (S-3).
     """
 
