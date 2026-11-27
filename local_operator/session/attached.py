@@ -3638,7 +3638,11 @@ class AttachedSession:
         )
 
     async def attach_existing(
-        self, *, budget: float | None = None, control_budget: float | None = None
+        self,
+        *,
+        budget: float | None = None,
+        control_budget: float | None = None,
+        _owner_lookup_trace: open_trace.ReadAttachOwnerLookupTrace | None = None,
     ) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
@@ -3755,6 +3759,11 @@ class AttachedSession:
             # UNCHANGED, and a remote owner asks the peer and reproduces both of
             # its states ("no owner" and "an owner that published no record").
             record, owner = await asyncio.to_thread(self._owner.locate)
+            if _owner_lookup_trace is not None:
+                # Observe the existing result before local recovery can turn
+                # PID-only into a record. Memo/retained/cancelled reads that
+                # never reach this line have no observed lookup for this flight.
+                _owner_lookup_trace.record(has_record=record is not None, has_pid=owner is not None)
             if record is None and owner is not None and self._owner.placement.is_local:
                 # AN owner EXISTS but published no LIVE record: an older binary, a
                 # registrant that failed, or — the case a read must not call "no
