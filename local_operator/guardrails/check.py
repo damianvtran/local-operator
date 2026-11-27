@@ -3006,6 +3006,33 @@ _INLINE_PYTHON = re.compile(
     r"(?i)(\bpython[\d.]*\s+(-[a-z]*c\b|-(\s|$)|<<)|\|\s*python[\d.]*\b|"
     r"\b(uv\s+run|ipython)\b[^\n|;&]*\s-c\b)"
 )
+#: ``python -c CODE`` (and ``uv run … -c``): the code is the ARGUMENT, so stdin
+#: is data. Text BEFORE such an invocation (``rg GuardConsentHost src | python3
+#: -c 'print(len(sys.stdin.read()))'``) is not code it runs (L2a review NIT-R2-1).
+_PYTHON_DASH_C = re.compile(r"(?i)^\|\s*(python[\d.]*|uv\s+run|ipython)\b[^\n|;&]*?\s-[a-z]*c\b")
+
+
+def _runs_engine_inline(text: str) -> bool:
+    """An inline interpreter in ``text`` whose CODE names the consent engine.
+
+    A pipe into a bare ``python``/``python -`` or a heredoc runs what flows in,
+    so an engine name anywhere counts. A PIPE into ``python -c`` runs only its
+    argument and reads the pipe as data, so there only text from the pipe on
+    counts. Narrowed to the piped shape on purpose: an unpiped ``python -c`` in a
+    command that also names the engine keeps the old, wider refusal.
+    """
+
+    for match in _INLINE_PYTHON.finditer(text):
+        tail = text[match.start() :]
+        if _PYTHON_DASH_C.match(tail):
+            if _GUARD_ENGINE.search(tail):
+                return True
+            continue
+        if _GUARD_ENGINE.search(text):
+            return True
+    return False
+
+
 #: A path token directly under a ``guard`` directory (key-file globs).
 _GUARD_DIR_TOKEN = re.compile(r"(?i)([^\s'\"`;|&()<>]*?)\bguard[\\/]+([^\s\\/'\"`;|&()<>]+)")
 #: ``cd`` into a ``guard`` directory (then a bare ``install.key``).
@@ -3051,10 +3078,16 @@ def _arg_strings(value: Any, depth: int = 0) -> list[str]:
     return []
 
 
+#: The key file and the file store's per-writer temp that holds it before the
+#: link (``install.key.<hex>.tmp``). Exact, not a prefix (L2a review NIT-R2-2):
+#: ``install.keyring`` or ``install.key-notes`` is not the key.
+_KEY_FILE_EXACT = re.compile(r"install\.key(\.[0-9a-f]+\.tmp)?")
+
+
 def _names_key_file(token: str) -> bool:
     """``token`` (a path piece under ``guard/``) is or globs to the key file."""
 
-    if token.lower().startswith(KEY_FILE_NAME):
+    if _KEY_FILE_EXACT.fullmatch(token.lower()):
         return True
     if not any(ch in token for ch in "*?["):
         return False
@@ -3123,7 +3156,10 @@ def guard_credential_hit(tool_name: str, args: Mapping[str, Any]) -> str | None:
         # ``join('guard', 'install.key')`` and ``gu''ard`` collapse to the plain
         # spelling. Raw first so nothing the raw text matched can be lost.
         joined = _STRING_CONCAT.sub("", _EMPTY_QUOTES.sub("", text))
-        text = text + "\n" + _STRING_JOIN.sub("/", joined)
+        spellings = (text, _STRING_JOIN.sub("/", joined))
+        text = "\n".join(spellings)
+    else:
+        spellings = (text,)
     if _key_file_hit(text, executing=executing):
         return "the Radient Guard install key file"
     if _GUARD_SERVICE in text.lower() and _CREDENTIAL_READERS.search(text):
@@ -3140,7 +3176,9 @@ def guard_credential_hit(tool_name: str, args: Mapping[str, Any]) -> str | None:
     if (
         executing
         and _GUARD_ENGINE.search(text)
-        and (tool_name == "eval" or _INLINE_PYTHON.search(text))
+        # Each spelling on its own: the de-fragmented copy is appended to the raw
+        # text, so a pipe position in one must not see the other's engine name.
+        and (tool_name == "eval" or any(_runs_engine_inline(s) for s in spellings))
     ):
         return "the Radient Guard consent engine"
     return None

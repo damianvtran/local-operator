@@ -57987,19 +57987,37 @@ class OperatorApp(App[None]):
         try:
             from local_operator.guard import surface as guard_surface
             from local_operator.paths import config_dir
-            from local_operator.tui.widgets.guard_view import badge_text, notice_text
+            from local_operator.guard.consent import GuardConsentHost
+            from local_operator.guard.reports import GuardReports
+            from local_operator.tui.widgets.guard_view import (
+                badge_text,
+                notice_text,
+                receipt_text,
+            )
 
             root = config_dir()
             if not guard_surface.guard_available(root):
                 self._assert_guard_badge("")
                 return
             states = guard_surface.org_states(root)
-            self._assert_guard_badge(badge_text(states))
+            known = {s.tenant for s in states}
+            drafts = [d for d in GuardReports(root).drafts() if d.tenant in known]
+            self._assert_guard_badge(badge_text(states, reports_waiting=len(drafts)))
             # The C6 line announces an org turning Guard ON; a widening is said
             # by the badge ("new items waiting") alone, never by this sentence.
             waiting = [s for s in states if s.state == guard_surface.STATE_WAITING]
             if waiting and guard_surface.should_show_notice(root, surface="tui"):
                 self._system_notice(notice_text(waiting[0]))
+            # §15.4' C3 grant receipts ("... Not you? Stop sharing in /guard"):
+            # each shown once, then marked, so a grant this person did not make
+            # (the same-user residual, RFC §5.7c) is surfaced on the next poll.
+            host = GuardConsentHost(root, transport=None, mirror=False)
+            for notice in host.notices(unshown_only=True):
+                text = receipt_text(notice)
+                if text is None:
+                    continue
+                self._system_notice(text)
+                host.mark_notice_shown(int(notice["id"]))
         except Exception:  # noqa: BLE001 - a passive indicator never breaks the app
             logger.debug("guard poll failed", exc_info=True)
 

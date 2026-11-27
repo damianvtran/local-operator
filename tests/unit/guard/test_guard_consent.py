@@ -764,13 +764,19 @@ def test_failed_revoke_is_retried_after_the_team_membership_lapses(boundary_rig:
     fx.revoke_reply = (200, {"result": {}})
     fx.memberships = [_membership("none")]
     el.reset_memo()
+    before = len(fx.guard_requests())
+    # L2a QA Q4: driven through the REAL boundary, not ``check_point`` directly
+    # -- the retry used to sit behind ``if orgs:`` and never ran for a lapsed
+    # member at sign-in / daemon start / the 6 h tick.
     enrol.run_boundary(root, "sign-in", force=True)
     assert C.team_tenants(root) == []
-    before = len(fx.guard_requests())
-    assert C.check_point(root, boundary="tick") == []
     sent = fx.guard_requests()[before:]
     assert [(r["method"], r["path"]) for r in sent] == [("POST", "/v1/guard/consents/revoke")]
     assert _state(host) == "revoked"
+    # Settled: the next boundary sends nothing more.
+    after = len(fx.guard_requests())
+    enrol.run_boundary(root, "tick", force=True)
+    assert fx.guard_requests()[after:] == []
 
 
 # ---------------------------------------------------------------------------
@@ -885,3 +891,149 @@ def test_file_key_store_create_never_overwrites_this_installs_key(config_dir: Pa
     store.store("f" * 32, "33" * 32)
     assert store.load("f" * 32) == "33" * 32
     assert not list(install_key.key_file(config_dir).parent.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# L2b round 1 remediation: the L2a deferrals and copy C1
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scope", sorted(C.UNMEASURED_SCOPES))
+def test_an_offer_naming_an_unmeasured_scope_is_refused_whole(config_dir: Path, scope: str) -> None:
+    """Copy round 1, C1: no consent can hold a scope whose revoke copy needs X."""
+
+    with pytest.raises(C.GuardConsentRefused) as refused:
+        C.ConsentOffer.from_wire(_offer(scopes=["decisions", scope]))
+    assert refused.value.code == "guard_scope_unavailable"
+    assert not C.GuardConsentStore(config_dir).exists()
+
+
+def test_an_in_flight_grant_never_erases_a_newer_sticky_decline(config_dir: Path) -> None:
+    """L2a review round 2, MINOR-R2-1 (the reviewer's probe): any sticky state wins."""
+
+    transport = _Hooked()
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+
+    def newer_row_declined() -> None:
+        assert host.offer(C.ConsentOffer.from_wire(_offer(collection_rev=2))).status == "queued"
+        host.decline(TENANT, 2, surface="tui")
+
+    transport.during_grant = newer_row_declined
+    outcome = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert outcome.status == "revoked_first"
+    assert host.sticky(TENANT) == "declined"  # the later answer is kept
+    assert _state(host) != "live"
+    assert transport.calls == ["grant", "revoke"]  # the landed grant is undone
+    assert "grant" not in [n["kind"] for n in host.notices()]
+    # And the member is not asked again at the next admission point.
+    assert host.offer(C.ConsentOffer.from_wire(_offer(collection_rev=2))).status == (
+        "suppressed_sticky"
+    )
+
+
+def test_the_claim_binds_the_digest_the_person_was_shown(config_dir: Path) -> None:
+    """L2a review round 2, MINOR-R2-2: a same-rev replace between render and claim."""
+
+    transport = _Hooked()
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    shown = host.offer(C.ConsentOffer.from_wire(_offer())).row
+    assert shown is not None
+    # The server's immutables change at the same rev after the card rendered.
+    assert host.offer(C.ConsentOffer.from_wire(_offer(revocation_gen=4))).status == "queued"
+    with pytest.raises(C.GuardConsentRefused) as refused:
+        host.accept(
+            TENANT, 1, capability=True, signature=None, source="tui", expected_digest=shown.digest
+        )
+    assert refused.value.code == "guard_prompt_changed"
+    assert transport.calls == []
+    assert [p.state for p in host.pending()] == ["pending"]
+    current = host.prompt(TENANT, 1)
+    assert current is not None
+    assert host.accept(
+        TENANT, 1, capability=True, signature=None, source="tui", expected_digest=current.digest
+    ).status == ("granted")
+
+
+def test_a_lease_expired_grant_is_settled_not_revoked(config_dir: Path) -> None:
+    """L2a security round 2, S-6 (the reviewer's interleaving, injected clock)."""
+
+    now = [1_000_000.0]
+    transport = _Hooked()
+    host = C.GuardConsentHost(
+        config_dir, transport=transport, key_store=CountingKeyStore(), clock=lambda: now[0]
+    )
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    seen: dict[str, Any] = {}
+
+    def laptop_sleeps_then_member_answers_again() -> None:
+        now[0] += C.CLAIM_LEASE_S + 1
+        host.fold_desktop_answers()  # the next admission point releases the lease
+        assert [p.state for p in host.pending()] == ["pending"]
+        seen["second"] = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+
+    transport.during_grant = laptop_sleeps_then_member_answers_again
+    first = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert seen["second"].status == "granted"
+    assert first.status == "granted"  # settled by the other answer, not a revoke
+    assert transport.calls == ["grant", "grant"]
+    assert _state(host) == "live"
+    assert host.sticky(TENANT) is None
+    assert [n["kind"] for n in host.notices()] == ["grant"]
+
+
+def test_a_lease_released_grant_that_nobody_re_answered_is_recorded(config_dir: Path) -> None:
+    """S-6, the other arm: the row is pending again and this grant is the answer."""
+
+    now = [1_000_000.0]
+    transport = _Hooked()
+    host = C.GuardConsentHost(
+        config_dir, transport=transport, key_store=CountingKeyStore(), clock=lambda: now[0]
+    )
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+
+    def laptop_sleeps() -> None:
+        now[0] += C.CLAIM_LEASE_S + 1
+        host.fold_desktop_answers()
+
+    transport.during_grant = laptop_sleeps
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )
+    assert transport.calls == ["grant"]
+    assert _state(host) == "live"
+    assert host.prompt(TENANT, 1).state == "accepted"  # type: ignore[union-attr]
+
+
+def test_a_revoke_during_a_grant_writes_one_revoke_receipt(config_dir: Path) -> None:
+    """L2a QA Q5: one stop, one receipt (the re-send after the grant writes none)."""
+
+    transport = _Hooked()
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    transport.during_grant = lambda: host.revoke(TENANT)
+    host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert transport.calls == ["grant", "revoke", "revoke"]
+    assert [n["kind"] for n in host.notices()].count("revoke") == 1
+
+
+def test_a_generation_1_store_is_migrated_in_place(config_dir: Path) -> None:
+    """Schema 1 (L2a) -> 2 adds ``prompts.claim``; existing rows read as unclaimed."""
+
+    import sqlite3
+
+    host = C.GuardConsentHost(config_dir, transport=_Hooked(), key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    path = C.guard_consent_path(config_dir)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.execute("ALTER TABLE prompts DROP COLUMN claim")
+    conn.execute("PRAGMA user_version = 1")
+    conn.close()
+    rows = host.pending()
+    assert [(p.collection_rev, p.claim) for p in rows] == [(1, "")]
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == C.GUARD_CONSENT_SCHEMA_VERSION
+    conn.close()
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )

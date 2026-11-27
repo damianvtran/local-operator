@@ -35,7 +35,9 @@ exceptions); the person-facing strings live in the ``tui.guard`` catalogue.
 
 from __future__ import annotations
 
+import json
 import logging
+import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
@@ -75,12 +77,46 @@ _DESCRIPTION = (
     "this computer shares Guard stats. See guide://guard."
 )
 
-#: Added only for an owner/admin (operator ask 3): a member is never told that
-#: org analytics exist, so the model cannot offer them to someone who cannot open them.
+#: Added only for an owner/admin (operator ask 3): a member's tool never offers
+#: the insights link, so the model cannot send someone to a page they cannot
+#: open. (The guide and the consent prompt do say that admins see aggregate
+#: stats -- that is the disclosure the member consents to -- but neither names a
+#: route to them; QA round 1, Q2.)
 _ADMIN_CLAUSE = (
     " open_insights: your org's Guard insights are in Console; this returns the "
     "link to give the user. It returns no figures; never invent any."
 )
+
+
+#: Cap on an org-supplied name in model-facing text (security round 1, S-3).
+#: The server allows 256 characters (``guard/consent.py``); 80 holds every real
+#: org name while leaving no room for a paragraph of instructions.
+_NAME_CAP = 80
+
+
+def _org_label(name: str) -> str:
+    """An org-SUPPLIED name, made inert for model context (security round 1, S-3).
+
+    The name is set by the org -- the party that gains when members opt in --
+    and lands in the member's agent context. So it is one line (control and
+    format characters, newlines included, become spaces), capped at
+    :data:`_NAME_CAP` characters, JSON-quoted so it reads as data, and labelled
+    as the org's own text. The TUI renders names with markup off, so this is
+    the model-facing half only.
+    """
+
+    flat = "".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in str(name or ""))
+    flat = " ".join(flat.split())
+    if len(flat) > _NAME_CAP:
+        flat = flat[: _NAME_CAP - 1] + "…"
+    return f"org-supplied name {json.dumps(flat, ensure_ascii=False)}"
+
+
+def _tenant_label(tenant: str) -> str:
+    """A tenant id, server-issued but still org-adjacent: quoted and capped too."""
+
+    flat = "".join(ch for ch in str(tenant or "") if unicodedata.category(ch)[0] != "C")
+    return json.dumps(flat[:128], ensure_ascii=False)
 
 
 def _config_dir() -> Path | None:
@@ -115,7 +151,7 @@ def _gate() -> tuple[bool, bool]:
     root = _config_dir()
     if not surface.guard_available(root):
         return False, False
-    return True, bool(surface.insights_tenants(root))
+    return True, bool(surface.guard_insights_tenants(root))
 
 
 def build_guard_tool(context: ToolContext) -> AgentTool | None:
@@ -148,12 +184,14 @@ def _pick_tenant(requested: str | None, candidates: list[tuple[str, str]]) -> tu
         for tenant, name in candidates:
             if tenant == requested:
                 return tenant, name
-        return f"tenant {requested!r} is not one of this member's Guard orgs."
+        return f"tenant {_tenant_label(requested)} is not one of this member's Guard orgs."
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
         return "no Team org has turned on Radient Guard for this member."
-    names = ", ".join(f"{name} ({tenant})" for tenant, name in candidates)
+    names = ", ".join(
+        f"{_tenant_label(tenant)} ({_org_label(name)})" for tenant, name in candidates
+    )
     return f"several Guard orgs; pass tenant= one of: {names}."
 
 
@@ -164,7 +202,7 @@ async def execute_guard(
     on_update: Any = None,
     context: ToolContext | None = None,
 ) -> ToolResult:
-    from local_operator.tools.builtin import _error, _text, _validation_error
+    from local_operator.tools.builtin import _error, _validation_error
 
     del signal, on_update, context
     try:
@@ -180,8 +218,34 @@ async def execute_guard(
     if root is None or not surface.guard_available(root):
         return _error(tool_call_id, TOOL_NAME, "Radient Guard is not available for this account.")
 
+    from local_operator.guard.consent import GuardConsentRefused
+    from local_operator.guard.reports import GuardReportRefused
+
+    try:
+        return _execute(tool_call_id, params, root)
+    except (GuardConsentRefused, GuardReportRefused) as exc:
+        # A damaged or newer-generation store (review R1-3): say so, never raise
+        # into the turn. Nothing was drafted or sent.
+        damaged = exc.code.endswith("_damaged")
+        return _error(
+            tool_call_id,
+            TOOL_NAME,
+            (
+                "Radient Guard's local store on this computer can't be read right now; "
+                "nothing was drafted or sent."
+                if damaged
+                else str(exc)
+            ),
+            details={"action": params.action, "code": exc.code},
+        )
+
+
+def _execute(tool_call_id: str, params: GuardParams, root: Path) -> ToolResult:
+    from local_operator.guard import surface
+    from local_operator.tools.builtin import _error, _text
+
     if params.action == "open_insights":
-        admins = surface.insights_tenants(root)
+        admins = surface.guard_insights_tenants(root)
         if not admins:
             return _error(
                 tool_call_id,
@@ -197,7 +261,7 @@ async def execute_guard(
         return _text(
             tool_call_id,
             TOOL_NAME,
-            f"Guard insights for {name} are in Console: {url}\n"
+            f"Guard insights for {_org_label(name)} are in Console: {url}\n"
             "Give the user this link. Figures are shown there only, after sign-in.",
             details={"action": "open_insights", "tenant": tenant, "url": url},
         )
@@ -230,17 +294,14 @@ async def execute_guard(
     if isinstance(picked, str):
         return _error(tool_call_id, TOOL_NAME, picked)
     tenant, name = picked
-    from local_operator.guard.reports import GuardReportRefused, GuardReports
+    from local_operator.guard.reports import GuardReports
 
-    try:
-        draft, created = GuardReports(root).draft(tenant, params.kind)
-    except GuardReportRefused as exc:
-        return _error(tool_call_id, TOOL_NAME, str(exc), details={"code": exc.code})
+    draft, created = GuardReports(root).draft(tenant, params.kind)
     lead = "Drafted" if created else "Already drafted"
     return _text(
         tool_call_id,
         TOOL_NAME,
-        f"{lead} a {params.kind} report for {name}. NOT sent: the user sends or "
+        f"{lead} a {params.kind} report for {_org_label(name)}. NOT sent: the user sends or "
         "discards it in /guard. Tell them so; do not include the credential or any "
         "detail anywhere.",
         details={
@@ -253,6 +314,18 @@ async def execute_guard(
     )
 
 
+#: Plain reasons for a paused state (copy round 1, C7): §15.4' C9 says never
+#: the enum, and the agent repeats this text to the user.
+_PAUSED_PLAIN = {
+    "entitlement_lapsed": "the Team plan is inactive",
+    "org_off": "the org turned Guard off",
+    "membership_ended": "the user is no longer in the org",
+    "scope_revoked": "the user stopped sharing",
+    "console_revoked": "the user stopped sharing from Console",
+    "revoke_pending": "stopping; waiting for Radient to confirm",
+}
+
+
 def _status_line(state: Any) -> str:
     from local_operator.guard import surface
 
@@ -263,9 +336,13 @@ def _status_line(state: Any) -> str:
         ),
         surface.STATE_WAITING: "waiting for the user's choice in /guard; nothing shared yet",
         surface.STATE_NOT_SHARING: "the user chose not to share",
-        surface.STATE_PAUSED: f"paused ({state.reason})",
-    }.get(state.state, state.state)
-    return f"{state.org} ({state.tenant}): {text}"
+        surface.STATE_WILL_ASK: (
+            "not sharing; the user asked to be asked again, and the org's next prompt "
+            "will appear in /guard"
+        ),
+        surface.STATE_PAUSED: f"paused ({_PAUSED_PLAIN.get(state.reason, 'paused')})",
+    }.get(state.state, "unknown")
+    return f"{_org_label(state.org)} (tenant {_tenant_label(state.tenant)}): {text}"
 
 
 __all__ = ["GuardParams", "build_guard_tool", "execute_guard"]

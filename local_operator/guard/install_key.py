@@ -42,6 +42,12 @@ CREATE IS CREATE-IF-ABSENT (security S-3). Two first accepts can race; the
 file store links its temp file into place (fails if present), the Keychain
 adds without ``-U`` (fails if present), and :func:`get_or_create` serializes on
 a lock file and re-reads after its write, so both callers end on ONE key.
+Linux is the exception to "the store refuses a duplicate": libsecret's
+``secret-tool store`` REPLACES an existing item for the same attributes, so
+there create-if-absent rests entirely on the ``guard/key.lock`` ``flock`` plus
+the re-read. That is sufficient because one install is one config dir is one
+lock file; a second writer outside that lock (another config dir pointing at
+the same Secret Service item) is not a shape lop creates (L2a security nit).
 
 The model never receives the key: it is not in env, tool results, logs, Team
 Bridge or the decision journal, and the built-in ``guard-credential``

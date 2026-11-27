@@ -50,6 +50,33 @@ STATE_SHARING_PENDING: Final = "sharing_pending"  # consent_stale: still sharing
 STATE_WAITING: Final = "waiting"  # first grant pending; nothing is shared yet
 STATE_NOT_SHARING: Final = "not_sharing"  # declined (sticky)
 STATE_PAUSED: Final = "paused"
+#: "Share again" lifted the sticky answer and the org's next prompt is not
+#: queued yet (UX round 1, U2): the org stays listed with a truthful state
+#: instead of vanishing until the next admission point.
+STATE_WILL_ASK: Final = "will_ask"
+
+#: How many days backup copies of deleted step-by-step timing survive (RFC §5.4
+#: "X", recorded by G2). ``None`` until measured: while it is, the consent engine
+#: refuses ``trace_detail``/``admin_share`` offers
+#: (``guard.consent.UNMEASURED_SCOPES``), so the revoke confirm that must state
+#: X can never render without it (copy review round 1, C1).
+BACKUP_DAYS: Final[int | None] = None
+
+#: The process-environment markers that mean "this terminal may be driven by an
+#: agent, not a person" (security round 1, S-1). ``LOCAL_OPERATOR_AGENT_SHELL``
+#: is set by the ``bash``/``eval`` tools on every child (``agent_shell``).
+#: ``LOCAL_OPERATOR_CONSOLE_SURFACE`` is set by the desktop console host on
+#: EVERY pane it spawns (local-operator-ui ``src/main/console/host.ts``
+#: ``surfaceEnvironment``), and those panes are exactly what the ``console``
+#: tool drives; the app strips the agent-shell markers from its backend, so
+#: that pane carries no ``AGENT_SHELL`` marker even when an agent is typing.
+#: RFC §5.9 names the "capability-less pane" as a refused answer path, so the
+#: pane marker withholds the capability too; the person answers in their own
+#: terminal (or, from U1, the desktop approvals panel).
+_AGENT_DRIVEN_MARKERS: Final = (
+    "LOCAL_OPERATOR_AGENT_SHELL",
+    "LOCAL_OPERATOR_CONSOLE_SURFACE",
+)
 
 PAUSE_REASONS: Final = (
     "entitlement_lapsed",
@@ -57,6 +84,7 @@ PAUSE_REASONS: Final = (
     "membership_ended",
     "scope_revoked",
     "revoke_pending",
+    "console_revoked",
 )
 
 
@@ -71,6 +99,33 @@ class OrgState:
     prompt: Any = None
     #: When the last answer was given on another surface ("Answered on <surface>").
     answered_via: str = ""
+    #: Epoch seconds of the state's cause where the copy names a date (the
+    #: Console stop, §15.4' C10); 0 otherwise.
+    since: float = 0.0
+
+
+def host_can_answer() -> bool:
+    """May THIS process answer an authority-increasing Guard question? Never raises.
+
+    The TUI passes the answer to ``admit_increasing`` as the host capability, so
+    this is the one place that decides it. ``False`` inside an agent's shell or
+    a desktop console pane (:data:`_AGENT_DRIVEN_MARKERS`), INDEPENDENT of
+    ``LOCAL_OPERATOR_ALLOW_NESTED_SESSION``: that escape hatch lets a harness run
+    a real TUI, and a harness is not a person. Defence in depth, not a boundary:
+    a shell that strips the markers is the accepted same-user residual (RFC
+    §5.7 (i)), and the ``guard-credential`` guardrail still covers the key.
+    """
+
+    import os
+
+    from local_operator.agent_shell import in_agent_shell
+
+    try:
+        if in_agent_shell():
+            return False
+        return not any(os.environ.get(name, "").strip() for name in _AGENT_DRIVEN_MARKERS)
+    except Exception:  # noqa: BLE001 - unknown means not a person
+        return False
 
 
 def _team_orgs(config_dir: Path) -> list[Any]:
@@ -109,6 +164,29 @@ def insights_tenants(config_dir: Path | str | None) -> list[tuple[str, str]]:
         return []
 
 
+def guard_insights_tenants(config_dir: Path | str | None) -> list[tuple[str, str]]:
+    """:func:`insights_tenants` limited to orgs that raised Guard here (review R1-4).
+
+    An admin of a Guard-off org B who is a plain member of Guard-on org A gets
+    no insights clause for B: B's Guard page has nothing to show.
+
+    ADVERTISING, NOT AUTHORIZATION (security round 1, S-4). The role read is
+    the cached, same-user-writable membership record (refreshed every 6 h,
+    served for up to 7 days offline), so it decides only whether to OFFER the
+    link. The authority is Console: ``/dashboard/guard`` must check owner/admin
+    server-side on every load, and no figure ever crosses this client.
+    """
+
+    admins = insights_tenants(config_dir)
+    if not admins or config_dir is None:
+        return []
+    try:
+        raised = {state.tenant for state in org_states(config_dir)}
+    except Exception:  # noqa: BLE001 - fail closed
+        return []
+    return [(tenant, name) for tenant, name in admins if tenant in raised]
+
+
 def insights_url(tenant_id: str) -> str:
     """The opaque first-party Console link for one org's Guard insights."""
 
@@ -140,6 +218,7 @@ def org_states(config_dir: Path | str) -> list[OrgState]:
         consent = host.consent(tenant)
         live = consent is not None and consent.get("state") == "live"
         sticky = host.sticky(tenant)
+        origin, since = _sticky_origin(host, tenant)
         if tenant in revoke_pending:
             state = OrgState(tenant, name, org.role, STATE_PAUSED, "revoke_pending")
         elif live and row is not None:
@@ -148,10 +227,17 @@ def org_states(config_dir: Path | str) -> list[OrgState]:
             state = OrgState(tenant, name, org.role, STATE_SHARING)
         elif row is not None:
             state = OrgState(tenant, name, org.role, STATE_WAITING, prompt=row)
+        elif sticky == "revoked" and origin == "console":
+            # §15.4' C10: "You stopped sharing from Console on <date>".
+            state = OrgState(tenant, name, org.role, STATE_PAUSED, "console_revoked", since=since)
         elif sticky == "revoked":
             state = OrgState(tenant, name, org.role, STATE_PAUSED, "scope_revoked")
         elif sticky == "declined":
             state = OrgState(tenant, name, org.role, STATE_NOT_SHARING)
+        elif _ever_asked(host, tenant):
+            # Asked before, answered, and the sticky answer was lifted ("Share
+            # again"): the next admission point queues the org's prompt.
+            state = OrgState(tenant, _asked_name(host, tenant) or name, org.role, STATE_WILL_ASK)
         else:
             continue  # this org never raised Guard for this member
         states.append(
@@ -163,9 +249,37 @@ def org_states(config_dir: Path | str) -> list[OrgState]:
                 state.reason,
                 state.prompt,
                 _last_answer_surface(host, tenant),
+                state.since,
             )
         )
     return states
+
+
+def _sticky_origin(host: Any, tenant: str) -> tuple[str, float]:
+    try:
+        rows = host._rows("SELECT origin, at FROM sticky WHERE tenant = ?", (tenant,))
+    except Exception:  # noqa: BLE001
+        return "", 0.0
+    return (str(rows[0][0] or ""), float(rows[0][1] or 0.0)) if rows else ("", 0.0)
+
+
+def _ever_asked(host: Any, tenant: str) -> bool:
+    try:
+        return bool(host._rows("SELECT 1 FROM prompts WHERE tenant = ? LIMIT 1", (tenant,)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _asked_name(host: Any, tenant: str) -> str:
+    try:
+        rows = host._rows(
+            "SELECT org_display_name FROM prompts WHERE tenant = ?"
+            " ORDER BY collection_rev DESC LIMIT 1",
+            (tenant,),
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(rows[0][0] or "") if rows else ""
 
 
 def _revoke_pending_tenants(host: Any) -> set[str]:
@@ -261,7 +375,11 @@ __all__ = [
     "STATE_SHARING",
     "STATE_SHARING_PENDING",
     "STATE_WAITING",
+    "STATE_WILL_ASK",
+    "BACKUP_DAYS",
     "guard_available",
+    "guard_insights_tenants",
+    "host_can_answer",
     "insights_tenants",
     "insights_url",
     "non_team_card",

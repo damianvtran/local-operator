@@ -13,6 +13,10 @@ def answered_on(*, surface: str) -> Msg:
     return Msg("tui.guard.answered_on", {"surface": surface})
 
 
+def badge_report_waiting() -> Msg:
+    return Msg("tui.guard.badge_report_waiting", {})
+
+
 def badge_sharing() -> Msg:
     return Msg("tui.guard.badge_sharing", {})
 
@@ -69,6 +73,10 @@ def card_body() -> Msg:
     return Msg("tui.guard.card_body", {})
 
 
+def card_cta_loading() -> Msg:
+    return Msg("tui.guard.card_cta_loading", {})
+
+
 def card_cta_see() -> Msg:
     return Msg("tui.guard.card_cta_see", {})
 
@@ -93,6 +101,10 @@ def indicator_paused(*, reason: str) -> Msg:
     return Msg("tui.guard.indicator_paused", {"reason": reason})
 
 
+def indicator_paused_plain() -> Msg:
+    return Msg("tui.guard.indicator_paused_plain", {})
+
+
 def indicator_sharing(*, org: str) -> Msg:
     return Msg("tui.guard.indicator_sharing", {"org": org})
 
@@ -103,6 +115,10 @@ def indicator_sharing_pending(*, org: str) -> Msg:
 
 def indicator_waiting(*, org: str) -> Msg:
     return Msg("tui.guard.indicator_waiting", {"org": org})
+
+
+def indicator_will_ask(*, org: str) -> Msg:
+    return Msg("tui.guard.indicator_will_ask", {"org": org})
 
 
 def notice_org_on(*, org: str) -> Msg:
@@ -165,6 +181,14 @@ def prompt_would_send() -> Msg:
     return Msg("tui.guard.prompt_would_send", {})
 
 
+def readonly_agent() -> Msg:
+    return Msg("tui.guard.readonly_agent", {})
+
+
+def reason_console_revoked(*, date: str) -> Msg:
+    return Msg("tui.guard.reason_console_revoked", {"date": date})
+
+
 def reason_entitlement_lapsed() -> Msg:
     return Msg("tui.guard.reason_entitlement_lapsed", {})
 
@@ -185,16 +209,24 @@ def reason_scope_revoked() -> Msg:
     return Msg("tui.guard.reason_scope_revoked", {})
 
 
-def report_body() -> Msg:
-    return Msg("tui.guard.report_body", {})
+def receipt_grant(*, org: str, device: str, time: str) -> Msg:
+    return Msg("tui.guard.receipt_grant", {"org": org, "device": device, "time": time})
 
 
-def report_confirmed(*, org: str) -> Msg:
-    return Msg("tui.guard.report_confirmed", {"org": org})
+def receipt_widen(*, org: str, device: str, time: str) -> Msg:
+    return Msg("tui.guard.receipt_widen", {"org": org, "device": device, "time": time})
 
 
-def report_discarded() -> Msg:
-    return Msg("tui.guard.report_discarded", {})
+def report_body(*, org: str) -> Msg:
+    return Msg("tui.guard.report_body", {"org": org})
+
+
+def report_confirmed(*, kind: str, org: str) -> Msg:
+    return Msg("tui.guard.report_confirmed", {"kind": kind, "org": org})
+
+
+def report_discarded(*, kind: str) -> Msg:
+    return Msg("tui.guard.report_discarded", {"kind": kind})
 
 
 def report_kind_credential_exposure() -> Msg:
@@ -217,8 +249,8 @@ def revoke_body() -> Msg:
     return Msg("tui.guard.revoke_body", {})
 
 
-def revoke_body_trace() -> Msg:
-    return Msg("tui.guard.revoke_body_trace", {})
+def revoke_body_trace(*, backup_days: str) -> Msg:
+    return Msg("tui.guard.revoke_body_trace", {"backup_days": backup_days})
 
 
 def revoke_retained() -> Msg:
@@ -313,12 +345,20 @@ def screen_revoked(*, org: str) -> Msg:
     return Msg("tui.guard.screen_revoked", {"org": org})
 
 
+def screen_share_again(*, org: str) -> Msg:
+    return Msg("tui.guard.screen_share_again", {"org": org})
+
+
 def screen_shared(*, org: str) -> Msg:
     return Msg("tui.guard.screen_shared", {"org": org})
 
 
 def screen_title() -> Msg:
     return Msg("tui.guard.screen_title", {})
+
+
+def screen_unavailable() -> Msg:
+    return Msg("tui.guard.screen_unavailable", {})
 
 
 def screen_working() -> Msg:

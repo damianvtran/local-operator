@@ -3854,9 +3854,13 @@ AskPickerScreen .ask-picker {
 /* ── /guard: Radient Guard (RFC v0.9 slice L2b) ─────────────────────────── *
  *
  * The `/move --to` confirmation's card family: content-sized over the dimmed
- * transcript, one decision at a time, the body the only flexible child (it
- * scrolls; the title and buttons stay painted). Opened only by `/guard`, never
- * by a prompt's arrival, so it can never sit inside a running turn. */
+ * transcript, one decision at a time. The body is the only part that gives up
+ * rows: `GuardScreen._fit` sets its `max-height` from the measured budget on
+ * mount, resize and every recompose (design round 1, D1: the old fixed
+ * `max-height: 30` painted every button off an 80x24 screen), and it scrolls
+ * beyond that, so the title and the buttons are always on screen. Opened only
+ * by `/guard`, never by a prompt's arrival, so it can never sit inside a
+ * running turn. */
 GuardScreen {
     align: center middle;
     background: $lo-sunken;
@@ -3880,7 +3884,6 @@ GuardScreen .guard-card {
 #guard-body {
     width: 100%;
     height: auto;
-    max-height: 30;
     color: $lo-fg;
     background: $lo-overlay;
     scrollbar-size-vertical: 1;
@@ -3912,6 +3915,50 @@ GuardScreen .guard-card {
     align-horizontal: right;
 }
 
+/* EQUAL WEIGHT (design round 1, D2/D3). Every answer has the same body from
+ * the lop palette (no stock `primary` fill on "Share"), and focus -- placed on
+ * the non-sharing choice -- is the only emphasis: a lighter body, a bright
+ * edge and bold. Measured WCAG ratios on the dark theme: label $lo-fg on
+ * $lo-raised 12.56:1, on the focused $lo-edge-hi 7.89:1. */
 #guard-buttons Button {
     margin-left: 2;
+    min-width: 16;
+    background: $lo-raised;
+    color: $lo-fg;
+    border: tall $lo-edge;
+}
+
+#guard-buttons Button:focus {
+    background: $lo-edge-hi;
+    background-tint: $lo-fg 0%;
+    color: $lo-fg;
+    text-style: bold;
+    border: tall $lo-fg;
+}
+
+/* "Stop sharing": the one coloured action, and it only goes the safe way.
+ * $lo-danger on $lo-tint-danger 6.34:1 (the stock `error` variant was 4.47:1). */
+#guard-buttons Button.guard-danger,
+#guard-buttons Button.guard-danger:focus {
+    background: $lo-tint-danger;
+    color: $lo-danger;
+}
+
+#guard-buttons Button.guard-danger:focus {
+    border: tall $lo-danger;
+}
+
+/* The non-Team CTA (nothing leaves the computer from that card, so it may
+ * carry the accent): $lo-bg on $lo-accent 8.73:1. A FIXED width (D4), so
+ * "Checking…", "See Radient Team" and "Start 30-day free trial" share one slot
+ * and Close never moves when eligibility arrives. */
+#guard-buttons Button.guard-cta {
+    width: 28;
+    background: $lo-accent;
+    color: $lo-bg;
+}
+
+#guard-buttons Button.guard-cta:disabled {
+    background: $lo-raised;
+    color: $lo-muted;
 }

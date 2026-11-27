@@ -252,7 +252,7 @@
   "tui.guard.revoke_body_trace": {
     "role": "TUI revoke confirmation (RFC §15.4' C2)",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": ""
+    "note": "{backup_days} is a whole number of days (RFC §5.4 X). Not rendered until X is measured."
   },
   "tui.guard.revoke_retained": {
     "role": "TUI revoke confirmation (RFC §15.4' C2)",
@@ -292,7 +292,7 @@
   "tui.guard.report_body": {
     "role": "TUI agent-drafted report card on /guard",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": ""
+    "note": "{org} is the organization's display name, verbatim."
   },
   "tui.guard.button_send_report": {
     "role": "TUI button label",
@@ -307,12 +307,12 @@
   "tui.guard.report_confirmed": {
     "role": "TUI agent-drafted report card on /guard",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "{org} is the organization's display name, verbatim."
+    "note": "{kind} is one of the report_kind_* strings (already localized); {org} is the organization's display name."
   },
   "tui.guard.report_discarded": {
     "role": "TUI agent-drafted report card on /guard",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": ""
+    "note": "{kind} is one of the report_kind_* strings (already localized)."
   },
   "tui.guard.card_title": {
     "role": "TUI non-Team card (RFC §15.4' C1)",
@@ -382,7 +382,7 @@
   "tui.guard.screen_failed": {
     "role": "TUI /guard screen text",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "/guard is a slash command; keep it verbatim."
+    "note": "No placeholders."
   },
   "tui.guard.screen_shared": {
     "role": "TUI /guard screen text",
@@ -392,7 +392,7 @@
   "tui.guard.screen_declined": {
     "role": "TUI /guard screen text",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": "{org} is the organization's display name, verbatim. /guard is a slash command; keep it verbatim."
+    "note": "{org} is the organization's display name, verbatim."
   },
   "tui.guard.screen_later": {
     "role": "TUI /guard screen text",
@@ -412,6 +412,56 @@
   "tui.guard.slash_description": {
     "role": "command description line in /help and the completion picker",
     "tone": "plain, calm, factual; privacy copy, never alarming",
-    "note": ""
+    "note": "Slash-command picker description; shown to every account, Team or not (UX U8)."
+  },
+  "tui.guard.readonly_agent": {
+    "role": "Line on a read-only Guard decision card when /guard runs inside an agent's shell or a desktop console pane (security S-1)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "No placeholders."
+  },
+  "tui.guard.indicator_paused_plain": {
+    "role": "TUI passive Guard indicator for an unknown pause reason (copy C3)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "No placeholders; never name a cause."
+  },
+  "tui.guard.indicator_will_ask": {
+    "role": "TUI passive Guard indicator after Share again, before the org's next prompt arrives (UX U2)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{org} is the organization's display name, verbatim."
+  },
+  "tui.guard.screen_share_again": {
+    "role": "Result line on /guard after Share again (copy C4)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{org} is the organization's display name, verbatim. The quoted text is tui.guard.badge_waiting; keep it identical to that string in this language."
+  },
+  "tui.guard.reason_console_revoked": {
+    "role": "Pause reason after a Console revoke (RFC §15.4' C10), continues 'Guard: paused, '",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{date} is an ISO date (YYYY-MM-DD). Lower-case continuation."
+  },
+  "tui.guard.badge_report_waiting": {
+    "role": "Status-bar badge when an agent-drafted Guard report waits for the person (UX U6)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "/guard is a slash command; keep it verbatim."
+  },
+  "tui.guard.card_cta_loading": {
+    "role": "Placeholder label on the non-Team card's CTA while trial eligibility loads (design D4)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "Short; fits the same button as 'Start 30-day free trial'."
+  },
+  "tui.guard.screen_unavailable": {
+    "role": "Guard screen body when the local consent or report store can't be read (review R1-3)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "No placeholders."
+  },
+  "tui.guard.receipt_grant": {
+    "role": "One-line grant receipt in the transcript (RFC §15.4' C3)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local HH:MM time. /guard is a slash command; keep it verbatim."
+  },
+  "tui.guard.receipt_widen": {
+    "role": "One-line widening receipt in the transcript (RFC §15.4' C3)",
+    "tone": "plain, calm, factual; privacy copy, never alarming",
+    "note": "{org} is the organization's display name; {device} this computer's name; {time} a local HH:MM time. /guard is a slash command; keep it verbatim."
   }
 }

@@ -17,10 +17,21 @@ holds the capability, so a model, a peer ``send``, ``bridge_decide`` or
 ``--yolo`` cannot reach ``confirm``.
 
 NOTHING IS SENT IN THIS SLICE. The server half (the pending-action create +
-signed atomic consume, agent-server A3) is not built. A confirmed report is
-therefore parked locally as ``confirmed`` for the later uploader; this module
-imports no network client. That keeps the invariant checkable today: every
-path to the wire starts at a ``confirmed`` row, and only ``confirm`` writes one.
+signed atomic consume, agent-server A3) is not built, and this module imports
+no network client.
+
+A LOCAL ``confirmed`` ROW IS NEVER UPLOAD AUTHORITY (security round 1, S-2).
+``confirm`` takes caller-asserted facts and the file is same-user writable, so
+any same-user process can forge a ``confirmed`` row (``UPDATE drafts SET
+state='confirmed'``); today that is inside the accepted same-user residual only
+because nothing is sent. A3 must therefore NOT build an uploader that signs
+``confirmed`` rows in bulk -- that would make the install key a confused deputy
+for whoever forged the row. Per RFC §9.2', the install-key signature over
+``{action_id, digest, nonce}`` is produced INSIDE the person's admitted confirm
+gesture, against a server pending action created for that gesture and within
+its ``confirm_deadline``; a row confirmed before A3 exists re-raises the host
+prompt when A3 ships. ``confirmed`` here means "a person said yes on this
+computer", nothing more.
 
 ZERO-COST WHERE GUARD IS ABSENT. Construction does no I/O; the file is created
 by the first :meth:`draft`, which the tool only offers where an org has turned
@@ -50,10 +61,6 @@ DRAFTED: Final = "drafted"
 CONFIRMED: Final = "confirmed"
 DISCARDED: Final = "discarded"
 
-#: Drafts the model may hold open per tenant. A model looping on ``report_draft``
-#: must not bury the member's ``/guard`` screen; the server's own quota is 3 per
-#: member per kind per day (§9.2'), so one open draft per kind is all a person
-#: could usefully confirm. A repeat draft of an open kind returns the existing row.
 _BUSY_TIMEOUT_S: Final = 5.0
 
 _DDL: Final = (
@@ -107,7 +114,14 @@ class GuardReports:
         conn.row_factory = sqlite3.Row
         try:
             os.chmod(self._path, 0o600)
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            try:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+            except sqlite3.DatabaseError as exc:
+                # Not SQLite at all: refused as damaged like an unknown generation,
+                # so callers handle one typed refusal (review R1-3).
+                raise GuardReportRefused(
+                    "report_store_damaged", "the Guard report store is not a database"
+                ) from exc
             if existed and version != GUARD_REPORTS_SCHEMA_VERSION:
                 raise GuardReportRefused(
                     "report_store_damaged", "the Guard report store has an unknown schema"
@@ -126,7 +140,14 @@ class GuardReports:
     # -- the tool's one verb ------------------------------------------------
 
     def draft(self, tenant: str, kind: str) -> tuple[ReportDraft, bool]:
-        """``(draft, created)``. An open draft of the same kind is returned, not duplicated."""
+        """``(draft, created)``. An open draft of the same kind is returned, not duplicated.
+
+        That de-dup is the whole bound on open drafts: at most one per kind per
+        tenant, so a model looping on ``report_draft`` cannot bury the member's
+        ``/guard`` screen. The server's own quota is 3 per member per kind per
+        day (§9.2'), so one open draft per kind is all a person could usefully
+        confirm (review R1-5: this note used to sit on an unrelated constant).
+        """
 
         if kind not in REPORT_KINDS:
             raise GuardReportRefused(

@@ -687,6 +687,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ratchet and their detail moved here, to the on-demand doc.
     "glob": 224,
     "grep": 472,
+    "guard": 205,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
     # actions plus the preview-first/confirm/selection contract. Measured with
     # this test's canonical isolated renderer; no existing entry moved. Round-1

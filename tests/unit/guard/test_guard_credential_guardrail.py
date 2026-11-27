@@ -77,6 +77,14 @@ REFUSED = [
     ("eval", {"code": "open(os.path.expanduser('~/.local-operator/guard/'+'install'+'.key'))"}),
     ("eval", {"code": "open(os.path.join(home, '.local-operator', 'guard', 'install.key'))"}),
     ("bash", {"command": "security find-generic-password -s com.radient.gu''ard -w"}),
+    # L2b (L2a security S-7): the file store's per-writer temp holds the key too.
+    ("bash", {"command": "cat ~/.local-operator/guard/install.key.0a1b2c3d.tmp"}),
+    # L2b (L2a NIT-R2-1, narrowed): a pipe into a bare python RUNS what flows in.
+    ("bash", {"command": "echo 'from local_operator.guard import consent' | python3"}),
+    (
+        "bash",
+        {"command": "rg x | python3 -c 'from local_operator.guard import consent_op'"},
+    ),
 ]
 
 ALLOWED = [
@@ -94,6 +102,16 @@ ALLOWED = [
     ("bash", {"command": "cd tests/unit/guard && ls"}),
     ("bash", {"command": "git diff -- local_operator/server/routes/desktop_credentials.py"}),
     ("monitor", {"op": "create", "tool": "bash", "arguments": {"command": "git status"}}),
+    # L2b (L2a review NIT-R2-2): the key name is matched exactly, not by prefix.
+    ("bash", {"command": "cat ~/.local-operator/guard/install.keyring"}),
+    # L2b (L2a review NIT-R2-1): a pipe into ``python -c`` reads the pipe as DATA.
+    (
+        "bash",
+        {
+            "command": "rg -n GuardConsentHost local_operator | "
+            "python3 -c 'import sys; print(len(sys.stdin.read()))'"
+        },
+    ),
 ]
 
 
