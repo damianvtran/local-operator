@@ -1157,6 +1157,40 @@ async def test_handoff_tab_survives_retirement_and_releases_after_answer_on_succ
 
 
 @pytest.mark.asyncio
+async def test_handoff_answered_while_no_runtime_runs_rebinds_the_same_tab(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """Session a64fec9430f3, 2026-11-26: the answer arrived while NO runtime ran.
+
+    The successor's first action must continue in the tab the human used
+    (same handle, no reopen), and its ordinary disposal still closes it.
+    """
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        held_surface = session._browser.surface_id
+        ask_id = await _ask(session, handoff=True)
+    finally:
+        await session.dispose()  # idle exit: no close, no retain
+    assert _control(protocol_peer)["tabs"] == 1
+    _settle_ask(directory, ask_id)  # answered before any runtime is back
+
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+        assert "reopened_handoff" not in (snap.details or {}), snap.text
+        assert successor._browser.surface_id == held_surface
+        assert _control(protocol_peer)["tabs"] == 1, "a second tab was opened"
+        # The hold is spent with its ask; the tab is an ordinary owned tab now.
+        assert not successor._browser.resource.record.get("retention")
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0, "ordinary cleanup must still close it"
+
+
+@pytest.mark.asyncio
 async def test_handoff_still_open_keeps_holding_across_a_second_retirement(
     protocol_peer: tuple[int, str], headless_tui_env: Path
 ) -> None:
