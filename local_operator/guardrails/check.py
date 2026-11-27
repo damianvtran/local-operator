@@ -128,6 +128,8 @@ DANGEROUS_DELETE_RULE = "dangerous-delete"
 #: The built-in layer for edits to the guard's own rules, hooks and settings
 #: (``guardrails/policy.py`` names the set).
 POLICY_WRITE_RULE = "guard-policy-write"
+#: The rule name of the fail-closed refusal when the check itself raises.
+GUARD_ERROR_RULE = "guardrail-error"
 
 
 def guard_version() -> str:
@@ -596,9 +598,49 @@ def rule_warn_text(rule: Rule) -> str:
     return f"Guardrail {rule.name}: {rule.body}".strip()
 
 
+#: The closed tool class of the call ``check_tool_call`` is checking, so the
+#: decision record (``guard/decisions.py``) can carry it without threading the
+#: tool name through every ``_journal`` call site. A ContextVar, like
+#: ``_OUTPUT_REDACTOR``, keeps concurrent checks from reading each other's.
+_DECISION_TOOL_CLASS: ContextVar[str] = ContextVar("guard_decision_tool_class", default="other")
+
+
+def _record_decision(rule: str, risk: str, verdict: str) -> None:
+    """Hand one enum-only Guard decision record to the sink (RFC v0.6, slice L1).
+
+    Only the CLASS of the rule leaves this function: ``risk == "rule"`` is how
+    every user-rule call site marks itself, and a user rule is ``custom`` even
+    if its author named it after a built-in, so a name can never pose as one.
+    A LOW ``allow`` is a ``pass`` (ranked safe, never reviewed), kept distinct
+    from an ``allow`` a review granted. Never raises: ``emit_decision``
+    swallows sink failures, and the import is local so a broken Guard package
+    degrades to "not recorded" inside this guard rather than failing a call.
+    """
+    try:
+        from local_operator.guard import decisions as gd
+
+        if risk == "rule":
+            rule_class = gd.RULE_CLASS_CUSTOM
+        elif rule == DANGEROUS_DELETE_RULE:
+            rule_class = gd.RULE_CLASS_DANGEROUS_DELETE
+        elif rule == POLICY_WRITE_RULE:
+            rule_class = gd.RULE_CLASS_POLICY_WRITE
+        elif rule == GUARD_ERROR_RULE:
+            rule_class = gd.RULE_CLASS_GUARD_ERROR
+        else:
+            rule_class = gd.RULE_CLASS_CUSTOM
+        outcome = gd.OUTCOME_PASS if (risk == "low" and verdict == "allow") else verdict
+        gd.emit_decision(outcome, rule_class, _DECISION_TOOL_CLASS.get())
+    except Exception:  # noqa: BLE001 — telemetry must never decide a call
+        return
+
+
 def _journal(
     rule: str, risk: str, verdict: str, latency: float, targets: str, basis: str = ""
 ) -> None:
+    # The Guard decision record rides the same seam, so every journaled
+    # verdict is also recorded; the targets/basis below never reach it.
+    _record_decision(rule, risk, verdict)
     # One structured line per non-LOW decision so a rollout can watch the
     # block ratio and judge latency (see the PR's risk notes). ``basis`` names
     # what an ALLOW rested on (the creating call, the ask, the operator row).
@@ -2430,6 +2472,11 @@ async def _dangerous_delete(
                 _targets_text(verdict),
                 " | ".join([*verdict.warnings, *finished]),
             )
+        else:
+            # The plain LOW delete writes no log line (it is the common case
+            # and the log watches non-LOW ratios), but Guard's decision count
+            # must include it, or ``pass`` would be missing from the grid.
+            _record_decision(DANGEROUS_DELETE_RULE, "low", "allow")
         return GuardOutcome(blocked=False, destructive=True, warnings=list(verdict.warnings))
     targets = _targets_text(verdict)
     risk = verdict.risk
@@ -2731,8 +2778,10 @@ async def check_tool_call(
 
         return private_judge
 
+    from local_operator.guard.decisions import tool_class_of
     from local_operator.guardrails import provenance as prov
 
+    tool_token = _DECISION_TOOL_CLASS.set(tool_class_of(tool_name))
     token = _OUTPUT_REDACTOR.set(redact)
     # Never read into ``values``/facts: the provider's output goes only to the
     # forge CLI child env (``provenance._forge_cli_env``).
@@ -2754,17 +2803,20 @@ async def check_tool_call(
             outcome.warnings = [_safe_text(warning) for warning in outcome.warnings]
         return outcome
     except Exception:
+        # A fail-closed refusal is a decision too; record it before returning.
+        _record_decision(GUARD_ERROR_RULE, "error", "block")
         return GuardOutcome(
             blocked=True,
             text=stamp_guard_version(
                 f"{BLOCK_MARKER} (error): the safety check failed, so this "
                 "command was not run. Ask the user how to proceed."
             ),
-            rule="guardrail-error",
+            rule=GUARD_ERROR_RULE,
         )
     finally:
         prov.FORGE_AUTH.reset(forge_token)
         _OUTPUT_REDACTOR.reset(token)
+        _DECISION_TOOL_CLASS.reset(tool_token)
 
 
 async def _check_tool_call(
