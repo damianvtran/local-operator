@@ -3795,7 +3795,12 @@ def _case_header_end(text: str) -> int | None:
     scan(rest, spans=spans)
     at = 0
     for lo, hi in spans:
-        if rest[lo:hi] not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+        word = rest[lo:hi]
+        if word not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+            break
+        # ``-p`` leads only as ``time -p``; a bare ``-p`` is a command name,
+        # so ``-p case x in`` is no header (#4646 R3-B1).
+        if word == "-p" and (at == 0 or rest[slice(*spans[at - 1])] != "time"):
             break
         at += 1
     head = spans[at : at + 3]

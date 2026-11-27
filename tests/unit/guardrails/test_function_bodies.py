@@ -541,6 +541,10 @@ _SUBSHELL_REACHES = (
     'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncat <( true; "$cmd" )',
     'f() { rm -rf ~/x; }\ng() { ( true; "$1" ); }\ng "$(printf f)"',
     'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( true; "$cmd" ) ;;\nesac',
+    # #4646 R3-B1: a bare ``-p`` is a command name, not ``time -p``, so this
+    # is no case header and the next piece is a command.
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( -p case x in\n"$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true; -p case x in\n"$cmd" )',
 )
 
 
@@ -562,6 +566,8 @@ _SUBSHELL_REACHES = (
         "in-proc-subst",
         "after-semicolon-in-function",
         "after-semicolon-in-arm",
+        "bare-dash-p-header",
+        "bare-dash-p-header-after-semicolon",
     ],
 )
 def test_subshell_with_dynamic_word_still_reaches_functions(command: str) -> None:
