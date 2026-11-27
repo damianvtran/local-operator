@@ -48,6 +48,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -93,7 +94,23 @@ MIRROR_WINDOW_S: Final = 7 * 24 * 3600.0
 
 _BUSY_TIMEOUT_S: Final = 5.0
 
+#: A ``committing`` claim older than this is a crashed commit, released back to
+#: ``pending`` at the next admission point so the member can answer again. The
+#: live path it must outlast is two key-store calls (``install_key._TIMEOUT_S``
+#: = 10 s each) plus the grant request (``RadientClient._guard_call``
+#: ``timeout=30`` per connect/read): ~50 s. Ten minutes is far above that; a
+#: re-answer after a real crash is harmless because the server's partial-unique
+#: consent index makes a second grant for the same rev a no-op.
+CLAIM_LEASE_S: Final = 600.0
+
+_TERMS_DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
+
 PROMPT_PENDING: Final = "pending"
+#: An admitted accept CLAIMED the row and is signing/sending its grant. Only
+#: one answer can hold the claim (``BEGIN IMMEDIATE`` + ``state='pending'``),
+#: so a TUI accept racing a desktop apply cannot sign two grants (§5.2.3), and
+#: a revoke that lands mid-flight finds the claim and wins (§5.4/§5.7d).
+PROMPT_COMMITTING: Final = "committing"
 PROMPT_ACCEPTED: Final = "accepted"
 PROMPT_DECLINED: Final = "declined"
 PROMPT_SUPERSEDED: Final = "superseded"
@@ -168,7 +185,7 @@ class ConsentOffer:
         for value in (rev, gen):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise bad("a malformed revision")
-        if not isinstance(terms, str) or not terms.startswith("sha256:") or len(terms) != 71:
+        if not isinstance(terms, str) or _TERMS_DIGEST.fullmatch(terms) is None:
             raise bad("a malformed terms digest")
         if reason not in REASONS:
             raise bad("an unknown reason")
@@ -366,8 +383,10 @@ class OfferOutcome:
 
 @dataclass(frozen=True)
 class AcceptOutcome:
-    """``granted`` | ``refused`` (not admitted; nothing sent) | ``failed`` (sent, refused
-    by the server or unreachable; the row stays pending) | ``revoked_first``."""
+    """``granted`` | ``refused`` (not admitted, or another answer holds the row;
+    nothing sent) | ``failed`` (sent, refused by the server or unreachable; the row
+    stays pending) | ``revoked_first`` (a Console or local revoke won the race) |
+    ``revoked`` (:meth:`GuardConsentHost.revoke` reached the server)."""
 
     status: str
     code: str = ""
@@ -521,9 +540,21 @@ class GuardConsentHost:
         suppression (U10), superseding older revisions and the insert see one
         state. The desktop mirror is filed after commit; a mirror failure never
         loses the queue row.
+
+        SAME-REV RE-OFFERS (review round 1, MAJOR-1). Only an IDENTICAL pending
+        row (or one an accept is committing) is a duplicate. A row at the same
+        ``collection_rev`` that was declined, accepted then revoked, or
+        superseded is REPLACED once the sticky state has been lifted -- that is
+        "Share again" (§5.2.6, §5.4/C10, §5.9 "re-grant at the same rev
+        succeeds") -- and so is a pending row whose server-side immutables
+        changed (a new ``revocation_gen`` or terms digest), which the member
+        would otherwise sign stale and see fail forever. The replacement takes
+        the next ``mirror_seq`` so its desktop card is a new request, and the
+        old card is withdrawn.
         """
 
         now = self._clock()
+        replaced_card = ""
         conn = self._store.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -542,13 +573,15 @@ class GuardConsentHost:
             if newer is not None:
                 conn.execute("ROLLBACK")
                 return OfferOutcome("superseded_by_newer")
-            existing = conn.execute(
+            found = conn.execute(
                 "SELECT * FROM prompts WHERE tenant = ? AND collection_rev = ?",
                 (offer.tenant, offer.collection_rev),
             ).fetchone()
-            if existing is not None:
+            existing = None if found is None else _row(found)
+            if existing is not None and existing.state == PROMPT_COMMITTING:
+                # An admitted accept is mid-flight for this rev; never yank it.
                 conn.execute("ROLLBACK")
-                return OfferOutcome("duplicate", _row(existing))
+                return OfferOutcome("duplicate", existing)
             if offer.reason == "widened":
                 declined = {
                     r[0]
@@ -577,14 +610,36 @@ class GuardConsentHost:
             ):
                 conn.execute("ROLLBACK")
                 return OfferOutcome("already_consented")
+            mirror_seq = 0
+            if existing is not None:
+                candidate = {
+                    **existing.immutable(),
+                    "revocation_gen": offer.revocation_gen,
+                    "org_display_name": offer.org_display_name,
+                    "scopes": list(offer.scopes),
+                    "asked_scopes": list(asked),
+                    "grant_scopes": list(grant),
+                    "terms_digest": offer.rendered_terms_digest,
+                    "reason": offer.reason,
+                }
+                if existing.state == PROMPT_PENDING and candidate == existing.immutable():
+                    conn.execute("ROLLBACK")
+                    return OfferOutcome("duplicate", existing)
+                if existing.state == PROMPT_PENDING:
+                    replaced_card = existing.approval_id
+                mirror_seq = existing.mirror_seq + 1
+                conn.execute(
+                    "DELETE FROM prompts WHERE tenant = ? AND collection_rev = ?",
+                    (offer.tenant, offer.collection_rev),
+                )
             conn.execute(
                 "UPDATE prompts SET state = ? WHERE tenant = ? AND state = ?",
                 (PROMPT_SUPERSEDED, offer.tenant, PROMPT_PENDING),
             )
             conn.execute(
                 "INSERT INTO prompts (tenant, collection_rev, revocation_gen, org_display_name,"
-                " scopes, asked_scopes, grant_scopes, terms_digest, reason, created_at, state)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " scopes, asked_scopes, grant_scopes, terms_digest, reason, created_at, state,"
+                " mirror_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     offer.tenant,
                     offer.collection_rev,
@@ -597,6 +652,7 @@ class GuardConsentHost:
                     offer.reason,
                     now,
                     PROMPT_PENDING,
+                    mirror_seq,
                 ),
             )
             conn.execute("COMMIT")
@@ -606,6 +662,8 @@ class GuardConsentHost:
             raise
         finally:
             conn.close()
+        if replaced_card:
+            self._withdraw_card(replaced_card)
         self._withdraw_superseded_mirrors(offer.tenant, offer.collection_rev)
         row = self.prompt(offer.tenant, offer.collection_rev)
         assert row is not None
@@ -660,7 +718,7 @@ class GuardConsentHost:
             raise
         finally:
             conn.close()
-        self._settle_mirror(row, deny=surface != "desktop")
+        self._settle_mirror(row)
         return row
 
     def share_again(self, tenant: str) -> None:
@@ -694,6 +752,16 @@ class GuardConsentHost:
         desktop plane already compute; :func:`admit_increasing` is the policy.
         A refusal writes a typed host refusal row, leaves the prompt pending
         and sends NOTHING -- the install key is not even looked up.
+
+        Both facts are CALLER-ASSERTED: this method trusts the surface that
+        computed them (the attached host TUI, or :meth:`accept_signed` after
+        ``verify_for_run``). Same-user code that imports this module and passes
+        ``capability=True`` itself admits itself; that is RFC residual (i), and
+        the ``guard-credential`` guardrail refuses the obvious model spelling of
+        it (defence in depth only).
+
+        The row is CLAIMED (``pending`` -> ``committing``) before anything is
+        signed, so exactly one answer can send a grant for it.
         """
 
         from local_operator.harness.approval import admit_increasing
@@ -701,10 +769,51 @@ class GuardConsentHost:
         if not admit_increasing(capability=capability, signature=signature):
             self._record_refusal(tenant, collection_rev, source, "guard_answer_not_admitted")
             return AcceptOutcome("refused", "guard_answer_not_admitted")
-        row = self.prompt(tenant, collection_rev)
-        if row is None or row.state != PROMPT_PENDING:
+        row = self._claim(tenant, collection_rev)
+        if row is None:
             return AcceptOutcome("refused", "guard_prompt_not_pending")
         return self._commit(row, source=source)
+
+    def _claim(self, tenant: str, collection_rev: int) -> PromptRow | None:
+        if not self._store.exists():
+            return None
+        conn = self._store.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            claimed = conn.execute(
+                "UPDATE prompts SET state = ?, decided_at = ? WHERE tenant = ? AND"
+                " collection_rev = ? AND state = ?",
+                (PROMPT_COMMITTING, self._clock(), tenant, collection_rev, PROMPT_PENDING),
+            ).rowcount
+            found = conn.execute(
+                "SELECT * FROM prompts WHERE tenant = ? AND collection_rev = ?",
+                (tenant, collection_rev),
+            ).fetchone()
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        return _row(found) if claimed == 1 and found is not None else None
+
+    def _release(self, row: PromptRow) -> None:
+        """Hand a failed claim back to ``pending``; a revoke that superseded it wins."""
+
+        self._exec(
+            "UPDATE prompts SET state = ?, decided_at = NULL WHERE tenant = ? AND"
+            " collection_rev = ? AND state = ?",
+            (PROMPT_PENDING, row.tenant, row.collection_rev, PROMPT_COMMITTING),
+        )
+
+    def _release_stale_claims(self) -> None:
+        """A claim older than :data:`CLAIM_LEASE_S` is a crashed commit."""
+
+        self._exec(
+            "UPDATE prompts SET state = ?, decided_at = NULL WHERE state = ? AND decided_at < ?",
+            (PROMPT_PENDING, PROMPT_COMMITTING, self._clock() - CLAIM_LEASE_S),
+        )
 
     def accept_signed(self, approval_id: str, expected: Mapping[str, Any]) -> AcceptOutcome:
         """The desktop typed op's apply: the card was signed through ``/approve-operation``.
@@ -778,8 +887,24 @@ class GuardConsentHost:
         return transport  # type: ignore[return-value]
 
     def _commit(self, row: PromptRow, *, source: str) -> AcceptOutcome:
-        """Enrol (lazily) + grant in ONE signed request (§5.2.5). Host-only."""
+        """Enrol (lazily) + grant in ONE signed request (§5.2.5). Host-only.
 
+        ``row`` is already claimed (``committing``); every outcome that
+        recorded nothing hands the claim back.
+        """
+
+        try:
+            outcome = self._commit_claimed(row, source=source)
+        except BaseException:
+            self._release(row)
+            raise
+        if outcome.status == "failed":
+            # Nothing was recorded; the row is answerable again (unless a revoke
+            # superseded the claim meanwhile -- ``_release`` keeps that).
+            self._release(row)
+        return outcome
+
+    def _commit_claimed(self, row: PromptRow, *, source: str) -> AcceptOutcome:
         from local_operator.guard import install_key
 
         transport = self._resolve_transport()
@@ -790,9 +915,11 @@ class GuardConsentHost:
         # THE ONLY PLACE A GUARD KEY IS CREATED: after admission, for a row the
         # member was shown (module docstring of install_key).
         try:
-            key, created = install_key.get_or_create(store, install_id)
+            key, created = install_key.get_or_create(
+                store, install_id, lock_path=install_key.lock_file(self._config_dir)
+            )
         except install_key.GuardKeyStoreError:
-            # Nothing was sent; the row stays pending for the next answer.
+            # Nothing was sent; the row goes back to pending for the next answer.
             return AcceptOutcome("failed", "guard_key_store_unavailable")
         public = install_key.public_raw(key)
         payload: dict[str, Any] = {
@@ -818,16 +945,67 @@ class GuardConsentHost:
         except Exception as exc:  # noqa: BLE001 -- classified; the row stays pending
             code = str(getattr(exc, "code", "") or "guard_grant_failed")
             if code in _STALE_REVOCATION_CODES:
-                # §5.2.5/§5.2.6: a revoke landed first (from Console). Revocation
-                # wins: record it as a Console revoke, sticky, and stop asking.
-                self._observe_console_revoke(row)
+                # §5.2.5/§5.2.6: a revoke landed first. Revocation wins. When it
+                # was THIS install's own revoke (sticky ``revoked`` already set
+                # while the grant was in flight) it is not relabelled Console.
+                if self.sticky(row.tenant) == STICKY_REVOKED:
+                    self._exec(
+                        "UPDATE prompts SET state = ? WHERE tenant = ? AND collection_rev = ?"
+                        " AND state = ?",
+                        (PROMPT_SUPERSEDED, row.tenant, row.collection_rev, PROMPT_COMMITTING),
+                    )
+                else:
+                    self._observe_console_revoke(row)
                 return AcceptOutcome("revoked_first", code)
             logger.info("guard consent grant failed (%s)", code)
             return AcceptOutcome("failed", code)
         now = self._clock()
+        revoked_meanwhile = False
         conn = self._store.connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # The server enrolled this key whatever happens next.
+            conn.execute("UPDATE install SET enrolled = 1 WHERE id = 1")
+            current = conn.execute(
+                "SELECT state FROM prompts WHERE tenant = ? AND collection_rev = ?",
+                (row.tenant, row.collection_rev),
+            ).fetchone()
+            sticky = conn.execute(
+                "SELECT state FROM sticky WHERE tenant = ?", (row.tenant,)
+            ).fetchone()
+            # Security round 1, S-1: a revoke that arrived while the grant was in
+            # flight superseded the claim and set sticky ``revoked``. Revoke wins
+            # (§5.4, §5.7d): the consent is recorded ``revoke_pending`` -- never
+            # ``live`` -- the sticky state stays, and the revoke is re-sent below
+            # because the first one may have reached the server before this grant.
+            revoked_meanwhile = (
+                current is None
+                or current["state"] != PROMPT_COMMITTING
+                or (sticky is not None and sticky["state"] == STICKY_REVOKED)
+            )
+            if revoked_meanwhile:
+                conn.execute(
+                    "INSERT OR REPLACE INTO consents (tenant, collection_rev, scopes, granted_at,"
+                    " state) VALUES (?, ?, ?, ?, 'revoke_pending')",
+                    (row.tenant, row.collection_rev, json.dumps(list(row.grant_scopes)), now),
+                )
+                conn.execute(
+                    "UPDATE prompts SET state = ? WHERE tenant = ? AND collection_rev = ?"
+                    " AND state = ?",
+                    (PROMPT_SUPERSEDED, row.tenant, row.collection_rev, PROMPT_COMMITTING),
+                )
+                conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            conn.close()
+            raise
+        if revoked_meanwhile:
+            conn.close()
+            self._settle_mirror(row)
+            self._send_revoke(row.tenant, row.org_display_name, now)
+            return AcceptOutcome("revoked_first", "guard_revoked_locally")
+        try:
             conn.execute(
                 "UPDATE prompts SET state = ?, decided_at = ?, decided_via = ?"
                 " WHERE tenant = ? AND collection_rev = ?",
@@ -838,7 +1016,6 @@ class GuardConsentHost:
                 " state) VALUES (?, ?, ?, ?, 'live')",
                 (row.tenant, row.collection_rev, json.dumps(list(row.grant_scopes)), now),
             )
-            conn.execute("UPDATE install SET enrolled = 1 WHERE id = 1")
             conn.execute("DELETE FROM sticky WHERE tenant = ?", (row.tenant,))
             # The receipt notice (§5.7c, §15.4' C3): first grant vs widening.
             conn.execute(
@@ -860,7 +1037,7 @@ class GuardConsentHost:
         finally:
             conn.close()
         if source != "desktop":
-            self._settle_mirror(row, deny=False)
+            self._settle_mirror(row)
         return AcceptOutcome("granted")
 
     # -- revoke ------------------------------------------------------------
@@ -872,6 +1049,9 @@ class GuardConsentHost:
         sharing: the consent is marked revoked and the tenant sticky before the
         JWT-only revoke is sent. A failure leaves ``revoke_pending`` for the
         next admission point to retry.
+
+        A row an accept is still committing is superseded too, so the grant's
+        post-send step sees the revoke and keeps it (security round 1, S-1).
         """
 
         now = self._clock()
@@ -889,8 +1069,8 @@ class GuardConsentHost:
                 (tenant, STICKY_REVOKED, "local", now),
             )
             conn.execute(
-                "UPDATE prompts SET state = ? WHERE tenant = ? AND state = ?",
-                (PROMPT_SUPERSEDED, tenant, PROMPT_PENDING),
+                "UPDATE prompts SET state = ? WHERE tenant = ? AND state IN (?, ?)",
+                (PROMPT_SUPERSEDED, tenant, PROMPT_PENDING, PROMPT_COMMITTING),
             )
             conn.execute("COMMIT")
         except BaseException:
@@ -900,6 +1080,11 @@ class GuardConsentHost:
         finally:
             conn.close()
         self._withdraw_superseded_mirrors(tenant, None)
+        return self._send_revoke(tenant, name or tenant, now)
+
+    def _send_revoke(self, tenant: str, name: str, now: float) -> AcceptOutcome:
+        """The JWT-only revoke call; on success ``revoked`` + a receipt notice."""
+
         transport = self._resolve_transport()
         if transport is None:
             return AcceptOutcome("failed", "guard_signed_out")
@@ -907,13 +1092,16 @@ class GuardConsentHost:
             transport.guard_revoke(tenant)
         except Exception as exc:  # noqa: BLE001 -- stays revoke_pending, retried later
             return AcceptOutcome("failed", str(getattr(exc, "code", "") or "guard_revoke_failed"))
-        self._exec("UPDATE consents SET state = 'revoked' WHERE tenant = ?", (tenant,))
+        self._exec(
+            "UPDATE consents SET state = 'revoked' WHERE tenant = ? AND state = 'revoke_pending'",
+            (tenant,),
+        )
         self._exec(
             "INSERT INTO notices (tenant, kind, org_display_name, scopes, at)"
             " VALUES (?, 'revoke', ?, '[]', ?)",
-            (tenant, name or tenant, now),
+            (tenant, name, now),
         )
-        return AcceptOutcome("granted")
+        return AcceptOutcome("revoked")
 
     def _observe_console_revoke(self, row: PromptRow) -> None:
         now = self._clock()
@@ -927,8 +1115,8 @@ class GuardConsentHost:
                 (row.tenant, STICKY_REVOKED, "console", now),
             )
             conn.execute(
-                "UPDATE prompts SET state = ? WHERE tenant = ? AND state = ?",
-                (PROMPT_SUPERSEDED, row.tenant, PROMPT_PENDING),
+                "UPDATE prompts SET state = ? WHERE tenant = ? AND state IN (?, ?)",
+                (PROMPT_SUPERSEDED, row.tenant, PROMPT_PENDING, PROMPT_COMMITTING),
             )
             conn.execute(
                 "INSERT INTO notices (tenant, kind, org_display_name, scopes, at)"
@@ -942,7 +1130,7 @@ class GuardConsentHost:
             raise
         finally:
             conn.close()
-        self._settle_mirror(row, deny=False)
+        self._settle_mirror(row)
 
     def retry_pending_revokes(self) -> None:
         """Re-send revokes a previous call could not deliver. Never raises."""
@@ -983,13 +1171,18 @@ class GuardConsentHost:
         )
         return self.prompt(row.tenant, row.collection_rev)
 
-    def _settle_mirror(self, row: PromptRow, *, deny: bool) -> None:
-        if not row.approval_id:
+    def _settle_mirror(self, row: PromptRow) -> None:
+        self._withdraw_card(row.approval_id)
+
+    def _withdraw_card(self, approval_id: str) -> None:
+        """Withdraw a card the queue already answered. Never raises."""
+
+        if not approval_id:
             return
         try:
             from local_operator.guard import consent_op
 
-            consent_op.settle_mirror(self._config_dir, row.approval_id)
+            consent_op.settle_mirror(self._config_dir, approval_id)
         except Exception:  # noqa: BLE001
             logger.debug("guard consent mirror could not be settled", exc_info=True)
 
@@ -1025,18 +1218,40 @@ class GuardConsentHost:
         queue itself never expires.
         """
 
+        self.fold_desktop_answers()
         for row in self.pending():
             try:
                 from local_operator.guard import consent_op
 
                 state = consent_op.mirror_state(self._config_dir, row.approval_id)
-                if state == "denied":
-                    self.decline(row.tenant, row.collection_rev, surface="desktop")
-                elif state in {"expired", "withdrawn", "missing"}:
+                if state in {"expired", "withdrawn", "missing"}:
                     bumped = PromptRow(**{**row.__dict__, "mirror_seq": row.mirror_seq + 1})
                     self._mirror(bumped)
             except Exception:  # noqa: BLE001
                 logger.debug("guard consent mirror reconcile failed", exc_info=True)
+
+    def fold_desktop_answers(self) -> None:
+        """Fold desktop DENIES into the queue, and release crashed claims. Never raises.
+
+        Runs BEFORE an admission point's offers (QA round 1, Q1): a deny the
+        member gave on the desktop is only a card state until folded, and an
+        offer for a newer rev would otherwise supersede the still-``pending``
+        row first -- dropping the "Don't share" (org sticky) or "Keep current"
+        (U10 declined scopes) and asking again.
+        """
+
+        try:
+            self._release_stale_claims()
+        except Exception:  # noqa: BLE001
+            logger.debug("guard consent stale-claim release failed", exc_info=True)
+        for row in self.pending():
+            try:
+                from local_operator.guard import consent_op
+
+                if consent_op.mirror_state(self._config_dir, row.approval_id) == "denied":
+                    self.decline(row.tenant, row.collection_rev, surface="desktop")
+            except Exception:  # noqa: BLE001
+                logger.debug("guard consent desktop fold failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1069,18 +1284,32 @@ def check_point(
     """One admission point (sign-in, daemon start, the 6 h tick). Never raises.
 
     Returns BEFORE any network call, file or credential-store access for an
-    account with no Team membership (§5.1, the L2a zero-call row).
+    account with no Team membership (§5.1, the L2a zero-call row). The one
+    exception is an install that already HAS a consent store with a
+    ``revoke_pending`` row (a member who lapsed after a failed revoke): that
+    revoke is retried, because revoke has no membership precondition (§5.4).
+    A never-Team install has no store, so it still makes zero calls.
     """
 
     try:
+        factory = transport_factory or (lambda: default_transport(config_dir))
         tenants = team_tenants(config_dir)
         if not tenants:
+            # Review round 1, MINOR-4: revoke has no membership precondition
+            # (§5.4), so a member who lapsed or left after a failed revoke still
+            # gets it retried. Zero cost for a non-Team install: it has no
+            # store, and the transport is resolved only for a revoke_pending row.
+            if GuardConsentStore(config_dir).exists():
+                GuardConsentHost(
+                    config_dir, transport=factory, key_store=key_store
+                ).retry_pending_revokes()
             return []
-        factory = transport_factory or (lambda: default_transport(config_dir))
         transport = factory()
         if transport is None:
             return []
         host = GuardConsentHost(config_dir, transport=transport, key_store=key_store)
+        if host.store.exists():
+            host.fold_desktop_answers()
         outcomes: list[OfferOutcome] = []
         for tenant_id, _name in tenants:
             try:

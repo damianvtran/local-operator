@@ -271,3 +271,76 @@ def test_newer_revision_supersedes_and_withdraws_the_older_card(
     assert second.status == "queued" and second.row is not None
     assert A.load_record(first.approval_id, root=root)["state"] == A.STATE_WITHDRAWN
     assert [p.collection_rev for p in host.pending()] == [2]
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (QA Q1): a desktop deny survives a newer revision
+# ---------------------------------------------------------------------------
+
+
+class _StatusAnswers:
+    """``guard_status`` answers from a script; grants and revokes are refused loudly."""
+
+    def __init__(self, fx: Any) -> None:
+        self.fx = fx
+        self.offer: dict[str, Any] | None = None
+
+    def guard_status(self, tenant_id: str) -> dict[str, Any]:
+        return {"status": "consent_required", "prompt": self.offer}
+
+    def guard_grant(self, envelope: Any) -> dict[str, Any]:
+        raise AssertionError("a decline must never send a grant")
+
+    def guard_revoke(self, tenant_id: str) -> dict[str, Any]:
+        raise AssertionError("a decline must never send a revoke")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "newer", "expect"),
+    [
+        # "Keep current" on a widening, then the next tick carries a newer rev
+        # adding the same scope: U10 still suppresses it.
+        (
+            {
+                "collection_rev": 3,
+                "reason": "widened",
+                "added_scopes": ["posture"],
+                "scopes": ["decisions", "posture", "task_time"],
+            },
+            {
+                "collection_rev": 4,
+                "reason": "widened",
+                "added_scopes": ["posture"],
+                "scopes": ["decisions", "posture", "task_time"],
+            },
+            "suppressed_declined_scopes",
+        ),
+        # "Don't share" on a first grant, then a newer new_org rev: org sticky.
+        ({"collection_rev": 1}, {"collection_rev": 2}, "suppressed_sticky"),
+    ],
+)
+async def test_desktop_deny_then_a_newer_revision_does_not_re_ask(
+    root: Path,
+    fixture_server: Any,
+    monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    first: dict[str, Any],
+    newer: dict[str, Any],
+    expect: str,
+) -> None:
+    host, row = _queued(root, fixture_server, **first)
+    async with _http(root, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{row.approval_id}/deny")
+    assert response.status_code == 200, response.text
+    # The deny is only a card state until the next admission point folds it.
+    assert [p.collection_rev for p in host.pending()] == [row.collection_rev]
+    transport = _StatusAnswers(fixture_server)
+    transport.offer = _offer(**newer)
+    monkeypatch.setattr(C, "team_tenants", lambda _c: [(TENANT, "Acme")])
+    outcomes = C.check_point(root, boundary="tick", transport_factory=lambda: transport)
+    assert [o.status for o in outcomes] == [expect]
+    assert host.pending() == []
+    declined = host.prompt(TENANT, row.collection_rev)
+    assert declined is not None and declined.state == "declined"
+    assert host.prompt(TENANT, newer["collection_rev"]) is None
+    assert fixture_server.guard_requests() == []

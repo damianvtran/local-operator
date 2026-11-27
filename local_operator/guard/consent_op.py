@@ -52,7 +52,8 @@ if TYPE_CHECKING:  # pragma: no cover
 
 OP = "guard_consent"
 
-#: How long one desktop mirror card stays open; see ``consent.MIRROR_WINDOW_S``.
+#: The ``requested_by`` every mirror card carries; ``_intent`` refuses a card
+#: filed by anything else, so a forged card cannot stand in for the queue row.
 _REQUESTED_BY = {"surface": "guard-host"}
 
 

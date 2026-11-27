@@ -37,6 +37,46 @@ REFUSED = [
     ("eval", {"code": "import httpx; httpx.put(base + '/v1/guard/org', json={})"}),
     ("web_fetch", {"url": "https://api.radienthq.com/v1/guard/consents"}),
     ("read", {"path": "/Users/x/.local-operator/guard/install.key"}),
+    # Round 1 (review MINOR-1): a monitor create is judged as the call it schedules.
+    (
+        "monitor",
+        {"op": "create", "tool": "bash", "arguments": {"command": "cat ~/.local-operator/auth.db"}},
+    ),
+    (
+        "monitor",
+        {
+            "op": "create",
+            "tool": "bash",
+            "arguments": {"command": "cat ~/.local-operator/guard/install.key"},
+        },
+    ),
+    # Round 1 (security S-2): the in-process engine and the desktop signing route.
+    (
+        "eval",
+        {
+            "code": "from local_operator.guard.consent import GuardConsentHost as H; "
+            "H(root).accept('ten', 1, capability=True, signature=None, source='x')"
+        },
+    ),
+    ("bash", {"command": "python -c 'from local_operator.guard import consent_op'"}),
+    (
+        "bash",
+        {
+            "command": 'curl -X POST -H "Authorization: Bearer $(jq -r .token run.json)" '
+            "http://127.0.0.1:1/v1/desktop/approvals/ap_1/approve-operation"
+        },
+    ),
+    (
+        "bash",
+        {"command": "curl -X POST http://127.0.0.1:1/v1/desktop/approvals/ap_1/apply-operation"},
+    ),
+    # Round 1 (QA Q2): glob, cd and string-built spellings of the key file.
+    ("bash", {"command": "cat ~/.local-operator/guard/inst*.key"}),
+    ("bash", {"command": "cat ~/.local-operator/guard/*"}),
+    ("bash", {"command": "cd ~/.local-operator/guard && cat install.key"}),
+    ("eval", {"code": "open(os.path.expanduser('~/.local-operator/guard/'+'install'+'.key'))"}),
+    ("eval", {"code": "open(os.path.join(home, '.local-operator', 'guard', 'install.key'))"}),
+    ("bash", {"command": "security find-generic-password -s com.radient.gu''ard -w"}),
 ]
 
 ALLOWED = [
@@ -46,6 +86,14 @@ ALLOWED = [
     ("edit", {"path": "local_operator/guard/install_key.py", "old_text": "guard/install.key"}),
     ("write", {"path": "notes.md", "content": "curl https://x/v1/guard/consents"}),
     ("read", {"path": "local_operator/guard/consent.py"}),
+    # Round 1 widening must not refuse source work on the Guard package.
+    ("bash", {"command": "grep -rn GuardConsentHost local_operator/"}),
+    ("bash", {"command": "grep -n accept_signed local_operator/guard/*"}),
+    ("bash", {"command": "cat local_operator/guard/install_key.py"}),
+    ("bash", {"command": ".venv/bin/python -m pytest tests/unit/guard/ -q"}),
+    ("bash", {"command": "cd tests/unit/guard && ls"}),
+    ("bash", {"command": "git diff -- local_operator/server/routes/desktop_credentials.py"}),
+    ("monitor", {"op": "create", "tool": "bash", "arguments": {"command": "git status"}}),
 ]
 
 

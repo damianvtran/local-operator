@@ -33,6 +33,7 @@ as the outcome of its call, and its first words are the stable marker
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -2963,6 +2964,23 @@ async def _check_tool_call(
 # path because no legitimate model task reads them. A route is refused only in
 # a network-shaped call (a fetch/browser tool, or a shell/eval naming an HTTP
 # client), so reading or grepping the route's source still works.
+#
+# ROUND 1 WIDENING (review MINOR-1, security S-2, QA Q2). Still defence in
+# depth, still evadable, but the CHEAPEST spellings no longer pass:
+# * a ``monitor`` create is scanned as the call it schedules (its ``tool`` +
+#   ``arguments``): scheduled runs never pass through this check, so the
+#   arm-time call is the only place it can refuse them;
+# * in-process answers -- ``eval`` code (or a ``python -c``/heredoc shell)
+#   naming the consent engine (``GuardConsentHost``, ``accept_signed``,
+#   ``guard.consent``/``consent_op``/``install_key``), where ``capability`` is
+#   a caller-asserted bool;
+# * the desktop typed-approval sign/apply routes in a network-shaped call
+#   (the file-only signing path through a claimed daemon's run record);
+# * the key file spelt by glob (``inst*.key``, ``guard/*``), by ``cd`` into
+#   the Guard directory, or built from string pieces (``'install'+'.key'``,
+#   ``os.path.join(..., 'guard', 'install.key')``, ``gu''ard``).
+# Source work stays allowed: ``install_key.py`` is not a glob for the key,
+# and a bare ``grep GuardConsentHost`` in a shell runs no interpreter.
 
 _GUARD_SERVICE = "com.radient.guard"
 _CREDENTIAL_READERS = re.compile(
@@ -2972,6 +2990,30 @@ _CREDENTIAL_READERS = re.compile(
 _GUARD_KEY_FILE = re.compile(r"(?i)guard[\\/]+install\.key\b")
 _LOP_TOKEN_STORE = re.compile(r"(?i)local-operator[^\s'\"]*[\\/]auth\.db\b")
 _GUARD_ROUTES = re.compile(r"(?i)/v1/guard/(consents|org)\b")
+#: The desktop typed-approval sign/apply routes and their shipped aliases
+#: (``server/routes/desktop_credentials.py``, ``desktop_approvals.py``).
+_DESKTOP_SIGN_ROUTES = re.compile(
+    r"(?i)/v1/desktop/approvals/[^\s/'\"]+/(approve|apply)-(operation|credential)\b"
+)
+#: The consent engine's in-process entry points (security S-2).
+_GUARD_ENGINE = re.compile(
+    r"(?i)\b(GuardConsentHost|accept_signed|guard\.(consent|consent_op|install_key)\b|"
+    r"guard\s+import\s+[\w\s,()]*\b(consent|consent_op|install_key)\b)"
+)
+#: A shell running an interpreter on inline code: ``python -c``, ``python -``,
+#: a heredoc, or a pipe into python. A bare ``grep``/``rg``/``pytest`` is not.
+_INLINE_PYTHON = re.compile(
+    r"(?i)(\bpython[\d.]*\s+(-[a-z]*c\b|-(\s|$)|<<)|\|\s*python[\d.]*\b|"
+    r"\b(uv\s+run|ipython)\b[^\n|;&]*\s-c\b)"
+)
+#: A path token directly under a ``guard`` directory (key-file globs).
+_GUARD_DIR_TOKEN = re.compile(r"(?i)([^\s'\"`;|&()<>]*?)\bguard[\\/]+([^\s\\/'\"`;|&()<>]+)")
+#: ``cd`` into a ``guard`` directory (then a bare ``install.key``).
+_CD_GUARD = re.compile(r"(?i)\b(cd|pushd|chdir)\b[^\n;&|]*\bguard[\\/'\"]?(\s|;|&|\||\)|$)")
+#: Adjacent string pieces a model might concatenate a path from.
+_STRING_CONCAT = re.compile(r"""['"]\s*\+\s*['"]""")
+_STRING_JOIN = re.compile(r"""['"]\s*,\s*['"]""")
+_EMPTY_QUOTES = re.compile(r"""''|\"\"""")
 _HTTP_CLIENTS = re.compile(
     r"(?i)\b(curl|wget|https?|httpie|requests|httpx|urllib\w*|aiohttp|fetch|"
     r"invoke-webrequest|invoke-restmethod|iwr|irm|nc|ncat|socat|openssl)\b"
@@ -3009,12 +3051,64 @@ def _arg_strings(value: Any, depth: int = 0) -> list[str]:
     return []
 
 
+def _names_key_file(token: str) -> bool:
+    """``token`` (a path piece under ``guard/``) is or globs to the key file."""
+
+    if token.lower().startswith(KEY_FILE_NAME):
+        return True
+    if not any(ch in token for ch in "*?["):
+        return False
+    return fnmatch.fnmatchcase(KEY_FILE_NAME, token.lower())
+
+
+#: The fallback key file's name (``guard.install_key.KEY_FILENAME``), kept
+#: here as a literal so the guard never imports the module it protects.
+KEY_FILE_NAME = "install.key"
+
+
+def _key_file_hit(text: str, *, executing: bool) -> bool:
+    if _GUARD_KEY_FILE.search(text):
+        return True
+    for match in _GUARD_DIR_TOKEN.finditer(text):
+        prefix, token = match.group(1), match.group(2)
+        if not _names_key_file(token):
+            continue
+        # A glob that also matches source files (``guard/*``) is the key only
+        # under lop's CONFIG dir (``.local-operator``, hyphen), not the source
+        # package (``local_operator/guard/*``), so ``grep x local_operator/guard/*``
+        # stays allowed.
+        if not fnmatch.fnmatchcase("consent.py", token.lower()) or "local-operator" in (
+            prefix.lower()
+        ):
+            return True
+    if executing and _CD_GUARD.search(text):
+        # ``cd ~/.local-operator/guard && cat install.key`` / ``cat inst*``.
+        for token in re.split(r"[\s;&|()<>'\"`]+", text):
+            if token and token != "*" and _names_key_file(token):
+                return True
+    return False
+
+
 def guard_credential_hit(tool_name: str, args: Mapping[str, Any]) -> str | None:
     """What Guard material this call reaches for, or ``None``. Never raises.
 
     The answer is a fixed phrase (never call text), so it is safe to journal.
     """
 
+    if tool_name == "monitor":
+        # A monitor's scheduled runs never reach this check (``monitors/*``
+        # calls no guardrail), so the call it would schedule is judged now.
+        try:
+            nested_tool = args.get("tool")
+            nested_args = args.get("arguments")
+            if isinstance(nested_tool, str) and nested_tool != "monitor":
+                hit = guard_credential_hit(
+                    nested_tool.strip(), nested_args if isinstance(nested_args, Mapping) else {}
+                )
+                if hit is not None:
+                    return hit
+        except Exception:  # noqa: BLE001
+            pass
     try:
         if tool_name in _EXECUTING_TOOLS or tool_name in _NETWORK_TOOLS:
             scanned: Any = dict(args)
@@ -3023,17 +3117,32 @@ def guard_credential_hit(tool_name: str, args: Mapping[str, Any]) -> str | None:
         text = "\n".join(_arg_strings(scanned))[:_SCAN_MAX_CHARS]
     except Exception:  # noqa: BLE001 -- unreadable args are the other checks' business
         return None
-    if _GUARD_KEY_FILE.search(text):
+    executing = tool_name in _EXECUTING_TOOLS
+    if executing:
+        # Scan the raw text AND a de-fragmented copy: ``'install'+'.key'``,
+        # ``join('guard', 'install.key')`` and ``gu''ard`` collapse to the plain
+        # spelling. Raw first so nothing the raw text matched can be lost.
+        joined = _STRING_CONCAT.sub("", _EMPTY_QUOTES.sub("", text))
+        text = text + "\n" + _STRING_JOIN.sub("/", joined)
+    if _key_file_hit(text, executing=executing):
         return "the Radient Guard install key file"
     if _GUARD_SERVICE in text.lower() and _CREDENTIAL_READERS.search(text):
         return "the Radient Guard install key"
     if _LOP_TOKEN_STORE.search(text):
         return "Local Operator's Radient sign-in store"
-    if _GUARD_ROUTES.search(text) and (
-        tool_name in _NETWORK_TOOLS
-        or (tool_name in _EXECUTING_TOOLS and _HTTP_CLIENTS.search(text))
-    ):
+    network_shaped = tool_name in _NETWORK_TOOLS or (
+        executing and _HTTP_CLIENTS.search(text) is not None
+    )
+    if _GUARD_ROUTES.search(text) and network_shaped:
         return "a Radient Guard consent route"
+    if _DESKTOP_SIGN_ROUTES.search(text) and network_shaped:
+        return "the desktop approval signing route"
+    if (
+        executing
+        and _GUARD_ENGINE.search(text)
+        and (tool_name == "eval" or _INLINE_PYTHON.search(text))
+    ):
+        return "the Radient Guard consent engine"
     return None
 
 

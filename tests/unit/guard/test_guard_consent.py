@@ -466,7 +466,7 @@ def test_revoke_is_jwt_only_sticky_and_noticed(config_dir: Path, fixture_server:
     host = _host(config_dir, fixture_server, CountingKeyStore())
     host.offer(C.ConsentOffer.from_wire(_offer()))
     host.accept(TENANT, 1, capability=True, signature=None, source="tui")
-    assert host.revoke(TENANT).status == "granted"
+    assert host.revoke(TENANT).status == "revoked"
     revoke = fixture_server.guard_requests()[-1]
     assert (revoke["method"], revoke["path"], revoke["body"]) == (
         "POST",
@@ -515,6 +515,9 @@ def test_console_revoke_observed_on_accept_is_sticky(
         {"collection_rev": True},
         {"reason": "because"},
         {"rendered_terms_digest": "md5:x"},
+        # Review NIT-3: right length, not lowercase hex.
+        {"rendered_terms_digest": "sha256:" + "AB" * 32},
+        {"rendered_terms_digest": "sha256:" + "zz" * 32},
         {"reason": "widened", "added_scopes": []},
         {"added_scopes": ["posture"]},
     ],
@@ -550,3 +553,324 @@ def test_file_key_store_is_0600_and_never_created_by_load(config_dir: Path) -> N
     again, created_again = install_key.get_or_create(store, "inst")
     assert not created_again
     assert install_key.public_raw(again) == install_key.public_raw(key)
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: same-rev re-offers, the row claim, revoke-wins, retries
+# ---------------------------------------------------------------------------
+
+
+class _Hooked:
+    """A transport double whose grant runs a hook mid-flight (the race window)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.during_grant: Any = None
+        self.grant_error: Exception | None = None
+
+    def guard_status(self, tenant_id: str) -> dict[str, Any]:
+        self.calls.append("status")
+        return {"status": "sharing"}
+
+    def guard_grant(self, envelope: Any) -> dict[str, Any]:
+        self.calls.append("grant")
+        if self.during_grant is not None:
+            hook, self.during_grant = self.during_grant, None
+            hook()
+        if self.grant_error is not None:
+            raise self.grant_error
+        return {"consent": {}}
+
+    def guard_revoke(self, tenant_id: str) -> dict[str, Any]:
+        self.calls.append("revoke")
+        return {"revoked": True}
+
+
+def test_share_again_after_decline_re_raises_the_prompt_at_the_same_rev(
+    config_dir: Path, fixture_server: _Fixture
+) -> None:
+    """Review MAJOR-1: §5.2.6 Share again re-raises the CURRENT rev."""
+
+    host = _host(config_dir, fixture_server, CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    host.decline(TENANT, 1, surface="tui")
+    assert host.offer(C.ConsentOffer.from_wire(_offer())).status == "suppressed_sticky"
+    host.share_again(TENANT)
+    again = host.offer(C.ConsentOffer.from_wire(_offer()))
+    assert again.status == "queued" and again.row is not None
+    assert again.row.mirror_seq == 1  # a NEW desktop request, not the denied one
+    assert [(p.collection_rev, p.state) for p in host.pending()] == [(1, "pending")]
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )
+
+
+def test_share_again_after_revoke_re_grants_at_the_same_rev(
+    config_dir: Path, fixture_server: _Fixture
+) -> None:
+    """Review MAJOR-1 / RFC §5.9: re-grant after a revoke at the same rev succeeds."""
+
+    host = _host(config_dir, fixture_server, CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert host.revoke(TENANT).status == "revoked"
+    host.share_again(TENANT)
+    again = host.offer(C.ConsentOffer.from_wire(_offer(revocation_gen=1)))
+    assert again.status == "queued"
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )
+    grants = [r for r in fixture_server.guard_requests() if r["path"] == "/v1/guard/consents"]
+    assert [g["body"]["payload"]["revocation_gen"] for g in grants] == [0, 1]
+    assert host.consent(TENANT)["state"] == "live"
+
+
+def test_pending_row_is_refreshed_when_the_server_offer_changes_at_the_same_rev(
+    config_dir: Path, fixture_server: _Fixture
+) -> None:
+    host = _host(config_dir, fixture_server, CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    # Identical: a duplicate, nothing re-filed.
+    assert host.offer(C.ConsentOffer.from_wire(_offer())).status == "duplicate"
+    for over, seq in (({"rendered_terms_digest": TERMS_2}, 1), ({"revocation_gen": 3}, 2)):
+        merged = {"rendered_terms_digest": TERMS_2, **over}
+        outcome = host.offer(C.ConsentOffer.from_wire(_offer(**merged)))
+        assert outcome.status == "queued" and outcome.row is not None
+        assert outcome.row.mirror_seq == seq
+    (row,) = host.pending()
+    assert (row.terms_digest, row.revocation_gen) == (TERMS_2, 3)
+    host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    (grant,) = fixture_server.guard_requests()
+    assert grant["body"]["payload"]["terms_digest"] == TERMS_2
+    assert grant["body"]["payload"]["revocation_gen"] == 3
+
+
+def test_revoke_during_an_in_flight_grant_wins_locally(config_dir: Path) -> None:
+    """Security S-1: revoke-wins (§5.4, §5.7d) holds on the client too."""
+
+    transport = _Hooked()
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    seen: dict[str, Any] = {}
+
+    def revoke_now() -> None:
+        seen["outcome"] = host.revoke(TENANT)
+        seen["sticky"] = host.sticky(TENANT)
+
+    transport.during_grant = revoke_now
+    outcome = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert outcome.status == "revoked_first" and outcome.code == "guard_revoked_locally"
+    assert seen["sticky"] == "revoked"
+    # The grant landed, so the revoke is sent AGAIN after it: the first one may
+    # have reached the server before the grant did.
+    assert transport.calls == ["grant", "revoke", "revoke"]
+    assert host.consent(TENANT)["state"] == "revoked"
+    assert host.sticky(TENANT) == "revoked"
+    assert host.prompt(TENANT, 1).state == "superseded"  # type: ignore[union-attr]
+    assert "grant" not in [n["kind"] for n in host.notices()]
+    # Prompting stays suppressed.
+    assert host.offer(C.ConsentOffer.from_wire(_offer(collection_rev=2))).status == (
+        "suppressed_sticky"
+    )
+
+
+def test_revoke_during_a_grant_the_server_then_refuses_keeps_the_local_origin(
+    config_dir: Path,
+) -> None:
+    from local_operator.clients.radient import APIError
+
+    transport = _Hooked()
+    transport.grant_error = APIError("stale", code="guard_revocation_stale")
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    transport.during_grant = lambda: host.revoke(TENANT)
+    outcome = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert outcome.status == "revoked_first"
+    assert host.sticky(TENANT) == "revoked"
+    assert "console_revoke" not in [n["kind"] for n in host.notices()]
+    assert host.pending() == []
+
+
+def test_a_racing_second_accept_finds_the_row_claimed_and_sends_nothing(
+    config_dir: Path,
+) -> None:
+    """Review MINOR-3 / security S-3: one answer resolves the one row (§5.2.3)."""
+
+    transport = _Hooked()
+    host = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    seen: dict[str, Any] = {}
+
+    def second_answer() -> None:
+        other = C.GuardConsentHost(config_dir, transport=transport, key_store=CountingKeyStore())
+        seen["second"] = other.accept(TENANT, 1, capability=False, signature=True, source="desktop")
+
+    transport.during_grant = second_answer
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "granted"
+    )
+    assert seen["second"].status == "refused"
+    assert seen["second"].code == "guard_prompt_not_pending"
+    assert transport.calls == ["grant"]
+
+
+def test_a_failed_grant_releases_the_claim_and_a_crashed_claim_expires(
+    config_dir: Path,
+) -> None:
+    from local_operator.clients.radient import APIError
+
+    now = [1_000_000.0]
+    transport = _Hooked()
+    transport.grant_error = APIError("down", code="unavailable")
+    host = C.GuardConsentHost(
+        config_dir, transport=transport, key_store=CountingKeyStore(), clock=lambda: now[0]
+    )
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    assert host.accept(TENANT, 1, capability=True, signature=None, source="tui").status == (
+        "failed"
+    )
+    assert [p.state for p in host.pending()] == ["pending"]
+    # A process that died mid-commit leaves the claim; the lease hands it back.
+    assert host._claim(TENANT, 1) is not None
+    assert host.pending() == []
+    now[0] += C.CLAIM_LEASE_S - 1
+    host.fold_desktop_answers()
+    assert host.pending() == []
+    now[0] += 2
+    host.fold_desktop_answers()
+    assert [p.state for p in host.pending()] == ["pending"]
+
+
+def test_failed_revoke_is_retried_after_the_team_membership_lapses(boundary_rig: Any) -> None:
+    """Review MINOR-4: revoke has no membership precondition (§5.4)."""
+
+    root, fx = boundary_rig
+    host = _host(root, fx, CountingKeyStore())
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    fx.revoke_reply = (503, {"error": "refused", "code": "unavailable"})
+    assert host.revoke(TENANT).status == "failed"
+    fx.revoke_reply = (200, {"result": {}})
+    fx.memberships = [_membership("none")]
+    el.reset_memo()
+    enrol.run_boundary(root, "sign-in", force=True)
+    assert C.team_tenants(root) == []
+    before = len(fx.guard_requests())
+    assert C.check_point(root, boundary="tick") == []
+    sent = fx.guard_requests()[before:]
+    assert [(r["method"], r["path"]) for r in sent] == [("POST", "/v1/guard/consents/revoke")]
+    assert host.consent(TENANT)["state"] == "revoked"
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: the install key store never mistakes a failure for "absent"
+# ---------------------------------------------------------------------------
+
+
+class _Proc:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+INSTALL_ID = "0123456789abcdef0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    ("rc", "expect"), [(44, None), (51, "error"), (36, "error"), (0, "ab" * 32)]
+)
+def test_keychain_only_item_not_found_reads_as_absent(
+    monkeypatch: pytest.MonkeyPatch, rc: int, expect: str | None
+) -> None:
+    """Security S-4 / review MINOR-2. ``subprocess.run`` is faked: no Keychain is touched."""
+
+    argv: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kw: Any) -> _Proc:
+        argv.append(cmd)
+        return _Proc(rc, stdout=("ab" * 32 + "\n") if rc == 0 else "")
+
+    monkeypatch.setattr(install_key.subprocess, "run", fake_run)
+    store = install_key.KeychainKeyStore()
+    if expect == "error":
+        with pytest.raises(install_key.GuardKeyStoreError):
+            store.load(INSTALL_ID)
+    else:
+        assert store.load(INSTALL_ID) == expect
+    # Security N-1: the absolute binary, never a PATH lookup.
+    assert argv[0][0] == "/usr/bin/security"
+
+
+def test_keychain_refuses_a_malformed_install_id_before_any_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("no subprocess for a malformed install id")
+
+    monkeypatch.setattr(install_key.subprocess, "run", boom)
+    store = install_key.KeychainKeyStore()
+    for bad in ('x" -w "evil', "A" * 32, ""):
+        with pytest.raises(install_key.GuardKeyStoreError):
+            store.store(bad, "ab" * 32)
+
+
+@pytest.mark.parametrize(
+    ("rc", "stderr", "expect"),
+    [(1, "", None), (1, "Cannot autolaunch D-Bus without X11", "error"), (2, "", "error")],
+)
+def test_secret_tool_only_a_silent_exit_1_reads_as_absent(
+    monkeypatch: pytest.MonkeyPatch, rc: int, stderr: str, expect: str | None
+) -> None:
+    monkeypatch.setattr(install_key.subprocess, "run", lambda cmd, **kw: _Proc(rc, stderr=stderr))
+    store = install_key.SecretToolKeyStore("/usr/bin/secret-tool")
+    if expect == "error":
+        with pytest.raises(install_key.GuardKeyStoreError):
+            store.load(INSTALL_ID)
+    else:
+        assert store.load(INSTALL_ID) is None
+
+
+class _FailingReadStore(CountingKeyStore):
+    def load(self, install_id: str) -> str | None:
+        raise install_key.GuardKeyStoreError("locked")
+
+
+def test_a_failed_key_read_never_mints_a_replacement(config_dir: Path) -> None:
+    store = _FailingReadStore()
+    with pytest.raises(install_key.GuardKeyStoreError):
+        install_key.get_or_create(store, INSTALL_ID)
+    assert store.writes == 0
+
+
+class _LosesTheRace(CountingKeyStore):
+    """``store`` finds a racing creator's item already there (Keychain without -U)."""
+
+    def __init__(self, winner_hex: str) -> None:
+        super().__init__()
+        self._winner = winner_hex
+
+    def store(self, install_id: str, secret_hex: str) -> None:
+        self.writes += 1
+        self.items[install_id] = self._winner
+        raise install_key.GuardKeyStoreError("duplicate item")
+
+
+def test_a_creator_that_loses_the_race_signs_with_the_winners_key(config_dir: Path) -> None:
+    winner_hex = "11" * 32
+    key, created = install_key.get_or_create(
+        _LosesTheRace(winner_hex), INSTALL_ID, lock_path=install_key.lock_file(config_dir)
+    )
+    assert not created
+    assert install_key.public_raw(key) == install_key.public_raw(
+        install_key._private_from_hex(winner_hex)
+    )
+
+
+def test_file_key_store_create_never_overwrites_this_installs_key(config_dir: Path) -> None:
+    store = install_key.FileKeyStore(config_dir)
+    first, _ = install_key.get_or_create(store, INSTALL_ID)
+    store.store(INSTALL_ID, "22" * 32)  # a racing second creator
+    assert store.load(INSTALL_ID) == first.private_bytes_raw().hex()
+    # A key left by a PREVIOUS install id is replaced, not kept.
+    store.store("f" * 32, "33" * 32)
+    assert store.load("f" * 32) == "33" * 32
+    assert not list(install_key.key_file(config_dir).parent.glob("*.tmp"))

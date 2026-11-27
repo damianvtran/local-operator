@@ -792,6 +792,10 @@ _CONFIG_SECRET_SUBPATHS: tuple[str, ...] = (
     "tunnel/cloudflared.token",
     "push-handle.key",
     "mcp.json",
+    # The Radient Guard install key's 0600 file fallback (``guard/install_key``;
+    # Windows, Linux without libsecret, or ``LOCAL_OPERATOR_GUARD_KEY_STORE=file``).
+    # Guard RFC v0.9 §5.7a: a model shell must not read it (security S-2).
+    "guard/install.key",
 )
 
 #: Per-network secret files: ``network/networks/<id>.secrets.json``. A regex
