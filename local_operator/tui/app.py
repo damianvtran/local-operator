@@ -57986,9 +57986,9 @@ class OperatorApp(App[None]):
         """
         try:
             from local_operator.guard import surface as guard_surface
-            from local_operator.paths import config_dir
             from local_operator.guard.consent import GuardConsentHost
             from local_operator.guard.reports import GuardReports
+            from local_operator.paths import config_dir
             from local_operator.tui.widgets.guard_view import (
                 badge_text,
                 notice_text,
