@@ -57,11 +57,27 @@ STATE_PAUSED: Final = "paused"
 STATE_WILL_ASK: Final = "will_ask"
 
 #: How many days backup copies of deleted step-by-step timing survive (RFC §5.4
-#: "X", recorded by G2). ``None`` until measured: while it is, the consent engine
-#: refuses ``trace_detail``/``admin_share`` offers
-#: (``guard.consent.UNMEASURED_SCOPES``), so the revoke confirm that must state
-#: X can never render without it (copy review round 1, C1).
-BACKUP_DAYS: Final[int | None] = None
+#: "X", recorded by G2): the revoke confirm states it ("Copies in backups are
+#: gone within {backup_days} days"), on the TUI and on the desktop route's
+#: ``backup_days``. THE ONE PLACE both read it.
+#:
+#: MEASURED 31 on 2026-11-27 from the Atlas backup policy of the production
+#: cluster (G2 receipt "Atlas backup retention", read-only describe, then the
+#: operator-confirmed change: yearly snapshots dropped, monthly kept 1 month,
+#: weekly 4 weeks, hourly/daily 7 days, no cross-region copies). The longest a
+#: copy of a deleted row can persist is the monthly snapshot's one month = 31
+#: days (weekly is 28; PITR is 7). Snapshots taken before the change keep their
+#: original expiry but hold no Guard data (the namespace epoch was unset), so
+#: X holds for every Guard row. If the Atlas policy is ever lengthened, this
+#: constant and the RFC §11.1' disclosure change together.
+#:
+#: SETTING IT DOES NOT LIFT ``guard.consent.UNMEASURED_SCOPES``. The engine
+#: still refuses ``trace_detail``/``admin_share`` offers: offering a scope
+#: members can consent to is its own decision (copy and server readiness), not a
+#: side effect of knowing X. Until then no consent can hold ``trace_detail``, so
+#: the trace-detail revoke sentence stays unreachable and the TUI keeps showing
+#: the plain revoke body.
+BACKUP_DAYS: Final[int | None] = 31
 
 #: The process-environment markers that mean "this terminal may be driven by an
 #: agent, not a person" (security round 1, S-1). ``LOCAL_OPERATOR_AGENT_SHELL``
@@ -103,6 +119,88 @@ class OrgState:
     #: Epoch seconds of the state's cause where the copy names a date (the
     #: Console stop, §15.4' C10); 0 otherwise.
     since: float = 0.0
+
+
+def one_line(text: str) -> str:
+    """An org-supplied name flattened to one line: no control characters, capped (S-3).
+
+    The TUI renders the result with markup off; the desktop routes ship it as
+    JSON text. Either way a name an org controls cannot carry a newline, an
+    escape sequence or an unbounded run into a client.
+    """
+
+    flat = "".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text)
+    flat = " ".join(flat.split())
+    return flat[:79] + "…" if len(flat) > 80 else flat
+
+
+def badge_kind(states: list[OrgState], *, reports_waiting: int = 0) -> str:
+    """The status badge as an enum (``""`` = none); the TUI and the desktop agree on it.
+
+    Order: a waiting consent choice, then a waiting report draft (UX round 1,
+    U6), then a pending widening (still sharing, never "paused", §13.3'
+    ``consent_stale``), then plain sharing.
+    """
+
+    if any(s.state == STATE_WAITING for s in states):
+        return "waiting"
+    if reports_waiting > 0:
+        return "report_waiting"
+    if any(s.state == STATE_SHARING_PENDING for s in states):
+        return "sharing_pending"
+    if any(s.state == STATE_SHARING for s in states):
+        return "sharing"
+    return ""
+
+
+def computer_name() -> str:
+    """This computer's short name for "this computer" lines, ``""`` when unknown."""
+
+    import socket
+
+    try:
+        return socket.gethostname().split(".")[0].strip()
+    except OSError:
+        return ""
+
+
+def load_trial_eligibility(config_dir: Path | str) -> Mapping[str, Any] | None:
+    """``GET /v1/team-trial/eligibility`` as the signed-in person, or ``None``.
+
+    The non-Team card's only read (§14', §0.13). It is NOT a ``/v1/guard/*``
+    call and writes nothing. Blocking (it resolves the person's OAuth access on
+    a private loop): run it off the event loop. Lives here, not in the TUI
+    widget, so the desktop route can call it without importing Textual.
+    """
+
+    from local_operator.hub_org import eligibility
+
+    resolved = eligibility.person_client(Path(config_dir))
+    if resolved is None:
+        return None
+    return resolved[0].team_trial_eligibility()
+
+
+def is_sharing(state: OrgState) -> bool:
+    """ "Stop sharing" is offered: this computer is sharing with the org.
+
+    ONE predicate for the TUI's button and the desktop route's ``can_revoke`` /
+    revoke refusal, so the two cannot disagree about when a stop is offered. A
+    ``revoke_pending`` org is NOT sharing (the stop is committed, only the
+    request to Radient is outstanding), so it is not offered a second stop.
+    """
+
+    return state.state in (STATE_SHARING, STATE_SHARING_PENDING)
+
+
+def is_stopped(state: OrgState) -> bool:
+    """ "Share again" is offered for this org (still subject to :func:`host_can_answer`).
+
+    ONE predicate for the button and its handler (review R1-2): never a
+    ``revoke_pending`` org, whose stop has not been delivered yet.
+    """
+
+    return state.state in (STATE_NOT_SHARING, STATE_PAUSED) and state.reason != "revoke_pending"
 
 
 def host_can_answer() -> bool:
@@ -373,13 +471,7 @@ def non_team_card(eligibility: Mapping[str, Any] | None) -> NonTeamCard:
             days = raw
     org: str | None = None
     if isinstance(eligibility, Mapping) and isinstance(eligibility.get("tenant_name"), str):
-        # An org-supplied name: one line, no control characters, capped (the
-        # S-3 shape; the TUI renders it with markup off).
-        flat = "".join(
-            " " if unicodedata.category(ch)[0] == "C" else ch for ch in eligibility["tenant_name"]
-        )
-        flat = " ".join(flat.split())
-        org = (flat[:79] + "…" if len(flat) > 80 else flat) or None
+        org = one_line(eligibility["tenant_name"]) or None
     return NonTeamCard(trial_days=days, url=team_url(), org=org)
 
 
@@ -395,9 +487,15 @@ __all__ = [
     "STATE_WAITING",
     "STATE_WILL_ASK",
     "BACKUP_DAYS",
+    "badge_kind",
+    "computer_name",
     "guard_available",
     "guard_insights_tenants",
     "host_can_answer",
+    "is_sharing",
+    "is_stopped",
+    "load_trial_eligibility",
+    "one_line",
     "insights_tenants",
     "insights_url",
     "non_team_card",
