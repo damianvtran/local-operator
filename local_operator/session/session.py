@@ -4465,6 +4465,13 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # The delegating session as ``origin.json`` records it, read ONCE here.
+        # A child resumed by id has no live parent handle (``_parent_session_id``
+        # is ``""``), yet it is still a child: the divergence judge and
+        # ``_integration_consent_seam`` both need the durable marker, and reading
+        # it in one place keeps the two from disagreeing about who is a child.
+        self._origin_parent_session_id = origin_parent_session_id(transcript.directory)
+
         # The divergence observer (``local_operator/divergence.py``) is
         # SESSION-scoped, and that is the whole reason it is built here: "fire
         # once per novel root" and "escalate on a second turn" are facts about a
@@ -4481,7 +4488,7 @@ class Session:
             # marker on disk: a child resumed by id has no live parent handle,
             # and ``origin.json`` is written once by whoever created the
             # directory — the only place that knows.
-            parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
+            parent_session_id=parent_session_id or self._origin_parent_session_id,
             on_notice=self._record_divergence_notice,
         )
         from local_operator.profile_actions import ProfileActions
@@ -14995,7 +15002,22 @@ class Session:
         §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
         answer rows arrive during the run and reset when the next run starts.
         """
-        if self._parent_session_id or self.ask_queue() is None:
+        # A resumed child carries no constructor parent, but ``origin.json`` still
+        # names the session that delegated it: treat that marker as "child" too,
+        # or a resumed child would get the integration admin surface its first run
+        # was refused (S-2).
+        if self._parent_session_id or self._origin_parent_session_id:
+            return None
+        # No approval gate = no person who can be asked about the operations that
+        # never file a consent card of their own (``revoke``, ``draft_app``,
+        # ``status``, ``list``): the loop's write-tier card is skipped when
+        # ``request_approval`` is None, so they would run unattended. Unattended
+        # hosts (resume workers, agent-started workstreams, the moderation eval
+        # agent) install an ask handler that cannot be answered but no approval
+        # gate, which is exactly what this condition keeps out (S-1). An
+        # interactive ``--yolo`` session still holds its gate on the Session —
+        # yolo is applied where the loop is handed it — so it is unaffected.
+        if self._request_approval is None or self.ask_queue() is None:
             return None
         from local_operator.team_bridge.integration_consent import IntegrationConsent
 
