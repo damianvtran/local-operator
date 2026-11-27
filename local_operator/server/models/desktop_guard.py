@@ -113,6 +113,7 @@ class GuardReportDraft(BaseModel):
     tenant: str
     org: str
     kind: Literal["credential_exposure", "excessive_guardrail", "other"]
+    #: Epoch seconds floored to the minute, as the TUI shows it (security review S-4).
     created_at: float
 
 
@@ -124,6 +125,7 @@ class GuardNotice(BaseModel):
     kind: Literal["grant", "widen"]
     org: str
     scopes: list[ScopeName]
+    #: Epoch seconds FLOORED to the minute (the TUI renders ``%H:%M``; security review S-4).
     at: float
 
 
@@ -165,7 +167,8 @@ class GuardStatus(BaseModel):
     #: This computer's short name, for "this computer" lines and receipts.
     this_computer: str = ""
     #: Whether this backend accepts the person-only writes (``share-again``). It is
-    #: ``surface.host_can_answer()``: False for a backend started inside an agent's
+    #: ``surface.host_can_answer()`` AS CAPTURED when ``lop serve`` started (the daemon later
+    #: drops the markers it is read from): False for a backend started inside an agent's
     #: shell or a desktop console pane.
     can_answer: bool = False
     #: Console pages (first-party, non-bearer).
@@ -205,10 +208,16 @@ class GuardNoticeShownResult(BaseModel):
 
 
 class GuardNoticeDueRequest(BaseModel):
-    """``POST .../notice-due``: once-a-day cadence for the §15.4' C6 host notice."""
+    """``POST .../notice-due``: once-a-day cadence for the §15.4' C6 host notice.
+
+    ``desktop`` only, bound per capability (security review S-3): the plane has one shared
+    bearer and no per-caller identity, and this router is desktop-only, so the one surface a
+    caller here can be is the desktop. A phone-relay twin carries its own authenticated
+    surface when it exists.
+    """
 
     model_config = {"extra": "forbid", "strict": True}
-    surface: Literal["desktop", "mobile"]
+    surface: Literal["desktop"]
 
 
 class GuardNoticeDue(BaseModel):

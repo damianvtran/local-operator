@@ -290,6 +290,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_cross_platform_environment()
 
     app.state.config_manager = ConfigManager(config_dir=config_dir)
+    # Whether this daemon was started by a person (Guard's person-only gate). Taken from the
+    # capture ``lop serve`` made BEFORE it dropped the agent-shell markers; a per-request
+    # read of ``os.environ`` would always see the cleaned environment.
+    from local_operator.guard.surface import served_host_can_answer
+
+    app.state.guard_host_can_answer = served_host_can_answer()
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)

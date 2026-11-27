@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi import Path as PathParam
 from fastapi import Request
 
+from local_operator.guard import surface
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_guard import (
@@ -70,6 +71,26 @@ def _root(request: Request) -> Path:
     return request.app.state.config_manager.config_dir
 
 
+def _can_answer(request: Request) -> bool:
+    """Whether this daemon was started by a person, as captured at ``lop serve`` start.
+
+    ``app.state.guard_host_can_answer`` is set by the lifespan from the capture taken BEFORE
+    ``lop serve`` dropped its agent-shell markers; reading ``os.environ`` here would always
+    say yes on a served daemon (security review S-1). An app that never went through the
+    lifespan falls back to the same helper, which then reads the live environment.
+    """
+    value = getattr(request.app.state, "guard_host_can_answer", None)
+    return value if isinstance(value, bool) else surface.served_host_can_answer()
+
+
+def _listed(request: Request) -> set[int]:
+    """The receipt ids this daemon has listed (``notices/{id}/shown``'s allow-list)."""
+    state = request.app.state
+    if not isinstance(getattr(state, "guard_notices_listed", None), set):
+        state.guard_notices_listed = set()
+    return state.guard_notices_listed
+
+
 async def _local(request: Request, work: Any) -> Any:
     """Run one blocking Guard call off the event loop and translate its refusals.
 
@@ -89,7 +110,14 @@ async def _local(request: Request, work: Any) -> Any:
 @router.get("/v1/desktop/guard", response_model=CRUDResponse[GuardStatus])
 async def guard_status(request: Request):
     """The overview and the badge: states, drafts, receipts, the non-Team card. No network."""
-    return reply(await _local(request, lambda: guard.status(_root(request))))
+    return reply(
+        await _local(
+            request,
+            lambda: guard.status(
+                _root(request), can_answer=_can_answer(request), listed=_listed(request)
+            ),
+        )
+    )
 
 
 @router.get("/v1/desktop/guard/non-team-card", response_model=CRUDResponse[GuardNonTeamCard])
@@ -103,7 +131,11 @@ async def guard_non_team_card(request: Request):
 )
 async def guard_revoke(request: Request, tenant: str = _TENANT):
     """ "Stop sharing" with one org: the local stop is committed before Radient is told."""
-    return reply(await _local(request, lambda: guard.revoke(_root(request), tenant)))
+    return reply(
+        await _local(
+            request, lambda: guard.revoke(_root(request), tenant, can_answer=_can_answer(request))
+        )
+    )
 
 
 @router.post(
@@ -112,7 +144,12 @@ async def guard_revoke(request: Request, tenant: str = _TENANT):
 )
 async def guard_share_again(request: Request, tenant: str = _TENANT):
     """Lift a sticky "no"; grants nothing (the prompt still needs the signed card)."""
-    return reply(await _local(request, lambda: guard.share_again(_root(request), tenant)))
+    return reply(
+        await _local(
+            request,
+            lambda: guard.share_again(_root(request), tenant, can_answer=_can_answer(request)),
+        )
+    )
 
 
 @router.post(
@@ -130,7 +167,11 @@ async def guard_discard_report(request: Request, draft_id: str = _ID):
 )
 async def guard_notice_shown(request: Request, notice_id: int):
     """Mark a grant/widen receipt shown (once, on any surface)."""
-    return reply(await _local(request, lambda: guard.notice_shown(_root(request), notice_id)))
+    return reply(
+        await _local(
+            request, lambda: guard.notice_shown(_root(request), notice_id, listed=_listed(request))
+        )
+    )
 
 
 @router.post("/v1/desktop/guard/notice-due", response_model=CRUDResponse[GuardNoticeDue])

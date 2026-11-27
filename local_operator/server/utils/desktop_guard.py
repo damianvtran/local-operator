@@ -19,7 +19,12 @@ likewise absent (it is the authority-increasing half of
 ``share_again`` is the one person-only write: it lifts a sticky "no" so the
 org's prompt can return, so it is refused wherever the TUI's capability gate
 (``surface.host_can_answer``) refuses -- a backend started inside an agent's
-shell or a desktop console pane.
+shell or a desktop console pane. The gate is a fact about how the daemon was STARTED,
+so the routes pass it in from the capture ``lop serve`` takes before it drops its own
+agent-shell markers (``surface.capture_host_can_answer``); this module never reads the
+environment. It is a per-process gate, not a per-caller one: what keeps a caller in an
+agent's shell out of a person-started daemon is the desktop bearer, which agent shells
+do not receive.
 
 ZERO COST WHERE GUARD IS ABSENT. A non-Team account reads one cached membership
 record and nothing else: no Guard file is opened or created, no transport is
@@ -35,6 +40,7 @@ read for ``share_again`` and ``revoke``); the routes run it with
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -101,10 +107,9 @@ def _prompt(row: Any) -> dict[str, Any]:
     }
 
 
-def _org(root: Path, state: surface.OrgState, host: Any) -> dict[str, Any]:
+def _org(state: surface.OrgState, host: Any, can_answer: bool) -> dict[str, Any]:
     consent = host.consent(state.tenant)
     live = consent is not None and consent.get("state") == "live"
-    capable = surface.host_can_answer()
     return {
         "tenant": state.tenant,
         "org": surface.one_line(state.org),
@@ -118,12 +123,8 @@ def _org(root: Path, state: surface.OrgState, host: Any) -> dict[str, Any]:
         "can_revoke": surface.is_sharing(state),
         # Offered AND admitted: a host the TUI would hide the button on must not
         # advertise it here either.
-        "can_share_again": surface.is_stopped(state) and capable,
+        "can_share_again": surface.is_stopped(state) and can_answer,
     }
-
-
-def _states(root: Path) -> list[surface.OrgState]:
-    return surface.org_states(root)
 
 
 def _find(root: Path, tenant: str) -> surface.OrgState:
@@ -131,7 +132,7 @@ def _find(root: Path, tenant: str) -> surface.OrgState:
     from local_operator.guard.reports import GuardReportRefused
 
     try:
-        for state in _states(root):
+        for state in surface.org_states(root):
             if state.tenant == tenant:
                 return state
     except (GuardConsentRefused, GuardReportRefused) as error:
@@ -139,19 +140,17 @@ def _find(root: Path, tenant: str) -> surface.OrgState:
     raise GuardRefusal(404, "guard_org_unknown", "This computer has no Guard record for that org.")
 
 
-def _fresh_org(root: Path, tenant: str) -> dict[str, Any] | None:
+def _fresh_org(root: Path, tenant: str, can_answer: bool) -> dict[str, Any] | None:
     """The org's row AFTER a write, or ``None`` when it no longer lists (never raises)."""
 
     from local_operator.guard.consent import GuardConsentHost
 
     try:
         host = GuardConsentHost(root, transport=None, mirror=False)
-        for state in _states(root):
+        for state in surface.org_states(root):
             if state.tenant == tenant:
-                return _org(root, state, host)
-    except (
-        Exception
-    ):  # noqa: BLE001 - the write already happened; a re-read failure must not undo it
+                return _org(state, host, can_answer)
+    except Exception:  # noqa: BLE001 - write done; a re-read failure must not undo it
         return None
     return None
 
@@ -161,8 +160,14 @@ def _fresh_org(root: Path, tenant: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def status(root: Path) -> dict[str, Any]:
-    """``GET /v1/desktop/guard``. Local facts only; zero network, zero files for non-Team."""
+def status(root: Path, *, can_answer: bool, listed: set[int]) -> dict[str, Any]:
+    """``GET /v1/desktop/guard``. Local facts only; zero network, zero files for non-Team.
+
+    ``can_answer`` is the daemon's start-time capture (``surface.served_host_can_answer``),
+    NOT a read of this process's environment, which ``lop serve`` has already cleaned
+    (security review S-1). ``listed`` is the set of receipt ids this daemon has handed out:
+    ``notice_shown`` accepts only ids that were first listed here (S-2).
+    """
 
     from local_operator.guard.consent import (
         GuardConsentHost,
@@ -174,11 +179,11 @@ def status(root: Path) -> dict[str, Any]:
     base: dict[str, Any] = {
         "backup_days": surface.BACKUP_DAYS,
         "this_computer": surface.computer_name(),
-        "can_answer": surface.host_can_answer(),
+        "can_answer": can_answer,
         "team_url": surface.team_url(),
     }
     try:
-        states = _states(root)
+        states = surface.org_states(root)
         drafts = GuardReports(root).drafts() if states else []
         host = GuardConsentHost(root, transport=None, mirror=False)
         # Read inside the guard: a damaged store can fail here as well as in ``org_states``.
@@ -207,23 +212,24 @@ def status(root: Path) -> dict[str, Any]:
             "kind": n["kind"],
             "org": surface.one_line(str(n.get("org_display_name") or "")),
             "scopes": _scopes(n.get("scopes")),
-            "at": float(n.get("at") or 0.0),
+            "at": surface.to_minute(n.get("at") or 0.0),
         }
         for n in raw_notices
         if n.get("kind") in RECEIPT_KINDS
     ]
+    _remember(listed, (n["id"] for n in notices))
     return {
         **base,
         "mode": "orgs",
         "badge": surface.badge_kind(states, reports_waiting=len(reports)),
-        "orgs": [_org(root, state, host) for state in states],
+        "orgs": [_org(state, host, can_answer) for state in states],
         "reports": [
             {
                 "id": d.id,
                 "tenant": d.tenant,
                 "org": surface.one_line(known[d.tenant]),
                 "kind": d.kind,
-                "created_at": d.created_at,
+                "created_at": surface.to_minute(d.created_at),
             }
             for d in reports
         ],
@@ -266,7 +272,7 @@ def non_team_card(root: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def revoke(root: Path, tenant: str) -> dict[str, Any]:
+def revoke(root: Path, tenant: str, *, can_answer: bool) -> dict[str, Any]:
     """``POST .../orgs/{tenant}/revoke``: "Stop sharing". The TUI's own ``host.revoke``."""
 
     from local_operator.guard.consent import (
@@ -287,16 +293,16 @@ def revoke(root: Path, tenant: str) -> dict[str, Any]:
     # ``revoke`` commits the local stop BEFORE its request, so a failed request is still
     # "stopped on this computer": a 200 with ``revoke_pending``, retried at the next
     # admission point -- never a 5xx that would read as "still sharing" (§5.4, C5).
-    done = outcome.status in ("revoked", "granted")
+    done = outcome.status == "revoked"
     return {
         "tenant": tenant,
         "status": "revoked" if done else "revoke_pending",
         "code": "" if done else outcome.code,
-        "org": _fresh_org(root, tenant),
+        "org": _fresh_org(root, tenant, can_answer),
     }
 
 
-def share_again(root: Path, tenant: str) -> dict[str, Any]:
+def share_again(root: Path, tenant: str, *, can_answer: bool) -> dict[str, Any]:
     """``POST .../orgs/{tenant}/share-again``: lift the sticky answer, then re-read the offer."""
 
     from local_operator.guard import consent
@@ -304,8 +310,10 @@ def share_again(root: Path, tenant: str) -> dict[str, Any]:
 
     _require_available(root)
     state = _find(root, tenant)
-    # The TUI hides "Share again" for a host that cannot answer (U12); the same gate here.
-    if not surface.host_can_answer():
+    # The TUI hides "Share again" for a host that cannot answer (U12); the same gate here,
+    # read from the start-time capture because the served daemon's own environment no longer
+    # carries the markers (security review S-1).
+    if not can_answer:
         raise GuardRefusal(
             409,
             "guard_answer_not_admitted",
@@ -321,7 +329,7 @@ def share_again(root: Path, tenant: str) -> dict[str, Any]:
     # U2/C4: read the org's offer now rather than at the next 6 h tick so its prompt can
     # follow. ``check_point`` never raises; the next admission point retries anyway.
     consent.check_point(root, boundary="share_again")
-    return {"tenant": tenant, "org": _fresh_org(root, tenant)}
+    return {"tenant": tenant, "org": _fresh_org(root, tenant, can_answer)}
 
 
 def discard_report(root: Path, draft_id: str) -> dict[str, Any]:
@@ -341,27 +349,54 @@ def discard_report(root: Path, draft_id: str) -> dict[str, Any]:
     return {"id": draft_id, "state": "discarded"}
 
 
-def notice_shown(root: Path, notice_id: int) -> dict[str, Any]:
-    """``POST .../notices/{id}/shown``: mark a receipt shown (shared with the TUI)."""
+#: Receipt ids remembered per daemon. A receipt table is tens of rows; this only bounds a
+#: pathological one so the set cannot grow without limit.
+_LISTED_CAP = 1024
+
+
+def _remember(listed: set[int], ids: Iterable[int]) -> None:
+    """Record the receipt ids ``status`` just handed out (``notice_shown``'s allow-list)."""
+
+    fresh = [int(i) for i in ids]
+    if len(listed) + len(fresh) > _LISTED_CAP:
+        listed.clear()
+    listed.update(fresh)
+
+
+def notice_shown(root: Path, notice_id: int, *, listed: set[int]) -> dict[str, Any]:
+    """``POST .../notices/{id}/shown``: mark a receipt shown (shared with the TUI).
+
+    An acknowledgement a client makes AFTER it rendered the receipt, so only an id that
+    :func:`status` returned from this daemon is accepted: a bearer holder cannot dismiss a
+    receipt no surface here has displayed by guessing small integers (security review S-2).
+    Idempotent: a repeat for a receipt already shown is the same 200 with no second write.
+    The receipt itself stays in the store; this only flips ``shown``.
+    """
 
     from local_operator.guard.consent import GuardConsentHost
 
     _require_available(root)
-    host = GuardConsentHost(root, transport=None, mirror=False)
-    if not any(
-        int(n["id"]) == notice_id
-        for n in host.notices(unshown_only=True)
-        if n.get("kind") in RECEIPT_KINDS
-    ):
+    if notice_id not in listed:
         raise GuardRefusal(
-            404, "guard_notice_unknown", "There is no unshown Guard receipt with that id."
+            404, "guard_notice_unknown", "There is no Guard receipt with that id to mark shown."
         )
-    host.mark_notice_shown(notice_id)
+    host = GuardConsentHost(root, transport=None, mirror=False)
+    pending = {
+        int(n["id"]) for n in host.notices(unshown_only=True) if n.get("kind") in RECEIPT_KINDS
+    }
+    if notice_id in pending:
+        host.mark_notice_shown(notice_id)
     return {"id": notice_id, "shown": True}
 
 
 def notice_due(root: Path, surface_name: str) -> dict[str, Any]:
-    """``POST .../notice-due``: the §15.4' C6 once-a-day cadence. Asking consumes the day."""
+    """``POST .../notice-due``: the §15.4' C6 once-a-day cadence. Asking consumes the day.
+
+    ``surface_name`` is the surface the authenticated caller IS. The plane has one shared
+    bearer and no per-caller identity, so the request model binds it per capability: this
+    router is desktop-only (``features.guard`` is in ``DESKTOP_ONLY_FEATURES``), hence only
+    ``desktop`` is accepted and a caller cannot consume another surface's day (S-3).
+    """
 
     _require_available(root)
     return {"due": surface.should_show_notice(root, surface=surface_name)}

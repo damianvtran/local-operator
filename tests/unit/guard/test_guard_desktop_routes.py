@@ -90,13 +90,18 @@ def _non_team(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @asynccontextmanager
-async def _http(root: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[AsyncClient]:
+async def _http(
+    root: Path, monkeypatch: pytest.MonkeyPatch, *, can_answer: bool | None = None
+) -> AsyncIterator[AsyncClient]:
     monkeypatch.setattr(desktop, "_SPAWN_BEARER", None)
     monkeypatch.setattr(desktop, "_CLAIMED", None)
     monkeypatch.setenv(desktop.TOKEN_ENV, TOKEN)
     app = FastAPI()
     app.state.config_manager = ConfigManager(root)
     app.state.desktop_sessions = DesktopSessions(root)
+    if can_answer is not None:
+        # What the lifespan publishes from the start-time capture on a real ``lop serve``.
+        app.state.guard_host_can_answer = can_answer
     app.include_router(approval_routes.router)
     app.include_router(guard_routes.router)
     async with AsyncClient(
@@ -594,24 +599,56 @@ async def test_receipts_are_listed_once_marked_shown_and_a_stop_carries_none(
     _team(monkeypatch)
     host = _sharing(root, fixture_server)
     host.revoke(TENANT)  # writes a ``revoke`` notice: a stop is not a receipt
+    grant_id = next(n["id"] for n in host.notices() if n["kind"] == "grant")
+    revoke_id = next(n["id"] for n in host.notices() if n["kind"] == "revoke")
     async with _http(root, monkeypatch) as client:
+        # S-2: a real, unshown receipt id that THIS daemon has not listed is not accepted, so a
+        # bearer holder cannot dismiss "Not you? Stop sharing" by guessing small integers.
+        unlisted = await client.post(f"{BASE}/notices/{grant_id}/shown")
+        still_unshown = [n["id"] for n in host.notices(unshown_only=True)]
         first = _body(await client.get(BASE))
         grant = first["notices"][0]
-        revoke_id = next(n["id"] for n in host.notices() if n["kind"] == "revoke")
         refused = await client.post(f"{BASE}/notices/{revoke_id}/shown")
+        guessed = await client.post(f"{BASE}/notices/{grant['id'] + 1000}/shown")
         shown = await client.post(f"{BASE}/notices/{grant['id']}/shown")
         second = _body(await client.get(BASE))
-        gone = await client.post(f"{BASE}/notices/{grant['id']}/shown")
+        replay = await client.post(f"{BASE}/notices/{grant['id']}/shown")
+    assert unlisted.status_code == 404 and _code(unlisted) == "guard_notice_unknown"
+    assert grant_id in still_unshown, "the refused call must not have flipped the receipt"
     assert [n["kind"] for n in first["notices"]] == ["grant"]
     assert grant["org"] == "Acme" and grant["scopes"] == ["decisions", "task_time"]
     assert refused.status_code == 404 and _code(refused) == "guard_notice_unknown"
+    assert guessed.status_code == 404 and _code(guessed) == "guard_notice_unknown"
     assert _body(shown) == {"id": grant["id"], "shown": True}
     assert second["notices"] == []
-    assert gone.status_code == 404
+    # Idempotent: the same acknowledgement again is the same answer, not an error.
+    assert replay.status_code == 200 and _body(replay) == {"id": grant["id"], "shown": True}
+    assert [n["kind"] for n in host.notices(unshown_only=True)] == ["revoke"]  # not a receipt
 
 
 @pytest.mark.asyncio
-async def test_notice_due_is_once_per_day_per_surface_and_validates_the_surface(
+async def test_wire_timestamps_are_floored_to_the_minute_like_the_tui(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any
+) -> None:
+    """S-4: a renderer cannot show (and a relay twin cannot forward) finer timing than the TUI."""
+
+    _team(monkeypatch)
+    _sharing(root, fixture_server)
+    draft, _created = GuardReports(root).draft(TENANT, "other")
+    async with _http(root, monkeypatch) as client:
+        body = _body(await client.get(BASE))
+    notice_at = body["notices"][0]["at"]
+    created = body["reports"][0]["created_at"]
+    assert notice_at > 0 and notice_at % 60 == 0
+    assert created > 0 and created % 60 == 0
+    # The wire value is the engine's value floored (never rounded up into the future).
+    assert created == surface.to_minute(draft.created_at) <= draft.created_at
+    assert surface.to_minute(1795817427.449125) == 1795817400.0
+    assert surface.to_minute("junk") == 0.0
+
+
+@pytest.mark.asyncio
+async def test_notice_due_is_once_per_day_and_bound_to_the_desktop_surface(
     root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any
 ) -> None:
     _team(monkeypatch)
@@ -619,11 +656,33 @@ async def test_notice_due_is_once_per_day_per_surface_and_validates_the_surface(
     async with _http(root, monkeypatch) as client:
         first = await client.post(f"{BASE}/notice-due", json={"surface": "desktop"})
         second = await client.post(f"{BASE}/notice-due", json={"surface": "desktop"})
+        # S-3: the plane has one bearer and no caller identity, so another surface's day
+        # cannot be consumed from here at all.
         phone = await client.post(f"{BASE}/notice-due", json={"surface": "mobile"})
         bad = await client.post(f"{BASE}/notice-due", json={"surface": "tui"})
         extra = await client.post(f"{BASE}/notice-due", json={"surface": "desktop", "scopes": []})
-    assert (_body(first)["due"], _body(second)["due"], _body(phone)["due"]) == (True, False, True)
-    assert bad.status_code == 422 and extra.status_code == 422
+    assert (_body(first)["due"], _body(second)["due"]) == (True, False)
+    assert phone.status_code == bad.status_code == extra.status_code == 422
+    assert surface.should_show_notice(root, surface="mobile") is True  # the day was never spent
+
+
+@pytest.mark.asyncio
+async def test_the_routes_read_the_start_time_capture_from_app_state(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any
+) -> None:
+    """S-1: ``app.state.guard_host_can_answer`` (set by the lifespan) wins over the environment."""
+
+    _team(monkeypatch)
+    host = _host(root, fixture_server)
+    host.offer(C.ConsentOffer.from_wire(_offer()))
+    host.decline(TENANT, 1, surface="tui")
+    assert surface.host_can_answer() is True  # a clean environment, as a served daemon has
+    async with _http(root, monkeypatch, can_answer=False) as client:
+        status = _body(await client.get(BASE))
+        refused = await client.post(f"{BASE}/orgs/{TENANT}/share-again")
+    assert status["can_answer"] is False and status["orgs"][0]["can_share_again"] is False
+    assert refused.status_code == 409 and _code(refused) == "guard_answer_not_admitted"
+    assert host.sticky(TENANT) == "declined"
 
 
 # ---------------------------------------------------------------------------

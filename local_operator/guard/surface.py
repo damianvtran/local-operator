@@ -227,6 +227,87 @@ def host_can_answer() -> bool:
         return False
 
 
+#: The one name a served daemon's CHILDREN read the capture through (see
+#: :func:`capture_host_can_answer`). Only ever written as ``"0"``; ``"1"`` or absence means
+#: "decide from the live environment", so a process can never WIDEN the gate by setting it.
+HOST_CAN_ANSWER_ENV = "LOCAL_OPERATOR_GUARD_HOST_CAN_ANSWER"
+
+#: The capture a ``lop serve`` process took before it dropped its own agent-shell markers
+#: (``None`` = no capture: an embedded app, a test host, a TUI).
+_SERVE_CAPTURE: bool | None = None
+
+
+def capture_host_can_answer() -> bool:
+    """Record :func:`host_can_answer` for a daemon about to erase the evidence. Never raises.
+
+    WHY (security review S-1 on L2c). ``lop serve`` strips the agent-shell markers from its
+    OWN ``os.environ`` at startup (``agent_shell.drop_agent_shell_marker_from_environ``) so
+    that sessions the daemon mints for the operator are not stamped ``agent-shell``. A
+    :func:`host_can_answer` read per request therefore always sees a clean environment and
+    answers ``True`` on every served daemon, however it was started: the share-again
+    person-only gate and the ``can_answer`` hint were unreachable in production. The answer
+    is a fact about how the process was STARTED, so it is read once, here, BEFORE the drop
+    (``cli.serve_command`` calls this first), kept in this module and published to routes as
+    ``app.state.guard_host_can_answer``.
+
+    Also written to :data:`HOST_CAN_ANSWER_ENV` when the answer is no, because a ``--reload``
+    child and a re-exec read a copy of the already-cleaned environment: without the flag the
+    refusal would last exactly one process. Fail closed: only ``"0"`` is ever written, and
+    :func:`served_host_can_answer` only ever reads it to REFUSE.
+    """
+
+    import os
+
+    global _SERVE_CAPTURE
+    try:
+        answer = host_can_answer() and os.environ.get(HOST_CAN_ANSWER_ENV, "") != "0"
+    except Exception:  # noqa: BLE001 - unknown means not a person
+        answer = False
+    _SERVE_CAPTURE = answer
+    if not answer:
+        os.environ[HOST_CAN_ANSWER_ENV] = "0"
+    return answer
+
+
+def served_host_can_answer() -> bool:
+    """The capture a served daemon took at start, else the live read. Never raises.
+
+    What the desktop Guard routes use. With no capture (an embedded app or a test host that
+    never went through ``lop serve``) it is the live :func:`host_can_answer`, still refused
+    when an ancestor daemon left :data:`HOST_CAN_ANSWER_ENV` ``"0"``.
+    """
+
+    import os
+
+    try:
+        if _SERVE_CAPTURE is not None:
+            return _SERVE_CAPTURE
+        return host_can_answer() and os.environ.get(HOST_CAN_ANSWER_ENV, "") != "0"
+    except Exception:  # noqa: BLE001 - unknown means not a person
+        return False
+
+
+def reset_serve_capture() -> None:
+    """Forget the capture (test isolation; nothing in the product calls it)."""
+
+    global _SERVE_CAPTURE
+    _SERVE_CAPTURE = None
+
+
+def to_minute(epoch: float) -> float:
+    """Floor an epoch to its minute, as the TUI renders it (``%H:%M``). Never raises.
+
+    The wire must not carry finer timing than the TUI shows (security review S-4): a
+    renderer cannot show more than the screen it mirrors, and a phone-relay twin does not
+    forward sub-minute timing of when a receipt was written.
+    """
+
+    try:
+        return float(int(float(epoch)) // 60 * 60)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+
+
 def _team_orgs(config_dir: Path) -> list[Any]:
     from local_operator.hub_org import eligibility
 
@@ -491,6 +572,8 @@ __all__ = [
     "computer_name",
     "guard_available",
     "guard_insights_tenants",
+    "HOST_CAN_ANSWER_ENV",
+    "capture_host_can_answer",
     "host_can_answer",
     "is_sharing",
     "is_stopped",
@@ -500,6 +583,8 @@ __all__ = [
     "insights_url",
     "non_team_card",
     "org_states",
+    "served_host_can_answer",
     "should_show_notice",
     "team_url",
+    "to_minute",
 ]
