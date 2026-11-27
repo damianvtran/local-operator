@@ -987,7 +987,7 @@ def test_approve_all_still_owes_profile_gate_card():
     source = SimpleNamespace(
         session=SimpleNamespace(
             owns_runtime=False,
-            pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE)
+            pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE),
         ),
         draft=SimpleNamespace(approve_all=True, approve_scope="session"),
     )
