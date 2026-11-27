@@ -171,6 +171,7 @@ async def start_exec_control(
     resumed: bool = False,
     workstream: bool = False,
     supervisor_fd: int | None = None,
+    require_saved_approval: bool = False,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
 
@@ -301,6 +302,7 @@ async def start_exec_control(
     # control start, seconds apart), which can disagree briefly; named rather
     # than overstated (review R1-4).
     auto_approve = yolo
+    implicit_local_approval_id = None
     if not yolo:
         # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE MACHINE DEFAULT
         # (2026-10-23), and it is consulted HERE as well as in the handle
@@ -324,15 +326,19 @@ async def start_exec_control(
             auto_approve = override == "auto"
         else:
             try:
-                approval_mode = (
-                    str(
-                        ConfigManager(config_dir=config_directory).get_config_value(
-                            "tool_approval_mode", "ask"
-                        )
-                    )
-                    .strip()
-                    .lower()
+                config = ConfigManager(
+                    config_dir=config_directory, require_saved_approval=require_saved_approval
                 )
+                saved_or_default = config.get_config_value("tool_approval_mode", "ask")
+                approval_mode = str(saved_or_default).strip().lower()
+                if approval_mode == "auto" and config.uses_implicit_auto_approval() is True:
+                    from local_operator.session.approval_policy import may_inherit_local_auto
+
+                    session_id = str(session.session_id)
+                    if may_inherit_local_auto(config_directory, session_id):
+                        implicit_local_approval_id = session_id
+                    else:
+                        approval_mode = "ask"
             except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
                 logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
                 approval_mode = "ask"
@@ -362,6 +368,7 @@ async def start_exec_control(
         # unsupervised run's value is that one-shot read (see above).
         auto_approve=auto_approve,
         approval_pinned=yolo,
+        implicit_local_approval_id=implicit_local_approval_id,
         install_gates=supervised,
         install_ask_surface=install_ask_surface,
         # Declared so the §6 registration's store-existence check and the

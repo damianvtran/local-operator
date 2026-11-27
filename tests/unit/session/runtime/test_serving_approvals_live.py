@@ -58,6 +58,40 @@ def _fresh_registry():
     _reset_for_tests()
 
 
+@pytest.mark.asyncio
+async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp_path):
+    from local_operator.network import store as network_store
+    from local_operator.network.types import NetworkRecord
+
+    root = tmp_path / "config"
+    handle = ServingSessionHandle(
+        FakeSession(),
+        asyncio.get_running_loop(),
+        cwd=str(tmp_path),
+        auto_approve=True,
+        implicit_local_approval_id="local-session",
+        config_dir=root,
+    )
+    try:
+        assert await handle._approval_gate("bash", "before enrollment") is True
+        network_id = "n_0123456789abcdef0123456789abcdef"
+        enrolled = NetworkRecord(network_id=network_id, name="test", trust="active")
+        network_store.save(enrolled, root=root)
+        # No session stamp was added. A peer can prompt such an existing owner,
+        # so a post-join tool call must still lose implicit local authority.
+        pending = asyncio.create_task(handle._approval_gate("bash", "after enrollment"))
+        await asyncio.sleep(0)
+        card = handle._fold.projection.pending
+        assert card is not None, "implicit Auto survived enrollment"
+        await handle.approval_answer(card.request_id, False, False)
+        assert await pending is False
+        enrolled.trust = "disconnected"
+        network_store.save(enrolled, root=root)
+        assert not handle._approval_grant().auto, "disconnect must not loosen a live gate"
+    finally:
+        await handle.dispose()
+
+
 def _write_elsewhere(config_dir, key: str, value: Any) -> None:
     """A write shaped like another process's: below the notify hook."""
     setting = settings_io.resolve_key(key)

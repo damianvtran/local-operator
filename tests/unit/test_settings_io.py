@@ -46,6 +46,97 @@ def manager(tmp_path: Path) -> ConfigManager:
     return ConfigManager(tmp_path)
 
 
+def test_fresh_approval_default_is_local_not_an_unattended_opt_in(tmp_path: Path) -> None:
+    from local_operator.session_factory import (
+        _approval_mode_is_auto,
+        local_tool_approval_is_auto,
+        saved_tool_approval_is_auto,
+    )
+
+    root = tmp_path / "first-run"
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None and setting.default == "auto"
+    assert local_tool_approval_is_auto(root) and not saved_tool_approval_is_auto(root)
+    assert not root.exists(), "the read-only probes must not initialize a root"
+
+    manager = ConfigManager(root)
+    assert settings_io.read_setting(manager, setting) == "auto"
+    assert settings_io.is_default(manager, setting)
+    assert _approval_mode_is_auto(manager)
+    assert not (root / "config.yml").exists()
+
+    manager.set_config_value("conversation_length", 12)
+    assert "tool_approval_mode" not in yaml.safe_load((root / "config.yml").read_text())["values"]
+    assert local_tool_approval_is_auto(root) and not saved_tool_approval_is_auto(root)
+    assert _approval_mode_is_auto(ConfigManager(root))
+    assert not _approval_mode_is_auto(ConfigManager(root, require_saved_approval=True))
+
+    settings_io.write_setting(manager, setting, "ask", notify=False)
+    assert settings_io.read_setting(manager, setting) == "ask"
+    assert not local_tool_approval_is_auto(root)
+    assert not _approval_mode_is_auto(ConfigManager(root))
+    settings_io.reset_setting(manager, setting, notify=False)
+    assert settings_io.read_setting(manager, setting) == "auto"
+    assert _approval_mode_is_auto(manager)
+    assert not saved_tool_approval_is_auto(root)
+
+    settings_io.write_setting(manager, setting, "auto", notify=False)
+    assert saved_tool_approval_is_auto(root)
+    assert _approval_mode_is_auto(ConfigManager(root, require_saved_approval=True))
+
+
+@pytest.mark.parametrize(
+    ("document", "effective"),
+    [
+        ("", "ask"),
+        ("{}", "ask"),
+        ("values: {conversation_length: 12}", "ask"),
+        ("values: {tool_approval_mode: ask}", "ask"),
+        ("values: {tool_approval_mode: ' Auto '}", "auto"),
+        ("values: {tool_approval_mode: false}", "ask"),
+        ("values: {tool_approval_mode: typo}", "ask"),
+        ("values: [auto]", "ask"),
+    ],
+)
+def test_existing_config_approval_matches_gate_and_resets_to_ask(
+    tmp_path: Path, document: str, effective: str
+) -> None:
+    from local_operator.session_factory import _approval_mode_is_auto, local_tool_approval_is_auto
+
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(document, encoding="utf-8")
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None
+    assert local_tool_approval_is_auto(tmp_path) == (effective == "auto")
+    manager = ConfigManager(tmp_path)
+    assert settings_io.setting_default(manager, setting) == "ask"
+    assert settings_io.read_setting(manager, setting) == effective
+    assert _approval_mode_is_auto(manager) == (effective == "auto")
+    if effective == "auto":
+        settings_io.reset_setting(manager, setting, notify=False)
+        assert settings_io.read_setting(manager, setting) == "ask"
+        assert not _approval_mode_is_auto(manager)
+        assert not _approval_mode_is_auto(ConfigManager(tmp_path))
+
+
+def test_approval_setting_matches_local_gate_after_mesh_enrollment(tmp_path: Path) -> None:
+    from local_operator.network import store as network_store
+    from local_operator.network.types import NetworkRecord
+    from local_operator.session_factory import _approval_mode_is_auto, local_tool_approval_is_auto
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("conversation_length", 12)
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None and settings_io.read_setting(manager, setting) == "auto"
+    network_store.save(
+        NetworkRecord(network_id="n_0123456789abcdef0123456789abcdef", name="test"), root=tmp_path
+    )
+    assert settings_io.read_setting(manager, setting) == "ask"
+    assert settings_io.setting_default(manager, setting) == "ask"
+    assert not _approval_mode_is_auto(manager)
+    assert not local_tool_approval_is_auto(tmp_path)
+
+
 def _consumer_defaults() -> dict[str, object]:
     """What each setting's REAL consumer falls back to when the key is absent.
 

@@ -373,12 +373,10 @@ def _spawn_tui(config_dir: Path, home: Path) -> tuple[int, int]:
 
     ``pty.fork`` makes the child a session leader whose controlling terminal is
     the slave — the object a terminal emulator gives the process it hosts, and
-    the thing that decides whether stdin is a tty at all. The console script is
-    the product's own entry point resolved from this venv, so what runs is the
-    checkout under test rather than a re-implementation of it.
+    the thing that decides whether stdin is a tty at all. Use the product's
+    module entry point from the current interpreter: a shared venv's console
+    script can retain a shebang pointing at a now-removed worktree.
     """
-    script = Path(sys.executable).with_name("local-operator")
-    assert script.is_file(), f"the venv console script is missing: {script}"
     pid, fd = pty.fork()
     if pid == 0:  # pragma: no cover — the forked child execs immediately
         # A process started from a non-interactive shell inherits SIGINT as
@@ -387,8 +385,16 @@ def _spawn_tui(config_dir: Path, home: Path) -> tuple[int, int]:
         # app would ignore the signals this test cleans up with.
         for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
             signal.signal(sig, signal.SIG_DFL)
-        os.execve(str(script), [str(script)], _child_env(config_dir, home))
-        os._exit(127)  # pragma: no cover
+        try:
+            os.execve(
+                sys.executable,
+                [sys.executable, "-m", "local_operator"],
+                _child_env(config_dir, home),
+            )
+        finally:
+            # If exec fails, do not re-enter the parent's pytest teardown in
+            # the fork, which would remove the parent's scratch resources.
+            os._exit(127)  # pragma: no cover
     # Pin the geometry on the pty itself rather than trusting the terminal
     # pytest happens to be running in: a piped or zero-sized parent would
     # otherwise compose a frame at a size these assertions did not choose.
@@ -655,6 +661,52 @@ def _marker_context(
             if data.find(marker) >= 0:
                 return f"{path.name} {_window_around(data, marker, before=before, after=after)}"
     return "the marker is in no log file"
+
+
+def test_first_run_tui_runs_a_tool_without_an_approval_card(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    from local_operator.config import ConfigManager
+
+    root = headless_tui_env
+    home = tmp_path / "home"
+    home.mkdir()
+    assert not (root / "config.yml").exists()
+    ConfigManager(root).update_config({"hosting": "test", "model_name": "mock"})
+    pid, fd = _spawn_tui(root, home)
+    terminal = _Terminal(fd)
+    runtime_pid = None
+    try:
+        with bounded(BOOT_BOUND_S, "first-run TUI approval"):
+            deadline = time.monotonic() + BOOT_BOUND_S - 5.0
+            owner = _live_runtime(root)
+            while owner is None and time.monotonic() < deadline:
+                terminal.pump(0.2)
+                owner = _live_runtime(root)
+            assert owner is not None, terminal.tail()
+            session_id, runtime_pid = owner
+            assert terminal.type_until_echoed(b"[bash:0]", ECHO_TIMEOUT_S), terminal.tail()
+            terminal.write(b"\r")
+            transcript = root / "sessions" / session_id / "transcript.jsonl"
+            while time.monotonic() < deadline:
+                terminal.pump(0.2)
+                if not transcript.is_file():
+                    continue
+                # Only complete JSONL lines count as committed results.
+                for line in transcript.read_text(encoding="utf-8").splitlines(keepends=True):
+                    if not line.endswith("\n"):
+                        continue
+                    payload = json.loads(line).get("payload", {})
+                    if payload.get("role") == "tool" and payload.get("tool_name") == "bash":
+                        details = payload.get("provider_payload", {}).get("details", {})
+                        assert details.get("exit_code") == 0, payload
+                        print("Fresh TUI: input [bash:0] reached the live owner; bash exit_code=0")
+                        return
+            pytest.fail(f"TUI never recorded a bash result; terminal tail:\n{terminal.tail()}")
+    finally:
+        _stop_child(pid, terminal)
+        terminal.close()
+        _stop_other(runtime_pid)
 
 
 def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_terminal_input(

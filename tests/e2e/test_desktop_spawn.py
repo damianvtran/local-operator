@@ -45,6 +45,65 @@ async def serve_http():
 
 
 @pytest.mark.asyncio
+async def test_fresh_local_owner_runs_tool_without_an_approval_card(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    from local_operator.config import ConfigManager
+    from local_operator.session_factory import saved_tool_approval_is_auto
+
+    root = headless_tui_env
+    assert not (root / "config.yml").exists()
+    # Pick a credential-free provider without setting any approval preference.
+    ConfigManager(root).update_config({"hosting": "test", "model_name": "mock"})
+    assert not saved_tool_approval_is_auto(root)
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    sid = None
+    try:
+        async with (
+            serve_http() as url,
+            httpx.AsyncClient(
+                base_url=url, headers={"Authorization": f"Bearer {token}"}, timeout=60
+            ) as client,
+        ):
+            created = await client.post(
+                "/v1/desktop/sessions",
+                json={"request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "cwd": str(workspace)},
+            )
+            assert created.status_code == 200, created.text
+            sid = created.json()["result"]["session_id"]
+            path = f"/v1/desktop/sessions/{sid}"
+            async with client.stream("GET", path + "/events") as stream:
+                lines = stream.aiter_lines()
+                await next_frame(lines, lambda f: f["type"] == "snapshot")
+                admitted = await client.post(
+                    path + "/messages",
+                    json={"request_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "text": "[bash:0]"},
+                )
+                assert admitted.status_code == 200, admitted.text
+                executed = await next_frame(
+                    lines,
+                    lambda f: f["type"] == "event"
+                    and f["payload"].get("type") == "tool_execution_end",
+                )
+                event = executed["payload"]
+                assert event["tool_name"] == "bash", event
+                assert event["result"]["details"]["exit_code"] == 0, event
+                print("Fresh desktop owner: create200, prompt200, mock bash exit_code=0")
+    finally:
+        if sid is not None:
+            record, _ = await asyncio.to_thread(find_runtime_record, root, sid)
+            if record is not None:
+                attach = AttachClient(lambda _: None, lambda _: None)
+                await attach.connect(record, sid)
+                try:
+                    await attach.request_stop()
+                finally:
+                    await attach.detach()
+
+
+@pytest.mark.asyncio
 async def test_spawn_and_reopen_after_http_restart(
     headless_tui_env: Path, workspace: Path, monkeypatch
 ):

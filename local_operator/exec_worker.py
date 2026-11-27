@@ -520,7 +520,7 @@ def _default_session_factory(
     # session-name backfill through ``create_session``'s store-maintenance pass,
     # which writes to whatever root it is handed.
     base_dir = config_dir()
-    config_manager = ConfigManager(base_dir)
+    config_manager = ConfigManager(base_dir, require_saved_approval=True)
 
     from local_operator.agents import AgentRegistry  # lazy: heavy module
 
@@ -576,7 +576,7 @@ def run(
             source = factory()
             session: SessionProtocol = await source if inspect.isawaitable(source) else source
             session_box.append(session)
-            return await run_session(session, parsed.prompt, parsed, team)
+            return await run_session(session, parsed.prompt, parsed, team, detached=True)
 
         # Race the WHOLE lifetime, not just the first prompt: a worker waiting
         # on provider discovery must still honour termination and finalize.

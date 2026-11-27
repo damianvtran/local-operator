@@ -103,6 +103,7 @@ from local_operator.mobile.types import (
 # The conversation's own recorded approval choice: read at construction, written
 # by ``/approvals``. Module-scope because the module is stdlib-only (its docstring
 # explains why it must stay that way for the resume path).
+from local_operator.session.approval_policy import may_inherit_local_auto
 from local_operator.session.approval_policy import (
     OVERRIDE_FILENAME as _APPROVAL_OVERRIDE_FILENAME,
 )
@@ -1213,6 +1214,7 @@ class ServingSessionHandle(SessionHandle):
         cwd: str,
         auto_approve: bool = False,
         approval_pinned: bool = False,
+        implicit_local_approval_id: str | None = None,
         install_gates: bool = True,
         install_ask_surface: bool = False,
         config_dir: Path | None = None,
@@ -1276,6 +1278,7 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
+        self._implicit_local_approval_id = implicit_local_approval_id
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
         #: live gate (which an explicit conversation choice may override). The
         #: pending-gate projection publishes it beside the mode so a viewer can
@@ -1936,6 +1939,7 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.harness.bridge_egress import ApprovalGrant
 
+        self._tighten_implicit_local_approval()
         explicit = getattr(self, "_explicit_approvals_mode", None)
         pinned = bool(getattr(self, "_approval_pinned", False))
         scope = "session" if explicit is not None and not pinned else "global"
@@ -1943,6 +1947,25 @@ class ServingSessionHandle(SessionHandle):
             auto=bool(getattr(self, "_auto_approve", False)),
             scope=scope,
         )
+
+    def _tighten_implicit_local_approval(self) -> None:
+        session_id = getattr(self, "_implicit_local_approval_id", None)
+        if (
+            session_id
+            and self._auto_approve
+            and self._explicit_approvals_mode is None
+            and (
+                self._config_dir is None
+                or not may_inherit_local_auto(self._config_dir, session_id)
+            )
+        ):
+            # A peer can prompt an existing local (unstamped) session after a
+            # join. Recheck on the decision path, not only at owner boot. This
+            # only tightens: leaving the mesh cannot re-enable Auto mid-session.
+            self._implicit_local_approval_id = None
+            self._auto_approve = False
+            self._default_approvals_mode = "ask"
+            self._publish_approval_mode()
 
     def _watch_bridge_latch(self) -> None:
         """Re-publish parked cards as latched cards the moment the session latches.
@@ -2250,6 +2273,13 @@ class ServingSessionHandle(SessionHandle):
         # holding its own override still needs the correct global half for its
         # provenance sentence, and the gate may not move this tick.
         self._default_approvals_mode = mode
+        if getattr(self, "_implicit_local_approval_id", None) and (
+            not wanted_auto
+            or _loosening_is_authorised(source=getattr(change, "source", "disk"), gate_is_here=True)
+        ):
+            # A disk-only Auto write must not upgrade an implicit local choice
+            # into unattended authority even when the visible mode is already Auto.
+            self._implicit_local_approval_id = None
         if wanted_auto == self._auto_approve:
             return
         if self._explicit_approvals_mode is not None:
@@ -12521,6 +12551,7 @@ class ServingSessionHandle(SessionHandle):
         # The file now holds this value; the projection's global half follows
         # even if this conversation keeps (or loses) its own record below.
         self._default_approvals_mode = mode
+        self._implicit_local_approval_id = None  # An authorised, explicitly saved mode now applies.
         cleared = self._persist_approval_override(None, had_record=previous_override is not None)
         direct = False
         if self._auto_approve != (mode == "auto"):
@@ -13433,7 +13464,9 @@ async def spawn_owned_session(
     from local_operator.session_factory import create_session
 
     config_directory = config_dir()
-    config_manager = ConfigManager(config_dir=config_directory)
+    # The lower-level gate is a saved-only fallback. This owner installs its
+    # gate before admitting a turn and can then distinguish local from mesh.
+    config_manager = ConfigManager(config_dir=config_directory, require_saved_approval=True)
     agent_registry = AgentRegistry(config_dir=config_directory)
 
     # The publication latch the deferred MCP wiring parks on. Created HERE, on
@@ -13462,6 +13495,16 @@ async def spawn_owned_session(
         logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
         approval_mode = "ask"
     auto_approve = approval_mode == "auto"
+    implicit_local_approval_id = None
+    if (
+        not auto_approve
+        and resume
+        and "tool_approval_mode" not in config_manager.get_config().values
+        and config_manager.tool_approval_default() == "auto"
+        and may_inherit_local_auto(config_directory, resume)
+    ):
+        auto_approve = True
+        implicit_local_approval_id = resume
     # CARRIED AUTO AUTHORITY (remote-onboarding §6 defect 2). A session created
     # or moved here under an accepted ``unattended`` request carries that fact on
     # its ``mesh.json``; applying it is RE-CHECKED here, at engage, against this
@@ -13600,6 +13643,7 @@ async def spawn_owned_session(
         cwd=cwd,
         auto_approve=auto_approve,
         approval_pinned=False,
+        implicit_local_approval_id=implicit_local_approval_id,
         # Declared so the §6 registration's store-existence check and the
         # registration itself share the config root this session was built
         # from (MINOR-3).

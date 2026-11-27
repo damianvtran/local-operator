@@ -237,7 +237,7 @@ def _view(
         kind=setting.kind.value,
         help=_live_help(setting, live),
         value=None if _private_endpoint(value) else value,
-        default=setting.default,
+        default=settings_io.setting_default(manager, setting),
         redacted=_private_endpoint(value),
         is_default=settings_io.is_default(manager, setting),
         minimum=setting.minimum,

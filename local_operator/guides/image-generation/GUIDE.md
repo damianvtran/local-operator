@@ -100,8 +100,8 @@ covers the general rules for handling them.
   and Google rungs generate one image per call (a larger request fails over
   rather than silently delivering fewer).
 
-The harness asks for approval before spending (the tool is write-tier in the
-default "ask" mode). In unattended modes there is no prompt — treat
+The tool is write-tier. In Ask mode, the harness asks for approval before
+spending. In Auto mode, there is no prompt — treat
 `generate_image` as a paid call wherever it appears.
 
 ## Model choice

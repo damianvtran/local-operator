@@ -380,7 +380,7 @@ def test_build_worker_argv_train_threaded_to_worker(monkeypatch: pytest.MonkeyPa
         seen["train"] = session_args.train
         return None
 
-    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a, **kw: object())
     # No credential-manager stub: the worker's composition root builds only a
     # ``ConfigManager`` now that PR2b deleted the ``CredentialManager`` it used to
     # thread through (the config root is read off the manager).
@@ -1299,11 +1299,14 @@ def test_an_answerable_background_launch_stays_quiet(
 
 
 def test_a_foreground_non_tty_run_advertises_the_deny_trap(
-    fake_factory, monkeypatch: pytest.MonkeyPatch, capsys
+    fake_factory, monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
 ) -> None:
     """Foreground without a tty is the same trap as ``--background`` (CL-04
     denies); the advisory is the half that was missing — before the first
-    denial, not only inside it."""
+    denial, not only inside it. Use a saved Ask, not a first-run root."""
+    root = _redirect_logs_dir(monkeypatch, tmp_path).parent
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yml").write_text("values: {tool_approval_mode: ask}", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     session = FakeSession([_success_script()])
     fake_factory(session)
@@ -2065,7 +2068,7 @@ def test_build_worker_argv_threads_workstream_to_the_worker(
         seen["workstream"] = getattr(session_args, "workstream", "<field missing>")
         return None
 
-    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a, **kw: object())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_worker._default_session_factory(parsed)
@@ -2125,7 +2128,7 @@ def test_the_foreground_factory_carries_workstream_to_the_stamp(
         seen["workstream"] = getattr(session_args, "workstream", "<field missing>")
         return None
 
-    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a, **kw: object())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
@@ -2150,7 +2153,7 @@ def test_the_foreground_factory_carries_the_team_suggestion(
         seen["suggestion"] = getattr(session_args, "team_model_suggestion", "<field missing>")
         return None
 
-    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a, **kw: object())
     monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     suggestion = ModelSuggestion(hosting="openrouter", model="vendor/model")

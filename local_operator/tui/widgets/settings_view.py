@@ -4526,8 +4526,8 @@ class SettingsView(Vertical):
             line.append("● " if chosen else "○ ", style=accent if chosen else dim)
             choice_label = _choice_label(row.setting, row.choice)
             line.append(choice_label, style=base)
-            if row.choice.value == row.setting.default:
-                # Which member SHIPPED, named in the list rather than inferred
+            if row.choice.value == settings_io.setting_default(self._manager, row.setting):
+                # Which member reset restores, named in the list rather than inferred
                 # from the ink (#440 §2.2). This is the information the
                 # collapsed row never carried and the reason a two-member bool
                 # expansion is not empty ceremony: `●` says what is stored and
@@ -5839,8 +5839,9 @@ class SettingsView(Vertical):
         if not settings_io.is_default(self._manager, setting):
             # `raw=True`: the value is a word INSIDE this sentence, so only the
             # sentence is projected (PR #4361 R1).
+            default = settings_io.setting_default(self._manager, setting)
             return _t_chrome(
-                _svc.clause_default(value=_render_value(setting.default, setting=setting, raw=True))
+                _svc.clause_default(value=_render_value(default, setting=setting, raw=True))
             )
         return ""
 

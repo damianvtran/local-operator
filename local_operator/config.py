@@ -670,9 +670,9 @@ class Config:
         )
 
         # Set metadata values with defaults if not provided
-        if not self.metadata["created_at"]:
+        if not self.metadata.get("created_at"):
             self.metadata["created_at"] = datetime.now().isoformat()
-        if not self.metadata["last_modified"]:
+        if not self.metadata.get("last_modified"):
             self.metadata["last_modified"] = datetime.now().isoformat()
 
         # Set config values
@@ -725,6 +725,15 @@ class Config:
         """
         return self.values.get(key, default)
 
+    def tool_approval_mode(self, *, require_saved_approval: bool) -> Any:
+        """Resolve the approval setting without materializing its local default."""
+        fallback = (
+            _LEGACY_TOOL_APPROVAL_MODE
+            if require_saved_approval
+            else _approval_default_from_metadata(self.metadata)
+        )
+        return self.get_value("tool_approval_mode", fallback)
+
     def set_value(self, key: str, value: Any) -> None:
         """Set a specific configuration value.
 
@@ -733,6 +742,44 @@ class Config:
             value (Any): The value to set for the key
         """
         self.values[key] = value
+
+
+# Auto is the first-run default, not a fallback when a saved setting or its
+# provenance cannot be read. Existing configs without the key retain Ask.
+DEFAULT_TOOL_APPROVAL_MODE = "auto"
+_LEGACY_TOOL_APPROVAL_MODE = "ask"
+_FRESH_APPROVAL_METADATA = "fresh_tool_approval_default"
+#: Config migrations record prior setting paths here to detect a truncated write.
+CONFIG_KEY_INVENTORY_NAME = ".config-keys.json"
+
+
+def missing_config_approval_mode(config_file: Path) -> str:
+    """Default for a missing config, without altering the root.
+
+    A config backup or the prior key inventory proves this is not a clean
+    install. In particular a parse failure moves config.yml aside: neither
+    the recovery load nor a subsequent process may turn that failure into
+    approval. Empty directories and incidental startup files are not proof
+    of an earlier config; they can already exist on a legitimate first run.
+    """
+    name = config_file.name
+    try:
+        for entry in config_file.parent.iterdir():
+            if entry.name in (name, CONFIG_KEY_INVENTORY_NAME, f"{name}.bad") or (
+                entry.name.startswith((f"{name}.bad.", f"{name}.bak-", f"{name}.pre-"))
+            ):
+                return _LEGACY_TOOL_APPROVAL_MODE
+    except FileNotFoundError:
+        pass  # The config directory has not been created yet.
+    except OSError:
+        return _LEGACY_TOOL_APPROVAL_MODE
+    return DEFAULT_TOOL_APPROVAL_MODE
+
+
+def _approval_default_from_metadata(metadata: Any) -> str:
+    if isinstance(metadata, dict) and metadata.get(_FRESH_APPROVAL_METADATA) is True:
+        return DEFAULT_TOOL_APPROVAL_MODE
+    return _LEGACY_TOOL_APPROVAL_MODE
 
 
 # Default configuration settings for Local Operator
@@ -808,7 +855,7 @@ DEFAULT_CONFIG = Config(
             # command's name true — it sets the default for sessions that have
             # none — and it is why the resolution rule lives in
             # ``approval_policy.resolve_effective`` rather than in each reader.
-            "tool_approval_mode": "ask",
+            "tool_approval_mode": DEFAULT_TOOL_APPROVAL_MODE,
             # Direct OpenAI GPT-5 calls use the public Responses API by default.
             # Set `providers.openai.api` to `chat_completions` for an explicit
             # compatibility opt-out; other OpenAI-shaped providers never read it.
@@ -1018,7 +1065,7 @@ DEFAULT_CONFIG = Config(
 )
 
 
-def _fresh_default_config() -> Config:
+def _fresh_default_config(approval_mode: str) -> Config:
     """A private copy of the shipped defaults, safe to mutate.
 
     :data:`DEFAULT_CONFIG` is a module-level object holding two mutable dicts,
@@ -1034,7 +1081,14 @@ def _fresh_default_config() -> Config:
     ``Config.__init__`` aliases ``metadata`` straight through, so a shallow
     copy would leave the timestamp shared.
     """
-    return Config(deepcopy(vars(DEFAULT_CONFIG)))
+    config = Config(deepcopy(vars(DEFAULT_CONFIG)))
+    # Whole-config writes must not turn a first-run fallback into an explicit
+    # opt-in for a detached run or a mesh request. Retain the local default as
+    # provenance in metadata instead, even after unrelated settings are saved.
+    config.values.pop("tool_approval_mode")
+    if approval_mode == DEFAULT_TOOL_APPROVAL_MODE:
+        config.metadata[_FRESH_APPROVAL_METADATA] = True
+    return config
 
 
 # Name of the YAML configuration file
@@ -1172,7 +1226,7 @@ class ConfigManager:
     #: write instead of performing it (see ``ConfigWriteRefused``).
     _loaded_from_disk: bool
 
-    def __init__(self, config_dir: Path) -> None:
+    def __init__(self, config_dir: Path, *, require_saved_approval: bool = False) -> None:
         """Initialize the config manager with default or existing settings.
 
         Creates a new ConfigManager instance that manages configuration settings.
@@ -1181,6 +1235,8 @@ class ConfigManager:
 
         Args:
             config_dir (Path): Directory path where the config file should be stored
+            require_saved_approval: Do not apply the local first-run default to
+                detached or nonlocal session gates.
 
         The config file will be named according to CONFIG_FILE_NAME and stored
         in the specified directory. Configuration is loaded immediately upon
@@ -1188,6 +1244,7 @@ class ConfigManager:
         """
         self.config_dir = config_dir
         self.config_file = self.config_dir / CONFIG_FILE_NAME
+        self._require_saved_approval = require_saved_approval
         # Set here as well as in `_load_config` so the attribute exists even if the
         # load raises; a later write must never guess at it.
         self._loaded_from_disk = False
@@ -1242,6 +1299,7 @@ class ConfigManager:
             Config: The configuration object
         """
         if not self.config_file.exists():
+            approval_mode = missing_config_approval_mode(self.config_file)
             # 0700 at CREATION only (item 17): config.yml and the transcripts and
             # credentials beside it are the same sensitivity class as the log dir
             # (paths.ensure_log_dir), and the default 0755 exposed the directory
@@ -1249,7 +1307,7 @@ class ConfigManager:
             # dir on upgrade — a user may have widened it on purpose.
             self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self._loaded_from_disk = False
-            return _fresh_default_config()
+            return _fresh_default_config(approval_mode)
 
         with open(self.config_file, "r", encoding="utf-8") as f:
             # A hand-edited config.yml with a YAML syntax error, or one whose
@@ -1263,17 +1321,17 @@ class ConfigManager:
             # stdout is the event stream.
             try:
                 loaded = _parse_config_stream(self.config_file, f)
-            except yaml.YAMLError as exc:
+            except (UnicodeDecodeError, yaml.YAMLError) as exc:
                 self._handle_bad_config(f"could not parse {self.config_file}: {exc}")
                 self._loaded_from_disk = False
-                return _fresh_default_config()
+                return _fresh_default_config(_LEGACY_TOOL_APPROVAL_MODE)
             if loaded is not None and not isinstance(loaded, dict):
                 self._handle_bad_config(
                     f"{self.config_file} is not a valid configuration mapping "
                     f"(top level is {type(loaded).__name__})"
                 )
                 self._loaded_from_disk = False
-                return _fresh_default_config()
+                return _fresh_default_config(_LEGACY_TOOL_APPROVAL_MODE)
             # True only when the parsed document actually carried SETTINGS — a
             # non-empty `values` mapping. Everything else (None from a 0-byte or
             # comment-only file, `{}`, or a document with `version:`/`metadata:`
@@ -1287,7 +1345,7 @@ class ConfigManager:
                 and isinstance(loaded.get("values"), dict)
                 and bool(loaded["values"])
             )
-            config_dict = loaded or deepcopy(vars(DEFAULT_CONFIG))
+            config_dict = loaded or {}
 
             # Check if config version is older than current version
             config_version = config_dict.get("version", "0.0.0")
@@ -1304,14 +1362,20 @@ class ConfigManager:
                     file=sys.stderr,
                 )
 
-            # Fill in any missing values with defaults
-            if "values" not in config_dict:
-                config_dict["values"] = deepcopy(vars(DEFAULT_CONFIG)["values"])
-            else:
-                default_values = vars(DEFAULT_CONFIG)["values"]
-                for key, value in default_values.items():
-                    if key not in config_dict["values"]:
-                        config_dict["values"][key] = deepcopy(value)
+            # Leave the approval key raw: callers that grant unattended
+            # authority must be able to distinguish a choice from a fallback.
+            values = config_dict.setdefault("values", {})
+            metadata = config_dict.get("metadata", {})
+            if not isinstance(values, dict) or not isinstance(metadata, dict):
+                # Retain these bytes so the existing write guard can still
+                # refuse a config whose values subtree it cannot preserve.
+                self._loaded_from_disk = False
+                return _fresh_default_config(_LEGACY_TOOL_APPROVAL_MODE)
+            if not values:
+                metadata.pop(_FRESH_APPROVAL_METADATA, None)
+            for key, value in DEFAULT_CONFIG.values.items():
+                if key != "tool_approval_mode" and key not in values:
+                    values[key] = deepcopy(value)
 
             _report_unmodelled_top_level(self.config_file, config_dict)
 
@@ -1381,7 +1445,12 @@ class ConfigManager:
         """
         drops = _validated_drops(drop, config)
 
-        if not self.config_file.exists():
+        had_config_file = self.config_file.exists()
+        still_fresh = (
+            not had_config_file
+            and missing_config_approval_mode(self.config_file) == DEFAULT_TOOL_APPROVAL_MODE
+        )
+        if not had_config_file:
             # 0700 at creation for the same reason as _load_config above (item 17).
             self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.config_file.touch()
@@ -1478,6 +1547,17 @@ class ConfigManager:
             _carry_through_unmodelled(
                 payload_values, disk_values, drops=drops, prefix=(), preserved=preserved
             )
+
+        # A stale manager constructed before a legacy file appeared cannot
+        # turn that file into first-run config. Conversely, a stale payload
+        # must not discard the marker the current file actually carries.
+        # Only a write creating config can introduce the in-memory marker.
+        if not still_fresh:
+            disk_metadata = disk_document.get("metadata") if disk_document else None
+            if _approval_default_from_metadata(disk_metadata) == DEFAULT_TOOL_APPROVAL_MODE:
+                document["metadata"][_FRESH_APPROVAL_METADATA] = True
+            else:
+                document["metadata"].pop(_FRESH_APPROVAL_METADATA, None)
 
         # ATOMIC. This was a plain `open(..., "w")`, which truncates the file
         # before it writes a byte: a crash, a full disk, or a kill between the
@@ -1736,7 +1816,15 @@ class ConfigManager:
         # A COPY, for the reason `_fresh_default_config` exists: adopting the
         # module-level object made the next `set_config_value` a write into the
         # process's defaults.
-        self.config = _fresh_default_config()
+        # Do not reload here: a reset must refuse an unreadable file instead
+        # of quarantining it and then writing over the recovery state.
+        document = _read_config_document(self.config_file)
+        metadata = document.get("metadata") if document is not None else None
+        if document is None and not self.config_file.exists():
+            mode = missing_config_approval_mode(self.config_file)
+        else:
+            mode = _approval_default_from_metadata(metadata)
+        self.config = _fresh_default_config(mode)
         # Read from DISK, not from `self.config`: the manager may have been built
         # before a hand-edit, and the reset means "the file holds nothing of mine".
         # `read_config_values` never constructs a manager, so a file it cannot
@@ -1759,6 +1847,23 @@ class ConfigManager:
         }
         self._write_config(vars(self.config), drop=drop)
 
+    def tool_approval_default(self) -> str:
+        """Local baseline when there is no explicitly saved approval setting."""
+        if _approval_default_from_metadata(self.config.metadata) == DEFAULT_TOOL_APPROVAL_MODE:
+            from local_operator.session.approval_policy import may_inherit_local_auto
+
+            if may_inherit_local_auto(self.config_dir):
+                return DEFAULT_TOOL_APPROVAL_MODE
+        return _LEGACY_TOOL_APPROVAL_MODE
+
+    def uses_implicit_auto_approval(self) -> bool:
+        """Whether this snapshot would resolve Auto without an explicit setting."""
+        return (
+            not self._require_saved_approval
+            and "tool_approval_mode" not in self.config.values
+            and self.tool_approval_default() == DEFAULT_TOOL_APPROVAL_MODE
+        )
+
     def get_config_value(self, key: str, default: Any = None) -> Any:
         """Get a specific configuration variable.
 
@@ -1778,6 +1883,10 @@ class ConfigManager:
         Returns:
             Any: The configuration value for the key, or default if not found
         """
+        if key == "tool_approval_mode":
+            if self._require_saved_approval or key in self.config.values:
+                return self.config.get_value(key, _LEGACY_TOOL_APPROVAL_MODE)
+            return self.tool_approval_default()
         return self.config.get_value(key, default)
 
     def get_nested_value(self, path: tuple[str, ...], default: Any = None) -> Any:

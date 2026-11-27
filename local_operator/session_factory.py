@@ -75,6 +75,7 @@ from local_operator.resume import ResumeNotFound, resume_dir
 # docstring states why it must stay that way): read here so a resumed
 # conversation's gate starts in the mode its human left it in. Aliased so the
 # call site reads as a policy question rather than a bare ``read_override``.
+from local_operator.session.approval_policy import may_inherit_local_auto
 from local_operator.session.approval_policy import (
     read_override as read_approval_override,
 )
@@ -959,8 +960,8 @@ def _approval_mode_is_auto(config_manager: Any) -> bool:
     readout equal by construction: there is no separate handle to report a
     value the deciding gate ignores.
 
-    Degrades to ``ask`` — never a crash, and never an implicit approval: a
-    missing or odd config must fail toward asking, not toward approving.
+    Degrades to ``ask`` — never a crash, and never an implicit approval: an
+    unreadable or unrecognized value must fail toward asking, not approving.
     """
     try:
         stored = config_manager.get_config_value("tool_approval_mode", "ask")
@@ -969,63 +970,55 @@ def _approval_mode_is_auto(config_manager: Any) -> bool:
     return str(stored).strip().lower() == "auto"
 
 
-def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
-    """Whether ``tool_approval_mode: auto`` is SAVED at ``root`` (this process's
-    config root when ``root`` is None).
+def _tool_approval_is_auto_at_root(root: Path | None, *, require_saved_approval: bool) -> bool:
+    """Read the same policy as ConfigManager without changing the config root.
 
-    THE GUARDED SIBLING of :func:`_approval_mode_is_auto`, for callers OUTSIDE a
-    session build that have to know what a session started here would resolve —
-    the mesh surfaces deciding whether a create or a move should REQUEST
-    ``unattended`` (remote-onboarding §6 defect 2). Four properties make it the
-    one reader for those callers:
-
-    * the derivation is ``_approval_mode_is_auto`` itself — same key, same
-      default, same degrade-to-ask — so the requested mode cannot drift from the
-      gate a locally-started session would run with;
-    * a root with NO config file answers ``False`` WITHOUT being constructed,
-      because constructing ``ConfigManager`` materialises the directory and a
-      launch- or request-path check has no business writing (the rule
-      ``exec_mode._saved_auto_approval`` states for its own call site);
-    * a MALFORMED file (unparseable, or a top level that is not a mapping) also
-      answers ``False`` WITHOUT being constructed — and WITHOUT the rename
-      ``ConfigManager`` would perform (``config.py::_handle_bad_config`` moves
-      the file to ``config.yml.bad.<stamp>``). That repair is right for a launch
-      that must recover; it is wrong for THIS reader, which mesh REQUEST paths
-      call: a create must not move the operator's file. The guard pre-parses
-      with the manager's own ``_parse_config_stream``, so a file its load would
-      repair is refused before the constructor runs. What remains: a rewrite
-      landing between the guard parse and the manager's own read could still be
-      repaired — a same-instant race, stated rather than hidden (review F2);
-    * any failure is ``False`` — the fail-closed direction, because a wrong
-      ``True`` here asks a PEER for unattended authority nobody needs, and the
-      request can only ever be honoured against that peer's own grant anyway.
+    A launch advisory and a mesh request must not create a config directory or
+    quarantine damaged input. A single parsed snapshot also avoids treating a
+    new implicit default as permission when the file changes during the read.
     """
     try:
         from local_operator.config import (
             CONFIG_FILE_NAME,
-            ConfigManager,
+            Config,
             _parse_config_stream,
+            missing_config_approval_mode,
         )
         from local_operator.paths import config_dir
 
         base = Path(root) if root is not None else config_dir()
         config_file = base / CONFIG_FILE_NAME
-        if not config_file.is_file():
-            return False
-        # THE MALFORMED GUARD (review F2): run the manager's OWN parse first,
-        # so a file its load would rename aside answers ask with the file LEFT
-        # IN PLACE. An unreadable file is "ask" too — the constructor below is
-        # only reached when its load would succeed without writing.
         try:
             with open(config_file, "r", encoding="utf-8") as handle:
                 loaded = _parse_config_stream(config_file, handle)
-        except Exception:  # noqa: BLE001 — unparseable is "ask", never a write
+        except FileNotFoundError:
+            return (
+                not require_saved_approval
+                and missing_config_approval_mode(config_file) == "auto"
+                and may_inherit_local_auto(base)
+            )
+        if not isinstance(loaded, dict):
             return False
-        if loaded is not None and not isinstance(loaded, dict):
+        values = loaded.get("values")
+        if not isinstance(values, dict) or not values:
             return False
-        return _approval_mode_is_auto(ConfigManager(config_dir=base))
-    except Exception:  # noqa: BLE001 — keep the request OFF when unsure
+        config = Config(loaded)
+        mode = config.tool_approval_mode(require_saved_approval=require_saved_approval)
+        return str(mode).strip().lower() == "auto" and (
+            "tool_approval_mode" in config.values or may_inherit_local_auto(base)
+        )
+    except Exception:  # noqa: BLE001 — unreadable config never conveys unattended authority
         return False
+
+
+def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
+    """Whether Auto was explicitly saved, as required for mesh/detached requests."""
+    return _tool_approval_is_auto_at_root(root, require_saved_approval=True)
+
+
+def local_tool_approval_is_auto(root: Path | None = None) -> bool:
+    """Whether a foreground local launch's effective config will adopt Auto."""
+    return _tool_approval_is_auto_at_root(root, require_saved_approval=False)
 
 
 def _bridge_notice_prefix(bridge_latched: bool) -> str:
@@ -1039,7 +1032,9 @@ def _bridge_notice_prefix(bridge_latched: bool) -> str:
     return bridge_card_notice() + "\n"
 
 
-def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
+def _make_request_approval(
+    yolo: bool, *, implicit_local_scope: tuple[Path, str] | None = None
+) -> Callable[..., Awaitable[bool]]:
     """Build the tool-approval gate.
 
     ``--yolo`` auto-approves every tier (read/write/exec). Otherwise approval
@@ -1059,6 +1054,7 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     agent froze mid-task.
     """
     if yolo:
+        implicit_revoked = False
 
         async def auto_approve(
             tool_name: str,
@@ -1076,8 +1072,15 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             # the interactive path — a y/N on a tty, a typed refusal without.
             from local_operator.harness.approval import never_auto_approved
 
-            if never_auto_approved(tool_name):
-                return await _make_request_approval(False)(tool_name, description)
+            nonlocal implicit_revoked
+            if implicit_local_scope is not None and not implicit_revoked:
+                # Exec also publishes a live runtime, so a peer may attach
+                # after enrollment while a foreground turn still owns this gate.
+                implicit_revoked = not may_inherit_local_auto(*implicit_local_scope)
+            if implicit_revoked or never_auto_approved(tool_name):
+                return await _make_request_approval(False)(
+                    tool_name, description, taint_raised=taint_raised, bridge_latched=bridge_latched
+                )
             return True
 
         return auto_approve
@@ -5561,7 +5564,7 @@ async def _prepare(
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
-    # THE HEADLESS GATE HONOURS THE OPERATOR'S SAVED DEFAULT. ``--yolo`` still
+    # THE HEADLESS GATE HONOURS THE APPLICABLE CONFIG DEFAULT. ``--yolo`` still
     # wins for one run (and pins, downstream); without it,
     # ``tool_approval_mode: auto`` — the key whose default comment has always
     # described exactly this gate ("a ``lop exec`` running in CI") — now
@@ -5583,7 +5586,7 @@ async def _prepare(
     #
     # Degrading to ``ask`` is preserved: an unreadable record reads as ``ask``
     # (``approval_policy.read_override`` fails closed), and the config read
-    # itself still falls back to ``ask`` on an odd or missing file.
+    # itself still falls back to ``ask`` on an unreadable file.
     _persisted_approval, _approval_warning = read_approval_override(transcript_dir)
     if _approval_warning:
         print(f"\033[1;33mWarning: {_approval_warning}\033[0m", file=sys.stderr)
@@ -5592,7 +5595,18 @@ async def _prepare(
         if _persisted_approval is not None
         else _approval_mode_is_auto(config_manager)
     )
-    request_approval = _make_request_approval(yolo or _approval_auto)
+    implicit_local_scope = None
+    if (
+        not yolo
+        and _approval_auto
+        and _persisted_approval is None
+        and config_manager.uses_implicit_auto_approval() is True
+    ):
+        implicit_local_scope = (config_manager.config_dir, transcript_dir.name)
+        _approval_auto = may_inherit_local_auto(*implicit_local_scope)
+    request_approval = _make_request_approval(
+        yolo or _approval_auto, implicit_local_scope=implicit_local_scope
+    )
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).

@@ -105,12 +105,6 @@ _RETIRED_CEILINGS = (
 #: dotted key). KEPT and pinned to False: see the module docstring.
 _REAP_UNUSED_FLAT = "session.reap_unused"
 
-#: The sidecar that records which setting paths the last launch saw, so the next
-#: one can say what went missing between them. Dot-prefixed machinery beside the
-#: config, never a setting: nothing reads it as configuration and ``/settings``
-#: does not list it.
-_KEY_INVENTORY_NAME = ".config-keys.json"
-
 
 def migrate_session_cleanup(config_dir: Path) -> list[str]:
     """Read-only eligibility first; serialize only a migration that can write.
@@ -369,9 +363,9 @@ def record_config_key_inventory(config_dir: Path, removed: "Sequence[Sequence[st
     No inventory yet: record the file as it stands, which is the baseline the next
     launch would have written anyway. Best-effort like the rest of this module.
     """
-    from local_operator.config import _leaf_paths, read_config_values
+    from local_operator.config import CONFIG_KEY_INVENTORY_NAME, _leaf_paths, read_config_values
 
-    inventory_path = config_dir / _KEY_INVENTORY_NAME
+    inventory_path = config_dir / CONFIG_KEY_INVENTORY_NAME
     previous = _read_key_inventory(inventory_path)
     if previous is None:
         values = read_config_values(config_dir)
@@ -442,7 +436,12 @@ def report_config_key_shrink(
     paths, so a caller (and the tests) can assert on what was reported without
     parsing the message.
     """
-    from local_operator.config import _dotted, _leaf_paths, read_config_values
+    from local_operator.config import (
+        CONFIG_KEY_INVENTORY_NAME,
+        _dotted,
+        _leaf_paths,
+        read_config_values,
+    )
 
     config_file = config_dir / "config.yml"
     try:
@@ -460,7 +459,7 @@ def report_config_key_shrink(
     # which compares equal to nothing and renders as nested arrays in the log.
     current = sorted(_dotted(path) for path in _leaf_paths(values))
     current_set = set(current)
-    inventory_path = config_dir / _KEY_INVENTORY_NAME
+    inventory_path = config_dir / CONFIG_KEY_INVENTORY_NAME
     previous = _read_key_inventory(inventory_path)
     if previous is None:
         if current and record:

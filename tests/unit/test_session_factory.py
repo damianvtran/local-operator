@@ -7708,7 +7708,7 @@ def test_saved_tool_approval_is_auto_answers_without_materialising_a_root(tmp_pa
     file answers False WITHOUT being constructed (constructing ``ConfigManager``
     creates ``config.yml`` — a mesh request-path check has no business writing, and
     a later test of "no saved mode" must not be the thing that creates one); the
-    key is read through ``_approval_mode_is_auto`` (so ``auto`` rounds-trips and a
+    key is read as an explicitly saved policy (so ``auto`` rounds-trips and a
     missing key means ask); a MALFORMED file ALSO answers False WITHOUT being
     constructed — and without the rename ``ConfigManager`` performs
     (``config.yml.bad.<stamp>``), because a create must not move the operator's
@@ -7777,9 +7777,9 @@ async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monke
     gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        gate = real(auto)
+        gate = real(auto, **kwargs)
         gates.append(gate)
         return gate
 
@@ -7801,11 +7801,9 @@ async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monke
 async def test_without_the_key_the_headless_gate_still_asks(
     tmp_config_dir: Path, monkeypatch
 ) -> None:
-    """The default preserves tonight's failure mode ON PURPOSE, loud and typed.
+    """A legacy config without the key preserves the loud and typed refusal.
 
-    No key (or ``ask``) keeps the gate denying non-tty callers with the CL-04
-    notice and the typed refusal — the semantics every existing headless user
-    has, and the reason the fix above is an OR rather than a new default.
+    The new-install default must not loosen the posture of a pre-existing file.
     """
     import local_operator.session_factory as sf
     from local_operator.agents import AgentRegistry
@@ -7818,9 +7816,9 @@ async def test_without_the_key_the_headless_gate_still_asks(
     gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        gate = real(auto)
+        gate = real(auto, **kwargs)
         gates.append(gate)
         return gate
 
@@ -7880,9 +7878,9 @@ async def test_a_resumed_conversations_approval_choice_reaches_the_headless_gate
     seen: list[bool] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        return real(auto)
+        return real(auto, **kwargs)
 
     monkeypatch.setattr(sf, "_make_request_approval", spy)
     session = await create_session(

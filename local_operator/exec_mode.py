@@ -1110,15 +1110,8 @@ def _declared_by_profile(name: str | None) -> bool:
 def _saved_auto_approval() -> bool:
     """Whether ``tool_approval_mode: auto`` is saved in this run's config root.
 
-    Delegates the read to ``session_factory.saved_tool_approval_is_auto`` — the ONE
-    guarded reader (fresh-root case included: constructing ``ConfigManager`` can
-    CREATE a config directory, and a launch- or request-path check has no business
-    writing; since review F2 the malformed case is guarded the same way — a broken
-    file answers ask and is never renamed aside), so this call site and the mesh
-    surfaces that ask the same question cannot drift.
-    Best-effort: any failure answers ``False``, which keeps the deny-trap advisory
-    ON. That is the safe direction for a launch-time warning: a wrong ``True`` would
-    silence advice for a run that then spent its life denied.
+    A detached run requires a saved choice, like a mesh request. The read
+    does not create a config directory or quarantine an unreadable file.
     """
     from local_operator.session_factory import saved_tool_approval_is_auto
 
@@ -1164,7 +1157,10 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     # calls answer inline — and warning "any tool call ... will be denied" over
     # it is the M2 hazard wearing its other face: telling a run that will work
     # that it will be denied. Best-effort on purpose; see the helper.
-    if _saved_auto_approval():
+    from local_operator.session_factory import local_tool_approval_is_auto
+
+    # Only the foreground local path adopts Auto without a saved choice.
+    if _saved_auto_approval() if args.background else local_tool_approval_is_auto():
         return None
     return _t(_wd.approval_advisory())
 

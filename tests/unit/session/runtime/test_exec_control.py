@@ -332,11 +332,8 @@ async def test_yolo_outranks_a_resumed_conversations_recorded_ask(
 
 @pytest.mark.asyncio
 async def test_ask_mode_still_parks_a_card(isolated_config: Path) -> None:
-    """Default (ask): the seed changes the BOOT VALUE, not the asking.
-
-    With no saved mode the gate must keep parking for a supervisor and settle
-    on their answer — the behaviour ``--control`` exists for.
-    """
+    """A legacy file without an approval choice still parks for the supervisor."""
+    (isolated_config / "config.yml").write_text("values: {conversation_length: 12}\n")
     control = await start_exec_control(FakeSession(), cwd="/tmp")
     try:
         assert control.handle._auto_approve is False
@@ -400,15 +397,13 @@ async def test_an_unsupervised_run_reports_the_gate_its_decisions_use(
 
 
 @pytest.mark.asyncio
-async def test_an_unsupervised_run_without_the_key_still_denies(isolated_config: Path) -> None:
-    """The default — no saved mode — keeps the flag-only posture exactly.
-
-    The positive control for the cell above: nothing seeds an unsupervised
-    handle from an ABSENT key, and the report still says what the gate does.
-    """
+async def test_a_detached_run_without_the_key_still_denies(isolated_config: Path) -> None:
+    """A fresh local default cannot grant authority to a detached worker."""
     from local_operator.session.frontend_state import SlashResult
 
-    control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False)
+    control = await start_exec_control(
+        FakeSession(), cwd="/tmp", supervised=False, require_saved_approval=True
+    )
     try:
         assert control.handle._auto_approve is False
         notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)

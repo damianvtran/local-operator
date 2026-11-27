@@ -328,6 +328,9 @@ def test_config_manager_malformed_yaml_backs_up_and_defaults(temp_config_dir, ca
     manager = ConfigManager(temp_config_dir)
     # Degraded to defaults rather than crashing.
     assert manager.get_config_value("hosting") == ""
+    assert manager.get_config_value("tool_approval_mode") == "ask"
+    assert not config_file.exists()
+    assert ConfigManager(temp_config_dir).get_config_value("tool_approval_mode") == "ask"
     # Backup name is `config.yml.bad.<timestamp>` so a second bad edit cannot
     # clobber the first (round-1 CR-MINOR-3), hence the glob rather than an
     # exact-name check.
@@ -346,6 +349,30 @@ def test_config_manager_non_mapping_top_level_backs_up(temp_config_dir, capsys):
     assert list(temp_config_dir.glob("config.yml.bad.*"))
     err = capsys.readouterr().err
     assert "not a valid configuration mapping" in err
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "config.yml.bad",
+        "config.yml.bak-20260101",
+        "config.yml.pre-cleanup-migration.1",
+        ".config-keys.json",
+    ],
+)
+def test_missing_config_with_prior_config_provenance_keeps_ask(temp_config_dir, marker):
+    (temp_config_dir / marker).touch()
+    assert ConfigManager(temp_config_dir).get_config_value("tool_approval_mode") == "ask"
+
+
+def test_a_stale_first_run_manager_cannot_undo_recovery(tmp_path):
+    manager = ConfigManager(tmp_path)
+    assert manager.get_config_value("tool_approval_mode") == "auto"
+    (tmp_path / "config.yml").write_text("values: [", encoding="utf-8")
+    assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
+    manager.set_config_value("conversation_length", 12)
+    assert manager.get_config_value("tool_approval_mode") == "ask"
+    assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
 
 
 def test_config_dir_created_0700(tmp_path):
@@ -1956,7 +1983,7 @@ def test_a_declared_prefix_silences_the_never_read_refusal(tmp_path: Path) -> No
     payload = deepcopy(vars(manager.config))  # the shipped defaults it holds
     assert not path.exists()
 
-    disk = deepcopy(DEFAULT_CONFIG.values)
+    disk = deepcopy(payload["values"])
     disk["language"] = "de"
     disk["subagents"] = {"models": {"hi": "openai/gpt-5"}}
     path.write_text(

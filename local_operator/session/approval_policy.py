@@ -229,3 +229,41 @@ def resolve_effective(
     if global_mode in _MODES:
         return str(global_mode), "global"
     return "ask", "global"
+
+
+def may_inherit_local_auto(root: Path, session_id: str | None = None) -> bool:
+    """Only an unstamped owner on a root without active mesh trust may inherit Auto."""
+    from local_operator.network import store as network_store
+    from local_operator.session.placement import stamp_path
+
+    # Presence, not a valid parsed stamp: unreadable, invalid and broken-link
+    # placement data are not evidence that a session was born locally.
+    if session_id:
+        try:
+            stamp_path(root, session_id).lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+    try:
+        paths = list(network_store.networks_dir(root).iterdir())
+    except FileNotFoundError:
+        return True  # No enrollment store yet.
+    except OSError:
+        return False
+    try:
+        for path in paths:
+            if path.name.endswith(".secrets.json"):
+                continue
+            if path.name.endswith(network_store.CORRUPT_SUFFIX):
+                return False
+            if path.suffix == ".json":
+                record = network_store.load(path.stem, root=root)
+                if record.trust == "active":
+                    return False
+    except (OSError, ValueError, TypeError):
+        # A disappearing or unreadable record is not proof of a clear root.
+        return False
+    return True
