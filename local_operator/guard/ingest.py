@@ -31,20 +31,38 @@ same bytes:
 WHAT IS ON THE WIRE. Enums, a UTC day or ISO week, random record ids, a
 randomised posture bit, the install id and the consent revisions. No path,
 argument, prompt, name, forge id, title, timestamp finer than a day, or true
-posture value. :func:`build_payload` refuses any family it does not know, and
-every family record is re-checked against its closed key set before signing,
-so a producer bug cannot widen what is sent.
+posture value. :func:`build_payload` refuses any family it does not know and
+re-checks EVERY record before signing -- its keys against the family's closed
+key set AND its values against the closed vocabularies and shapes (enums, a
+``YYYY-MM-DD`` day, a 32-hex id, an ISO week, a 0/1 bit; :func:`validate_record`)
+-- so a producer bug, a custom adapter or a hand-edited local queue row cannot
+put free text on the wire: it is refused before it is signed, not after A3
+answers ``guard_invalid_request``.
+
+WHAT ORGS CAN LINK (RFC v0.9 §10', S-5). A computer holds ONE install key and
+A3 binds one ``install_id``/``key_id`` per account device, so every org this
+member shares with sees the same ``install_id`` and ``key_id`` and the same
+(account-memoised, by design) posture bits: two orgs that compare notes can tell
+that two records came from one computer. Record ids are NOT shared: the
+producers derive one per (tenant, record) with a local secret salt
+(``producers.GuardProducers._wire_record_id``), so the same piece of work
+carries a different id at each org and cannot be joined on it.
 """
 
 from __future__ import annotations
 
 import base64
+import datetime as _dt
 import hashlib
+import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
+from . import activity as _act
+from . import decisions as _dec
+from . import posture as _pst
 from .consent import canonical_json
 
 BATCH_SCHEMA: Final = "guard_batch_v1"
@@ -161,6 +179,91 @@ def batch_id_for(tenant: str, families: Mapping[str, Sequence[Mapping[str, Any]]
     return hashlib.sha256(b"radient-guard-batch-id-v1\x00" + material).hexdigest()[:32]
 
 
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_WEEK = re.compile(r"[0-9]{4}-W[0-9]{2}")
+
+
+def _is_day(value: Any) -> bool:
+    if not isinstance(value, str) or not _DAY.fullmatch(value):
+        return False
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_record(family: str, record: Mapping[str, Any]) -> bool:
+    """True when every KEY and VALUE of ``record`` is inside ``family``'s closed grammar.
+
+    The same vocabularies the producers' record types enforce at creation
+    (``decisions.GuardDecisionRecord``, ``activity.TaskTimeRecord`` /
+    ``ReviewCycleRecord``, ``posture.FACTS``), re-applied here because a record
+    is stored as JSON and read back unvalidated: this is the one place every
+    producer's output passes, so it is where "enum-only" is actually enforced.
+    Never raises.
+    """
+
+    allowed = FAMILY_KEYS.get(family)
+    if allowed is None or not isinstance(record, Mapping):
+        return False
+    keys = set(record)
+    if not keys <= allowed:
+        return False
+    try:
+        if family == FAMILY_POSTURE:
+            return (
+                keys == allowed
+                and record["schema"] == _pst.POSTURE_SCHEMA
+                and record["fact"] in _pst.FACTS
+                and isinstance(record["bit"], int)
+                and not isinstance(record["bit"], bool)
+                and record["bit"] in (0, 1)
+                and isinstance(record["week"], str)
+                and _WEEK.fullmatch(record["week"]) is not None
+            )
+        if not isinstance(record.get("record_id"), str) or not _HEX32.fullmatch(
+            record["record_id"]
+        ):
+            return False
+        if not _is_day(record.get("day")):
+            return False
+        if family == FAMILY_DECISIONS:
+            return (
+                keys == allowed
+                and record["schema"] == _dec.DECISION_SCHEMA
+                and record["outcome"] in _dec.OUTCOMES
+                and record["rule_class"] in _dec.RULE_CLASSES
+                and record["tool_class"] in _dec.TOOL_CLASSES
+            )
+        if family == FAMILY_TASK_TIME:
+            done = record.get("terminal_state") == _act.TERMINAL_DONE
+            return (
+                record["schema"] == _act.TASK_SCHEMA
+                and record["workflow_class"] in _act.WORKFLOW_CLASSES
+                and record["terminal_state"] in _act.TERMINAL_STATES
+                # A completed task carries a band; every other state carries none.
+                and (
+                    record.get("active_duration_band") in _act.DURATION_BAND_NAMES
+                    if done
+                    else "active_duration_band" not in record
+                )
+            )
+        if family == FAMILY_REVIEW_CYCLES:
+            return (
+                keys == allowed
+                and record["schema"] == _act.REVIEW_SCHEMA
+                and record["terminal_outcome"] in _act.REVIEW_OUTCOMES
+                and record["rounds_band"] in _act.ROUNDS_BANDS
+                and record["source"] == _act.REVIEW_SOURCE_HARNESS
+            )
+    except (KeyError, TypeError):
+        # A missing key, or an unhashable value in a set test: not a record.
+        return False
+    return False
+
+
 def build_payload(
     *,
     tenant: str,
@@ -171,7 +274,7 @@ def build_payload(
     ts: int,
     nonce: str | None = None,
 ) -> dict[str, Any]:
-    """The signed payload. Refuses unknown families and unknown record keys."""
+    """The signed payload. Refuses unknown families, record keys and values outside the grammar."""
 
     payload: dict[str, Any] = {
         "schema": BATCH_SCHEMA,
@@ -191,6 +294,9 @@ def build_payload(
         for record in records:
             if not set(record) <= allowed:
                 raise ValueError("guard ingest record carries a field outside its family")
+            if not validate_record(family, record):
+                # Never echo the value: it is exactly what must not travel.
+                raise ValueError("guard ingest record carries a value outside its closed grammar")
             rows.append(dict(record))
         if rows:
             clean[family] = rows
@@ -306,4 +412,5 @@ __all__ = [
     "classify",
     "send",
     "sign",
+    "validate_record",
 ]

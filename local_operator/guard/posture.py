@@ -239,10 +239,11 @@ def values_digest(values: Mapping[str, str]) -> str:
 # Reading the facts (true values; never leave this module except as a memo key)
 # ---------------------------------------------------------------------------
 
-#: SHA-256 of the packaged ``guardrails/defaults/dangerous-delete.md``. A test
-#: pins this against the file, so a deliberate edit to the shipped default
-#: updates the digest in the same change; any other difference -- an edited
-#: install tree -- reads as "not intact".
+#: Digest of the packaged built-in policy: ``_builtin_digest`` hashes
+#: ``name\0 bytes \0`` over every ``guardrails/defaults/*.md`` (so it is NOT the
+#: ``sha256sum`` of any one file). A test pins this against the shipped set, so
+#: a deliberate edit to a default updates the digest in the same change; any
+#: other difference -- an edited install tree -- reads as "not intact".
 BUILTIN_POLICY_SHA256: Final = "b85c0fc1231e621711b627e1f24d906e0c5f949224c71c906932fcac8307389c"
 
 

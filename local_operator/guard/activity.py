@@ -41,7 +41,7 @@ import json
 import secrets
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -283,7 +283,20 @@ def record_from_job(job: Any) -> TaskTimeRecord | None:
     """The record for one settled ``task`` job, or ``None`` (not a task / not terminal).
 
     Active time is the union of the job's own run window and every descendant
-    job's run window; the queue wait before ``started_at`` is not active time.
+    job's run window that is still reachable; the queue wait before
+    ``started_at`` is not active time.
+
+    On the real path the subagent runner detaches the child manager (clearing
+    ``job.child_jobs``) before the job settles, so at settle time only the
+    job's own window is visible. That loses nothing: the runner tears the
+    child session down in the same ``finally`` that detaches it, so every
+    descendant started after, and ended before, its parent's window did.
+    Walking ``child_jobs`` stays for a roster that is still attached.
+
+    The workflow class is the job's ``agent_role`` -- the field a subagent
+    ``task`` job carries (``subagent.py`` stamps it at registration); ``agent_id``
+    is a different field no task registers, which read here collapsed every
+    record to ``general`` (review M1).
     """
 
     if getattr(job, "type", None) != "task":
@@ -297,7 +310,7 @@ def record_from_job(job: Any) -> TaskTimeRecord | None:
     if terminal == TERMINAL_DONE:
         band = duration_band(active_seconds(_work_spans(job)))
     return TaskTimeRecord(
-        workflow_class=workflow_class_of(getattr(job, "agent_id", None)),
+        workflow_class=workflow_class_of(getattr(job, "agent_role", None)),
         terminal_state=terminal,
         active_duration_band=band,
         day=day,
@@ -400,15 +413,35 @@ class ActivityStore:
             conn.close()
 
     def purge(self, family: str | None = None) -> None:
-        """Drop queued records (all, or one family). The friction counter is kept."""
+        """Drop queued records (all, or one family) and, with them, what tracked them.
+
+        ``review_seen`` (the review adapter's per-change dedup marks) goes with
+        ``review_cycles``: it exists only to serve that family's collection, so
+        once nobody collects it a stale mark must not survive to a later grant
+        (a re-grant starts empty). The friction counter is its own family-less
+        store: see :meth:`purge_friction`.
+        """
         if not self.exists():
             return
         conn = self._connect()
         try:
             if family is None:
                 conn.execute("DELETE FROM records")
+                conn.execute("DELETE FROM review_seen")
             else:
                 conn.execute("DELETE FROM records WHERE family = ?", (family,))
+                if family == FAMILY_REVIEW:
+                    conn.execute("DELETE FROM review_seen")
+        finally:
+            conn.close()
+
+    def purge_friction(self) -> None:
+        """Drop the local friction counter (collected only under a live ``reports`` consent)."""
+        if not self.exists():
+            return
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM friction")
         finally:
             conn.close()
 
@@ -616,12 +649,22 @@ def note_job_settled(job: Any) -> None:
 
 
 class StoreTaskSink:
-    """Appends a :class:`TaskTimeRecord` per settled ``task`` job."""
+    """Appends a :class:`TaskTimeRecord` per settled ``task`` job.
 
-    def __init__(self, store: ActivityStore) -> None:
+    ``permit`` re-asks, on every settle, whether a ``task_time`` consent is
+    still live (a stat-keyed read of the consent store, see
+    ``producers._LiveGate``), so a revoke stops collection at once and not at the
+    next tick. The write below is one short SQLite transaction on the event loop
+    (5 s busy timeout, in practice microseconds); it only runs under a live consent.
+    """
+
+    def __init__(self, store: ActivityStore, permit: Callable[[], bool] | None = None) -> None:
         self._store = store
+        self._permit = permit
 
     def job_settled(self, job: Any) -> None:
+        if self._permit is not None and not self._permit():
+            return
         record = record_from_job(job)
         if record is not None:
             self._store.append(record)
