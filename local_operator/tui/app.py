@@ -31959,14 +31959,9 @@ class OperatorApp(App[None]):
     def _set_approve_all(self, approve_all: bool, *, scope: str = "session") -> None:
         """THE writer of the auto-approve mode, band included.
 
-        One method because the band is an ASSERTION about the gate, and the two
-        were set from four places apiece with nothing tying them together. That
-        is not hypothetical tidiness: an owner's frame showed `! auto-approve`
-        beside two tool calls reporting `User denied approval`, and the first
-        hour of diagnosing it went on establishing whether the band was lying —
-        which the code could not answer, because nothing made it impossible.
-        Now the band cannot say anything the gate does not do, since the only
-        way to change either is to change both.
+        The band and the shown mode move together. For a local source that
+        mode also drives its gate. For an attached source it only mirrors the
+        owner; `_draft_auto_applies` never turns that display into a reply.
 
         The persisted default rides along for the same reason: `! auto-approve`
         and `! auto-approve always` are two different promises, and which one is
@@ -66848,13 +66843,10 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
 
 def _draft_auto_applies(source: SessionInteraction) -> bool:
-    # A pending owner request cannot be answered by this viewer's machine
-    # default. Keep a person's explicit Allow All in this conversation, but
-    # never translate a boot/default draft into a reply (visible or parked).
-    draft = source.draft
-    return bool(draft.approve_all) and (
-        not _is_viewer(source.session) or draft.approve_scope == "session"
-    )
+    # An attached draft mirrors the owner's mode for display, not as authority
+    # to answer a pending request. Only a card gesture replies to the owner;
+    # a local gate can still use its own draft, including an Allow All latch.
+    return not _is_viewer(source.session) and bool(source.draft.approve_all)
 
 
 def _canonical_frontend(session: Any) -> bool:

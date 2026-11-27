@@ -734,8 +734,9 @@ def test_first_run_tui_runs_a_tool_then_ask_parks_the_next_call(
 
 
 @pytest.mark.asyncio
-async def test_new_tui_attachment_renders_restored_ask_and_does_not_answer(
-    headless_tui_env: Path, workspace: Path
+@pytest.mark.parametrize("owner_mode", ["ask", "auto"])
+async def test_new_tui_attachment_renders_owner_mode_and_does_not_answer(
+    headless_tui_env: Path, workspace: Path, owner_mode: str
 ) -> None:
     from local_operator.config import ConfigManager
     from local_operator.harness.types import AgentTool, TextContent, ToolResult
@@ -810,39 +811,50 @@ async def test_new_tui_attachment_renders_restored_ask_and_does_not_answer(
 
     try:
         await server.start_in_process()
-        app = OperatorApp(connect)
-        with bounded(BOOT_BOUND_S, "reattach to owner with restored Ask"):
-            async with app.run_test(size=(120, 40)) as pilot:
-                await wait_for_adoption(app, pilot)
-                assert app._session is viewers[0] and not viewers[0].owns_runtime
-                assert app._approvals_default_auto  # this viewer's machine remains on implicit Auto
-                viewer = await connect()
-                app._adopt_session(viewer)
-                await pilot.pause()
-                assert app._session is viewer and viewer.frontend_state.approval_mode == "ask"
-                assert "! auto" not in _band(app), _band(app)
-                assert not app._status._approvals_auto
-                print("Reattached TUI: no Auto chip with owner on restored Ask")
+        with bounded(BOOT_BOUND_S, f"reattach to owner in {owner_mode}"):
+            # Park under restored Ask before the TUI connects: changing the
+            # owner's mode must not answer the already outstanding request.
+            parked = asyncio.Event()
 
-                # Real socket projection, real approval card, inert executor. A
-                # viewer-side automatic answer would run it instead of parking.
-                turn = asyncio.create_task(handle.run_headless_prompt("check the fixture"))
-                try:
-                    await _pump(pilot, lambda: bool(app.query(ApprovalPrompt)))
-                    pending = handle._fold.projection.pending
-                    assert pending is not None and pending.title == "probe"
+            def on_projection():
+                if handle._fold.projection.pending is not None:
+                    parked.set()
+
+            unsubscribe = handle.subscribe(on_projection)
+            turn = asyncio.create_task(handle.run_headless_prompt("check the fixture"))
+            try:
+                await parked.wait()
+                pending = handle._fold.projection.pending
+                assert pending is not None and pending.title == "probe"
+                if owner_mode == "auto":
+                    receipt = await handle.run_slash_authoritative("approvals", "auto")
+                    assert receipt["data"]["approval_mode"] == "auto", receipt
+                    assert handle._fold.projection.pending == pending
+
+                app = OperatorApp(connect)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await wait_for_adoption(app, pilot)
+                    viewer = viewers[0]
+                    assert app._session is viewer and not viewer.owns_runtime
+                    assert app._approvals_default_auto  # this viewer's machine is on implicit Auto
+                    await _pump(pilot, lambda: turn.done() or bool(app.query(ApprovalPrompt)))
+                    assert viewer.frontend_state.approval_mode == owner_mode
+                    assert ("! auto" in _band(app)) == (owner_mode == "auto"), _band(app)
+                    assert app._status._approvals_auto == (owner_mode == "auto")
+                    assert handle._fold.projection.pending == pending
                     assert not turn.done() and not executed
-                    await handle.approval_answer(pending.request_id, False, False)
-                    assert await turn
-                    assert not executed
-                    print(
-                        "Reattached TUI: genuine approval card parked; denying left executor untouched"
-                    )
-                finally:
-                    if not turn.done():
-                        turn.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await turn
+                    card = app.query_one(ApprovalPrompt)
+                    card.focus()
+                    await pilot.press("n")
+                    await _pump(pilot, turn.done)
+                    assert await turn and not executed
+                    print(f"Reattached TUI: {owner_mode} shown; card waited for viewer denial")
+            finally:
+                unsubscribe()
+                if not turn.done():
+                    turn.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await turn
     finally:
         for viewer in viewers:
             await viewer.dispose()
