@@ -1949,7 +1949,8 @@ class ServingSessionHandle(SessionHandle):
             # start or reuse this same owner; only a locally driven run may
             # consume the implicit default. Don't revoke it for the next prompt.
             foreground = getattr(self._session, "_has_local_foreground_approval_input", None)
-            auto = callable(foreground) and foreground()
+            # The Session predicate returns bool; keep the callable check for sessions without it.
+            auto = callable(foreground) and cast(Callable[[], bool], foreground)()
         return ApprovalGrant(auto=auto, scope=scope)
 
     def _tighten_implicit_local_approval(self) -> None:

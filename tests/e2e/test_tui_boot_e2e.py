@@ -840,6 +840,7 @@ async def test_new_tui_attachment_renders_owner_mode_and_does_not_answer(
                     await _pump(pilot, lambda: turn.done() or bool(app.query(ApprovalPrompt)))
                     assert viewer.frontend_state.approval_mode == owner_mode
                     assert ("! auto" in _band(app)) == (owner_mode == "auto"), _band(app)
+                    assert app._status is not None
                     assert app._status._approvals_auto == (owner_mode == "auto")
                     assert handle._fold.projection.pending == pending
                     assert not turn.done() and not executed
