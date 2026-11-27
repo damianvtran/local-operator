@@ -210,6 +210,9 @@ ICON_APPROVALS = "!"
 #: than re-spelled so the two cannot drift apart; the brand glyph, the spinner
 #: and this band's segment icons stay the only other marks on the row.
 ICON_TUNNEL = ICON_APPROVALS
+#: Radient Guard's badge glyph: a shield-adjacent mark already in the terminal
+#: safe set (the band's other glyphs are BMP geometric shapes too).
+ICON_GUARD = "◈"
 
 
 #: What the parked-connector rung says.
@@ -573,6 +576,14 @@ _DROP_LADDER: tuple[str, ...] = (
     # is the one that predicts the operator's next action. An earlier version had
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
+    # Radient Guard's passive badge (RFC v0.9 slice L2b). Outlasts the working
+    # directory because it is the only on-screen sign that the org is waiting
+    # for this person's choice (§5.2.3: notice once a day, badge on every
+    # attach); measured: placed right after `duration` it was shed at 100 cells
+    # beside a worktree path, so the frame showed no badge at all. Not an alarm
+    # (a pending choice pauses nothing), so `context` and the alarm group still
+    # outrank it. Inert (zero cells) for every account without Guard.
+    "guard",
     "context",
     # A PARKED CONNECTOR — remote access is off and only a person can restore it
     # (review round 1, D4). Authored as the FIRST of the alarm group, so it sheds
@@ -1390,6 +1401,9 @@ class StatusLine:
         #: the same reason every other segment is pushed rather than read off the
         #: session: the band never reaches into the world.
         self._tunnel_parked: bool = False
+        #: Radient Guard's badge text ("" = no segment); the app owns the read
+        #: (`OperatorApp._poll_guard`), the band only paints it.
+        self._guard_badge: str = ""
         # Which segments the drop ladder shed on the LAST render. Every segment
         # is dropped until something has been rendered, which is the honest
         # starting state: nothing has been shown yet.
@@ -1754,6 +1768,7 @@ class StatusLine:
         fork_pending: bool | None = None,
         mcp: McpStatus | None = None,
         tunnel_parked: bool | None = None,
+        guard_badge: str | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
         custom: str | None = None,
@@ -1809,6 +1824,8 @@ class StatusLine:
             self._mcp = mcp
         if tunnel_parked is not None:
             self._tunnel_parked = tunnel_parked
+        if guard_badge is not None:
+            self._guard_badge = guard_badge
         if approvals_auto is not None:
             self._approvals_auto = approvals_auto
         if approvals_always is not None:
@@ -2722,6 +2739,14 @@ class StatusLine:
                         Style(color=theme_mod.semantic_color("danger"), bold=True),
                     )
                 )
+
+        guard_badge = getattr(self, "_guard_badge", "")
+        if guard_badge and "guard" not in dropped:
+            # A plain reading: neutral glyph and words, because nothing is wrong
+            # (`getattr` for the stub bands, as with `_tunnel_parked` above).
+            parts.append(
+                (ICON_GUARD, guard_badge, Style(color=theme_mod.semantic_color("fg")), None)
+            )
 
         # LAST-KNOWN INK (TUI-FINALITY-DESIGN D2): every value painted from a
         # stored row takes the band's dim step, so the row reads as "what this

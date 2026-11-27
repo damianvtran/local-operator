@@ -3850,3 +3850,68 @@ AskPickerScreen .ask-picker {
     height: 1;
     padding-top: 0;
 }
+
+/* ── /guard: Radient Guard (RFC v0.9 slice L2b) ─────────────────────────── *
+ *
+ * The `/move --to` confirmation's card family: content-sized over the dimmed
+ * transcript, one decision at a time, the body the only flexible child (it
+ * scrolls; the title and buttons stay painted). Opened only by `/guard`, never
+ * by a prompt's arrival, so it can never sit inside a running turn. */
+GuardScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+GuardScreen .guard-card {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+    layout: vertical;
+}
+
+#guard-title {
+    text-style: bold;
+    color: $lo-fg;
+}
+
+#guard-body {
+    width: 100%;
+    height: auto;
+    max-height: 30;
+    color: $lo-fg;
+    background: $lo-overlay;
+    scrollbar-size-vertical: 1;
+}
+
+.guard-line {
+    width: 1fr;
+    height: auto;
+    color: $lo-fg;
+}
+
+/* A scope bullet: the mark in its own 2-cell column, so a wrapped line keeps
+ * its hanging indent instead of falling back under the bullet. */
+.guard-bullet {
+    width: 100%;
+    height: auto;
+}
+
+.guard-bullet-mark {
+    width: 2;
+    height: 1;
+    color: $lo-muted;
+}
+
+#guard-buttons {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    align-horizontal: right;
+}
+
+#guard-buttons Button {
+    margin-left: 2;
+}

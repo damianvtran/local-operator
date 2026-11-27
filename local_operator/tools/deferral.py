@@ -163,6 +163,7 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # createIf-gated to interactive, signed-in sessions, and deferral keeps
         # even those at the purpose phrase until ``read tool://integrations``.
         "integrations",
+        "guard",
     }
 )
 
@@ -206,6 +207,9 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "tags": "list/create/assign session tag categories",
     "harness_import": "import Claude Code/Codex/omp sessions and memory",
     "integrations": "Team apps/tokens",
+    "guard": (
+        "draft a report of a leaked credential or over-blocking guardrail for the user to send"
+    ),
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

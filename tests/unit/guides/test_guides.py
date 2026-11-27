@@ -57,6 +57,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "extensions",
         "failover",
         "google-vertex",
+        "guard",
         "guardrails",
         "harness-import",
         "highlights",
@@ -1311,6 +1312,9 @@ def test_org_hub_guide_is_gated_on_the_radient_team_predicate(tmp_path) -> None:
     guides = discover_guides()
     gated = {g.name: g.requires for g in guides if g.requires}
     assert gated == {
+        # Radient Guard (RFC v0.9 L2b): Team membership AND an org-raised Guard
+        # prompt on this computer; the same gate builds the `guard` tool.
+        "guard": "radient-guard",
         "org-hub": "radient-team",
         "radient-vault": "radient-vault",
         # The bridge guide advertises a Radient-organization feature, so it
