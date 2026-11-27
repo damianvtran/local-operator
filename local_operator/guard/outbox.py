@@ -1,0 +1,277 @@
+"""The durable local queue of Guard decision records (RFC v0.6, slice L1).
+
+WHAT. A small SQLite ledger at ``<config_dir>/guard/outbox.sqlite3`` holding
+:class:`~local_operator.guard.decisions.GuardDecisionRecord` rows until a later
+slice uploads them as a decision-event batch. It follows
+``team_bridge/outbox.py``: its own file with its own lifetime, a
+``user_version`` schema generation, short per-call connections, and a refusal
+(never a re-create) when a non-empty file carries no generation.
+
+INERT IN L1. Nothing in the product constructs this class yet, and the module
+imports no network client: it cannot send anything. Admission (the member's
+host-level consent, L2a) is what will install :class:`OutboxDecisionSink` and
+a drainer. Construction does no I/O, so even a caller that builds one but never
+appends leaves no file behind -- the "no artefact for non-Team installs" rule.
+
+IDEMPOTENT APPEND. ``record_id`` is the primary key. Appending the same record
+twice is a no-op; appending a DIFFERENT record under an existing id is refused
+(``record_conflict``), because silently keeping either would make the upload's
+idempotency key mean two things.
+
+BOUNDED. Rows are capped at :data:`MAX_OUTBOX_ROWS`. The bound is derived, not
+guessed: the ``decisions`` family releases ``outcome x rule_class`` cells
+(4 x 4 = 16) and counts at most c = 20 units per contributor per cell per day
+(RFC §10'), so one install can contribute at most 320 countable units per day;
+a decision batch lives at most 72 h (§9.2', 3 days), so 960 rows is the most
+that can ever matter. 2048 leaves 2x headroom. At the cap the outbox first
+drops what can no longer count (expired rows, already-sent rows); if it is
+still full the NEW record is dropped -- the oldest live rows are the ones
+closest to upload, and a capped install already exceeds what the grid counts.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import os
+import sqlite3
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+from .decisions import GuardDecisionRecord
+
+#: Our own schema generation; bump only for additive migrations.
+GUARD_OUTBOX_SCHEMA_VERSION: Final = 1
+
+#: See the module docstring for the derivation (16 cells x c=20 x 3 days, x2).
+MAX_OUTBOX_ROWS: Final = 2048
+
+#: Decision-event batches have a 72 h queue TTL (RFC §9.2'); a record whose
+#: UTC day is more than this many days before today can no longer be accepted.
+DECISION_TTL_DAYS: Final = 3
+
+#: Bound on how long a writer waits for another lop process holding the file.
+_BUSY_TIMEOUT_S: Final = 5.0
+
+ROW_STATES: Final = ("pending", "sent")
+
+
+class GuardOutboxRefused(Exception):
+    """The outbox cannot serve this request (damage, conflicting record)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def guard_outbox_path(config_dir: Path | str) -> Path:
+    """The outbox's own file, beside (not inside) any other store."""
+
+    return Path(config_dir) / "guard" / "outbox.sqlite3"
+
+
+@dataclass(frozen=True)
+class AppendResult:
+    """``stored``: a new row; ``duplicate``: the same record was already there;
+    ``dropped``: the outbox was full of rows that still count."""
+
+    status: str
+
+
+def _today() -> _dt.date:
+    return _dt.datetime.now(_dt.UTC).date()
+
+
+class GuardOutbox:
+    """The durable decision ledger. Every method opens its own short connection."""
+
+    def __init__(self, config_dir: Path | str, *, max_rows: int = MAX_OUTBOX_ROWS) -> None:
+        # No I/O here: see "INERT IN L1" above.
+        self._path = guard_outbox_path(config_dir)
+        self._max_rows = max_rows
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def _connect(self) -> sqlite3.Connection:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        existed = self._path.exists() and self._path.stat().st_size > 0
+        conn = sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S)
+        conn.row_factory = sqlite3.Row
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if existed and version != GUARD_OUTBOX_SCHEMA_VERSION:
+                # Re-running DDL over an unknown file is not repair (house rule,
+                # team_bridge/outbox.py); a newer generation is not ours to edit.
+                raise GuardOutboxRefused(
+                    "outbox_damaged",
+                    "the Guard outbox has an unknown schema generation; refusing it",
+                )
+            if not version:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS decision_records ("
+                    " record_id TEXT PRIMARY KEY,"
+                    " schema TEXT NOT NULL,"
+                    " day TEXT NOT NULL,"
+                    " outcome TEXT NOT NULL,"
+                    " rule_class TEXT NOT NULL,"
+                    " tool_class TEXT NOT NULL,"
+                    " state TEXT NOT NULL DEFAULT 'pending',"
+                    " seq INTEGER NOT NULL"
+                    ")"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS decision_records_state"
+                    " ON decision_records (state, seq)"
+                )
+                conn.execute(f"PRAGMA user_version = {GUARD_OUTBOX_SCHEMA_VERSION}")
+                conn.commit()
+                # Enum-only content, but still the member's activity: owner-only.
+                os.chmod(self._path, 0o600)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def append(self, record: GuardDecisionRecord, *, today: _dt.date | None = None) -> AppendResult:
+        """Store ``record`` durably (committed before return); idempotent on ``record_id``."""
+        conn = self._connect()
+        try:
+            # BEGIN IMMEDIATE: the room check and the insert must see the same
+            # row count even when two lop processes append at once.
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM decision_records WHERE record_id = ?", (record.record_id,)
+            ).fetchone()
+            if existing is not None:
+                conn.rollback()
+                if _row_to_record(existing) != record:
+                    raise GuardOutboxRefused(
+                        "record_conflict", "a different record already holds this record_id"
+                    )
+                return AppendResult("duplicate")
+            if not self._make_room(conn, today or _today()):
+                conn.rollback()
+                return AppendResult("dropped")
+            conn.execute(
+                "INSERT INTO decision_records"
+                " (record_id, schema, day, outcome, rule_class, tool_class, state, seq)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'pending',"
+                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM decision_records))",
+                (
+                    record.record_id,
+                    record.schema,
+                    record.day,
+                    record.outcome,
+                    record.rule_class,
+                    record.tool_class,
+                ),
+            )
+            conn.commit()
+            return AppendResult("stored")
+        finally:
+            conn.close()
+
+    def _make_room(self, conn: sqlite3.Connection, today: _dt.date) -> bool:
+        count = conn.execute("SELECT COUNT(*) FROM decision_records").fetchone()[0]
+        if count < self._max_rows:
+            return True
+        _delete_spent(conn, today)
+        count = conn.execute("SELECT COUNT(*) FROM decision_records").fetchone()[0]
+        return count < self._max_rows
+
+    def pending(self, limit: int = 500) -> list[GuardDecisionRecord]:
+        """Unsent records, oldest first."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM decision_records WHERE state = 'pending' ORDER BY seq LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [_row_to_record(row) for row in rows]
+        finally:
+            conn.close()
+
+    def mark_sent(self, record_ids: Iterable[str]) -> int:
+        """Settle records the server confirmed; returns how many moved out of pending."""
+        ids = list(record_ids)
+        if not ids:
+            return 0
+        conn = self._connect()
+        try:
+            moved = conn.executemany(
+                "UPDATE decision_records SET state = 'sent'"
+                " WHERE record_id = ? AND state = 'pending'",
+                [(rid,) for rid in ids],
+            ).rowcount
+            conn.commit()
+            return moved
+        finally:
+            conn.close()
+
+    def prune(self, *, today: _dt.date | None = None) -> int:
+        """Delete sent rows and rows past the 72 h queue TTL; returns rows removed."""
+        conn = self._connect()
+        try:
+            removed = _delete_spent(conn, today or _today())
+            conn.commit()
+            return removed
+        finally:
+            conn.close()
+
+    def count(self) -> int:
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM decision_records").fetchone()[0]
+        finally:
+            conn.close()
+
+
+def _delete_spent(conn: sqlite3.Connection, today: _dt.date) -> int:
+    cutoff = (today - _dt.timedelta(days=DECISION_TTL_DAYS)).isoformat()
+    # ISO dates compare correctly as text.
+    return conn.execute(
+        "DELETE FROM decision_records WHERE state = 'sent' OR day < ?", (cutoff,)
+    ).rowcount
+
+
+def _row_to_record(row: sqlite3.Row) -> GuardDecisionRecord:
+    # Re-validated through the record's own constructor: a row edited on disk
+    # to carry a non-enum value is refused here rather than uploaded later.
+    return GuardDecisionRecord(
+        outcome=row["outcome"],
+        rule_class=row["rule_class"],
+        tool_class=row["tool_class"],
+        day=row["day"],
+        record_id=row["record_id"],
+        schema=row["schema"],
+    )
+
+
+class OutboxDecisionSink:
+    """A decision sink that appends to a :class:`GuardOutbox`.
+
+    Not installed anywhere in L1; L2a installs it once the install is
+    admitted. ``emit_decision`` already swallows its failures.
+    """
+
+    def __init__(self, outbox: GuardOutbox) -> None:
+        self._outbox = outbox
+
+    def emit(self, record: GuardDecisionRecord) -> None:
+        self._outbox.append(record)
+
+
+__all__ = [
+    "DECISION_TTL_DAYS",
+    "GUARD_OUTBOX_SCHEMA_VERSION",
+    "MAX_OUTBOX_ROWS",
+    "ROW_STATES",
+    "AppendResult",
+    "GuardOutbox",
+    "GuardOutboxRefused",
+    "OutboxDecisionSink",
+    "guard_outbox_path",
+]
