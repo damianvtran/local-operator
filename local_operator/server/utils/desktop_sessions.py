@@ -2256,6 +2256,11 @@ class DesktopSessionBridge:
         """
         tracing = open_trace.enabled()
         trace_id = uuid.uuid4().hex if tracing else None
+        owner_lookup_trace = (
+            open_trace.ReadAttachOwnerLookupTrace(trace_id)
+            if read and ingress_trace is not None and trace_id is not None
+            else None
+        )
         if ingress_trace is not None:
             # Join the existing acquisition diagnostics without copying their
             # session field into the new, payload-free request trace. Keep this
@@ -2278,6 +2283,7 @@ class DesktopSessionBridge:
             loop_handle = asyncio.get_running_loop().call_soon(witness)
             open_trace.mark("a.acquire.start", session=self.session_id, acquire_id=trace_id)
         task: asyncio.Task[bool] | None = None
+        draft_bridge: bool | None = None
         attach_landed: bool | None = None
         completed = False
         try:
@@ -2303,7 +2309,15 @@ class DesktopSessionBridge:
                         await self._detach()
                     raise
                 if read:
-                    task = self._start_read_attach(remote)
+                    if owner_lookup_trace is not None:
+                        # Materialization can clear this marker after we yield
+                        # to the flight; report the bridge scope at scheduling.
+                        draft_bridge = self.draft is not None
+                        task = self._start_read_attach(
+                            remote, owner_lookup_trace=owner_lookup_trace
+                        )
+                    else:
+                        task = self._start_read_attach(remote)
                 if phases is not None:
                     phases["lock_held_ms"] = (time.monotonic() - lock_at) * 1000
             try:
@@ -2372,6 +2386,17 @@ class DesktopSessionBridge:
                 loop_handle.cancel()
                 # Keep attach_landed's historical completion meaning. Never read
                 # task.result(): failure/cancellation belongs to the existing path.
+                lookup_fields: dict[str, object] = {}
+                if owner_lookup_trace is not None:
+                    # This cutoff is acquire exit, not first snapshot. Missing,
+                    # shared, skipped, or cancelled attempts stay unknown here.
+                    lookup_result = owner_lookup_trace.finish_acquire()
+                    if not completed or (task is not None and task.cancelled()):
+                        lookup_result = open_trace.OwnerLookupResult.UNKNOWN
+                    lookup_fields = {
+                        "owner_lookup_result_at_acquire": lookup_result,
+                        "draft_bridge": draft_bridge,
+                    }
                 open_trace.mark(
                     "a.acquire",
                     (time.monotonic() - trace_at) * 1000,
@@ -2386,23 +2411,35 @@ class DesktopSessionBridge:
                     loop_witness_ran=loop_delay_ms is not None,
                     loop_queue_delay_ms=loop_delay_ms,
                     **(phases or {}),
+                    **lookup_fields,
                 )
 
-    def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
+    def _start_read_attach(
+        self,
+        remote: AttachedSession,
+        *,
+        owner_lookup_trace: open_trace.ReadAttachOwnerLookupTrace | None = None,
+    ) -> asyncio.Task[bool] | None:
         """The bridge's one read-envelope attach attempt, started if none is live.
 
-        ``None`` when there is nothing to wait for: a facade that is already
-        attached (every read of a live conversation), or one whose attempt is
-        already running — the second reader joins it rather than dialling again,
-        which is what used to serialise two reads into 4 s. Called under
-        ``self.lock`` so two readers cannot both find no task.
+        ``None`` when the facade is already attached. If an attempt is
+        already running, the second reader joins it without lending it a new
+        trace identity or dialling again. Called under ``self.lock`` so two
+        readers cannot both find no task.
         """
         running = self.read_attach_task
         if running is not None and not running.done():
             return running
         if not remote.is_cold:
             return None
-        task = asyncio.create_task(remote.attach_existing(budget=READ_ATTACH_BUDGET_S))
+        attach = (
+            remote.attach_existing(
+                budget=READ_ATTACH_BUDGET_S, _owner_lookup_trace=owner_lookup_trace
+            )
+            if owner_lookup_trace is not None
+            else remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+        )
+        task = asyncio.create_task(attach)
         self.read_attach_task = task
         task.add_done_callback(lambda settled: self._read_attach_settled(remote, settled))
         return task

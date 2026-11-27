@@ -85,7 +85,9 @@ class DesktopEventsIngressTrace:
     row's separate ``acquire_id`` joins to the existing ``a.acquire`` span
     (whose ``ms`` remains its own duration), and to ``cold.summary.span`` only
     when that acquire built the facade. A reused facade/shared cold work is
-    not a cold construction cost attributable to each waiter.
+    not a cold construction cost attributable to each waiter. A read attach's
+    ``a.attach.owner_lookup`` also joins by ``acquire_id``; it can arrive after
+    headers, so it must not backfill ``a.acquire.owner_lookup_result_at_acquire``.
 
     The optional client stream ID appears only on ``asgi_entry``. Later phases
     use the server's own ID so even repeated client IDs cannot conflate them.
@@ -112,6 +114,47 @@ class DesktopEventsIngressTrace:
 
     def mark(self, stage: str, **fields: object) -> None:
         mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self.open_id, **fields)
+
+
+class OwnerLookupResult(StrEnum):
+    """The initial locate tuple, not whether the owner bound or was reachable."""
+
+    UNKNOWN = "unknown"
+    NONE = "none"
+    RECORD = "record"
+    PID_ONLY = "pid_only"
+
+
+class ReadAttachOwnerLookupTrace:
+    """Only the request that starts a read-attach flight can observe its lookup.
+
+    ``acquire_id`` joins to ``desktop.events.acquire``, not to a session or
+    whichever request happens to be waiting when the result arrives. The
+    attempt can outlive that request's grace: still log the actual result,
+    but never backfill the acquisition's already-frozen observation.
+    """
+
+    def __init__(self, acquire_id: str) -> None:
+        self._acquire_id = acquire_id
+        self._during_acquire: OwnerLookupResult | None = OwnerLookupResult.UNKNOWN
+
+    def record(self, *, has_record: bool, has_pid: bool) -> None:
+        # ``none`` means the seam returned (None, None). On a peer, that
+        # answer can also reflect a failed relay; it is not proof of absence.
+        if has_record:
+            result = OwnerLookupResult.RECORD
+        elif has_pid:
+            result = OwnerLookupResult.PID_ONLY
+        else:
+            result = OwnerLookupResult.NONE
+        if self._during_acquire is not None:
+            self._during_acquire = result
+        mark("a.attach.owner_lookup", acquire_id=self._acquire_id, result=result)
+
+    def finish_acquire(self) -> OwnerLookupResult:
+        result = self._during_acquire
+        self._during_acquire = None
+        return result if result is not None else OwnerLookupResult.UNKNOWN
 
 
 class ColdWorkerPhase(StrEnum):
