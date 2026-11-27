@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 if TYPE_CHECKING:  # the crypto module is function-local at runtime; this is a type only
     from local_operator.network.wire import LinkKeys
@@ -249,6 +249,39 @@ def capabilities_for_role(role: str) -> frozenset[str]:
     if role not in ROLE_CAPABILITIES:
         raise KeyError(f"unknown role {role!r}; known roles are {', '.join(ROLES)}")
     return ROLE_CAPABILITIES[role]
+
+
+#: What a POOL member's stored capability set may NEVER contain (R-I11,
+#: ``mesh-compute-pool.md`` §3.5). A pool member has no human at its end — its
+#: admission is a token plus provider attestation (§3.2, A8.1) — so the two
+#: authorities a device join asks a person to confirm are exactly the two it must
+#: never hold: ``admin`` (membership authority) and ``trust`` (re-admission).
+#: ``delete`` and ``move`` go with them because a borrowed machine must not be
+#: able to destroy or relocate the operator's sessions.
+#:
+#: ``trust`` is not in :data:`CAPABILITIES` today (re-admission is ``admin``); it
+#: is listed anyway because this set is a POLICY about what a pool member may ever
+#: hold, and a future capability named ``trust`` must be covered the day it is
+#: added rather than the day someone notices.
+POOL_FORBIDDEN_CAPABILITIES: frozenset[str] = frozenset({"admin", "trust", "delete", "move"})
+
+
+def clamp_pool_capabilities(capabilities: Iterable[str]) -> list[str]:
+    """``capabilities`` with :data:`POOL_FORBIDDEN_CAPABILITIES` removed (R-I11).
+
+    REMOVE, NEVER REFUSE: an ``admin`` pool invite is a mistake an operator makes
+    with a flag, and the useful answer is the narrow member it describes — not a
+    refusal that leaves them holding a token. The strip is silent here and the
+    admission's audit row carries the resulting set, so the reduction is
+    answerable after the fact.
+
+    Applied at MINT (``invite.mint``, so the saved row, the token's own copy and
+    the joiner's view agree) and again at ADMISSION (``relay``, so a record or
+    token written another way still cannot admit one) — the same two-seat
+    discipline ``capabilities_under_policy`` states for the credential policy.
+    Sorted and de-duplicated so every caller stores one spelling of a set.
+    """
+    return sorted({str(capability) for capability in capabilities} - POOL_FORBIDDEN_CAPABILITIES)
 
 
 # ---------------------------------------------------------------------------
@@ -1574,6 +1607,11 @@ class JoinParkUnanswered(MeshRefusal):
 # ---------------------------------------------------------------------------
 
 MemberKind = Literal["device", "pool"]
+#: The same two values as a runtime tuple, for the ONE place a string off the wire
+#: has to be checked against them: :func:`local_operator.network.invite.decode`.
+#: Kept beside the ``Literal`` so a third kind cannot be added to one and not the
+#: other.
+MEMBER_KINDS: tuple[str, ...] = ("device", "pool")
 MemberLifecycle = Literal["active", "provisioning", "draining", "expired"]
 TrustState = Literal["active", "untrusted", "disconnected"]
 InviteState = Literal["minted", "redeemed", "consumed"]
@@ -2046,6 +2084,12 @@ class InviteRecord:
     #: enters pairing: the inviter enforces freshness against its own clock.
     ttl_s: float = 600.0
     role: str = "drive"
+    #: ``device`` (the ordinary invitation, a human at both ends) or ``pool`` —
+    #: the A8.1 grant whose joiner has no screen and which is therefore admitted on
+    #: provider attestation INSTEAD of this device's human card (§3.2). The row is
+    #: the authority, not the token's copy of it, for the same reason
+    #: ``credential_offers`` is: a token holder can re-tag an edited payload.
+    member_kind: MemberKind = "device"
     capabilities: list[str] = field(default_factory=list)
     hosts: list[str] = field(default_factory=list)
     state: InviteState = "minted"
@@ -2160,6 +2204,15 @@ class NetworkRecord:
     #: Unix seconds before which a second LOCAL rotation is refused
     #: (``rotation_in_progress``).
     rotation_lock_until: float = 0.0
+    #: ``{key_id: unpadded-URL-safe-base64 32-byte Ed25519 public key}`` — the
+    #: provisioning control plane's signing keys, pinned on the OPERATOR's device
+    #: when they configure a provider once, locally (``mesh-compute-pool.md``
+    #: §3.2). They are what a pool joiner's attestation is verified against, so a
+    #: network with none can admit no pool member at all (fail closed, never
+    #: "unpinned means trusted"). Empty for every network that has never
+    #: configured a provider, which is every device network — the default is what
+    #: keeps an existing record readable by this build and by older ones.
+    attestation_keys: dict[str, str] = field(default_factory=dict)
 
     def member(self, device_id: str) -> MemberRecord | None:
         for row in self.members:
@@ -2191,6 +2244,11 @@ class NetworkRecord:
     @staticmethod
     def from_json(data: dict[str, Any]) -> NetworkRecord:
         fields = _known(NetworkRecord, data)
+        # A peer's JSON can carry ``null`` or a list where the pinned key set is
+        # expected. An unreadable set degrades to EMPTY — which admits no pool
+        # member — rather than raising on a record every other surface still needs.
+        if not isinstance(fields.get("attestation_keys"), dict):
+            fields["attestation_keys"] = {}
         fields["members"] = [
             MemberRecord.from_json(row)
             for row in data.get("members") or []

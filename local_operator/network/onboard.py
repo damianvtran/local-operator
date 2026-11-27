@@ -2289,8 +2289,9 @@ class OnboardRun:
         * the per-class default credential HELD rows on THIS device's placement
           document — the set is the offer's own projection (§1.4's defaults), so
           the join screen the node saw and this write cannot disagree. Role
-          ``read`` and pool members get no credential rows (§1.3): the necessary
-          data is bounded by the member's role;
+          ``read`` gets no credential rows (§1.3), and a POOL member gets the
+          session-scoped ones only: it may never hold a device-bound credential
+          and still declares none of its own (§3.5; ratified Item 3 / B4);
         * the ``broker_credential`` capability on the node's member row — the
           other half of the pair ``credential share`` writes, and without it the
           node cannot dial the broker at all;
@@ -2440,9 +2441,11 @@ class OnboardRun:
         # -- credential provisioning: the holder rows + the capability --------
         granted: list[str] = []
         skipped: list[dict[str, str]] = []
+        withheld: list[dict[str, str]] = []
         store_unreadable = ""
         role = str(member.role or "")
-        grants_credentials = str(getattr(member, "kind", "device")) != "pool" and role in (
+        pool_member = str(getattr(member, "kind", "device")) == "pool"
+        grants_credentials = role in (
             "drive",
             "admin",
         )
@@ -2459,6 +2462,21 @@ class OnboardRun:
                 store_unreadable = (
                     "this machine's login store could not be read, so no logins were " "shared"
                 )
+            if pool_member:
+                # §3.5, ratified Item 3 (B4): a pool member is PROVISIONED like a
+                # drive member — it runs the sessions, so it needs the model
+                # credentials to run them — but only the session-scoped ones. The
+                # device-bound key (the GitHub App key) is withheld BY NAME rather
+                # than silently dropped, so the receipt says why a login the offer
+                # listed was not written. The node still declares no credential of
+                # its own: this writes HOLDER rows on THIS device.
+                session_scoped = set(offers_mod.session_scoped_keys(default_keys))
+                withheld = [
+                    {"key": key, "reason": "pool_session_scope_only"}
+                    for key in default_keys
+                    if key not in session_scoped
+                ]
+                default_keys = [key for key in default_keys if key in session_scoped]
             try:
                 with placement_mod.mutate(
                     record.network_id, self_device=identity.device_id
@@ -2483,10 +2501,12 @@ class OnboardRun:
                     False,
                     "the sharing list on this machine could not be written: " + str(exc),
                 )
+            skipped = [*skipped, *withheld]
             data["grants_note"] = ""
-        elif str(getattr(member, "kind", "device")) == "pool":
+        elif pool_member:
             data["grants_note"] = (
-                "no credential rows were written: this member is a pool member (§1.3)"
+                "no credential rows were written: this member is a pool member with no "
+                "borrow path at its role (§1.3)"
             )
         else:
             data["grants_note"] = (

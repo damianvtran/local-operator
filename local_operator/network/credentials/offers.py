@@ -68,6 +68,7 @@ is imported inside the functions that need it.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -729,6 +730,28 @@ def owner_default_shares(items: list[dict[str, Any]]) -> list[str]:
     """The default decision: the full offered set (§3.3 — the default is what was
     offered, so a y/N-only flow behaves as "accept what was offered")."""
     return sorted(served_keys(items))
+
+
+def session_scoped_keys(keys: Iterable[str]) -> list[str]:
+    """``keys`` minus the ones a grant can only make DEVICE-bound: the GitHub App key.
+
+    WHY THIS EXISTS AS ONE FUNCTION. A pool member borrows session-scoped model
+    credentials and may never hold a device-scoped one
+    (``mesh-compute-pool.md`` §3.5), and that decision is made at two write sites —
+    the relay's pairing admission (``relay._pool_offer_items`` /
+    ``relay._grant_pair_shares``) and onboarding's provisioning write
+    (``onboard.step_provision``). The per-kind scope itself lives in
+    :func:`local_operator.network.credentials.github.is_github_key` ("the one
+    spelling rule") and in the placement document's ``grant``; restating "not
+    github" at each site is how one of them ends up still offering a key the other
+    refuses.
+
+    Order is preserved, so a caller can filter a list in place and keep the offer's
+    own ordering.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    return [key for key in keys if not github_mod.is_github_key(key)]
 
 
 # ---------------------------------------------------------------------------

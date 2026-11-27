@@ -107,6 +107,10 @@ CODE_EXPIRED = "remote_compute_attestation_expired"
 CODE_WINDOW_INVERTED = "remote_compute_attestation_window_inverted"
 CODE_WINDOW_TOO_LONG = "remote_compute_attestation_window_too_long"
 CODE_MALFORMED_KEY_SET = "remote_compute_attestation_malformed_key_set"
+#: A pool joiner's hello carried no ``attestation`` at all. Its own code because it
+#: is the one refusal a caller can fix by sending the frame the contract asks for,
+#: rather than a statement that failed a rule.
+CODE_MISSING_ATTESTATION = "remote_compute_attestation_missing"
 CODE_MALFORMED_KEY_ID = "remote_compute_attestation_malformed_key_id"
 CODE_DUPLICATE_KEY_ID = "remote_compute_attestation_duplicate_key_id"
 CODE_EMPTY_KEY_SET = "remote_compute_attestation_empty_key_set"
@@ -203,7 +207,7 @@ def verify_attestation(
     signature: str,
     key_id: str,
     keys: Mapping[str, bytes],
-    expect_workload_id: str,
+    expect_workload_id: str | None,
     expect_network_id: str,
     expect_device_key: bytes,
     now: int,
@@ -224,6 +228,16 @@ def verify_attestation(
     AFTER the network check — the tenant is the segmentation guarantee, and a
     statement about another network is refused before anyone asks whether it is
     about the right workload in it.
+
+    ``expect_workload_id=None`` is for the ONE caller that cannot name a workload
+    yet: a mesh pool grant is minted by a person BEFORE the provider provisions
+    the pod the statement will describe, so the workload id does not exist on the
+    minting device (``mesh-compute-pool.md`` §3.2). It does not skip the check —
+    the statement must still carry a non-empty, printable ``workload_id`` (the
+    parse rule) and it is returned for the audit — it removes only the
+    comparison against a value this side never had. An EMPTY STRING is still a
+    caller bug and still refused: "I forgot to say what I am checking" and "I
+    cannot know it yet" must not read the same.
 
     ``keys`` VALUES MUST BE ``bytes``; anything else is a ``TypeError``, not a
     refusal. Discovery answers ``{id: AttestationKey}`` and :func:`public_keys`
@@ -396,6 +410,64 @@ def public_keys(parsed: Mapping[str, AttestationKey]) -> dict[str, bytes]:
     return {key_id: key.public_key for key_id, key in parsed.items()}
 
 
+def parse_pinned_keys(keys: Mapping[str, object]) -> dict[str, bytes]:
+    """A network's PINNED control-plane keys, decoded for :func:`verify_attestation`.
+
+    ``keys`` is the operator's own configuration — ``{key_id: unpadded URL-safe
+    base64}`` exactly as ``NetworkRecord.attestation_keys`` stores it — and the
+    answer is the ``{key_id: 32-byte public key}`` this module verifies against.
+
+    WHY IT IS NOT :func:`parse_attestation_keys` WITH A DIFFERENT SHAPE. A
+    published set answers "which keys has this server got", carries a status per
+    key, and is allowed to be empty-but-answered. A pinned set is the TRUST ROOT
+    for a pool admission: the operator wrote it once, locally, and it is the only
+    thing that makes a pool joiner's statement checkable. So an EMPTY set is
+    refused here (``CODE_EMPTY_KEY_SET``) rather than answered as ``{}`` — a
+    caller that then verified against nothing would report "checked" for a check
+    that could not run — and every entry is held to the published set's own
+    spelling rules (key-id shape, the one legal base64 spelling, the one legal
+    key length). One malformed entry refuses the whole set rather than being
+    skipped: a trust root with a silently dropped key is a trust root nobody can
+    describe.
+
+    ``ValueError`` is not raised for bad input; the caller gets an
+    :class:`AttestationRefusal` with a stable code, like every other read here.
+    """
+    if not isinstance(keys, Mapping):
+        raise AttestationRefusal(
+            CODE_MALFORMED_KEY_SET, "the pinned key set must map a key id to a public key"
+        )
+    if not keys:
+        raise AttestationRefusal(
+            CODE_EMPTY_KEY_SET,
+            "no control-plane key is pinned for this network, so nothing can verify "
+            "a pool member's statement; pin the provisioning plane's key first",
+        )
+    decoded: dict[str, bytes] = {}
+    for key_id, spelling in keys.items():
+        _require_key_id(key_id, CODE_MALFORMED_KEY_SET, "pinned key id")
+        if not isinstance(spelling, str) or len(spelling) != _PUBLIC_KEY_B64_CHARS:
+            raise AttestationRefusal(
+                CODE_MALFORMED_KEY_SET,
+                f"pinned key {key_id!r} is not the {_PUBLIC_KEY_B64_CHARS}-character "
+                f"unpadded base64 of a {_PUBLIC_KEY_BYTES}-byte Ed25519 public key",
+            )
+        try:
+            public_key = _decode_b64u(spelling)
+        except ValueError as exc:
+            raise AttestationRefusal(
+                CODE_MALFORMED_KEY_SET, f"pinned key {key_id!r} is {exc}"
+            ) from exc
+        if len(public_key) != _PUBLIC_KEY_BYTES:
+            raise AttestationRefusal(
+                CODE_MALFORMED_KEY_SET,
+                f"pinned key {key_id!r} decodes to {len(public_key)} bytes; an Ed25519 "
+                f"public key is {_PUBLIC_KEY_BYTES}",
+            )
+        decoded[key_id] = public_key
+    return decoded
+
+
 def _require_byte_keys(keys: Mapping[str, bytes]) -> None:
     """Refuse a key set whose values are not ``bytes`` — a caller bug, not a refusal.
 
@@ -416,7 +488,7 @@ def _require_byte_keys(keys: Mapping[str, bytes]) -> None:
 
 
 def _require_expectation(
-    expect_network_id: str, expect_workload_id: str, expect_device_key: bytes
+    expect_network_id: str, expect_workload_id: str | None, expect_device_key: bytes
 ) -> None:
     """Refuse an empty expectation BEFORE reading the statement.
 
@@ -431,7 +503,9 @@ def _require_expectation(
             "no expected network id was supplied; a statement is only meaningful "
             "against the network this device asked about",
         )
-    if not isinstance(expect_workload_id, str) or not expect_workload_id:
+    if expect_workload_id is not None and (
+        not isinstance(expect_workload_id, str) or not expect_workload_id
+    ):
         raise AttestationRefusal(
             CODE_MISSING_EXPECTATION,
             "no expected workload id was supplied; a statement is only meaningful "
@@ -680,15 +754,19 @@ def _require_network(statement: Mapping[str, Any], expect_network_id: str) -> No
         )
 
 
-def _require_workload(statement: Mapping[str, Any], expect_workload_id: str) -> None:
+def _require_workload(statement: Mapping[str, Any], expect_workload_id: str | None) -> None:
     """Refuse a statement about a different workload than the one asked about.
 
     Compared AFTER the network check: the tenant is the segmentation guarantee,
     and "this is another tenant's workload" is a different fact from "this is
     the wrong workload in the right tenant". A caller branching on the code
     needs those told apart.
+
+    ``None`` means the caller cannot name the workload yet (see
+    :func:`verify_attestation`), so there is nothing to compare — the statement's
+    own ``workload_id`` still had to parse as a non-empty printable field.
     """
-    if statement["workload_id"] != expect_workload_id:
+    if expect_workload_id is not None and statement["workload_id"] != expect_workload_id:
         raise AttestationRefusal(
             CODE_WORKLOAD_MISMATCH,
             "this device asked about workload "
