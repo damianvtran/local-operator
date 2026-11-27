@@ -418,7 +418,46 @@ def test_randomised_response_rate_is_p_three_quarters(root: Path) -> None:
     assert abs(truthful - 0.75 * n) < 4 * 27.4
 
 
-def test_posture_batch_carries_the_bit_only_and_memo_survives_regrant_and_reset(
+def _posture_sends(fx: _Fixture) -> list[dict[str, Any]]:
+    return [r["body"]["payload"] for r in fx.ingests() if "posture" in r["body"]["payload"]]
+
+
+def _bits(payload: dict[str, Any]) -> dict[str, int]:
+    return {r["fact"]: r["bit"] for r in payload["posture"]}
+
+
+def _posture_rows(root: Path) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(P.producers_path(root))
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            "SELECT week, sent_values, sent_bits, closed FROM posture_weeks ORDER BY week"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _day_closed_reply(week: str) -> tuple[int, dict[str, Any]]:
+    return (
+        200,
+        {
+            "result": {
+                "batch_id": "x",
+                "replayed": False,
+                "accepted": 0,
+                "refused_fields": [],
+                "posture": {
+                    "status": "accepted",
+                    "accepted": 0,
+                    "duplicate": 0,
+                    "rejected": [{"ref": f"guardrails_enabled@{week}", "code": "guard_day_closed"}],
+                },
+            }
+        },
+    )
+
+
+def test_open_week_memo_is_sent_on_a_friday_tick_carries_the_bit_only_and_memo_survives(
     root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     truth = {
@@ -430,35 +469,174 @@ def test_posture_batch_carries_the_bit_only_and_memo_survives_regrant_and_reset(
     host = _grant(root, fx, store, ["posture"])
     clock = _Clock()
     producers = _producers(root, fx, store, clock=clock, rng=_Rng([0.1, 0.1]))
-    producers.tick()  # observes week 2026-W48
-    assert fx.ingests() == []  # the week is still open
-    clock.now += 7 * 86400  # into W49: W48 closed
-    producers.reset_transport()
-    producers.tick()
+    # Friday 2026-11-27, W48 is OPEN: the server takes its memo now, and a
+    # laptop that is off all weekend must not lose the week by waiting.
+    assert producers.tick().sent == {"posture": 2}
     (req,) = fx.ingests()
     posture = req["body"]["payload"]["posture"]
     assert {tuple(sorted(r)) for r in posture} == {("bit", "fact", "schema", "week")}
     assert {r["week"] for r in posture} == {"2026-W48"}
-    bits = {r["fact"]: r["bit"] for r in posture}
+    bits = _bits(req["body"]["payload"])
     assert "recommended" not in json.dumps(req["body"]) and "other" not in json.dumps(req["body"])
     memo_file = pst.memo_path(root)
     before = memo_file.read_bytes()
 
     # Revoke, namespace reset, re-grant: the memo file is untouched and the
-    # next report for the same true values carries the same bits.
+    # re-grant reports the SAME bits for the same true values.
     host.revoke(TENANT)
     producers.tick()
     producers.namespace_reset()
     assert memo_file.read_bytes() == before
     _grant(root, fx, store, ["posture"], rev=2)
-    producers.tick()  # observe W49 under the new grant
-    clock.now += 7 * 86400
-    producers.reset_transport()
     producers._rng = _Rng([0.99])  # any fresh draw would now LIE: must not be used
     producers.tick()
-    later = [r for r in fx.ingests() if "posture" in r["body"]["payload"]][-1]
-    assert {r["fact"]: r["bit"] for r in later["body"]["payload"]["posture"]} == bits
+    assert _bits(_posture_sends(fx)[-1]) == bits
     assert pst.PostureMemo(root).memo_count(ACCOUNT) == 2
+
+
+def test_changed_bit_is_sent_again_unchanged_bit_is_not_and_the_batch_id_is_stable(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    calls: list[int] = []
+    producers = _producers(root, fx, store, calls=calls, rng=_Rng([0.1]))
+    producers.tick()
+    assert len(_posture_sends(fx)) == 1 and _bits(_posture_sends(fx)[0]) == {
+        pst.FACT_GUARDRAILS_ENABLED: 1
+    }
+
+    # Idle tick: no change, so no request AND no sign-in resolution at all.
+    used = len(calls)
+    producers.reset_transport()
+    assert producers.tick().results == []
+    assert len(fx.ingests()) == 1 and len(calls) == used
+
+    # The member turns guardrails off: its (first-seen, truthful) bit is 0.
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    assert producers.tick().sent == {"posture": 1}
+    first, second = _posture_sends(fx)
+    assert _bits(second) == {pst.FACT_GUARDRAILS_ENABLED: 0}
+    # lop's batch_id derivation is unchanged (tenant + fact@week ids, no bit):
+    # the changed re-send reuses it, which A3 accepts as last-report-wins.
+    assert first["batch_id"] == second["batch_id"]
+    assert first["nonce"] != second["nonce"]
+
+    # Turning it back reuses the memo (bit 1 again) and is a change vs. the
+    # last SENT bit, so it is sent; a further idle tick is not.
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_RECOMMENDED
+    producers.reset_transport()
+    producers.tick()
+    assert _bits(_posture_sends(fx)[-1]) == {pst.FACT_GUARDRAILS_ENABLED: 1}
+    producers.reset_transport()
+    producers.tick()
+    assert len(_posture_sends(fx)) == 3
+
+
+def test_a_moved_true_value_with_the_same_memoised_bit_sends_nothing(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    # recommended draws truthfully (0.1 < 0.75 -> 1); other then LIES (0.99 -> 1).
+    producers = _producers(root, fx, store, rng=_Rng([0.1, 0.99]))
+    producers.tick()
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    producers.tick()
+    assert [_bits(p) for p in _posture_sends(fx)] == [{pst.FACT_GUARDRAILS_ENABLED: 1}]
+    # ...and the move is remembered, so it is not recomputed every tick.
+    (row,) = _posture_rows(root)
+    assert row["sent_values"] == pst.values_digest({pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_OTHER})
+
+
+def test_day_closed_on_posture_drops_the_week_and_never_marks_it_sent(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append(_day_closed_reply("2026-W48"))
+    producers.tick()
+    (row,) = _posture_rows(root)
+    # Too late is NOT delivered: nothing recorded as sent, and the week is
+    # retired so it is not retried every tick.
+    assert row["closed"] == 1 and row["sent_bits"] is None and row["sent_values"] is None
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    producers.tick()
+    assert len(fx.ingests()) == 1
+    # The next week is a fresh start and is sent.
+    clock.now += 4 * 86400  # Tuesday 2026-12-01, W49
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for r in _posture_sends(fx)[-1]["posture"]] == ["2026-W49"]
+
+
+def test_an_unsent_week_is_still_sent_on_the_monday_after_but_not_later(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append((503, {"code": "unavailable", "error": "try later"}))
+    assert producers.tick().results == ["retry"]  # the Friday send failed
+    # Monday 2026-11-30 12:00 UTC: W48 closed Sunday and is inside A3's 24 h.
+    clock.now = dt.datetime(2026, 11, 30, 12, 0, tzinfo=dt.UTC).timestamp()
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for p in _posture_sends(fx)[1:] for r in p["posture"]] == [
+        "2026-W48",
+        "2026-W49",
+    ]
+    # A week that never got through and is now past its window is dropped
+    # unsent: the server would answer guard_day_closed.
+    weeks = [r["week"] for r in _posture_rows(root)]
+    assert weeks == ["2026-W48", "2026-W49"]
+    assert not pst.week_is_open("2026-W48", dt.date(2026, 12, 1))
+    assert pst.week_is_open("2026-W48", dt.date(2026, 11, 30))
+    assert pst.week_is_open("2026-W49", dt.date(2026, 12, 1))
+    assert not pst.week_is_open("garbage", dt.date(2026, 11, 30))
+
+
+def test_a_week_past_its_window_is_never_sent(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append((503, {"code": "unavailable", "error": "try later"}))
+    producers.tick()  # W48 observed, send failed
+    clock.now = dt.datetime(2026, 12, 1, 12, 0, tzinfo=dt.UTC).timestamp()  # Tuesday W49
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for p in _posture_sends(fx)[1:] for r in p["posture"]] == ["2026-W49"]
+
+
+def test_no_posture_consent_means_no_posture_observation_or_send(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pst, "read_facts", lambda _c: {pst.FACT_GUARDRAILS_ENABLED: "recommended"})
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    assert fx.ingests() == [] and _posture_rows(root) == []
+    assert not pst.memo_path(root).exists()
 
 
 # ---------------------------------------------------------------------------

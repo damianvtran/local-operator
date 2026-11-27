@@ -25,6 +25,13 @@ touches (``guard/producers.py`` purges queues, never this file). Only the
 member deleting the install's Guard state draws again (the RFC's
 member-controlled-redraw residual).
 
+WHEN IT IS SENT. The OPEN week's memo is reported during the week and sent
+again whenever a reported bit changes; the last report of a week wins on the
+server (A3 ``docs/GUARD.md`` "Deltas for lop" #6). It is never held back until
+the week closes: the server stops taking a week 24 h after its Sunday, so a
+laptop that was off that weekend would otherwise lose the whole week
+(:func:`week_is_open`).
+
 ONE DESIGNATED DEVICE PER MEMBER is the server's job (A3's persisted
 ``posture_designation``); this install simply reports under a live
 ``posture`` grant and the server ignores it when it is not the designated one.
@@ -175,6 +182,59 @@ def iso_week(day: _dt.date) -> str:
     return f"{year}-W{week:02d}"
 
 
+#: How long after its Sunday a posture week still counts server-side: A3's
+#: ``guard.PostureCloseLag`` (24 h), kept at one day so the retained bit never
+#: outlives RFC v0.9 §10' S-2b's 8-day window. Deliberately NOT lop's 72 h
+#: queue TTL for day records: a posture week lop finds closed past this is lost
+#: to the server, so the producers send the OPEN week during the week instead.
+POSTURE_CLOSE_LAG_DAYS: Final = 1
+
+
+def week_is_open(week: str, today: _dt.date) -> bool:
+    """Whether the server still accepts ``week``'s memo on UTC day ``today``.
+
+    Open from the week's Monday until the end of the Monday after it (week end
+    + :data:`POSTURE_CLOSE_LAG_DAYS`). Judged on the UTC DATE, like the server,
+    so a clock a few minutes off cannot move the verdict except at midnight.
+    A malformed week is never open.
+    """
+
+    try:
+        year, number = week.split("-W")
+        monday = _dt.date.fromisocalendar(int(year), int(number), 1)
+    except ValueError:
+        return False
+    return today < monday + _dt.timedelta(days=7 + POSTURE_CLOSE_LAG_DAYS)
+
+
+def _digest(items: list[str]) -> str:
+    material = "\x00".join(sorted(items)).encode()
+    return hashlib.sha256(b"radient-guard-posture-sent-v1\x00" + material).hexdigest()[:32]
+
+
+def bits_digest(reports: Mapping[str, int] | list[PostureReport]) -> str:
+    """Digest of one week's REPORTED bits: what the server holds after a send.
+
+    Equal digests mean the server already has this exact memo for the week, so
+    re-sending would add nothing. Bits only, no true value.
+    """
+
+    if isinstance(reports, Mapping):
+        return _digest([f"{fact}={bit}" for fact, bit in reports.items()])
+    return _digest([f"{r.fact}={r.bit}" for r in reports])
+
+
+def values_digest(values: Mapping[str, str]) -> str:
+    """Digest of one week's TRUE values. Local only (``producers.sqlite3``).
+
+    It exists so an idle tick can tell "nothing changed" without resolving the
+    sign-in or reading the memo: the memo maps a value to its bit
+    deterministically, so equal values give equal bits.
+    """
+
+    return _digest([f"{fact}={value}" for fact, value in values.items()])
+
+
 # ---------------------------------------------------------------------------
 # Reading the facts (true values; never leave this module except as a memo key)
 # ---------------------------------------------------------------------------
@@ -283,14 +343,18 @@ __all__ = [
     "EPSILON",
     "FACTS",
     "P_TRUTH",
+    "POSTURE_CLOSE_LAG_DAYS",
     "POSTURE_SCHEMA",
     "PostureMemo",
     "PostureReport",
     "VALUE_OTHER",
     "VALUE_RECOMMENDED",
     "account_key",
+    "bits_digest",
     "iso_week",
     "memo_path",
     "read_facts",
     "reports_for",
+    "values_digest",
+    "week_is_open",
 ]

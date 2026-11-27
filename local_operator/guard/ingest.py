@@ -226,6 +226,10 @@ class IngestResult:
     #: ``guard_day_closed`` and the like). Counted for the log only; they are
     #: retired with the rest of the batch because they can never count.
     rejected: int = 0
+    #: ``(family, code)`` for each of those per-record rejections. The producers
+    #: need the CODE for exactly one decision: a posture ``guard_day_closed`` is
+    #: "too late", so that week is dropped rather than recorded as delivered.
+    rejected_codes: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 def classify(code: str) -> str:
@@ -258,6 +262,7 @@ def send(transport: GuardIngestTransport, envelope: Mapping[str, Any]) -> Ingest
         return IngestResult(classify(code), code)
     refused: tuple[str, ...] = ()
     rejected = 0
+    codes: list[tuple[str, str]] = []
     if isinstance(result, Mapping):
         raw = result.get("refused_fields")
         if isinstance(raw, list):
@@ -266,7 +271,15 @@ def send(transport: GuardIngestTransport, envelope: Mapping[str, Any]) -> Ingest
             detail = result.get(family)
             if isinstance(detail, Mapping) and isinstance(detail.get("rejected"), list):
                 rejected += len(detail["rejected"])
-    return IngestResult("accepted", refused_families=refused, rejected=rejected)
+                for entry in detail["rejected"]:
+                    if isinstance(entry, Mapping) and isinstance(entry.get("code"), str):
+                        codes.append((family, entry["code"]))
+    return IngestResult(
+        "accepted",
+        refused_families=refused,
+        rejected=rejected,
+        rejected_codes=tuple(sorted(set(codes))),
+    )
 
 
 __all__ = [

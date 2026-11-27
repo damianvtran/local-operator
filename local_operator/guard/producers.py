@@ -29,6 +29,15 @@ old queue, and a re-grant after a revoke starts empty. A paused consent
 (org off, plan lapsed, membership ended, device revoked) stays paused until
 the member grants again; nothing is re-sent under the new grant.
 
+POSTURE IS SENT DURING THE WEEK. The server takes a posture week only until 24 h
+after it ends, and the last report of a week wins, so the tick sends the OPEN
+ISO week's memo (UTC) and sends it again only when a reported BIT changed since
+the last successful send for that org. A week is never held back until it
+closes, and a ``guard_day_closed`` on posture is "too late", not "delivered":
+that week is retired unsent (``posture_weeks.closed``). Day records (decisions,
+task time, review cycles) still go once their UTC day has closed, inside the
+server's 72 h.
+
 WHAT LEAVES. Only what ``guard/ingest.py`` lets through: enums, UTC days or ISO
 weeks, random ids, a randomised posture bit, the install id and the consent's
 revisions. The friction counter never leaves (v0.3 §9.4).
@@ -76,9 +85,10 @@ BACKOFF_BASE_S: Final = 60.0
 BACKOFF_CAP_S: Final = 6 * 3600.0
 #: Batches per org per tick: drains a full outbox (2048 rows at 500 per batch).
 MAX_BATCHES_PER_TICK: Final = 5
-#: Posture is reported for the week that just closed. A week older than this is
-#: past the server's weekly fold (≤ 8 days, §10') and is dropped, not sent.
-POSTURE_MAX_LAG_WEEKS: Final = 2
+#: Local posture rows (true values and per-org send marks) older than this many
+#: weeks are pruned. Only the current and the just-closed week can still be
+#: sent (``posture.week_is_open``); the rest is slack for a skewed clock.
+POSTURE_KEEP_WEEKS: Final = 2
 
 _SCOPE_FAMILIES: Final = {
     "decisions": ingest.FAMILY_DECISIONS,
@@ -99,11 +109,16 @@ _DDL: Final = (
     " failures INTEGER NOT NULL DEFAULT 0, paused_code TEXT)",
     "CREATE TABLE delivered (tenant TEXT NOT NULL, family TEXT NOT NULL,"
     " record_id TEXT NOT NULL, PRIMARY KEY (tenant, family, record_id))",
-    # The member's TRUE posture value per closed week. Local only, never sent.
+    # The member's TRUE posture value per ISO week (the open week's is re-read each
+    # tick; last value wins). Local only, never sent.
     "CREATE TABLE posture_obs (week TEXT NOT NULL, fact TEXT NOT NULL, value TEXT NOT NULL,"
     " PRIMARY KEY (week, fact))",
+    # What this org's server holds for the week, as two local digests: the TRUE
+    # values and the REPORTED bits last sent (NULL = nothing sent yet). ``closed``
+    # = the server answered ``guard_day_closed``: too late, never tried again.
     "CREATE TABLE posture_weeks (tenant TEXT NOT NULL, week TEXT NOT NULL,"
-    " sent INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant, week))",
+    " sent_values TEXT, sent_bits TEXT, closed INTEGER NOT NULL DEFAULT 0,"
+    " PRIMARY KEY (tenant, week))",
 )
 
 
@@ -423,7 +438,7 @@ class GuardProducers:
                         "INSERT OR IGNORE INTO posture_weeks (tenant, week) VALUES (?, ?)",
                         (consent.tenant, week),
                     )
-            oldest = pst.iso_week(today - _dt.timedelta(weeks=POSTURE_MAX_LAG_WEEKS + 1))
+            oldest = pst.iso_week(today - _dt.timedelta(weeks=POSTURE_KEEP_WEEKS))
             conn.execute("DELETE FROM posture_obs WHERE week < ?", (oldest,))
             conn.execute("DELETE FROM posture_weeks WHERE week < ?", (oldest,))
             conn.execute("COMMIT")
@@ -432,29 +447,61 @@ class GuardProducers:
                 conn.execute("ROLLBACK")
             conn.close()
 
-    def _posture_week(
+    def _posture_pending(
         self, consent: LiveConsent, today: _dt.date
-    ) -> tuple[str, dict[str, str]] | None:
-        """The oldest closed, unsent, still-useful week for ``consent`` and its true values."""
+    ) -> list[tuple[str, dict[str, str], str, str | None]]:
+        """Open weeks whose true values differ from what this org last received.
 
-        current = pst.iso_week(today)
-        floor = pst.iso_week(today - _dt.timedelta(weeks=POSTURE_MAX_LAG_WEEKS))
+        ``(week, values, values_digest, sent_bits)``, oldest first. A week the
+        server has refused as too late (``closed``), one past its window, and
+        one whose true values are unchanged since the last successful send are
+        all absent: an idle tick finds nothing here and never touches the
+        sign-in, the memo or the network.
+        """
+
         conn = self._state()
         try:
-            row = conn.execute(
-                "SELECT week FROM posture_weeks WHERE tenant = ? AND sent = 0 AND week < ?"
-                " AND week >= ? ORDER BY week LIMIT 1",
-                (consent.tenant, current, floor),
-            ).fetchone()
-            if row is None:
-                return None
-            values = {
-                r["fact"]: r["value"]
-                for r in conn.execute(
-                    "SELECT fact, value FROM posture_obs WHERE week = ?", (row["week"],)
-                ).fetchall()
-            }
-            return row["week"], values
+            out: list[tuple[str, dict[str, str], str, str | None]] = []
+            for row in conn.execute(
+                "SELECT week, sent_values, sent_bits FROM posture_weeks"
+                " WHERE tenant = ? AND closed = 0 ORDER BY week",
+                (consent.tenant,),
+            ).fetchall():
+                if not pst.week_is_open(row["week"], today):
+                    continue
+                values = {
+                    r["fact"]: r["value"]
+                    for r in conn.execute(
+                        "SELECT fact, value FROM posture_obs WHERE week = ?", (row["week"],)
+                    ).fetchall()
+                }
+                if not values:
+                    continue
+                digest = pst.values_digest(values)
+                if digest != row["sent_values"]:
+                    out.append((row["week"], values, digest, row["sent_bits"]))
+            return out
+        finally:
+            conn.close()
+
+    def _record_posture(
+        self, tenant: str, week: str, values_digest: str, bits_digest: str | None, *, closed: bool
+    ) -> None:
+        """Remember what the server now holds for ``week`` (or that it is too late)."""
+
+        conn = self._state()
+        try:
+            if closed:
+                conn.execute(
+                    "UPDATE posture_weeks SET closed = 1 WHERE tenant = ? AND week = ?",
+                    (tenant, week),
+                )
+            else:
+                conn.execute(
+                    "UPDATE posture_weeks SET sent_values = ?, sent_bits = ?"
+                    " WHERE tenant = ? AND week = ?",
+                    (values_digest, bits_digest, tenant, week),
+                )
         finally:
             conn.close()
 
@@ -464,7 +511,8 @@ class GuardProducers:
     class _Batch:
         families: dict[str, list[dict[str, Any]]]
         seqs: dict[str, int]
-        posture_week: str | None
+        #: ``(week, values_digest, bits_digest)`` of the posture memo in this batch.
+        posture: tuple[str, str, str] | None
 
     def _build(
         self, consent: LiveConsent, state: Mapping[str, Any], today: _dt.date
@@ -518,24 +566,28 @@ class GuardProducers:
             if rows2:
                 families[family] = [body for _, body in rows2]
                 seqs[family] = rows2[-1][0]
-        posture_week: str | None = None
+        posture: tuple[str, str, str] | None = None
         if ingest.FAMILY_POSTURE in consent.families:
-            found = self._posture_week(consent, today)
-            if found is not None:
-                week, values = found
-                account = self._account() if values else None
-                if account:
-                    memo = pst.PostureMemo(self._config_dir, rng=self._rng)
-                    families[ingest.FAMILY_POSTURE] = [
-                        r.wire() for r in pst.reports_for(memo, account, week, values)
-                    ]
-                    # Only a week whose bits are IN this batch is marked sent by it.
-                    posture_week = week
-                elif not values:
-                    self._mark_posture_sent(consent.tenant, week)
+            pending = self._posture_pending(consent, today)
+            account = self._account() if pending else None
+            if account:
+                memo = pst.PostureMemo(self._config_dir, rng=self._rng)
+                for week, values, v_digest, sent_bits in pending:
+                    reports = pst.reports_for(memo, account, week, values)
+                    b_digest = pst.bits_digest(reports)
+                    if b_digest == sent_bits:
+                        # A true value moved but its memoised bit did not (or
+                        # flipped back): the server already holds this memo.
+                        self._record_posture(consent.tenant, week, v_digest, b_digest, closed=False)
+                        continue
+                    if reports:
+                        families[ingest.FAMILY_POSTURE] = [r.wire() for r in reports]
+                        # One week per batch; the tick's loop sends the next.
+                        posture = (week, v_digest, b_digest)
+                        break
         if not families:
             return None
-        return GuardProducers._Batch(families, seqs, posture_week)
+        return GuardProducers._Batch(families, seqs, posture)
 
     def _delivered(self, tenant: str) -> dict[str, set[str]]:
         conn = self._state()
@@ -648,11 +700,6 @@ class GuardProducers:
                         " VALUES (?, ?, ?)",
                         [(tenant, family, row["record_id"]) for row in rows],
                     )
-                if batch.posture_week is not None:
-                    conn.execute(
-                        "UPDATE posture_weeks SET sent = 1 WHERE tenant = ? AND week = ?",
-                        (tenant, batch.posture_week),
-                    )
                 conn.execute(
                     "UPDATE tenant_state SET failures = 0, next_at = 0 WHERE tenant = ?", (tenant,)
                 )
@@ -661,6 +708,17 @@ class GuardProducers:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 conn.close()
+            if batch.posture is not None:
+                week, v_digest, b_digest = batch.posture
+                too_late = (ingest.FAMILY_POSTURE, "guard_day_closed") in result.rejected_codes
+                # ``guard_day_closed`` on a posture week means the bits are NOT
+                # held: "too late", not delivered. Retire the week so it is
+                # never retried, and never record it as sent (A3 GUARD.md,
+                # Deltas for lop #6). Anything else the 200 or a dropped batch
+                # said (accepted, not designated, record conflict, scope
+                # refused, replay) leaves nothing a re-send of the SAME bits
+                # could change, so the week waits for its next bit change.
+                self._record_posture(tenant, week, v_digest, b_digest, closed=too_late)
             if result.kind == "drop":
                 logger.info("guard ingest dropped a batch (%s)", result.code)
             elif result.rejected:
@@ -736,15 +794,6 @@ class GuardProducers:
         conn = self._state()
         try:
             self._forget(conn, tenant)
-        finally:
-            conn.close()
-
-    def _mark_posture_sent(self, tenant: str, week: str) -> None:
-        conn = self._state()
-        try:
-            conn.execute(
-                "UPDATE posture_weeks SET sent = 1 WHERE tenant = ? AND week = ?", (tenant, week)
-            )
         finally:
             conn.close()
 
