@@ -24,7 +24,7 @@
   "tui.guard.scope_posture": "Kiểm tra thiết lập: các cài đặt được khuyến nghị có bật hay không. Mỗi máy tính xáo trộn ngẫu nhiên câu trả lời trước khi gửi đi, nên quản trị viên chỉ thấy số ước tính, không thấy câu trả lời thật của ai. Quản trị viên có thể nhận ra khi một trong các cài đặt này thay đổi trên máy tính của bạn.",
   "tui.guard.scope_task_time": "Thời gian làm tác vụ, theo khoảng như 5–15 phút",
   "tui.guard.scope_review_cycles": "Số vòng đánh giá cho mỗi thay đổi, và thay đổi đó đã được merge hay bị đóng",
-  "tui.guard.scope_reports": "Các báo cáo bạn chọn gửi, chẳng hạn khóa có thể bị lộ hoặc bị chặn quá nhiều. Quản trị viên {org} chỉ thấy số lượng đã gửi của mỗi loại, và chỉ với loại có ít nhất 5 người gửi trong ngày đó. Không ai ở {org} mở được báo cáo của bạn. Nhân viên Radient chỉ mở một báo cáo khi bạn nhờ chúng tôi hỗ trợ về nó hoặc khi pháp luật yêu cầu.",
+  "tui.guard.scope_reports": "Các báo cáo bạn chọn gửi, chẳng hạn nghi ngờ lộ khóa hoặc quy tắc bảo vệ chặn quá nhiều. Quản trị viên {org} chỉ thấy số lượng đã gửi của mỗi loại, và chỉ với loại có ít nhất 5 người gửi trong ngày đó. Không ai ở {org} mở được báo cáo của bạn. Nhân viên Radient chỉ mở một báo cáo khi bạn nhờ chúng tôi hỗ trợ về nó hoặc khi pháp luật yêu cầu.",
   "tui.guard.scope_trace_detail": "Thời gian từng bước của các tác vụ, không kèm nội dung (lưu 14 ngày)",
   "tui.guard.scope_admin_share": "Cho phép quản trị viên {org} xem thời gian từng bước của bạn",
   "tui.guard.prompt_never_sent": "Không bao giờ gửi: đường dẫn tệp, lệnh, prompt, mã, đầu ra của mô hình hay tham số công cụ.",

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.guard",
-  "history_sha256": "88ec8f749a2759e4dc57afcb143b6dedf416861b00beccb683a51ee1267fd249",
+  "history_sha256": "5f06f19cd33fec323098275cbc00fd5e6fe1212642bc32a7026ac37001b59da5",
   "entries": [
     {
       "locale": "vi",
@@ -23,6 +23,77 @@
       },
       "status": "translated",
       "note": "Translator-only receipt for the new 94-key tui.guard namespace (Vietnamese), PR #4650 (Radient Guard L2b) at English head 47d837e8eb; independent audit NOT completed, so vi must not be treated as carrying an audited tui.guard until an independent i18n-auditor appends a passed receipt against this source hash. Translated target sha256 079df087471fc48d999541b59d39c8420d0ba126808bd352d2e236e1a8c7581f. Glossary i18n/glossary.md and i18n/style-guides/vi.md. Placeholders ({org}, {reason}, {scopes}, {surface}, {kind}, {backup_days}, {trial_days}, {date}, {device}, {time}) and the literals /guard, lop, Console, Radient, Radient Guard, Radient Team, Guard preserved; screen_share_again quotes this locale's badge_waiting byte-for-byte. Privacy/consent copy (high-visibility): needs independent semantic audit of consent meaning (k-anonymity thresholds 5/20, retention 14/90/180 days, 'never sent' list, no-auto-send promise in report_confirmed). No rendered, pseudo, RTL-visual or native-speaker audit claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "7c35e803ad91b1fe585e71cdeb7d490aa064a755ae9e8d4e6536871aa5da034d",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": "radientdev copy-reviewer acting as independent i18n auditor #1 (PR #4650 Guard L2b), session d3661c1e5338",
+        "session": "d3661c1e5338",
+        "model": "anthropic/claude-opus-5-5",
+        "actual_model_source": "runtime model declaration in this session's system context",
+        "fallback": "none observed",
+        "date": "2026-11-27",
+        "independent_from_translator_session": "5bd246fcf195",
+        "independence_note": "Different session from the translator and from the English author; same model family as the translator (anthropic/claude-opus-5-5), disclosed rather than hidden.",
+        "result": "passed",
+        "findings_fixed": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "audit_instance": "first-independent",
+      "second_independent_audit_required": true,
+      "audit_scope": "translation_only",
+      "audit_date": "2026-11-27",
+      "key_count": 94,
+      "keys_read": 94,
+      "previous_receipt_target_sha256": "079df087471fc48d999541b59d39c8420d0ba126808bd352d2e236e1a8c7581f",
+      "auditor_changes": [
+        {
+          "key": "tui.guard.scope_reports",
+          "before": "chẳng hạn khóa có thể bị lộ hoặc bị chặn quá nhiều.",
+          "after": "chẳng hạn nghi ngờ lộ khóa hoặc quy tắc bảo vệ chặn quá nhiều.",
+          "reason": "C4 MINOR fixed: 'khóa có thể bị lộ hoặc bị chặn quá nhiều' attached 'blocked too much' to the key; now names both report kinds as their own report_kind_* strings do ('nghi ngờ lộ khóa', 'quy tắc bảo vệ chặn quá nhiều')."
+        }
+      ],
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.json",
+          "sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.context.json",
+          "sha256": "105858995d85c823fe9e159e745b7c3e50f5e27ccca435101d784f0720451106"
+        },
+        "glossary": {
+          "path": "i18n/glossary.md",
+          "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+        },
+        "style": {
+          "path": "i18n/style-guides/vi.md",
+          "sha256": "99eed3b6f9b619f9eb7fb00e4ffc8963df0adaea29891dfa3aefc58d658eba51"
+        }
+      },
+      "safety_semantic_judgments": {
+        "k_anonymity_minimums": "5 present in scope_reports, prompt_visibility, prompt_visibility_posture, prompt_visibility_admin_share, prompt_visibility_admin_share_posture; 20 present in both *_posture visibility keys; each stated as a minimum ('at least') with the 'only when' restriction intact.",
+        "retentions": "14 days in scope_trace_detail ('kept'), 90 days stats and 180 days reports in revoke_retained, {backup_days} preserved in revoke_body_trace; none reworded into a different period or a deletion promise.",
+        "never_sent_list": "prompt_never_sent keeps all six items (file paths, commands, prompts, code, model output, tool arguments) under a 'never' negation.",
+        "card_footer": "'Guard collects nothing for {org}' kept org-scoped (not a global 'collects nothing').",
+        "report_confirmed_no_auto_send": "Every locale says saved on this computer, not sent, sending not live yet, and that Guard asks again before sending to {org}; no locale promises an automatic send.",
+        "other_consent_lines": "prompt_reason_widened (keeps sharing only what you agreed to), prompt_reason_reactivated/plan_gap (nothing shared until you choose), revoke_body/_trace, revoke_totals, scope_reports (no one at {org} can open; Radient staff only on request or legal requirement), readonly_agent ('may be driving', not 'is') checked in all seven locales."
+      },
+      "mechanical_checks": "94/94 keys; placeholder multiset identical to en for every key; literals /guard, lop, Console, Radient, Radient Guard, Radient Team preserved (scope_decisions translates the common noun 'Guardrail' per the shipped wire.guardrails rendering); screen_share_again quotes this locale's badge_waiting byte-for-byte; no bidi control characters; NFC; badge_waiting and badge_sharing within maxCells 28 by rich.cells.cell_len.",
+      "rendered_evidence_executed": false,
+      "note": "Independent audit 1 of 2 for tui.guard (vi), PR #4650 at worktree head 33c6f23fa2. All 94 values read against en + context. Auditor changed 1 value(s); see auditor_changes. NFC verified; bạn register used sparingly; 'tác nhân' for agent, 'quy tắc bảo vệ' for guardrail rule as shipped. Consent copy is high-visibility: a SECOND independent audit is required before merge, recorded as a further appended receipt for this same source_sha256 with audit_instance 'second-independent' (precedent: i18n/audit-history/es/wire.teams.effective.json). No rendered, RTL-visual or native-speaker review claimed."
     }
   ]
 }

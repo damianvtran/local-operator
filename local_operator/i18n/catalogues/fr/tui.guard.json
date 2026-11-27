@@ -21,7 +21,7 @@
   "tui.guard.prompt_reason_rejoined": "Vous avez rejoint {org} à nouveau. Votre réponse précédente a pris fin à votre départ : choisissez de nouveau.",
   "tui.guard.prompt_would_send": "Depuis cet ordinateur, Guard enverrait :",
   "tui.guard.scope_decisions": "Résultats des garde-fous : si chaque contrôle a autorisé, demandé ou bloqué, et le type de règle",
-  "tui.guard.scope_posture": "Contrôles de configuration : si les réglages recommandés sont activés. Chaque ordinateur rend ses réponses aléatoires avant qu’elles ne partent : les administrateurs voient des estimations, jamais la vraie réponse de quelqu’un. Les administrateurs peuvent parfois deviner quand l’un de ces réglages change sur votre ordinateur.",
+  "tui.guard.scope_posture": "Contrôles de configuration : si les réglages recommandés sont activés. Chaque ordinateur rend ses réponses aléatoires avant qu’elles ne partent : les administrateurs voient des estimations, jamais la vraie réponse de quelqu’un. Il se peut que les administrateurs remarquent quand l’un de ces réglages change sur votre ordinateur.",
   "tui.guard.scope_task_time": "Durée des tâches, par tranches comme 5–15 min",
   "tui.guard.scope_review_cycles": "Tours de revue par modification, et leur issue : merge ou fermeture",
   "tui.guard.scope_reports": "Les signalements que vous choisissez d’envoyer, par exemple une clé peut-être exposée ou trop de blocages. Les administrateurs de {org} ne voient que le nombre envoyé pour chaque type, et seulement pour un type envoyé par au moins 5 personnes ce jour-là. Personne chez {org} ne peut ouvrir votre signalement. L’équipe Radient n’ouvre un signalement que si vous nous demandez de l’aide à son sujet ou si la loi l’exige.",
