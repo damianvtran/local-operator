@@ -31276,6 +31276,9 @@ class OperatorApp(App[None]):
             # Tightening is never refused, latched or not: the way back stays.
             on_set_session_ask=partial(self._set_session_ask_for_card, source),
             person_only=bridge_latched,
+            # An attached reply settles only this call. Leave mode changes to
+            # the separately routed settings rather than promising both with A.
+            allow_combined=not _is_viewer(source.session),
             notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
         # A gate on a PEER's session carries the hint that says where an allow

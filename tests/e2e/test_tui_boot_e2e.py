@@ -845,10 +845,17 @@ async def test_new_tui_attachment_renders_owner_mode_and_does_not_answer(
                     assert not turn.done() and not executed
                     card = app.query_one(ApprovalPrompt)
                     card.focus()
+                    await pilot.press("A")
+                    assert card.answer is None and not turn.done() and not executed
+                    assert handle._fold.projection.pending == pending
+                    assert viewer.frontend_state.approval_mode == owner_mode
+                    assert app._approve_all == (owner_mode == "auto")
+                    assert [option.label for option in card.question.options] == ["Allow", "Deny"]
+                    assert card.answer_keys() == {"y", "n"}
                     await pilot.press("n")
                     await _pump(pilot, turn.done)
                     assert await turn and not executed
-                    print(f"Reattached TUI: {owner_mode} shown; card waited for viewer denial")
+                    print(f"Reattached TUI: {owner_mode} shown; A inert; viewer denial honored")
             finally:
                 unsubscribe()
                 if not turn.done():
