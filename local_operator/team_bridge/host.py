@@ -71,7 +71,8 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Mapping
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .client import (
     BridgeRefusal,
@@ -81,7 +82,45 @@ from .client import (
 )
 from .tool import BridgeRuntime, _RosterReadRefused
 
+if TYPE_CHECKING:
+    from local_operator.session.transcript import Transcript
+
 logger = logging.getLogger(__name__)
+
+
+def bridge_roster_root_session_id(config_dir: Path, transcript: Transcript) -> str | None:
+    """Prove this designated session was born on the host's Aida root path.
+
+    A resumed child can reach the same factory without a live parent object.
+    Missing origin alone is not evidence: the child sidecar is best effort.
+    Require the host-only Aida birth row as well, for the exact designated
+    directory. Any origin sidecar (including a damaged one) vetoes that row:
+    for example, a fork can copy its parent's transcript but not its authority.
+    """
+    from local_operator.aida.bootstrap import BIRTH_CUSTOM_TYPE
+    from local_operator.aida.state import STATE_SCHEMA, is_aida_session
+    from local_operator.resume import ORIGIN_NAME
+
+    session_id = transcript.directory.name
+    if not is_aida_session(config_dir, session_id):
+        return None
+    birth = transcript.latest_custom_entry(BIRTH_CUSTOM_TYPE)
+    details = birth.payload.get("details") if birth is not None else None
+    if not isinstance(details, dict):
+        return None
+    schema, created = details.get("schema_version"), details.get("created_at_ms")
+    if type(schema) is not int or schema != STATE_SCHEMA:
+        return None
+    if type(created) is not int or created <= 0:
+        return None
+    try:
+        (transcript.directory / ORIGIN_NAME).lstat()
+    except FileNotFoundError:
+        return session_id
+    except OSError:
+        return None
+    return None
+
 
 #: The ``bridge_credential_pin_gone`` refusals (model-facing tool results, like
 #: every sentence in ``_admission_refusal``). The pinned login row is gone but

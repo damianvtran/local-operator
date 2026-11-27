@@ -2604,6 +2604,26 @@ class ToolContext(BaseModel):
     #: guardrail creation ledger writes a child's creations under these ids
     #: too, so a parent may clean up after its subagents.
     ancestor_session_ids: tuple[str, ...] = ()
+    # A default or Pydantic-coerced empty tuple is not a root assertion. Only
+    # the host stamps its independently verified session ID; this marker is
+    # neither constructor data nor serialized tool input.
+    _bridge_roster_root_id: str | None = PrivateAttr(default=None)
+
+    def bind_bridge_roster_root(self, session_id: str, raw_ancestry: object) -> None:
+        """Bind the host's verified root ID to this context's uncoerced lineage."""
+        if type(raw_ancestry) is tuple and not raw_ancestry and session_id == self.session_id:
+            self._bridge_roster_root_id = session_id
+
+    def has_bridge_roster_root(self) -> bool:
+        ancestry = getattr(self, "ancestor_session_ids", None)
+        return bool(
+            self._bridge_roster_root_id
+            and self._bridge_roster_root_id == getattr(self, "session_id", None)
+            and "ancestor_session_ids" in self.model_fields_set
+            and type(ancestry) is tuple
+            and not ancestry
+        )
+
     #: The session's Team Bridge taint latch (``harness/bridge_egress.py``
     #: ``BridgeTaintLatch``), owned by the session and injected per turn. The
     #: loop's tier seam and the web tools' provider filter read it; ``None`` on

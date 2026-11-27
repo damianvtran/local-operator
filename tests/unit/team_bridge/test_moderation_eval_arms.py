@@ -574,7 +574,7 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
     import os
 
     from local_operator import sdk
-    from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg
+    from local_operator.evaluation.team_bridge_moderation.agent import AgentLeg, Egress
     from local_operator.evaluation.team_bridge_moderation.dataset import load_dataset
     from local_operator.evaluation.team_bridge_moderation.fixture import (
         build_fixture,
@@ -582,6 +582,8 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
     )
     from local_operator.evaluation.team_bridge_moderation.gates import Controls
     from local_operator.harness.loop import LoopContext
+    from local_operator.harness.types import AgentTool
+    from local_operator.session.session import Session
     from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
     from local_operator.tools.tool_docs import render_tool_doc
 
@@ -615,28 +617,42 @@ def test_the_session_is_offered_a_bridge_tool_and_an_ask_tool(tmp_path: Path) ->
 
         async def run() -> tuple[set[str], str, str]:
             async with sdk.open_session(spec, roots=roots, mode="own") as session:
-                before = {
-                    getattr(tool, "name", "") for tool in (getattr(session, "_tools", None) or [])
-                }
+                assert isinstance(session, Session), "the SDK stopped opening a local owner"
+                before = {tool.name for tool in session._tools}
                 assert "bridge" not in before, (
                     "precondition: the tool is createIf, so it must be absent before the "
                     "runtime is installed - otherwise this test proves nothing"
                 )
-                owner = enroll_bridge(
-                    world, session_id=str(getattr(session, "session_id", "") or "")
-                )
+                owner = enroll_bridge(world, session_id=session.session_id)
                 # This is the actual registration seam, not a synthetic ToolContext.
                 assert isinstance(session._context, LoopContext)
-                leg._install_runtime(session, [], owner=owner)
-                after = {tool.name: tool for tool in (session._tools or [])}
+                sink: list[Egress] = []
+                leg._install_runtime(session, sink, owner=owner)
+                after = {tool.name: tool for tool in session._tools}
                 assert "bridge" in after, f"the model was offered no bridge tool: {sorted(after)}"
                 bridge = after["bridge"]
+                assert isinstance(bridge, AgentTool) and bridge.name == "bridge"
                 ops = bridge.parameters["properties"]["op"]["enum"]
                 assert {"channels", "send"}.issubset(ops)
                 assert "channel_members" not in ops
                 help_text = render_tool_doc(bridge)
                 assert "- channels:" in help_text
                 assert "channel_members" not in help_text
+                # Evaluation registration uses LoopContext; tool execution uses
+                # that same owner's actual per-turn ToolContext.
+                dispatch = session._build_tool_context()
+                assert dispatch.bridge_runtime is session.bridge_runtime
+                assert dispatch.bridge_runtime is getattr(session._context, "bridge_runtime", None)
+                result = await bridge.execute(
+                    "evaluator-roster",
+                    {"op": "channel_members", "channel_id": "fixture-room"},
+                    None,
+                    None,
+                    dispatch,
+                )
+                assert result.is_error and result.details is not None
+                assert result.details["code"] == "not_chief_of_staff"
+                assert sink == []
                 return set(after), leg.bridge_tool_state, leg.ask_surface
 
         after, bridge_state, ask_state = asyncio.run(run())

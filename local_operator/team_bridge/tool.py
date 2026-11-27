@@ -5375,12 +5375,9 @@ async def _history_images(
 def _roster_tool_context(context: object, runtime: BridgeRuntime) -> bool:
     """Only a trusted root ToolContext can carry roster authority."""
     # The moderation evaluation registers ordinary Bridge from a LoopContext.
-    # A runtime on that context (or an inherited one on a child) is not proof
-    # of root ancestry. Only the host's canonical empty tuple establishes it.
-    if not isinstance(context, ToolContext):
-        return False
-    ancestry = getattr(context, "ancestor_session_ids", None)
-    if type(ancestry) is not tuple or ancestry:
+    # A runtime alone (including one inherited by a child) is not root proof.
+    # Both registration and dispatch require the host's bound lineage assertion.
+    if not isinstance(context, ToolContext) or not context.has_bridge_roster_root():
         return False
     session_id = getattr(context, "session_id", None)
     if not isinstance(session_id, str) or not session_id:

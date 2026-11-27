@@ -4284,6 +4284,7 @@ class Session:
         #: bridge surface is the designated session's, and H5d carries no
         #: authority worth fanning out (the decide path is the human's ask).
         bridge_runtime: Any | None = None,
+        bridge_roster_root_id: str | None = None,
         conversation_name: ConversationName | None = None,
         #: Where the BOOT model came from: ``"config"`` (the ``hosting`` /
         #: ``model_name`` keys), ``"agent"`` (a profile), ``"flag"``
@@ -4941,6 +4942,14 @@ class Session:
         #: wiring (the tool-context parity guard does exactly that), matching
         #: the three registries above.
         self.bridge_runtime = bridge_runtime
+        # The factory verified the durable root birth. A direct or inherited
+        # Session without that proof cannot promote its default parent fields;
+        # a live parent also vetoes the proof before any ID normalization.
+        self._bridge_roster_root_id = (
+            bridge_roster_root_id
+            if parent_session is None and type(parent_session_id) is str and not parent_session_id
+            else None
+        )
         # The runtime survives profile switches. Track the resolved host
         # identity here, then freeze it in each dispatch context; never derive
         # authorship from a transcript title, endpoint name or mutable client.
@@ -26343,7 +26352,8 @@ class Session:
         from local_operator.harness.subagent import _session_lineage
 
         lineage = _session_lineage(self)
-        return ToolContext(
+        ancestry = self._ancestor_session_ids()
+        context = ToolContext(
             note_waiting=self._note_waiting,
             team_id=lineage[-1] if lineage else "",
             memory_config_dir=str(self._config_dir),
@@ -26378,7 +26388,7 @@ class Session:
             # prompt block itself (children inherit the parent's).
             injected_guidance=getattr(self._system_blocks_provider, "injected_guidance", ()),
             session_id=self._session_id,
-            ancestor_session_ids=self._ancestor_session_ids(),
+            ancestor_session_ids=ancestry,
             bridge_taint=self._bridge_taint,
             inherited_bridge_taint=self._bridge_taint.inherited,
             community_taint=self._community_taint,
@@ -26566,6 +26576,9 @@ class Session:
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },
         )
+        if self._bridge_roster_root_id is not None and self._parent_session_ref is None:
+            context.bind_bridge_roster_root(self._bridge_roster_root_id, ancestry)
+        return context
 
     def _launch_subagent(
         self,

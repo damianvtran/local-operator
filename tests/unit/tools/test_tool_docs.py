@@ -1337,7 +1337,10 @@ def test_the_designated_bridge_reference_fits_the_cap(tmp_path) -> None:
     session_id = "sess_docs_cos"
     write_state(tmp_path, {"session_id": session_id})
     runtime = SimpleNamespace(config_dir=tmp_path, session_id=session_id)
-    tools = create_tools(ToolContext(bridge_runtime=runtime, session_id=session_id), ["bridge"])
+    context = ToolContext(bridge_runtime=runtime, session_id=session_id, ancestor_session_ids=())
+    # Simulate a verified host context; the roster tests exercise real session boot.
+    context.bind_bridge_roster_root(session_id, ())
+    tools = create_tools(context, ["bridge"])
     doc = make_tool_doc_resolver(lambda: tools)("tool://bridge")
     assert doc is not None
     assert len(doc) <= DOC_SOFT_CAP_CHARS, f"designated tool://bridge: {len(doc)} chars"

@@ -218,7 +218,8 @@ async def test_designated_channels_recovers_after_offline_boot(runtime, hub, cha
     assert (await roster(rt))["code"] == "conversation_not_found"
     assert status_calls == 1 and hub.calls == []  # detail never starts a retry or list
 
-    cos_context = ToolContext(bridge_runtime=rt, session_id=COS)
+    cos_context = ToolContext(bridge_runtime=rt, session_id=COS, ancestor_session_ids=())
+    cos_context.bind_bridge_roster_root(COS, ())
     child_context = ToolContext(
         bridge_runtime=rt, session_id=COS, ancestor_session_ids=("sess_parent",)
     )
@@ -347,6 +348,8 @@ async def test_pending_channels_discards_status_after_binding_changes(runtime, h
         "stale_designation",
         "inherited",
         "missing",
+        "coerced",
+        "explicit_unbound",
         "null",
         "empty_list",
         "empty_str",
@@ -354,7 +357,8 @@ async def test_pending_channels_discards_status_after_binding_changes(runtime, h
 )
 async def test_roster_tool_requires_positive_root_authority(runtime, hub, case):
     rt, _ = runtime
-    root = ToolContext(bridge_runtime=rt, session_id=COS)
+    root = ToolContext(bridge_runtime=rt, session_id=COS, ancestor_session_ids=())
+    root.bind_bridge_roster_root(COS, ())  # Simulate a verified host; exercised below on boot.
     privileged = build_bridge_tool(root)
     assert privileged is not None
     assert "- channel_members:" in render_tool_doc(privileged)
@@ -366,13 +370,21 @@ async def test_roster_tool_requires_positive_root_authority(runtime, hub, case):
     elif case == "stale_designation":
         write_state(rt.config_dir, {"session_id": "sess_other"})
         denied = root
+    elif case == "missing":
+        denied = ToolContext(bridge_runtime=rt, session_id=COS)
+        assert "ancestor_session_ids" not in denied.model_fields_set
+    elif case == "coerced":
+        denied = ToolContext.model_validate(
+            {"bridge_runtime": rt, "session_id": COS, "ancestor_session_ids": []}
+        )
+        assert denied.ancestor_session_ids == ()
+        denied.bind_bridge_roster_root(COS, [])  # The raw host value must not be coerced.
+    elif case == "explicit_unbound":
+        denied = ToolContext(bridge_runtime=rt, session_id=COS, ancestor_session_ids=())
     else:
         # Simulate corrupt host state without Pydantic normalizing supplied values.
         ancestry = {"inherited": ("sess_parent",), "null": None, "empty_list": [], "empty_str": ""}
         denied = root.model_copy(update={"ancestor_session_ids": ancestry.get(case)})
-        if case == "missing":
-            del denied.ancestor_session_ids
-            assert not hasattr(denied, "ancestor_session_ids")
 
     ordinary = build_bridge_tool(denied)
     assert ordinary is not None
@@ -392,9 +404,102 @@ async def test_roster_tool_requires_positive_root_authority(runtime, hub, case):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["root", "unknown", "child", "malformed"])
+async def test_real_host_roster_ancestry(runtime, hub, monkeypatch, origin):
+    from local_operator.agents import AgentRegistry
+    from local_operator.aida.bootstrap import _create_session_dir
+    from local_operator.config import ConfigManager
+    from local_operator.resume import ORIGIN_NAME, ORIGIN_SUBAGENT, mark_session_origin
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.session_factory import create_session
+    from local_operator.team_bridge import host
+    from local_operator.tools import registry
+    from tests.unit.test_session_factory import _args
+
+    rt, _ = runtime
+    directory = rt.config_dir / "sessions" / COS
+    if origin == "unknown":
+        transcript = Transcript(directory)
+        await transcript.append_custom("fixture", {})
+        transcript.close()
+    else:
+        await _create_session_dir(rt.config_dir, COS)
+    if origin == "child":
+        mark_session_origin(directory, ORIGIN_SUBAGENT, parent="sess_parent")
+    elif origin == "malformed":
+        (directory / ORIGIN_NAME).write_text('{"origin":', encoding="utf-8")
+
+    def runtime_for_session(*, session_id, **_):
+        assert session_id == COS
+        return rt  # The real builders use this offline pinned client, never live auth.
+
+    monkeypatch.setattr(host, "bridge_runtime_for_session", runtime_for_session)
+    real_create_tools = registry.create_tools
+    warm = []
+
+    def capture_warm(context):
+        tools = real_create_tools(context)
+        warm.append((context, next(tool for tool in tools if tool.name == "bridge")))
+        return tools
+
+    monkeypatch.setattr(registry, "create_tools", capture_warm)
+    session = await create_session(
+        _args(hosting="test", model="test", resume=COS),
+        ConfigManager(rt.config_dir),
+        AgentRegistry(rt.config_dir),
+    )
+    try:
+        assert isinstance(session, Session)
+        [(warm_context, warm_bridge)] = warm
+        published = next(tool for tool in session._tools if tool.name == "bridge")
+        live = session._build_tool_context()
+        [live_bridge] = real_create_tools(live, ["bridge"])
+        expected = origin == "root"
+        assert ("ancestor_session_ids" in warm_context.model_fields_set) is expected
+        assert published.execute is not None
+        listed = await published.execute("host-list", {"op": "channels"}, None, None, live)
+        assert not listed.is_error
+        calls = hub.calls.copy()
+        assert calls == [("GET", LIST_PATH, f"tenant_id={TENANT}&limit=50", 200)]
+        outcome = await published.execute(
+            "host-roster", {"op": "channel_members", "channel_id": ROOM}, None, None, live
+        )
+        observations = [
+            (
+                "channel_members" in tool.parameters["properties"]["op"]["enum"],
+                "- channel_members:" in render_tool_doc(tool),
+            )
+            for tool in (warm_bridge, published, live_bridge)
+        ]
+        assert (observations, not outcome.is_error, len(hub.calls) - len(calls)) == (
+            [(expected, expected)] * 3,
+            expected,
+            int(expected),
+        ), f"warm ancestry explicit: {'ancestor_session_ids' in warm_context.model_fields_set}"
+        assert all("- channels:" in render_tool_doc(tool) for tool in (published, live_bridge))
+        assert outcome.details is not None
+        if expected:
+            assert json.loads(outcome.content[0].model_dump()["text"]) == {
+                "conversation_id": ROOM,
+                "members": [
+                    member(OWNER, role="owner"),
+                    member(OWNER, kind="agent", state="pending", endpoint_id="bep_roster1"),
+                    member("acc_other", kind="agent", endpoint_id="bep_roster2"),
+                ],
+            }
+            assert hub.calls == [*calls, ("GET", f"{LIST_PATH}/{ROOM}", f"tenant_id={TENANT}", 200)]
+        else:
+            assert outcome.details["code"] == "not_chief_of_staff"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_roster_through_actual_tool_uses_exact_hub_state_and_minimal_fields(runtime, hub):
     rt, _ = runtime
-    ctx = ToolContext(bridge_runtime=rt, session_id=COS)
+    ctx = ToolContext(bridge_runtime=rt, session_id=COS, ancestor_session_ids=())
+    ctx.bind_bridge_roster_root(COS, ())
     tool = build_bridge_tool(ctx)
     assert tool is not None
     assert tool.call_approval_tier is not None
