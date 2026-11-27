@@ -980,6 +980,54 @@ def test_silent_sockets_past_the_cap_never_reach_a_handler_thread() -> None:
         server.stop()
 
 
+def test_stop_arriving_before_the_accept_loop_enters_does_not_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR 1: ``start`` returns as soon as the accept thread is STARTED, so a ``stop``
+    that follows a fast ``start`` runs before that thread has entered ``serve_forever``.
+
+    Reading the server off ``self`` inside the thread made that window a deadlock:
+    ``stop`` clears ``self._server`` first, the thread's first statement raised
+    ``AttributeError``, ``serve_forever`` never reached the ``finally`` that sets the
+    event ``shutdown`` waits on (``websockets`` 17.1), and ``stop`` blocked for good
+    instead of respecting the join's bound. The thread is handed the server directly
+    now, so the only thing deferred here — ~0.1 s — is the ENTRY itself.
+    """
+    entered = threading.Event()
+    original = ws.WebSocketAcceptServer._serve_forever
+
+    def delayed(self: ws.WebSocketAcceptServer, accept_server: Any) -> None:
+        # The thread has started and has not touched the server yet: exactly the state a
+        # ``stop`` arriving right after ``start`` finds.
+        entered.set()
+        time.sleep(0.1)
+        original(self, accept_server)
+
+    monkeypatch.setattr(ws.WebSocketAcceptServer, "_serve_forever", delayed)
+    server, _link, _keys = _one_slot_server(max_connections=1)
+    assert entered.wait(2.0), "the accept thread never started"
+    failure: list[BaseException] = []
+
+    def run_stop() -> None:
+        try:
+            server.stop()
+        except BaseException as exc:  # noqa: BLE001 — asserted on below
+            failure.append(exc)
+
+    # The stop runs on its own thread so a REGRESSION FAILS HERE rather than wedging the
+    # suite: the pre-fix deadlock never returned, so a bounded join is the only way to
+    # tell it apart from a slow machine.
+    stopper = threading.Thread(target=run_stop, name="stop-under-test", daemon=True)
+    started = time.monotonic()
+    stopper.start()
+    stopper.join(3.0)
+    elapsed = time.monotonic() - started
+    assert not stopper.is_alive(), f"stop did not return within 3.0s ({elapsed:.1f}s)"
+    assert not failure, failure
+    # The deferral above is 0.1 s and the healthy stop elsewhere measures 0.100-0.110 s.
+    assert elapsed < 1.0, f"stop took {elapsed:.2f}s behind a deferred accept thread"
+
+
 def test_a_start_that_raises_releases_the_listener_it_built(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -683,11 +683,16 @@ class _TrackedListenSocket:
                 pass
 
     def close_wakeup(self) -> None:
-        """Release the wake-up pair and any parked socket still open.
+        """Release the wake-up pair and anything still open or parked, once nothing waits.
 
-        Only once no thread can still be waiting on either: the accept loop has ended
-        and the server's ``shutdown`` has joined the connection handlers, so a
-        descriptor closed here is one nobody can be selecting on.
+        WHAT MAKES THIS SAFE DIFFERS BY VERSION, so it is not ``shutdown`` alone. On
+        ``websockets`` 17.x, ``shutdown`` closes the listener, waits for the accept loop
+        to flag itself out and JOINS the connection handlers, so nothing in the library
+        is still selecting a descriptor closed here. On the declared floor, 15.0.1,
+        ``shutdown`` only closes the listener and notifies its loop — it joins nothing,
+        including the accept loop — so the guarantee there is :meth:`stop`'s bounded
+        ``thread.join`` BEFORE this call, by which point no thread of ours is in
+        ``accept`` and none of the library's is left watching a parked socket.
         """
         for sock in (self._wake_reader, self._wake_writer):
             try:
@@ -695,8 +700,13 @@ class _TrackedListenSocket:
             except OSError:
                 pass
         with self._lock:
-            closing = self._closing
+            # THE PARKED LEDGER IS DRAINED AGAIN HERE. :meth:`stop` snapshots it, but the
+            # accept loop can hand one more connection over between that snapshot and its
+            # own last ``accept`` — and that socket is already untracked by the time anyone
+            # could look, so trusting the snapshot would leak its descriptor.
+            closing = self._closing + list(self._parked.values())
             self._closing = []
+            self._parked.clear()
         for sock in closing:
             try:
                 sock.close()
@@ -798,7 +808,7 @@ class WebSocketAcceptServer:
         )
         self._listen = listen
         try:
-            self._server = serve(
+            server = serve(
                 self._handle,
                 # The cast states the seam: the library asks the socket it is handed to
                 # accept, close and be named, and the ledger does exactly that (delegating
@@ -817,10 +827,20 @@ class WebSocketAcceptServer:
                 ping_interval=None,
                 close_timeout=CLOSE_TIMEOUT_S,
             )
+            self._server = server
             host, port = listen.getsockname()[:2]
             self._address = (str(host), int(port))
             self._thread = threading.Thread(
-                target=self._serve_forever, name="mesh-ws-accept", daemon=True
+                target=self._serve_forever,
+                # THE SERVER IS HANDED ACROSS, NOT READ OFF ``self``. ``stop`` clears
+                # ``self._server`` before it waits for this loop, so an accept thread that
+                # read the attribute could be left holding ``None`` and raise before
+                # ``serve_forever`` ever ran — and the event that loop's ``finally`` sets,
+                # which ``shutdown`` waits on (``websockets`` 17.x), would never be set,
+                # leaving ``stop`` blocked for good.
+                args=(server,),
+                name="mesh-ws-accept",
+                daemon=True,
             )
             self._thread.start()
         except BaseException:
@@ -829,6 +849,10 @@ class WebSocketAcceptServer:
             # BaseException, not Exception, so an interrupt mid-start cannot leak them.
             server, thread = self._server, self._thread
             self._server, self._thread, self._listen = None, None, None
+            # THE LISTENER STOPS FIRST, in the same order :meth:`stop` uses: waking the
+            # accept loop out of ``accept`` is what lets the ``shutdown`` below complete,
+            # so a loop blocked on the listener can never deadlock the failure path.
+            listen.stop()
             if server is not None and thread is not None and thread.is_alive():
                 # ``serve_forever`` is running, so its ``shutdown`` can complete and
                 # closes the listening socket it was handed.
@@ -840,14 +864,14 @@ class WebSocketAcceptServer:
                 # ``serve_forever`` never ran, and its ``shutdown`` waits on an event
                 # only that loop sets — so close the listener directly instead.
                 listen.close()
-            listen.stop()
             listen.close_wakeup()
             raise
         return self._address
 
-    def _serve_forever(self) -> None:
+    def _serve_forever(self, server: Any) -> None:
         try:
-            self._server.serve_forever()
+            # ``server`` by argument, never ``self._server``: see the thread's ``args``.
+            server.serve_forever()
         except Exception:  # noqa: BLE001 — a dead accept loop must not vanish silently
             if not self._stopping.is_set():
                 # Only worth a log while the relay believes it is listening: an
