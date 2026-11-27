@@ -3828,7 +3828,11 @@ def _case_pattern_head(text: str) -> bool:
     spans: list[tuple[int, int]] = []
     scan(text, spans=spans)
     tokens = [text[lo:hi] for lo, hi in spans]
-    while tokens and tokens[0] in ("(", "{"):
+    # Only ``{`` is skipped: ``{ WORD )`` is a syntax error. A leading ``(``
+    # is NOT skipped (#4646 R1-B1): ``( "$cmd" )`` is a subshell that runs
+    # ``$cmd``, and reads exactly like the ``(pat)`` arm form. That form
+    # therefore stays a judged false positive, the safe side.
+    while tokens and tokens[0] == "{":
         tokens = tokens[1:]
     return len(tokens) >= 2 and tokens[0] != ")" and tokens[1] == ")"
 

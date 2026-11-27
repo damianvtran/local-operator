@@ -520,10 +520,44 @@ def test_case_pattern_with_expansion_is_not_a_dynamic_command_word(command: str)
     assert verdict.risk is Risk.LOW, verdict.reasons
 
 
+# #4646 R1-B1: a SUBSHELL ``( WORD )`` runs WORD and must keep reaching the
+# functions. The command name is NOT resolvable (``$(printf f)``), so the
+# dynamic-word path is the one exercised; ``cmd=f`` resolves straight to ``f``.
+_SUBSHELL_REACHES = (
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( "$cmd")',
+    "f() { rm -rf ~/x; }\ncmd=$(printf f)\n($cmd)",
+    "f() { rm -rf ~/x; }\n( $(printf f) )",
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( ( "$cmd" ) )',
+    'f() { rm -rf ~/x; }\ng() { ( "$1" ); }\ng "$(printf f)"',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( "$cmd" ) ;;\nesac',
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    _SUBSHELL_REACHES,
+    ids=["spaced", "tight-close", "bare", "subst", "nested", "in-function", "in-arm"],
+)
+def test_subshell_with_dynamic_word_still_reaches_functions(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['f() { rm -rf ~/x; }\ncmd=$(printf f)\n"$cmd"'],
+    ids=["unresolvable-dynamic-word"],
+)
+def test_case_pattern_fix_keeps_unresolvable_reach(command: str) -> None:
+    verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
+    assert verdict.risk is not Risk.LOW, verdict
+
+
 @pytest.mark.parametrize(
     "command",
     [
-        # A real dynamic command word still reaches the functions it may run.
+        # A dynamic command word still reaches the functions it may run.
         'f() { rm -rf ~/x; }\ncmd=f\n"$cmd"',
         # A delete inside the matching arm is still ranked.
         'f() {\n  case "$1" in\n    "x/$y"*) rm -rf ~ ;;\n  esac\n}\nf a',
