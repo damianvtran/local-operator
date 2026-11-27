@@ -127,6 +127,22 @@ class MeshStamp:
     #: ONLY field that decides INV-1's routing question (§1.2).
     home_device: str = ""
     placement: SessionPlacement = field(default_factory=SessionPlacement)
+    #: THE POOL MEMBER the runtime is placed on, when ``placement.mode`` is
+    #: ``pool`` (``mesh-compute-pool.md`` §4 A8, §6.5 rule 2). Empty otherwise.
+    #:
+    #: WHY IT IS BESIDE THE PLACEMENT AND NOT INSIDE IT. ``SessionPlacement`` is the
+    #: shape mobility §5.2 fixes and the CATALOGUE ROW publishes verbatim, so a field
+    #: there changes the published ``lop sessions --json`` row for every session on
+    #: every install. It also could not be ``home_device``: §4.2 point 2 is explicit
+    #: that home is never the member ("a home that can die is not a home"), so on a
+    #: pool-placed session no placement field names the device running it. The stamp
+    #: is the durable carrier for facts the record has no room for — ``origin`` and
+    #: ``replicas`` are the two beside it — and this is the third.
+    #:
+    #: WRITTEN BY THE POOL PRODUCER (the placement request, E2) and CLEARED by the
+    #: drain's rewrite to ``local`` (``network/pool_drain._rewrite_placement_local``),
+    #: which is what makes :func:`pool_guard_refusal` lift when the member is gone.
+    pool_member: str = ""
     origin: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     version: int = MESH_STAMP_VERSION
@@ -156,6 +172,7 @@ class MeshStamp:
             "network_id": self.network_id,
             "home_device": self.home_device,
             "placement": self.placement.to_json(),
+            "pool_member": self.pool_member,
             "origin": dict(self.origin),
             "created_at": self.created_at,
             "replicas": list(self.replicas),
@@ -206,6 +223,12 @@ class MeshStamp:
             network_id=str(data.get("network_id") or ""),
             home_device=home,
             placement=placement,
+            # A stamp from a build that predates the pool writes none, and had no
+            # pool producer — so the default is both lenient and true. Not parsed
+            # through a validator: a device id is an opaque name here, and this
+            # field is a pointer to a member row the STORE validates, never
+            # authority of its own.
+            pool_member=str(data.get("pool_member") or ""),
             origin=dict(origin) if isinstance(origin, dict) else {},
             created_at=float(data.get("created_at") or 0.0),
             version=_as_int(data.get("version")) or MESH_STAMP_VERSION,
@@ -498,6 +521,143 @@ def handoff_guard_refusal(config_dir: Path, session_id: str) -> str:
         )
     device = str(entry.get("to_name") or entry.get("to_device") or "another device")
     return f"This conversation is being handed to {device}."
+
+
+def pool_guard_refusal(config_dir: Path, session_id: str) -> str:
+    """The sentence that stops a POOL session's home copy being engaged, or ``""``.
+
+    THE SECOND ADOPTION RULE AT HOME (``mesh-compute-pool.md`` §6.5 rule 2), and it
+    exists because a ``flush`` holds NO FENCE (§6.1): a pool session's copy at home
+    is brought up to the member's frontier while the member keeps writing, so
+    engaging it locally while the member is still alive is exactly the two-writer
+    situation the fence exists to make impossible everywhere else. The handoff guard
+    above refuses a move in flight; this refuses a REMOTE OWNER that has not
+    finished leaving.
+
+    ``""`` ALLOWS, and that is the majority answer — four of the five cases:
+
+    * no stamp, or ``placement.mode != "pool"``: a session no pool produced. This
+      is every install that never joined a mesh, and it costs one failed open (the
+      sidecar is absent).
+    * a stamp that names no member: nothing this build can call live
+      (``MeshStamp.pool_member``), so there is no second writer to rule out.
+    * the member's row is gone or ``expired``: it is a tombstone or a device this
+      install never admitted. Nothing is writing there any more, which is the
+      entire point of ``expired`` — ``/resume <id>`` must engage cleanly at home
+      with the same session id (§6.4's first guarantee).
+    * a COLD, FULLY-SYNCED copy: the cursor names this member as its source, carries
+      the frontier it announced, and the bytes it describes are still on disk. That
+      is the copy R22 exists to leave behind, and it is engageable by design.
+
+    What is left is refused: a live (or ``provisioning``) member whose announced
+    frontier this device has NOT reached. The sentence says which member and why,
+    because the operator's next move (wait, or `lop network drain`) depends on it.
+
+    Empty string, never ``None``, for the reason :func:`handoff_guard_refusal`
+    states: the caller's test is truthiness and a ``None`` reads as "no refusal".
+    """
+    stamp = read_stamp(config_dir, session_id)
+    if stamp is None or stamp.placement.mode != "pool":
+        return ""
+    member = stamp.pool_member
+    if not member:
+        return ""
+    try:
+        lifecycle = _member_lifecycle(config_dir, stamp, member)
+    except _MembershipUnreadable as exc:
+        # FAIL CLOSED, the handoff guard's asymmetry: a refusal costs a sentence and
+        # `lop network show`; proceeding can put a second writer on a conversation
+        # that a live pod is still appending to.
+        return (
+            "Local Operator could not read this device's network records, so it cannot "
+            f"tell whether the pool member holding this conversation is still running ({exc}). "
+            "The conversation was not started. Repair or remove the file named above, "
+            "then try again."
+        )
+    if lifecycle in ("", "expired"):
+        return ""
+    if _copy_at_member_frontier(config_dir, session_id, member):
+        return ""
+    return (
+        f"This conversation is running on pool member {member}, which is still {lifecycle}. "
+        "Its copy here is behind that member's last sync, so starting it would give the "
+        "conversation two writers. Wait for the member to be shut down (it flushes to this "
+        "device first), or run `lop network drain` to finish it now."
+    )
+
+
+class _MembershipUnreadable(Exception):
+    """The network store exists and cannot be read; the guard fails closed."""
+
+
+def _member_lifecycle(config_dir: Path, stamp: MeshStamp, member: str) -> str:
+    """The named member's ``lifecycle`` on this device, or ``""`` when there is no row.
+
+    READ FROM THIS DEVICE'S STORE, which is the only authority the guard has: a
+    peer's claim about its own lifecycle crosses the wire and is exactly what a
+    two-writer race would lie about. A member row is written by admission and by
+    revocation, both local events.
+    """
+    from local_operator.network import store
+
+    network_id = stamp.placement.network_id or stamp.network_id
+    try:
+        records = (
+            [store.load(network_id, config_dir)] if network_id else store.list_networks(config_dir)
+        )
+    except FileNotFoundError:
+        # INCLUDING A CORRUPT RECORD, which the store's own read path sets aside rather
+        # than raising (``_read_json`` -> ``None`` -> ``FileNotFoundError``). That is a
+        # rule this guard follows rather than a case it invents: a device whose record
+        # cannot be parsed no longer lists the network, so it cannot name a live member
+        # either — and refusing here would make a corrupt file block every pool resume
+        # with a remedy (delete it) that also destroys the membership.
+        return ""
+    except (OSError, ValueError, TypeError) as exc:
+        # A record that IS there and cannot be interpreted is the other answer, and the
+        # handoff guard's asymmetry applies: refusing costs a sentence, proceeding can
+        # spawn the second writer this whole module exists to prevent.
+        raise _MembershipUnreadable(str(exc)) from exc
+    for record in records:
+        row = record.member(member)
+        if row is not None:
+            return str(row.lifecycle)
+    return ""
+
+
+def _copy_at_member_frontier(config_dir: Path, session_id: str, member: str) -> bool:
+    """Whether this device's copy has reached the frontier THAT member announced.
+
+    The cursor is ``network/sync.py``'s (``read_replica_cursor``), and the three
+    facts checked are the ones that make it a claim about THIS member rather than
+    about some device: ``owner_device`` names the source, ``prefix_digest`` is the
+    frontier's sha256, and the transcript on disk is at least as long as the prefix
+    the digest covers. A compaction rewrites the transcript, so the length check is
+    what catches a cursor that outlived the bytes it describes — the same direction
+    ``sync.pull``'s own prefix check fails in, and it FAILS TOWARDS REFUSING.
+
+    Deliberately a ``stat`` and not a re-hash: this runs on the engage path for a
+    session the operator just asked to open, and a cursor that survived a
+    compaction has already been answered by the length.
+    """
+    from local_operator.network import sync
+
+    try:
+        cursor = sync.read_replica_cursor(config_dir, session_id)
+    except OSError:
+        return False
+    inner = cursor.get("cursor")
+    inner = inner if isinstance(inner, dict) else {}
+    if str(cursor.get("owner_device") or "") != member:
+        return False
+    prefix_bytes = int(inner.get("prefix_bytes") or 0)
+    if prefix_bytes <= 0 or not str(inner.get("prefix_digest") or ""):
+        return False
+    try:
+        size = (sync.session_dir(config_dir, session_id) / sync.TRANSCRIPT_NAME).stat().st_size
+    except OSError:
+        return False
+    return size >= prefix_bytes
 
 
 def _as_int(value: Any) -> int:
