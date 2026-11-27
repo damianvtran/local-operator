@@ -143,4 +143,6 @@ reading it returns to "Guard only via the approvals card". Nothing is migrated.
 * A phone-relay twin of these routes (the relay serves its own `/api/...`
   surface; M1 decides whether to proxy these or add relay twins).
 * Report confirm, and any scope change/grant (typed approvals card only).
+* Lifting `guard.consent.UNMEASURED_SCOPES` (`trace_detail`, `admin_share`). X is measured
+  (31, `surface.BACKUP_DAYS`) but offering those scopes is a separate decision.
 * "Other computers": the server owns that list; this computer reports only itself.
