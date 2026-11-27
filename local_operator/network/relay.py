@@ -143,6 +143,7 @@ from local_operator.network.types import (
     NET_PAIR_OPS,
     PAIR_STAGE_AWAITING_CONFIRMATION,
     PAIR_STAGE_AWAITING_JOINER,
+    POOL_MEMBER_ROLES,
     ControlRequestTimeout,
     ControlRequestUnsent,
     Granted,
@@ -3667,11 +3668,17 @@ def lowest_id_admin(record: NetworkRecord, *, excluding: str = "") -> str:
     Lowest id rather than an election: every remaining member computes the same
     answer from the same list, so no round trip is needed and two devices cannot
     both decide they are the rotator.
+
+    A POOL MEMBER IS NEVER THE ROTATOR, whatever its stored role says (code review
+    round 1, MAJOR 1). Admission clamps such a row's role to ``drive``, so the
+    ``kind`` test here is the belt for a row written another way: rotating the
+    network hands out the new epoch secret, and a borrowed, unowned machine must
+    never be the device that mints it.
     """
     candidates = sorted(
         row.device_id
         for row in record.active_members()
-        if row.role == "admin" and row.device_id != excluding
+        if row.role == "admin" and row.kind != "pool" and row.device_id != excluding
     )
     return candidates[0] if candidates else ""
 
@@ -14472,10 +14479,18 @@ class RelayServer:
                 # A8.1: NO CARD. The human act was minting the grant on this device;
                 # what stands in for their confirmation is the provisioning plane's
                 # signature over THIS joiner's key, verified before the offer above.
-                # ``assert`` rather than a branch: a pool join that reached here
-                # without a verified statement is a programming error in this
-                # function, and the safe direction is to stop rather than to admit.
-                assert attestation is not None, "a pool join reached admission unverified"
+                # REFUSED, NEVER ASSERTED: a pool join that reached here without a
+                # verified statement is a programming error in this function, and
+                # `python -O` strips an ``assert`` — which would turn this guard into
+                # an admission (security review round 1, NIT 1). The code is
+                # ``internal``, not ``protocol_error``: the peer did nothing wrong.
+                if attestation is None:
+                    raise PairingRefusal(
+                        "internal",
+                        "the pool admission has no verified attestation, so nothing was "
+                        "admitted",
+                    )
+                pool_role = _pool_admitted_role(record, invite_id)
                 decision = PairDecision(
                     invite_id=invite_id,
                     decision="admit",
@@ -14496,7 +14511,7 @@ class RelayServer:
                         outcome="ok",
                         detail={
                             "subject": joiner_id,
-                            "role": _invite_role(record, invite_id),
+                            "role": pool_role,
                             "answered_by": decision.answered_by,
                             "shares": len(decision.shares),
                             # The provider's own handle for the instance, so a
@@ -14580,12 +14595,16 @@ class RelayServer:
                     device_id=joiner_id,
                     public_key=joiner_key,
                     name=joiner_name,
-                    role=_invite_role(record, invite_id),
-                    # R-I11, CLAMPED AGAIN: ``invite.mint`` already strips the
-                    # forbidden four from a pool invite, but this reads a SAVED ROW
-                    # (which a hand edit, a future writer or an older build could
-                    # have left wide), and the row is what every later decision
-                    # consults. Defence in depth, one helper, same rule.
+                    role=(
+                        _pool_admitted_role(record, invite_id)
+                        if pool_join
+                        else _invite_role(record, invite_id)
+                    ),
+                    # R-I11, CLAMPED AGAIN: ``invite.mint`` already intersected a pool
+                    # invite's capabilities with ``POOL_ALLOWED_CAPABILITIES``, but this
+                    # reads a SAVED ROW (which a hand edit, a future writer or an older
+                    # build could have left wide), and the row is what every later
+                    # decision consults. Defence in depth, one helper, same rule.
                     capabilities=(
                         clamp_pool_capabilities(_invite_capabilities(record, invite_id))
                         if pool_join
@@ -14679,6 +14698,12 @@ class RelayServer:
                         "role": member_row.role,
                         "member_kind": member_row.kind,
                         "epoch": record.epoch,
+                        # WHAT THE MEMBER MAY ACTUALLY DO, recorded rather than left to
+                        # be inferred (security review round 1, MINOR 2): the clamp is
+                        # silent by design, so the resulting set is this row's answer
+                        # to "what did admission narrow it to" — read here instead of
+                        # re-deriving it from a role table a later build may have moved.
+                        "capabilities": list(member_row.capabilities),
                         # The granted count, beside the requested one on
                         # ``pairing_confirmed`` — the two differ exactly when a
                         # share was dropped, which is the case the audit exists to
@@ -18817,6 +18842,16 @@ def _verified_pool_attestation(
     * the WINDOW — a statement is current within the plan's skew and claims a
       bounded life, which is what makes a replayed one worthless after it.
 
+    WHAT THIS VERSION DOES NOT BIND, stated so the next reader does not assume it
+    (security review round 1, MINOR 3). v1 binds ``(network_id, device_key,
+    window)`` and nothing else: the statement carries an ``account_id``, but no
+    grant id and no account is PINNED here, because the grant this joiner redeems
+    is minted by a person before the provider exists (``expect_workload_id=None``
+    above is the same fact). Binding the statement to a specific pool grant or
+    billing account is the v2 statement's work, reserved in ``agent-server``'s
+    ``docs/REMOTE_COMPUTE.md``; until then the security this door buys rests on the
+    three bindings above plus the key set the operator pinned.
+
     A MALFORMED OR UNPINNED KEY SET REFUSES BEFORE ANY STATEMENT IS READ: the
     pinned keys are the trust root, and "no keys configured" must never read as
     "no signature needed".
@@ -18879,8 +18914,10 @@ def _pool_offer_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     that is device-bound, so the device-scoped rows are removed from the LIST as
     well as from the grant: the joiner's receipt is what its own operator reads,
     and a key that will not be granted must not appear on it as "not yet served".
-    The rule itself (which keys are session-scoped) is ``offers``'s, not this
-    function's — see :func:`local_operator.network.credentials.offers.session_scoped_keys`.
+    The rule itself (which keys are device-bound) is ``offers``'s, not this
+    function's — see :func:`local_operator.network.credentials.offers.session_scoped_keys`
+    and :func:`local_operator.network.credentials.offers.is_pool_excluded_key` for the
+    two spellings of the GitHub adapter's credential.
     """
     from local_operator.network.credentials import offers as offers_mod
 
@@ -18971,10 +19008,13 @@ def _grant_pair_shares(
     and emails never enter the audit (§9: masked is display-level).
 
     ``pool_member`` is the BELT to the caller's offer filter (§3.5): a pool member
-    borrows session-scoped model credentials and nothing device-bound, and the
+    borrows session-scoped model credentials and nothing device-bound, and every
     device-scoped key is dropped here as well as from the list the joiner saw — a
     decision naming one anyway (a hand-written row, a future caller) must not be
-    able to place it.
+    able to place it. "Device-scoped" is
+    :func:`local_operator.network.credentials.offers.is_pool_excluded_key`, which
+    covers BOTH spellings of the GitHub adapter's credential (``github`` and
+    ``secret:GITHUB_APP``).
     """
     if not offers_allowed:
         # INDEPENDENT OF THE OFFER (defence in depth for ``--no-credential-offers``):
@@ -19241,6 +19281,24 @@ def _remaining_of(record: NetworkRecord | None, invite_id: str) -> float:
 def _invite_role(record: NetworkRecord, invite_id: str) -> str:
     invite = record.invite(invite_id)
     return invite.role if invite else "read"
+
+
+def _pool_admitted_role(record: NetworkRecord, invite_id: str) -> str:
+    """The role a POOL joiner is admitted with: never ``admin`` (code review MAJOR 1).
+
+    ``invite.mint`` refuses ``role="admin"`` for a pool grant, so this is the
+    second seat of one rule: the row this reads is on disk, and a hand edit, an
+    older build or a future writer can leave one that says ``admin``. The admitted
+    member's ``role`` is what :func:`lowest_id_admin` and the credential owner's
+    ``_is_admin`` consult, so a narrowed capability set beside a role still reading
+    ``admin`` would be a membership authority nobody granted. ``drive`` is the
+    clamp's direction because it is what a session-running member is minted as;
+    a ``read`` row keeps ``read``, so nothing is ever widened by this.
+    """
+    role = _invite_role(record, invite_id)
+    if role in POOL_MEMBER_ROLES:
+        return role
+    return "drive"
 
 
 def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:

@@ -879,6 +879,7 @@ __all__ = [
     "CODE_MALFORMED_KEY_SET",
     "CODE_MALFORMED_KEY_ID",
     "CODE_MALFORMED_PAYLOAD",
+    "CODE_MISSING_ATTESTATION",
     "CODE_MISSING_EXPECTATION",
     "CODE_NETWORK_MISMATCH",
     "CODE_NON_CANONICAL",
@@ -893,6 +894,7 @@ __all__ = [
     "AttestationRefusal",
     "VerifiedAttestation",
     "parse_attestation_keys",
+    "parse_pinned_keys",
     "public_keys",
     "verify_attestation",
 ]

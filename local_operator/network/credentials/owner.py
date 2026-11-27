@@ -3715,6 +3715,13 @@ class MeshCredentialBroker:
         Read from the member record rather than from a capability: the design's
         capability vocabulary has no ``trust``/``admin`` member, and role is the
         thing an admin invite grants.
+
+        A POOL MEMBER IS NEVER AN ADMIN, whatever its stored role says (code review
+        round 1, MAJOR 1). What this gate authorises is device-bound credential work
+        — a forced refresh handing out the operator's own logins — and a pool member
+        borrows session-scoped grants for its own lifetime. Admission clamps such a
+        row's role to ``drive``, so the ``kind`` test is the belt for a row written
+        another way.
         """
         if not device:
             return False
@@ -3726,7 +3733,7 @@ class MeshCredentialBroker:
             for record in store.list_networks(self.root):
                 member = record.member(device)
                 if member is not None:
-                    return str(member.role) == "admin"
+                    return str(member.role) == "admin" and str(member.kind) != "pool"
         except Exception:  # noqa: BLE001
             return False
         return False

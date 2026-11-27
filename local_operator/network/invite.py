@@ -41,6 +41,7 @@ from local_operator.network.types import (
     CREDENTIAL_OFFERS_NONE,
     INVITE_ROLES,
     MEMBER_KINDS,
+    POOL_MEMBER_ROLES,
     InviteRecord,
     MemberKind,
     NetworkRecord,
@@ -216,10 +217,20 @@ def mint(
 
     ``member_kind="pool"`` is the A8.1 grant (``mesh-compute-pool.md`` §3.2): the
     joiner has no human at its end, so the relay admits it on provider attestation
-    instead of a confirmation card. Its capabilities are clamped HERE for R-I11 —
-    an ``admin`` pool invite mints the narrow member it describes rather than a
-    refusal — and clamped AGAIN at admission, because the token's copy of the
-    capability list is untrusted input while the saved row is what the relay reads.
+    instead of a confirmation card. Its capabilities are INTERSECTED with
+    :data:`local_operator.network.types.POOL_ALLOWED_CAPABILITIES` HERE for R-I11 —
+    a wider pool invite mints the narrow member it describes rather than a refusal
+    — and clamped AGAIN at admission, because the token's copy of the capability
+    list is untrusted input while the saved row is what the relay reads.
+
+    ``role="admin"`` is REFUSED for a pool member (code review round 1, MAJOR 1),
+    and that is the one widening the clamp must not absorb: ``admin`` is
+    membership authority — mint invites, remove devices, rotate the network — and
+    the operator who would hold it is precisely the person a pool member does not
+    have at its end. Narrowing an admin pool grant to a drive set would answer the
+    flag with a member whose stored ``role`` still reads ``admin`` to every reader
+    that consults the role (``lowest_id_admin``, ``owner._is_admin``), which is
+    why the refusal comes before the clamp rather than through it.
     """
     if role not in INVITE_ROLES:
         raise PairingRefusal(
@@ -229,6 +240,13 @@ def mint(
         raise PairingRefusal(
             "bad_member_kind",
             f"unknown invite member kind {member_kind!r}; use one of {', '.join(MEMBER_KINDS)}",
+        )
+    if member_kind == "pool" and role not in POOL_MEMBER_ROLES:
+        raise PairingRefusal(
+            "bad_role",
+            f"a pool member may only be minted as {' or '.join(POOL_MEMBER_ROLES)}: it has no "
+            "person at its end to hold membership authority, so an admin grant is refused "
+            "rather than narrowed",
         )
     if ttl_s <= 0:
         raise PairingRefusal("bad_ttl", "an invite must expire; give a positive lifetime")

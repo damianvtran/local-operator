@@ -577,7 +577,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "pairing_confirmed": frozenset({"subject", "role", "answered_by", "shares", "workload_id"}),
     "invite_minted": frozenset({"role", "expires_at", "bound_device"}),
-    "member_admitted": frozenset({"role", "member_kind", "epoch", "grants"}),
+    "member_admitted": frozenset({"role", "member_kind", "epoch", "grants", "capabilities"}),
     # A device learns about a member it did not know about, from a peer that does.
     # This is a MEMBERSHIP change and it is how a newcomer becomes visible to the
     # devices that were already in the network (Q-R2-1), so it is recorded with the

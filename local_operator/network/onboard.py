@@ -2445,10 +2445,12 @@ class OnboardRun:
         store_unreadable = ""
         role = str(member.role or "")
         pool_member = str(getattr(member, "kind", "device")) == "pool"
-        grants_credentials = role in (
-            "drive",
-            "admin",
-        )
+        # A POOL MEMBER'S ONLY BORROW ROLE IS ``drive`` (code review round 1,
+        # MAJOR 1). ``admin`` is refused at mint and clamped at admission, so a pool
+        # row that still says ``admin`` was written another way; provisioning it like
+        # an admin would hand the borrowed machine the operator's device-bound
+        # capability row on the strength of a role nobody granted.
+        grants_credentials = role == "drive" or (role == "admin" and not pool_member)
         if grants_credentials:
             try:
                 default_keys = offers_mod.served_keys(
