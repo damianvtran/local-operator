@@ -65,8 +65,12 @@ async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp
     root = tmp_path / "config"
     can_inherit = True
     monkeypatch.setattr(serving, "may_inherit_local_auto", lambda *_: can_inherit)
+    session = FakeSession()
+    monkeypatch.setattr(
+        session, "_has_local_foreground_approval_input", lambda: True, raising=False
+    )
     handle = ServingSessionHandle(
-        FakeSession(),
+        session,
         asyncio.get_running_loop(),
         cwd=str(tmp_path),
         auto_approve=True,
@@ -85,6 +89,118 @@ async def test_implicit_local_approval_tightens_on_the_first_call_after_join(tmp
         assert handle._implicit_local_approval_id == "local-session"
         can_inherit = True
         assert not handle._approval_grant().auto, "disconnect must not loosen a live gate"
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wake_first", [True, False], ids=["cold", "warm"])
+async def test_implicit_auto_requires_foreground_on_real_wake_turns(
+    tmp_path, monkeypatch, wake_first
+):
+    from local_operator.harness.types import (
+        AgentTool,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+    from local_operator.harness.wake import DueWake, WakeSchedule
+    from local_operator.session import session as session_module
+    from tests.unit.session.test_session import ScriptedStream, make_session, wait_for
+
+    # Give warm delivery its own turn rather than parking it until the next
+    # operator prompt; otherwise the test would never reach the scheduler gate.
+    monkeypatch.setattr(session_module, "WAKE_OPERATOR_QUIET_S", 0)
+    executed = []
+
+    async def run_fixture(call_id, *_):
+        executed.append(call_id)
+        return ToolResult(tool_call_id=call_id, tool_name="probe", content=[TextContent(text="ok")])
+
+    turns = []
+    for index in range(4):
+        turns.extend(
+            [
+                [
+                    StreamToolCallDelta(
+                        index=0, id=f"probe-{index}", name="probe", argument_delta="{}"
+                    ),
+                    StreamEndEvent(stop_reason="toolUse"),
+                ],
+                [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            ]
+        )
+
+    class WakeStream(ScriptedStream):
+        def __call__(self, request, signal):
+            # A first typed prompt can name an untitled session in parallel.
+            # That auxiliary request must not consume a scripted tool turn.
+            if request.purpose != "turn":
+                return ScriptedStream(
+                    [[StreamTextDelta(delta="Fixture"), StreamEndEvent(stop_reason="stop")]]
+                )(request, signal)
+            return super().__call__(request, signal)
+
+    session = make_session(
+        tmp_path, WakeStream(turns), tools=[AgentTool(name="probe", execute=run_fixture)]
+    )
+    root = tmp_path / "config"
+    handle = ServingSessionHandle(
+        session,
+        asyncio.get_running_loop(),
+        cwd=str(tmp_path),
+        config_dir=root,
+        auto_approve=True,
+        implicit_local_approval_id=session.session_id,
+    )
+
+    async def deny_pending(before: list[str]) -> None:
+        await wait_for(lambda: handle._fold.projection.pending is not None or executed != before)
+        assert executed == before, "scheduled work ran before a person answered"
+        pending = handle._fold.projection.pending
+        assert pending is not None and pending.title == "probe"
+        await handle.approval_answer(pending.request_id, False, False)
+        await wait_for(lambda: session._turn_task is None and not session.is_streaming)
+
+    async def ordinary_wake() -> None:
+        schedule = WakeSchedule(id="scheduled", message="check", next_due_at=0, created_at=0)
+        await session._deliver_wake(
+            DueWake(schedule=schedule, occurrence=1, planned_total=1, final=True)
+        )
+
+    try:
+        if not wake_first:
+            assert await handle.run_headless_prompt("local foreground")
+            assert executed == ["probe-0"]
+        before = list(executed)
+        await ordinary_wake()
+        await deny_pending(before)
+        # Goal/loop work reaches the same owner through its prompt queue,
+        # with the existing harness-injection stamp (unlike an ordinary wake).
+        goal = asyncio.create_task(
+            handle.prompt(
+                "goal continuation",
+                command_id="fixture-goal-turn",
+                wait_complete=True,
+                harness_injected=True,
+            )
+        )
+        await deny_pending(before)
+        await goal
+        assert executed == before, "scheduled work ran the fixture before a person answered"
+        if wake_first:
+            assert await handle.run_headless_prompt("local foreground")
+            assert executed == ["probe-2"]
+        else:
+            # A real operator-saved default is not subject to the implicit
+            # grant's run restriction; it can still authorize scheduled work.
+            handle.follow_config(process_watcher(root))
+            _write_here(root, "tool_approval_mode", "auto")
+            await ordinary_wake()
+            await wait_for(lambda: len(executed) == 2)
+            assert executed == ["probe-0", "probe-3"]
     finally:
         await handle.dispose()
 

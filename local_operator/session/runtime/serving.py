@@ -1943,10 +1943,14 @@ class ServingSessionHandle(SessionHandle):
         explicit = getattr(self, "_explicit_approvals_mode", None)
         pinned = bool(getattr(self, "_approval_pinned", False))
         scope = "session" if explicit is not None and not pinned else "global"
-        return ApprovalGrant(
-            auto=bool(getattr(self, "_auto_approve", False)),
-            scope=scope,
-        )
+        auto = bool(getattr(self, "_auto_approve", False))
+        if auto and self._implicit_local_approval_id and explicit is None and not pinned:
+            # Eligibility at boot is not authority for a turn. A wake can
+            # start or reuse this same owner; only a locally driven run may
+            # consume the implicit default. Don't revoke it for the next prompt.
+            foreground = getattr(self._session, "_has_local_foreground_approval_input", None)
+            auto = callable(foreground) and foreground()
+        return ApprovalGrant(auto=auto, scope=scope)
 
     def _tighten_implicit_local_approval(self) -> None:
         session_id = getattr(self, "_implicit_local_approval_id", None)

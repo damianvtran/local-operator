@@ -63,6 +63,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
@@ -439,6 +440,14 @@ BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 #: owner typing at this machine, so it never authorizes a card-free account
 #: profile save (operator: "a peer ... request never authorizes an edit").
 REMOTE_PROMPT_KEY = "lop_remote_prompt"
+
+#: Bind the deciding callback to the run that actually called it. A shared
+#: Session can serve a monitor while its foreground pipeline is active; a
+#: session-wide busy flag or the last driver alone would lend it that grant.
+#: A None token denotes just the local prompt's pre-turn reference expansion.
+_APPROVAL_RUN: ContextVar[tuple[Session, str | None] | None] = ContextVar(
+    "session_approval_run", default=None
+)
 
 
 #: The remedy a refused team restore names in ``attachment_restore_notice``.
@@ -11734,11 +11743,19 @@ class Session:
             # forwards the manager's own prompt into `child.prompt`, and a manager
             # that quoted an already-expanded block out of its context would have
             # it doubled here.
-            expansion = await expand_references(
-                text,
-                self._cwd,
-                request_approval=None if self._yolo else self._request_approval,
+            approval_origin = _APPROVAL_RUN.set(
+                (self, None)
+                if owner_typed and not harness_injected and mesh_origin is None
+                else None
             )
+            try:
+                expansion = await expand_references(
+                    text,
+                    self._cwd,
+                    request_approval=None if self._yolo else self._request_approval,
+                )
+            finally:
+                _APPROVAL_RUN.reset(approval_origin)
             # Notices are discarded deliberately: `prompt` has no channel back to a
             # UI, and no surface pre-expands a composer draft, so an unresolved
             # token on a submit exit is sent verbatim and silently — the accepted
@@ -20603,6 +20620,26 @@ class Session:
                     self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
                     self._run_owner_text_bindings.append(self._last_displayed_profile_proposal)
 
+    def _has_local_foreground_approval_input(self) -> bool:
+        """Whether this decision belongs to a live, locally driven run."""
+        origin = _APPROVAL_RUN.get()
+        if origin is None or origin[0] is not self:
+            return False
+        if origin[1] is None:
+            return True  # local input expansion, before a run has been admitted
+        # The pipeline resets these facts per run and updates them as inputs
+        # are consumed. The persisted surface/last driver intentionally survives
+        # across wakes; it cannot establish that THIS work is foreground.
+        return (
+            self._turn_task is not None
+            and origin[1] == self._attention_run_token
+            and bool(self._run_owner_texts or self._run_owner_consent)
+            and not self._run_untrusted_input
+            and self._run_triggers.isdisjoint(
+                (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE)
+            )
+        )
+
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
 
@@ -23587,6 +23624,7 @@ class Session:
             },
         )
         self._turn_task = asyncio.current_task()
+        approval_origin = _APPROVAL_RUN.set((self, self._attention_run_token))
         logically_settled = False
         try:
             await self._run_turn(
@@ -23611,6 +23649,7 @@ class Session:
             self._note_import_failure(exc, "local_operator.session.session")
             raise
         finally:
+            _APPROVAL_RUN.reset(approval_origin)
             self._turn_task = None
             await self._flush_held_end()
             await self._publish_attention_outcome()

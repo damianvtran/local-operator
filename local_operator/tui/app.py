@@ -13816,6 +13816,16 @@ class OperatorApp(App[None]):
             session_id = str(getattr(state, "session_id", "") or "")
             if session_id:
                 self._last_known_states[session_id] = state
+        # An attached pane paints the owner's decision, not this viewer's
+        # machine default. This is a projection only: the attached card path
+        # still requires a person to reply to the owner.
+        owner_mode = getattr(state, "approval_mode", None)
+        if (
+            not self._interaction.display_only
+            and self._gate_is_owned_elsewhere()
+            and owner_mode in ("ask", "auto")
+        ):
+            self._set_approve_all(owner_mode == "auto", scope="keep")
         # Metadata can arrive without a new source row. The card-result hook
         # below retries against actual settled seats if this update won first.
         self._apply_peer_display_records(state)
@@ -32514,13 +32524,10 @@ class OperatorApp(App[None]):
         warning by the policy module, and that warning is surfaced rather than
         swallowed, because a silent downgrade to prompting is still a change.
 
-        An attached session's gate belongs to its owner's process, so the record
-        is still READ here but it only feeds the card's provenance — moving
-        ``_approve_all`` here would make the band claim a mode this app does not
-        control. The sidecar lives beside the transcript on THIS machine, so an
-        attached local session can show "session override"; a remote mesh
-        session has no local directory, ``read_override`` answers "no record",
-        and the card keeps the global default rather than inventing one.
+        An attached session's gate belongs to its owner. Until its live
+        snapshot arrives, do not paint Auto from the viewer's machine default;
+        only an actual conversation record can supply a saved fallback. The
+        live snapshot wins over that record (e.g. for a run pinned by a flag).
 
         ``first_adoption`` is False when the source already had an in-memory
         ``draft.approve_all`` (a temporary `A` latch), and then the mode is NOT
@@ -32529,8 +32536,12 @@ class OperatorApp(App[None]):
         off. The record is still read for ``_explicit_approvals_mode`` so the
         card's provenance line names the conversation's saved choice.
         """
-        attached = self._gate_is_owned_elsewhere()
+        # Adoption runs before `_bind_viewer`, so `_session` still names the
+        # outgoing pane (or nothing on boot). Read ownership from the incoming one.
+        attached = not getattr(session, "owns_runtime", True)
         self._explicit_approvals_mode = None
+        if attached:
+            self._set_approve_all(False, scope="global")
         source = self._interactions.get(id(session))
         if source is None:
             source = SessionInteraction(session)
@@ -32557,7 +32568,7 @@ class OperatorApp(App[None]):
         # Provenance follows the record on EVERY adoption, even when an
         # in-memory latch keeps the gate itself where it is.
         self._explicit_approvals_mode = override
-        if not attached and first_adoption:
+        if attached or first_adoption:
             self._set_approve_all(override == "auto")
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
