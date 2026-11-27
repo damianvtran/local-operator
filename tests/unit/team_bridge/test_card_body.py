@@ -1468,6 +1468,8 @@ async def test_read_only_prompt_matches_main_turn_bridge_card_prefix_without_mut
         def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
             return blocks
 
+        _read_only_system_blocks = Session._read_only_system_blocks
+
         def _wire_legal_snapshot(self) -> list[Any]:
             return list(self._history)
 
@@ -1551,6 +1553,8 @@ async def test_read_only_prompt_returns_ids_only_without_purging_when_standing_r
 
         def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
             return blocks
+
+        _read_only_system_blocks = Session._read_only_system_blocks
 
         def _wire_legal_snapshot(self) -> list[Any]:
             return list(self._history)

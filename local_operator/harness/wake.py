@@ -1242,42 +1242,67 @@ class WakeScheduler:
         any queued delivery it left behind are purged like any other cancel.
         """
         async with self._write_lock:
-            incoming = [schedule.model_copy(deep=True) for schedule in schedules]
-            incoming.sort(key=lambda s: s.created_at)
-            kept_ids = {schedule.id for schedule in incoming}
-            removed = [s for s in self._schedules if s.id not in kept_ids]
-            for held_id in list(self._held):
-                if held_id not in kept_ids:
-                    removed.append(self._held.pop(held_id))
-                    self._held_reasons.pop(held_id, None)
-            # Runnable rows are the incoming ones that are NOT held; each held id
-            # the caller kept is re-affirmed in place (content from the caller,
-            # one-shot shape from the hold), so nothing resets it to a stale
-            # active copy.
-            self._schedules = [row for row in incoming if row.id not in self._held]
-            for row in incoming:
-                held = self._held.get(row.id)
-                if held is not None:
-                    self._held[row.id] = held.model_copy(
-                        update={
-                            "message": row.message,
-                            "notify": row.notify,
-                        }
-                    )
+            await self._update_locked(schedules)
+
+    async def replace_rows(
+        self,
+        drop: Callable[[WakeSchedule], bool],
+        add: Sequence[WakeSchedule] = (),
+    ) -> None:
+        """Drop the rows ``drop`` selects and append ``add``, read INSIDE the lock.
+
+        :meth:`update` takes a list its caller built beforehand, so a caller
+        that snapshots ``schedules`` while a pump is mid-delivery hands back the
+        pre-advance copy of every row that pump fired, and the update re-arms
+        them. A writer that only owns a few rows of its own (the cache
+        keep-alive) needs the snapshot and the write under the one lock the
+        pump also holds. Never call this from a deliver hook: the pump holds
+        the lock for the whole delivery.
+        """
+        async with self._write_lock:
+            kept = [row for row in self.schedules if not drop(row)]
+            await self._update_locked([*kept, *add])
+
+    async def _update_locked(
+        self, schedules: list[WakeSchedule] | tuple[WakeSchedule, ...]
+    ) -> None:
+        """:meth:`update`'s body; the caller holds ``_write_lock``."""
+        incoming = [schedule.model_copy(deep=True) for schedule in schedules]
+        incoming.sort(key=lambda s: s.created_at)
+        kept_ids = {schedule.id for schedule in incoming}
+        removed = [s for s in self._schedules if s.id not in kept_ids]
+        for held_id in list(self._held):
+            if held_id not in kept_ids:
+                removed.append(self._held.pop(held_id))
+                self._held_reasons.pop(held_id, None)
+        # Runnable rows are the incoming ones that are NOT held; each held id
+        # the caller kept is re-affirmed in place (content from the caller,
+        # one-shot shape from the hold), so nothing resets it to a stale
+        # active copy.
+        self._schedules = [row for row in incoming if row.id not in self._held]
+        for row in incoming:
+            held = self._held.get(row.id)
+            if held is not None:
+                self._held[row.id] = held.model_copy(
+                    update={
+                        "message": row.message,
+                        "notify": row.notify,
+                    }
+                )
+        try:
+            await self._maybe_await(self._persist(list(self.schedules)))
+        except Exception:
+            logger.warning("wake persist failed", exc_info=True)
+        self._arm()
+        if removed and self._on_removed is not None:
             try:
-                await self._maybe_await(self._persist(list(self.schedules)))
+                await self._maybe_await(self._on_removed(removed))
             except Exception:
-                logger.warning("wake persist failed", exc_info=True)
-            self._arm()
-            if removed and self._on_removed is not None:
-                try:
-                    await self._maybe_await(self._on_removed(removed))
-                except Exception:
-                    # Observation cannot break scheduling, and the schedules are
-                    # already persisted: a failed purge must not skip the change
-                    # notification below.
-                    logger.warning("wake on_removed failed", exc_info=True)
-            self._notify_change()
+                # Observation cannot break scheduling, and the schedules are
+                # already persisted: a failed purge must not skip the change
+                # notification below.
+                logger.warning("wake on_removed failed", exc_info=True)
+        self._notify_change()
 
     async def pump(self, now_ms: int | None = None) -> int:
         """Fire every due wake (delivering each and advancing it), persist if
