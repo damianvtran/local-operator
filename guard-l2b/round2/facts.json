@@ -1,0 +1,49 @@
+{
+  "prompt_during_turn": {
+    "streaming_after_open": true,
+    "screen": "GuardScreen",
+    "focused": "guard-no",
+    "row_state_after_typeahead_enter": "pending"
+  },
+  "widening": {
+    "badge": "Guard: sharing \u00b7 new items waiting",
+    "focused": "guard-no",
+    "state": "sharing_pending"
+  },
+  "readonly": {
+    "Size(width=100, height=34)": {
+      "buttons": [
+        "guard-close"
+      ],
+      "focused": "guard-close"
+    },
+    "Size(width=80, height=24)": {
+      "buttons": [
+        "guard-close"
+      ],
+      "focused": "guard-close"
+    }
+  },
+  "report_confirmed": {
+    "Size(width=100, height=34)": {
+      "drafts_left": []
+    },
+    "Size(width=80, height=24)": {
+      "drafts_left": []
+    }
+  },
+  "08-non-team-card-trial-eligible": {
+    "calls": [
+      "GET /v1/team-trial/eligibility"
+    ],
+    "guard_files": [],
+    "badge": ""
+  },
+  "09-non-team-card-ineligible": {
+    "calls": [
+      "GET /v1/team-trial/eligibility"
+    ],
+    "guard_files": [],
+    "badge": ""
+  }
+}

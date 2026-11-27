@@ -1,0 +1,974 @@
+{
+  "02-first-consent-card-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        5,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        7,
+        82,
+        17
+      ],
+      "virtual_size": [
+        82,
+        17
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        25,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        39,
+        25,
+        16,
+        3
+      ],
+      "guard-later": [
+        57,
+        25,
+        16,
+        3
+      ],
+      "guard-yes": [
+        75,
+        25,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "05-widening-card-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        7,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        9,
+        82,
+        14
+      ],
+      "virtual_size": [
+        82,
+        14
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        24,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        32,
+        24,
+        16,
+        3
+      ],
+      "guard-later": [
+        50,
+        24,
+        16,
+        3
+      ],
+      "guard-yes": [
+        68,
+        24,
+        23,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "13-agent-shell-read-only-card-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        4,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        6,
+        82,
+        20
+      ],
+      "virtual_size": [
+        82,
+        20
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        27,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        57,
+        27,
+        16,
+        3
+      ],
+      "guard-later": [
+        75,
+        27,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "18-report-confirmed-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        11,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        13,
+        82,
+        5
+      ],
+      "virtual_size": [
+        82,
+        5
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        19,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        57,
+        19,
+        16,
+        3
+      ],
+      "guard-stop": [
+        75,
+        19,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "19-read-only-overview-declined-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        12,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        14,
+        82,
+        4
+      ],
+      "virtual_size": [
+        82,
+        4
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        19,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        75,
+        19,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "02-first-consent-card-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        3,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        5,
+        70,
+        11
+      ],
+      "virtual_size": [
+        69,
+        20
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        17,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        23,
+        17,
+        16,
+        3
+      ],
+      "guard-later": [
+        41,
+        17,
+        16,
+        3
+      ],
+      "guard-yes": [
+        59,
+        17,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "05-widening-card-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        3,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        5,
+        70,
+        11
+      ],
+      "virtual_size": [
+        69,
+        16
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        17,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        16,
+        17,
+        16,
+        3
+      ],
+      "guard-later": [
+        34,
+        17,
+        16,
+        3
+      ],
+      "guard-yes": [
+        52,
+        17,
+        23,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "13-agent-shell-read-only-card-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        3,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        5,
+        70,
+        11
+      ],
+      "virtual_size": [
+        69,
+        24
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        17,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-no": [
+        41,
+        17,
+        16,
+        3
+      ],
+      "guard-later": [
+        59,
+        17,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-no"
+  },
+  "18-report-confirmed-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        6,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        8,
+        70,
+        5
+      ],
+      "virtual_size": [
+        70,
+        5
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        14,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        41,
+        14,
+        16,
+        3
+      ],
+      "guard-stop": [
+        59,
+        14,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "19-read-only-overview-declined-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        6,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        8,
+        70,
+        5
+      ],
+      "virtual_size": [
+        70,
+        5
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        14,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        59,
+        14,
+        16,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "17-non-team-card-loading-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        12,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        14,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        18,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        45,
+        18,
+        16,
+        3
+      ],
+      "guard-cta": [
+        63,
+        18,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "17-non-team-card-loading-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        7,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        9,
+        70,
+        4
+      ],
+      "virtual_size": [
+        70,
+        4
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        14,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        29,
+        14,
+        16,
+        3
+      ],
+      "guard-cta": [
+        47,
+        14,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "08-non-team-card-trial-eligible-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        11,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        13,
+        82,
+        5
+      ],
+      "virtual_size": [
+        82,
+        5
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        19,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        45,
+        19,
+        16,
+        3
+      ],
+      "guard-cta": [
+        63,
+        19,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "09-non-team-card-ineligible-100x34": {
+    "screen": [
+      100,
+      34
+    ],
+    "#guard-title": {
+      "region": [
+        9,
+        11,
+        82,
+        1
+      ],
+      "virtual_size": [
+        82,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        9,
+        13,
+        82,
+        5
+      ],
+      "virtual_size": [
+        82,
+        5
+      ],
+      "max_height": "20"
+    },
+    "#guard-buttons": {
+      "region": [
+        9,
+        19,
+        82,
+        3
+      ],
+      "virtual_size": [
+        82,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        45,
+        19,
+        16,
+        3
+      ],
+      "guard-cta": [
+        63,
+        19,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "08-non-team-card-trial-eligible-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        6,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        8,
+        70,
+        6
+      ],
+      "virtual_size": [
+        70,
+        6
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        15,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        29,
+        15,
+        16,
+        3
+      ],
+      "guard-cta": [
+        47,
+        15,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  },
+  "09-non-team-card-ineligible-80x24": {
+    "screen": [
+      80,
+      24
+    ],
+    "#guard-title": {
+      "region": [
+        5,
+        6,
+        70,
+        1
+      ],
+      "virtual_size": [
+        70,
+        1
+      ],
+      "max_height": "None"
+    },
+    "#guard-body": {
+      "region": [
+        5,
+        8,
+        70,
+        6
+      ],
+      "virtual_size": [
+        70,
+        6
+      ],
+      "max_height": "11"
+    },
+    "#guard-buttons": {
+      "region": [
+        5,
+        15,
+        70,
+        3
+      ],
+      "virtual_size": [
+        70,
+        3
+      ],
+      "max_height": "None"
+    },
+    "buttons": {
+      "guard-close": [
+        29,
+        15,
+        16,
+        3
+      ],
+      "guard-cta": [
+        47,
+        15,
+        28,
+        3
+      ]
+    },
+    "focused": "guard-close"
+  }
+}
