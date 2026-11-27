@@ -249,8 +249,13 @@ def accept(
     re-verifies the signature and sends the one signed grant (``consent_op.apply``).
 
     A card the host already signed whose grant did not reach Radient (``approved``/``failed``)
-    is retried through ``apply``, the desktop's own ``apply-operation`` retry: it signs nothing
-    new, only re-sends under the same signature and the same digest checks.
+    is retried through ``apply``, the desktop's own ``apply-operation`` retry: it records no new
+    APPROVAL signature and re-checks both digests; the grant itself is re-sent as a fresh
+    install-key envelope (new nonce), because that is what ``consent_op.apply`` builds.
+
+    ``can_answer`` is deliberately not consulted here (S-2): the desktop plane's
+    ``approve-operation`` has no such gate, and the grant is signed by the host's own key under
+    its assurance level (see ``docs/design/guard-relay-twin.md`` §2).
     """
 
     from local_operator.guard import consent_op
@@ -311,11 +316,18 @@ def accept(
 def decline(root: Path, approval_id: str) -> dict[str, Any]:
     """``POST /api/guard/consents/{id}/decline``: the host's ordinary ``deny`` ("Don't share").
 
-    The safe direction, so no digests are needed (as on the desktop). The card is denied, then
-    the queue folds it as a sticky decline NOW with ``decided_via = mobile`` rather than at the
-    next admission point, so the status read right after this call already says what happened
-    and where. If the queue cannot fold it now (the prompt moved on) the deny stands and the
-    next admission point folds it (``fold_desktop_answers``), exactly as for a desktop deny.
+    The safe direction, so no digests are needed (as on the desktop). THE QUEUE ARBITRATES
+    (L2d security round 1, S-1): the prompt row is declined FIRST, one atomic
+    ``pending -> declined`` step (``GuardConsentHost.decline``), and only a win there is
+    answered ``denied``. An accept that already claimed the row (``committing``: the grant is
+    being sent) or landed (``accepted``) makes that step refuse, and the answer is
+    ``409 approval_decision_conflict``, never ``denied``: the earlier shape (check the prompt,
+    then write the card's deny) let a grant land in the gap and acknowledge "Don't share"
+    beside a live consent. Once the queue holds the decline the accept's own claim can no
+    longer succeed, so the card is then denied to match; the store's per-kind deny guard
+    (``consent_op.require_deny_safe``) is the second wall for any surface that skips this order.
+    The fold stamps ``decided_via = mobile`` and the sticky decline NOW, so the status read
+    right after this call already says what happened and where.
     """
 
     from local_operator.guard.consent import GuardConsentHost, GuardConsentRefused
@@ -328,29 +340,37 @@ def decline(root: Path, approval_id: str) -> dict[str, Any]:
     record = _consent_record(root, approval_id)
     facts = _facts(record)
     tenant = str(facts["tenant"])
-    # Only a prompt that is still WAITING can be declined. The approvals store would also
-    # accept a deny on a card it has signed (``approved``) even after its grant landed, which
-    # would write "denied" beside a live consent: a lie the phone would show as "not shared".
-    # The same refusal as an accept of a spent card, so a stale button reads one way.
+    # Only a prompt that is still WAITING can be declined; the same refusal as an accept of a
+    # spent card, so a stale button reads one way. This early read is a courtesy: the atomic
+    # decision is the ``decline`` below, which re-checks inside its own transaction.
+    not_waiting = _refusal(
+        409,
+        "approval_decision_conflict",
+        "This Guard request is no longer waiting for an answer. Nothing was changed.",
+    )
     if not _prompt_waiting(root, tenant, facts, approval_id):
-        raise _refusal(
-            409,
-            "approval_decision_conflict",
-            "This Guard request is no longer waiting for an answer. Nothing was changed.",
-        )
-    try:
-        approvals_plane.deny(root, approval_id)
-    except MeshRefusal as error:
-        raise _refusal(409, error.code, str(error)) from None
+        raise not_waiting
     try:
         host = GuardConsentHost(root, transport=None, mirror=False)
         row = host.prompt(tenant, int(facts["collection_rev"]))
-        if row is not None and row.approval_id == approval_id:
-            host.decline(tenant, row.collection_rev, surface="mobile")
+        if row is None or row.approval_id != approval_id:
+            raise not_waiting
+        host.decline(tenant, row.collection_rev, surface="mobile")
     except GuardConsentRefused:
-        pass  # not pending any more: another surface or a newer offer already settled it
-    except Exception:  # noqa: BLE001 - the deny is written; folding retries at the next point
+        # Lost the race: an accept claimed or settled the row between the read above and the
+        # transaction (or another surface answered). Nothing was written; say so.
+        raise not_waiting from None
+    except Exception as error:  # noqa: BLE001 - e.g. an unreadable queue: the deny below stands
+        if error is not_waiting:
+            raise
         logger.debug("guard relay: decline fold deferred", exc_info=True)
+    try:
+        approvals_plane.deny(root, approval_id)
+    except MeshRefusal:
+        # The queue already holds the decline, which is what the member asked for. The card is
+        # usually ``withdrawn`` by that very step (the queue settled it), so a refused deny
+        # here is the expected shape, not a failure.
+        logger.debug("guard relay: card deny after queue decline refused", exc_info=True)
     return GuardConsentAnswer(approval_id=approval_id, state="denied", tenant=tenant).model_dump()
 
 

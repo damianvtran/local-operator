@@ -64,7 +64,6 @@ from local_operator.network.credentials import finite_share, inheritance
 from local_operator.network.types import MeshRefusal
 from local_operator.network.wire import canonical_json
 
-#: Assurance levels the wire carries (machine tokens; the UI localizes the words).
 #: Which surface is answering a typed card, as the audit rows and (for ``guard_consent``) the
 #: queue's ``decided_via`` record it. ``desktop`` is every caller that does not say otherwise.
 #: ``mobile`` is the phone relay's Guard twin (``mobile/guard_relay.py``), which signs through
@@ -94,6 +93,7 @@ def answer_surface() -> str:
     return _ANSWER_SURFACE.get()
 
 
+#: Assurance levels the wire carries (machine tokens; the UI localizes the words).
 ASSURANCE_PRESENCE = "presence"
 ASSURANCE_FILE_ONLY = "file_only"
 

@@ -129,6 +129,56 @@ def mirror_state(root: Path, approval_id: str) -> str:
         return "missing"
 
 
+def require_deny_safe(record: Mapping[str, Any], root: Path | None) -> None:
+    """Refuse a ``deny`` of a card whose grant is in flight or already landed.
+
+    Called by the approvals store's ``_record_decision`` under the record's own lock, for this
+    kind only (the per-kind guard pattern of ``pair_op.require_acked``). WHY at the store: the
+    store allows ``deny`` from ``approved``/``connecting`` (a runner's mid-run stop), but for
+    a Guard card the "run" is the one signed grant, and once the queue row is ``committing``
+    (claimed, send in progress) or ``accepted`` (landed) a deny written now only leaves the
+    card saying "denied" beside a live consent: a false "not shared" on the control that must
+    be unambiguous. Every surface that can deny (the desktop route, the phone relay, a TUI)
+    reaches this one write, so the rule cannot be bypassed by a surface that forgot the check
+    (L2d security round 1, S-1).
+
+    Deliberately NARROWER than "the prompt is no longer pending": a prompt already ``declined``
+    or ``superseded`` (the relay declines the queue row FIRST so the queue arbitrates, then
+    denies the card) must still let the card be denied, and refusing it would strand the
+    decision. An unreadable queue lets the deny through: it is the safe direction, and an
+    unreadable queue cannot hold a grant either.
+    """
+
+    from local_operator.guard.consent import (
+        PROMPT_ACCEPTED,
+        PROMPT_COMMITTING,
+        GuardConsentHost,
+    )
+    from local_operator.network.identity import network_root
+
+    payload = (record.get("what") or {}).get(OP)
+    payload = payload if isinstance(payload, Mapping) else {}
+    tenant = str(payload.get("tenant") or "")
+    rev = payload.get("collection_rev")
+    if not tenant or not isinstance(rev, int) or isinstance(rev, bool):
+        return
+    try:
+        # ``root`` may be the store's default (None): the queue lives beside ``network/``.
+        queue_root = network_root(root).parent
+        row = GuardConsentHost(queue_root, transport=None, mirror=False).prompt(tenant, rev)
+    except Exception:  # noqa: BLE001 - see above: the safe direction is not blocked by a read error
+        return
+    if row is None or row.approval_id != str(record.get("approval_id") or ""):
+        return
+    if row.state in (PROMPT_COMMITTING, PROMPT_ACCEPTED):
+        raise _refuse(
+            "approval_decision_conflict",
+            "this Guard request has already been answered with a yes and the grant is being "
+            "or has been recorded; it cannot be declined now. Use Stop sharing to turn "
+            "sharing off",
+        )
+
+
 def _intent(record: Mapping[str, Any]) -> dict[str, Any]:
     try:
         what = record["what"]

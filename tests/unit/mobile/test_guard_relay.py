@@ -506,6 +506,43 @@ def test_accept_with_the_cards_own_digests_signs_once_and_sends_exactly_one_gran
     assert any(event == "credential.desktop_signed" for event, _d in audits)
 
 
+def test_an_unwrapped_typed_approval_still_audits_desktop_and_an_unknown_surface_reads_desktop(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """The ``mobile`` stamp is opt-in: every caller that does not wrap its call, and any value
+    outside the allow-list, keeps writing ``desktop`` (MINOR-2: the "desktop unchanged" claim)."""
+
+    _team(monkeypatch)
+    _host_, row = _queued(root, fixture_server)
+    audits: list[dict[str, Any]] = []
+    real_audit = desktop_approval._audit
+    monkeypatch.setattr(
+        desktop_approval,
+        "_audit",
+        lambda event, approval_id, root_, detail: (
+            audits.append(dict(detail)),
+            real_audit(event, approval_id, root_, detail),
+        )[1],
+    )
+    assert desktop_approval.answer_surface() == "desktop"
+    with desktop_approval.answering_as("evil"):
+        assert desktop_approval.answer_surface() == "desktop"
+    with desktop_approval.answering_as("mobile"):
+        assert desktop_approval.answer_surface() == "mobile"
+    assert desktop_approval.answer_surface() == "desktop"  # reset on exit, no leak
+    typed = desktop_approval.row_fields(A.load_record(row.approval_id, root=root)) or {}
+    phases = desktop_approval.approve_and_apply(
+        root,
+        row.approval_id,
+        op="guard_consent",
+        request_digest=typed["request_digest"],
+        disclosure_digest_=typed["disclosure_digest"],
+    )
+    assert phases["applied"]["ok"], phases
+    assert audits and {detail["surface"] for detail in audits} == {"desktop"}
+    assert _paired().get(BASE).json()["orgs"][0]["answered_via"] == "desktop"
+
+
 @pytest.mark.parametrize("stale", ["request_digest", "disclosure_digest"])
 def test_accept_with_a_wrong_digest_is_refused_before_the_signer(
     root: Path,
@@ -602,7 +639,7 @@ def test_accept_of_a_declined_card_is_refused(
     assert counters["signer"] == 0 and fixture_server.guard_requests() == []
 
 
-def test_a_grant_that_did_not_reach_radient_is_a_409_and_the_retry_signs_nothing_new(
+def test_a_grant_that_did_not_reach_radient_is_a_409_and_the_retry_records_no_new_approval(
     root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
 ) -> None:
     """Signed but not applied: never reported as granted; a re-send is the desktop's own retry."""
@@ -615,7 +652,9 @@ def test_a_grant_that_did_not_reach_radient_is_a_409_and_the_retry_signs_nothing
     digests = _digests(client, row.approval_id)
     first = client.post(f"{BASE}/consents/{row.approval_id}/accept", json=digests)
     assert first.status_code == 409, first.text
-    assert first.json()["code"], first.text
+    # The consent engine's own code, as measured: the server's ``unavailable`` rides through;
+    # ``guard_consent_not_granted`` is only the fallback when Radient gives none (MINOR-1).
+    assert first.json()["code"] == "unavailable", first.text
     assert host.consent(TENANT) is None  # nothing is shared
     assert host.prompt(TENANT, 1).state == "pending"  # type: ignore[union-attr]
     assert counters["signer"] == 1
@@ -623,7 +662,10 @@ def test_a_grant_that_did_not_reach_radient_is_a_409_and_the_retry_signs_nothing
     retry = client.post(f"{BASE}/consents/{row.approval_id}/accept", json=digests)
     assert retry.status_code == 200, retry.text
     assert retry.json()["state"] == "granted"
-    assert counters["signer"] == 1  # the SAME signature was re-sent; no second gesture
+    # The approval is not re-signed (no second gesture); the GRANT envelope is a fresh
+    # install-key signature with a new nonce, which is why this says "approval" and not "signs
+    # nothing" (QA observation).
+    assert counters["signer"] == 1
     assert host.consent(TENANT)["state"] == "live"  # type: ignore[index]
 
 
@@ -652,6 +694,207 @@ def test_decline_is_the_hosts_ordinary_deny_sticky_stamped_mobile_and_sends_noth
     )
     again = client.post(f"{BASE}/consents/{row.approval_id}/decline")
     assert again.status_code == 409  # a decision is write-once
+
+
+def test_decline_of_a_signed_card_whose_grant_did_not_land_denies_it_and_sends_nothing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """The queue still holds the prompt (``pending``), so the decline wins; the signed card is
+    then denied to match. The store's guard must NOT block this order (prompt ``declined``)."""
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    fixture_server.grant_reply = (503, {"error": "refused", "code": "unavailable"})
+    client = _paired()
+    first = client.post(
+        f"{BASE}/consents/{row.approval_id}/accept", json=_digests(client, row.approval_id)
+    )
+    assert first.status_code == 409
+    assert A.load_record(row.approval_id, root=root)["state"] == "approved"
+    response = client.post(f"{BASE}/consents/{row.approval_id}/decline")
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "denied"
+    assert A.load_record(row.approval_id, root=root)["state"] == "denied"
+    assert host.consent(TENANT) is None and host.sticky(TENANT) == "declined"
+
+
+def test_a_plain_decline_leaves_the_card_settled_by_the_queue(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """Documented shape (design §2): the queue's decline withdraws the unanswered card."""
+
+    _team(monkeypatch)
+    _host_, row = _queued(root, fixture_server)
+    assert _paired().post(f"{BASE}/consents/{row.approval_id}/decline").status_code == 200
+    assert A.load_record(row.approval_id, root=root)["state"] in ("withdrawn", "denied")
+
+
+def test_decline_loses_to_an_accept_that_lands_inside_the_gap_and_never_says_denied(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """S-1, deterministic. Inject a complete accept at the exact point the old code checked the
+    prompt and then wrote the deny. The old order answered ``200 denied`` beside a live consent
+    (reproduced by the security review); the queue-first order answers 409 and sharing stays."""
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    client = _paired()
+    digests = _digests(client, row.approval_id)
+    real = guard_relay._prompt_waiting
+    injected: list[int] = []
+
+    def waiting_then_accept(*args: Any, **kwargs: Any) -> bool:
+        waiting = real(*args, **kwargs)
+        if not injected:
+            injected.append(
+                _paired()
+                .post(f"{BASE}/consents/{row.approval_id}/accept", json=digests)
+                .status_code
+            )
+        return waiting
+
+    monkeypatch.setattr(guard_relay, "_prompt_waiting", waiting_then_accept)
+    response = client.post(f"{BASE}/consents/{row.approval_id}/decline")
+    assert injected == [200]  # the grant landed inside the gap
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "approval_decision_conflict"
+    assert A.load_record(row.approval_id, root=root)["state"] != "denied"
+    assert host.consent(TENANT)["state"] == "live"  # type: ignore[index]
+    assert host.sticky(TENANT) is None
+    assert len(fixture_server.guard_requests()) == 1
+    assert client.get(BASE).json()["orgs"][0]["state"] == "sharing"
+
+
+def test_the_stores_deny_refuses_a_guard_card_whose_grant_is_in_flight_or_landed(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """The desktop plane's ``deny`` route is the same store write: the guard lives there, so it
+    closes S-1 for every surface, and it is NARROWER than "not pending" (a declined row may
+    still have its card denied: see the signed-card decline test above)."""
+
+    from local_operator.network.types import MeshRefusal
+    from local_operator.server.utils import desktop_approvals as plane
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    # ``committing``: claimed, the send in progress. A deny now would sit beside the grant.
+    claimed = host._claim(TENANT, 1)  # noqa: SLF001 - the claim IS the in-flight state
+    assert claimed is not None
+    with pytest.raises(MeshRefusal) as refused:
+        plane.deny(root, row.approval_id)
+    assert refused.value.code == "approval_decision_conflict"
+    assert A.load_record(row.approval_id, root=root)["state"] == "requested"
+
+
+def test_the_stores_deny_refuses_after_the_grant_landed_on_the_desktop_route_too(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    from local_operator.network.types import MeshRefusal
+    from local_operator.server.utils import desktop_approvals as plane
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    client = _paired()
+    assert (
+        client.post(
+            f"{BASE}/consents/{row.approval_id}/accept", json=_digests(client, row.approval_id)
+        ).status_code
+        == 200
+    )
+    with pytest.raises(MeshRefusal) as refused:
+        plane.deny(root, row.approval_id)
+    assert refused.value.code == "approval_decision_conflict"
+    assert A.load_record(row.approval_id, root=root)["state"] != "denied"
+    assert host.consent(TENANT)["state"] == "live"  # type: ignore[index]
+
+
+def test_accept_and_decline_released_together_never_end_denied_beside_a_live_consent(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """S-1, the real race through the real relay: both requests released from one barrier, many
+    iterations (one tenant each, so no sticky or live row carries over). The security review
+    measured the old order inconsistent in 1 of 12; the invariants below hold every time:
+
+    * a decline answered ``200 denied`` means NO consent is live and the sticky "no" is set;
+    * a live consent means the decline was answered 409 and the card is not ``denied``;
+    * exactly one of the two answers won; a grant is sent at most once per tenant.
+    """
+
+    import threading
+    import time
+
+    iterations = 100
+    tenants = [f"org_race{index:02d}" for index in range(iterations)]
+    monkeypatch.setattr(
+        el, "eligible_orgs", lambda _c: [OrgRef(t, "Acme", "member") for t in tenants]
+    )
+    host = _host(root, fixture_server)
+    cards: dict[str, str] = {}
+    for tenant in tenants:
+        outcome = host.offer(C.ConsentOffer.from_wire(_offer(tenant=tenant)))
+        assert outcome.status == "queued" and outcome.row is not None
+        cards[tenant] = outcome.row.approval_id
+    accepter, decliner = _paired(), _paired()
+    wins = {"accept": 0, "decline": 0}
+    for index, tenant in enumerate(tenants):
+        approval_id = cards[tenant]
+        digests = _digests(accepter, approval_id)
+        # The decline starts 0..~40 ms after the accept in a sweep, so some iterations land the
+        # decline's check/deny INSIDE the accept's sign-and-send (the gap the old code lost in);
+        # a pure same-instant release almost always lets the cheaper decline finish first.
+        stagger = (index % 40) * 0.001
+        barrier = threading.Barrier(2)
+        results: dict[str, Any] = {}
+
+        def run(name: str, call: Any) -> None:
+            barrier.wait()
+            if name == "decline":
+                time.sleep(stagger)
+            results[name] = call()
+
+        threads = [
+            threading.Thread(
+                target=run,
+                args=(
+                    "accept",
+                    lambda: accepter.post(f"{BASE}/consents/{approval_id}/accept", json=digests),
+                ),
+            ),
+            threading.Thread(
+                target=run,
+                args=("decline", lambda: decliner.post(f"{BASE}/consents/{approval_id}/decline")),
+            ),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        accept_r, decline_r = results["accept"], results["decline"]
+        consent = host.consent(tenant)
+        live = consent is not None and consent["state"] == "live"
+        card = A.load_record(approval_id, root=root)["state"]
+        context = (
+            tenant,
+            accept_r.status_code,
+            accept_r.text,
+            decline_r.status_code,
+            decline_r.text,
+            card,
+        )
+        if decline_r.status_code == 200:
+            assert decline_r.json()["state"] == "denied", context
+            assert not live and host.sticky(tenant) == "declined", context
+            assert accept_r.status_code == 409, context
+            wins["decline"] += 1
+        else:
+            assert decline_r.status_code == 409, context
+            assert accept_r.status_code == 200 and live, context
+            assert card != "denied", context
+            wins["accept"] += 1
+        assert not (card == "denied" and live), context
+    grants = [r for r in fixture_server.guard_requests() if r["path"] == "/v1/guard/consents"]
+    assert len(grants) == wins["accept"]
+    assert sum(wins.values()) == iterations
 
 
 # ---------------------------------------------------------------------------

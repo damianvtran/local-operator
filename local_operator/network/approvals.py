@@ -1470,6 +1470,13 @@ def _record_decision(
                 f"this approval was already decided ({state}); the first decision wins, "
                 "and a retry is a new request",
             )
+        if decision == "deny" and str(record.get("kind")) == KIND_GUARD_CONSENT:
+            # THE PER-KIND DENY GUARD: a Guard card is never denied beside a grant that is in
+            # flight or landed (L2d S-1). Checked here, under the record lock, so no surface
+            # can write "denied" over a live consent however it got to the store.
+            from local_operator.guard import consent_op
+
+            consent_op.require_deny_safe(record, root)
         if decision == "deny" and state == STATE_CONNECTING:
             # MID-RUN DENY: the write lands (write-once) and the RUNNER stops at
             # its next step check (``verify_for_run`` refuses a denied record). A
