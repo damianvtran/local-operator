@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1152,7 +1153,12 @@ def test_a_wake_in_another_year_renders_its_whole_time(
     from local_operator.cli import wake_command
     from local_operator.wakes.display import format_wake_time
 
-    due = NOW_MS + 400 * 86400_000  # comfortably into the next calendar year
+    # 400 days clears this local year even in a leap year, but can cross two
+    # New Years. Derive the actual year from the due instant, not the test date.
+    now = datetime.now().astimezone()
+    due = int(now.timestamp() * 1000) + 400 * 86400_000
+    due_year = datetime.fromtimestamp(due / 1000).year
+    assert due_year != now.year
     _arm(
         tmp_path,
         "nextyear0001",
@@ -1164,7 +1170,7 @@ def test_a_wake_in_another_year_renders_its_whole_time(
 
     out = capsys.readouterr().out
     expected = format_wake_time(due)
-    assert "2027" in expected or "2026" in expected, expected
+    assert f" {due_year} " in expected, expected
     row = next(line for line in out.splitlines() if "nextyear0001" in line)
     assert expected in row, f"the rendered time was truncated mid-token: {row!r}"
 

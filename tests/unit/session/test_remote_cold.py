@@ -113,6 +113,55 @@ async def test_a_cold_viewer_renders_durable_history_without_an_owner(
 
 
 @pytest.mark.asyncio
+async def test_untraced_cold_viewer_keeps_the_synthesis_call_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A diagnostic keyword is not part of the untraced cold-open call."""
+    from local_operator.session import open_trace
+    from local_operator.session.cold_model import synthesise_cold_state
+
+    monkeypatch.setattr(open_trace, "_PATH", None)
+    _configure_provider(tmp_path)
+
+    # Delegate to real synthesis, but accept only the pre-trace keywords. The
+    # cold open must still produce the configured model rather than raise.
+    async def untraced_synthesis(
+        *,
+        config_dir,
+        session_id,
+        cwd,
+        birth_model,
+        model_selection_override,
+        wakes,
+        monitors,
+        selection_sink,
+        selection,
+    ):
+        return await synthesise_cold_state(
+            config_dir=config_dir,
+            session_id=session_id,
+            cwd=cwd,
+            birth_model=birth_model,
+            model_selection_override=model_selection_override,
+            wakes=wakes,
+            monitors=monitors,
+            selection_sink=selection_sink,
+            selection=selection,
+        )
+
+    monkeypatch.setattr("local_operator.session.attached.synthesise_cold_state", untraced_synthesis)
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        model = viewer.frontend_state.selected_model
+        assert model is not None
+        assert (model.provider, model.model_id) == ("anthropic", "claude-opus-5")
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_cold_viewer_rehydrates_a_pasted_image_from_the_shared_store(
     tmp_path: Path, monkeypatch
 ) -> None:

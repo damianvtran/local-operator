@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, cast
+from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -1324,6 +1324,10 @@ def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
     return update
 
 
+class _ColdOpenTraceKwargs(TypedDict, total=False):
+    _trace: open_trace.ColdOpenTrace
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -2553,7 +2557,15 @@ class AttachedSession:
             # allocations trigger landed on the loop too). ``raw`` is this
             # facade's own parsed row and validation only reads it, so a
             # worker may.
-            durable = await asyncio.to_thread(FrontendSessionState.model_validate, raw)
+            trace = getattr(self, "_cold_open_trace", None)
+            if trace is None:
+                durable = await asyncio.to_thread(FrontendSessionState.model_validate, raw)
+            else:
+                durable = await trace.worker(
+                    open_trace.ColdWorkerPhase.DURABLE_VALIDATE,
+                    FrontendSessionState.model_validate,
+                    raw,
+                )
         except Exception as error:  # noqa: BLE001 — a bad row must not stop the open
             # LOUDLY. Falling back leaves exactly the pre-fix experience — an
             # empty roster and no todos — and at DEBUG that is indistinguishable
@@ -3300,6 +3312,10 @@ class AttachedSession:
         it to attribute a receipt that predates the serving-identity stamp,
         without a second scan of a transcript that reaches 103 MB.
         """
+        trace = getattr(self, "_cold_open_trace", None)
+        # Trace instrumentation is opt-in; the off path keeps both helpers'
+        # original call contracts, not a new keyword with a null value.
+        trace_kwargs: _ColdOpenTraceKwargs = {"_trace": trace} if trace is not None else {}
         state = await synthesise_cold_state(
             config_dir=self._config_dir,
             session_id=self._session_id,
@@ -3312,16 +3328,19 @@ class AttachedSession:
             # A deferred HIT's record-proved reading, or ``None`` to read the
             # journal (see ``cold_model.resolve_conversation_model``).
             selection=selection,
+            **trace_kwargs,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":
             # Resolve the account metadata the runtime would, so the band does
             # not divide a real reading by a stale denominator. Metadata must
             # never prevent viewing saved work.
             try:
-                trace = getattr(self, "_cold_open_trace", None)
                 with trace.phase("account_context") if trace else contextlib.nullcontext():
                     model = await resolve_context_metadata(
-                        self._config_dir, state.selected_model, stickiness_key=self._session_id
+                        self._config_dir,
+                        state.selected_model,
+                        stickiness_key=self._session_id,
+                        **trace_kwargs,
                     )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work

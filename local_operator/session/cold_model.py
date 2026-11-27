@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.harness.types import ModelSpec
+from local_operator.session import open_trace
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
     FrontendSessionState,
@@ -530,7 +531,11 @@ def resolve_conversation_model(
 
 
 async def resolve_context_metadata(
-    config_dir: Path, model: FrontendModelSpec, *, stickiness_key: str
+    config_dir: Path,
+    model: FrontendModelSpec,
+    *,
+    stickiness_key: str,
+    _trace: open_trace.ColdOpenTrace | None = None,
 ) -> FrontendModelSpec:
     """Resolve the account context metadatas a live dispatch would use.
 
@@ -574,7 +579,12 @@ async def resolve_context_metadata(
         finally:
             auth.close()
 
-    resolved = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+    if _trace is None:
+        resolved = await asyncio.to_thread(lambda: asyncio.run(_resolve()))
+    else:
+        resolved = await _trace.worker(
+            open_trace.ColdWorkerPhase.ACCOUNT_CONTEXT, lambda: asyncio.run(_resolve())
+        )
     return FrontendModelSpec.model_validate(resolved.model_dump(mode="python"))
 
 
@@ -589,6 +599,7 @@ async def synthesise_cold_state(
     monitors: Iterable[MonitorState] = (),
     selection_sink: Callable[[StoredModelSelection | None], None] | None = None,
     selection: SelectionReading | None = None,
+    _trace: open_trace.ColdOpenTrace | None = None,
 ) -> FrontendSessionState:
     """Canonical state for a session with no runtime to ask.
 
@@ -644,4 +655,6 @@ async def synthesise_cold_state(
             effective_identity=effective_identity_for(active_agent="", team=""),
         )
 
-    return await asyncio.to_thread(_build)
+    if _trace is None:
+        return await asyncio.to_thread(_build)
+    return await _trace.worker(open_trace.ColdWorkerPhase.MODEL_SYNTHESIS, _build)
