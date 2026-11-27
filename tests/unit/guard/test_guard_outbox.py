@@ -140,3 +140,31 @@ def test_outbox_sink_through_emit_decision(tmp_path: Path) -> None:
         "dangerous_delete",
         "shell",
     )
+
+
+def test_permissions_are_reasserted_on_every_open(tmp_path: Path) -> None:
+    """L1 MINOR-3 (folded into L2a): a loosened file or directory is tightened again."""
+    import os
+
+    from local_operator.guard.decisions import GuardDecisionRecord
+
+    outbox = GuardOutbox(tmp_path)
+    outbox.append(GuardDecisionRecord("block", "custom", "shell"))
+    os.chmod(outbox.path, 0o644)
+    os.chmod(outbox.path.parent, 0o755)
+    outbox.append(GuardDecisionRecord("warn", "custom", "shell"))
+    assert outbox.path.stat().st_mode & 0o777 == 0o600
+    assert outbox.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_a_file_that_is_not_sqlite_is_the_damaged_refusal(tmp_path: Path) -> None:
+    """L1 NIT-2: never a raw ``sqlite3.DatabaseError``; the file is left untouched."""
+    from local_operator.guard.decisions import GuardDecisionRecord
+
+    outbox = GuardOutbox(tmp_path)
+    outbox.path.parent.mkdir(parents=True)
+    outbox.path.write_bytes(b"not a database" * 200)
+    with pytest.raises(GuardOutboxRefused) as refused:
+        outbox.append(GuardDecisionRecord("block", "custom", "shell"))
+    assert refused.value.code == "outbox_damaged"
+    assert outbox.path.read_bytes().startswith(b"not a database")

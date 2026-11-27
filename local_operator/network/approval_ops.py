@@ -77,6 +77,9 @@ _PROVIDERS: tuple[str, ...] = (
     "local_operator.operator.pair_op",
     "local_operator.profile_approval",
     "local_operator.network.file_device_approval",
+    # Radient Guard sharing consent (Guard RFC v0.9 §5.2.2): ``machine``-block storage, the
+    # ``profile_save`` shape, signed only through ``/approve-operation``.
+    "local_operator.guard.consent_op",
 )
 
 

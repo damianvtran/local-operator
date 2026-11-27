@@ -7944,13 +7944,23 @@ class AgentLoop:
             logger.error("guardrail checkpoint raised for %s", tool.name, exc_info=True)
             if tool.name != "bash":
                 # Narrow on purpose: only a call that edits the guard's own
-                # policy (or whose own check cannot be completed) closes.
+                # policy, reaches for Radient Guard key material or a Guard
+                # consent route (guard-credential is pure and needs no setup,
+                # so a setup fault must not open it), or whose own check
+                # cannot be completed, closes.
                 try:
                     cwd = (tool_context.cwd if tool_context is not None else None) or os.getcwd()
-                    if not self._policy_hits(tool.name, item.args, cwd, settings, scratchpad):
+                    if guard_check.guard_credential_hit(
+                        tool.name, item.args
+                    ) is None and not self._policy_hits(
+                        tool.name, item.args, cwd, settings, scratchpad
+                    ):
                         return None
                 except Exception:  # noqa: BLE001 — an unanswerable check closes
                     logger.error("guard-policy check raised for %s", tool.name, exc_info=True)
+            # The fail-closed refusal is a Guard decision too (L1 QA Q1, folded
+            # into L2a): record it as block/guard_error before returning it.
+            guard_check._record_decision(guard_check.GUARD_ERROR_RULE, "error", "block")
             return guard_check.GuardOutcome(
                 blocked=True,
                 text=f"{guard_check.BLOCK_MARKER} (error): the safety check failed, so this "

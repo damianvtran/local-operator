@@ -33,8 +33,10 @@ class ApprovalRow(BaseModel):
     withdrawn_by: dict[str, Any] | None = None
     expires_at: float | None = None
     #: The where-block, under the key its KIND spells: ``device`` for
-    #: ``device_onboard``, ``machine`` for ``local_authority``. Exactly one is
-    #: present; the record's own kind is what tells a reader which.
+    #: ``device_onboard``, ``machine`` for ``local_authority`` (and the typed
+    #: machine-subject kinds, e.g. ``profile_save`` and Radient Guard's
+    #: ``guard_consent``, whose consent is a decision about THIS computer).
+    #: Exactly one is present; the record's own kind is what tells a reader which.
     device: dict[str, Any] | None = None
     machine: dict[str, Any] | None = None
     #: OPTIONAL extras, present ONLY on a credential-permission row (never stored: derived

@@ -295,7 +295,7 @@ async def test_the_session_switch_stops_offering_a_save_the_file_already_has(
         receipt = _notices(app)[-1]
         assert receipt == (
             "tool approvals: auto — every tool runs without asking, except account "
-            "profile saves and community posts (this session)"
+            "profile saves, community posts and Radient Guard sharing consent (this session)"
         ), receipt
         assert app._approve_all is True
 

@@ -266,8 +266,23 @@ ACCOUNT_PROFILE_GATE = "account profile save"
 #: always reaches a person (Allow/Deny only), or the post is refused.
 COMMUNITY_POST_GATE = "community post"
 
+#: The gate "tool name" of a member's Radient Guard sharing consent (Guard RFC
+#: v0.9 §5.2.4, slice L2a). Contains a space for the same reason as the two
+#: gates above: no registered tool can carry it.
+#:
+#: BELT-AND-BRACES ONLY (RFC N-1). The consent prompt is NOT a tool call and
+#: never rides the per-call approval callback; the load-bearing controls are
+#: ``admit_increasing`` admission in ``guard/consent.py``, the ``guard_consent``
+#: typed op on the desktop approvals plane, and the absence of any consent
+#: tool. This entry exists so that if any future path ever asks a gate under
+#: this name, ``--yolo``, ``/approvals auto`` and approve-all still cannot
+#: answer it: a member's agreement to share stats with their org is theirs.
+GUARD_CONSENT_GATE = "guard consent"
+
 #: Gates no auto mode may answer. A frozenset so a new member is one line.
-_PERSON_ONLY_GATES: frozenset[str] = frozenset({ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE})
+_PERSON_ONLY_GATES: frozenset[str] = frozenset(
+    {ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE, GUARD_CONSENT_GATE}
+)
 
 
 def never_auto_approved(tool_name: str) -> bool:
@@ -284,9 +299,11 @@ def never_auto_approved(tool_name: str) -> bool:
 #: absolute on the line an operator reads to know what they just armed:
 #: :func:`never_auto_approved` keeps the account profile save and the community
 #: post in front of a person under every auto mode. This is copy only — no gate's
-#: behaviour changed, and the sentence must stay true if the set grows.
+#: behaviour changed, and the sentence must stay true if the set grows. Guard
+#: sharing consent joined the set in slice L2a, so it is named here too.
 AUTO_MODE_EFFECT = (
-    "every tool runs without asking, except account profile saves and community posts"
+    "every tool runs without asking, except account profile saves, community posts "
+    "and Radient Guard sharing consent"
 )
 
 

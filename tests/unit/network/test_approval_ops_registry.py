@@ -230,6 +230,9 @@ def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> No
         profile_approval.OP: False,
         # Dormant file authority never inherits file-only credential policy.
         file_device_approval.OP: False,
+        # Radient Guard consent: the CTO's 2026-11-27 "no hardware requirements"
+        # decision is the explicit operator decision that a file-only key may sign it.
+        "guard_consent": True,
     }
     assert dict(desktop_approval.FILE_ONLY_SIGNING) == approval_ops.file_only_signing()
     # Every registered op carries an explicit decision, and only registered ops are listed.
@@ -241,6 +244,7 @@ def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> No
             A.KIND_OPERATOR_DEVICE_PAIR,
             A.KIND_PROFILE_SAVE,
             A.KIND_FILE_DEVICE_APPROVAL,
+            A.KIND_GUARD_CONSENT,
         }
 
 
