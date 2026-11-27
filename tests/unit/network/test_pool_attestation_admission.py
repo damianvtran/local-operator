@@ -1030,7 +1030,9 @@ def test_an_admitted_pool_member_is_refused_the_forbidden_ops(
     # ``unattended``: the create gate, on the row admission wrote. Refused BEFORE
     # anything is minted — the assertion on disk is what makes that a claim about
     # the real handler rather than about the capability set alone.
-    stub = SimpleNamespace(
+    # ``Any`` because this is a stub standing in for a ``PeerLink`` (the same
+    # binding the ``_link()`` helpers in the sibling modules use).
+    stub: Any = SimpleNamespace(
         device_id=pod.device_id,
         network_id=refreshed.network_id,
         epoch=refreshed.epoch,
@@ -1312,3 +1314,17 @@ def test_a_pool_read_member_still_gets_no_credential_rows(
     assert data["capability"]["set"] is False, data["capability"]
     pod = reloaded.member("d_node")
     assert pod is not None and "broker_credential" not in pod.capabilities, pod
+
+
+def test_a_hand_written_pool_admin_row_gets_no_credential_rows_either(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code review round 2, MINOR 1: ``admin`` is refused at mint and clamped at
+    admission, so a pool row that still says ``admin`` was written another way.
+    It must not be provisioned like an admin — no holder rows, no capability."""
+    data, written, _reloaded = _provision_outcome(root, monkeypatch, role="admin", kind="pool")
+
+    assert written == [], written
+    assert data["grants"] == {"granted": [], "skipped": []}, data["grants"]
+    assert "pool member" in data["grants_note"], data["grants_note"]
+    assert data["capability"] == {"set": False, "changed": False}, data["capability"]
