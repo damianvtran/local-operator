@@ -187,7 +187,7 @@ def arm_decision(
         return KeepaliveDecision(False, "no_cache_activity")
     if not route_matches:
         return KeepaliveDecision(False, "route_mismatch")
-    expiry = int(anchor_ms + ttl_s * 1000)
+    expiry = int(anchor_ms + KEEPALIVE_TTL_S * 1000)
     if other_wake_due_ms is not None and other_wake_due_ms < expiry:
         # That fire's own request re-reads the prefix in time.
         return KeepaliveDecision(False, "wake_keeps_cache_warm")

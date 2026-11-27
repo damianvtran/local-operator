@@ -149,7 +149,7 @@ def test_settings_defaults() -> None:
     assert settings.keepalive_daily_max == 24
     assert CompactionSettings(keepalive_mode="always_on").keepalive_mode == "always_on"
     with pytest.raises(ValueError):
-        CompactionSettings(keepalive_mode="sometimes")
+        CompactionSettings.model_validate({"keepalive_mode": "sometimes"})
     with pytest.raises(ValueError):
         CompactionSettings(keepalive_max_consecutive=-1)
 
