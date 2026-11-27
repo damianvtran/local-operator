@@ -42,7 +42,13 @@ from typing import Final
 from .decisions import GuardDecisionRecord
 
 #: Our own schema generation; bump only for additive migrations.
-GUARD_OUTBOX_SCHEMA_VERSION: Final = 1
+#: 2 (slice L3) adds ``outbox_meta.high_water``: ``seq`` was ``MAX(seq)+1``,
+#: which REUSES numbers once sent rows are pruned, so a per-tenant floor
+#: ("send only what was recorded after this grant") could hide new rows
+#: forever. A stored high-water mark never rewinds. Version 1 files migrate
+#: in place (one additive table, seeded from ``MAX(seq)``).
+GUARD_OUTBOX_SCHEMA_VERSION: Final = 2
+_MIGRATABLE_FROM: Final = 1
 
 #: See the module docstring for the derivation (16 cells x c=20 x 3 days, x2).
 MAX_OUTBOX_ROWS: Final = 2048
@@ -115,7 +121,7 @@ class GuardOutbox:
                 raise GuardOutboxRefused(
                     "outbox_damaged", "the Guard outbox is not a database; refusing it"
                 ) from exc
-            if existed and version != GUARD_OUTBOX_SCHEMA_VERSION:
+            if existed and version not in (GUARD_OUTBOX_SCHEMA_VERSION, _MIGRATABLE_FROM):
                 # Re-running DDL over an unknown file is not repair (house rule,
                 # team_bridge/outbox.py); a newer generation is not ours to edit.
                 raise GuardOutboxRefused(
@@ -139,10 +145,25 @@ class GuardOutbox:
                     "CREATE INDEX IF NOT EXISTS decision_records_state"
                     " ON decision_records (state, seq)"
                 )
-                conn.execute(f"PRAGMA user_version = {GUARD_OUTBOX_SCHEMA_VERSION}")
+                conn.execute(f"PRAGMA user_version = {_MIGRATABLE_FROM}")
+                version = _MIGRATABLE_FROM
                 conn.commit()
                 # Enum-only content, but still the member's activity: owner-only.
                 os.chmod(self._path, 0o600)
+            if version == _MIGRATABLE_FROM:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute("PRAGMA user_version").fetchone()[0] == _MIGRATABLE_FROM:
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS outbox_meta ("
+                        " id INTEGER PRIMARY KEY CHECK (id = 1),"
+                        " high_water INTEGER NOT NULL)"
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO outbox_meta (id, high_water)"
+                        " SELECT 1, COALESCE(MAX(seq), 0) FROM decision_records"
+                    )
+                    conn.execute(f"PRAGMA user_version = {GUARD_OUTBOX_SCHEMA_VERSION}")
+                conn.commit()
         except BaseException:
             conn.close()
             raise
@@ -168,11 +189,12 @@ class GuardOutbox:
             if not self._make_room(conn, today or _today()):
                 conn.rollback()
                 return AppendResult("dropped")
+            conn.execute("UPDATE outbox_meta SET high_water = high_water + 1 WHERE id = 1")
+            seq = conn.execute("SELECT high_water FROM outbox_meta WHERE id = 1").fetchone()[0]
             conn.execute(
                 "INSERT INTO decision_records"
                 " (record_id, schema, day, outcome, rule_class, tool_class, state, seq)"
-                " VALUES (?, ?, ?, ?, ?, ?, 'pending',"
-                " (SELECT COALESCE(MAX(seq), 0) + 1 FROM decision_records))",
+                " VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (
                     record.record_id,
                     record.schema,
@@ -180,6 +202,7 @@ class GuardOutbox:
                     record.outcome,
                     record.rule_class,
                     record.tool_class,
+                    seq,
                 ),
             )
             conn.commit()
@@ -204,6 +227,55 @@ class GuardOutbox:
                 (limit,),
             ).fetchall()
             return [_row_to_record(row) for row in rows]
+        finally:
+            conn.close()
+
+    def pending_after(
+        self, seq_floor: int, *, before_day: str, limit: int = 500
+    ) -> list[tuple[int, GuardDecisionRecord]]:
+        """``(seq, record)`` for unsent rows past ``seq_floor`` on CLOSED days, oldest first.
+
+        Slice L3's uploader reads through this. ``seq_floor`` is the outbox's
+        high-water mark when a tenant's current consent was first seen live, so
+        a queue built under one authority is never sent under a later grant
+        (RFC §22: "must not retry an old queue under newly granted authority").
+        ``before_day`` keeps the open UTC day local: v0.3 §7 sends a day only
+        after it closes, which also keeps intra-day timing off the wire.
+        """
+        if not self._path.exists():
+            return []
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM decision_records WHERE state = 'pending' AND seq > ?"
+                " AND day < ? ORDER BY seq LIMIT ?",
+                (seq_floor, before_day, limit),
+            ).fetchall()
+            return [(int(row["seq"]), _row_to_record(row)) for row in rows]
+        finally:
+            conn.close()
+
+    def max_seq(self) -> int:
+        """The high-water mark (0 for an absent or empty outbox). Creates no file."""
+        if not self._path.exists():
+            return 0
+        conn = self._connect()
+        try:
+            return int(
+                conn.execute("SELECT high_water FROM outbox_meta WHERE id = 1").fetchone()[0]
+            )
+        finally:
+            conn.close()
+
+    def purge(self) -> int:
+        """Drop every row (a revoke or ``namespace_reset``). Creates no file."""
+        if not self._path.exists():
+            return 0
+        conn = self._connect()
+        try:
+            removed = conn.execute("DELETE FROM decision_records").rowcount
+            conn.commit()
+            return removed
         finally:
             conn.close()
 

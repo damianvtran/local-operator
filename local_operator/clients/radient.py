@@ -1601,18 +1601,35 @@ class RadientClient:
             return body["result"]
         return body if isinstance(body, dict) else {}
 
-    def guard_status(self, tenant_id: str) -> Dict[str, Any]:
-        """``GET /v1/guard/status?tenant=``: ``{status, prompt?}`` for this member and org."""
+    def guard_status(self, tenant_id: str, *, install_id: str | None = None) -> Dict[str, Any]:
+        """``GET /v1/guard/status?tenant=[&install_id=]``: ``{status, prompt?}``.
 
-        return self._guard_call(
-            "GET", "status", action="read Radient Guard status", params={"tenant": tenant_id}
-        )
+        ``install_id`` is optional on the wire (agent-server A2): with it the
+        server answers per (account, tenant, install) and can offer a
+        ``new_device`` prompt; without it, per account.
+        """
+
+        params = {"tenant": tenant_id}
+        if install_id:
+            params["install_id"] = install_id
+        return self._guard_call("GET", "status", action="read Radient Guard status", params=params)
 
     def guard_grant(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         """``POST /v1/guard/consents``: the ONE install-key-signed enrol+grant request."""
 
         return self._guard_call(
             "POST", "consents", action="record your Radient Guard answer", json=dict(envelope)
+        )
+
+    def guard_ingest(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        """``POST /v1/guard/ingest``: one install-key-signed background batch (slice L3).
+
+        Called only by ``guard.producers`` for an org with a LIVE consent; the
+        envelope's shape is ``guard/ingest.py``'s, pending agent-server A3.
+        """
+
+        return self._guard_call(
+            "POST", "ingest", action="send Radient Guard stats", json=dict(envelope)
         )
 
     def guard_revoke(self, tenant_id: str) -> Dict[str, Any]:

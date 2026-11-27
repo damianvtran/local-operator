@@ -579,7 +579,7 @@ class _Hooked:
         self.during_grant: Any = None
         self.grant_error: Exception | None = None
 
-    def guard_status(self, tenant_id: str) -> dict[str, Any]:
+    def guard_status(self, tenant_id: str, *, install_id: str | None = None) -> dict[str, Any]:
         self.calls.append("status")
         return {"status": "sharing"}
 

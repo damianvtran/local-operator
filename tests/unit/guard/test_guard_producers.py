@@ -1,0 +1,1468 @@
+"""Radient Guard background producers (Guard RFC v0.9 §5.3, §10', §23; slice L3).
+
+The consent is granted through L2a's REAL admitted-accept path against a local
+stand-in for agent-server, and every upload goes through the real
+``RadientClient`` to the same stand-in, so the request log IS the wire. The
+install key lives in an in-memory store: no test reaches the macOS Keychain.
+"""
+
+from __future__ import annotations
+
+import base64
+import datetime as dt
+import json
+import sqlite3
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import SecretStr
+
+from local_operator.clients.radient import RadientClient
+from local_operator.guard import activity as act
+from local_operator.guard import consent as C
+from local_operator.guard import decisions as gd
+from local_operator.guard import ingest, install_key
+from local_operator.guard import posture as pst
+from local_operator.guard import producers as P
+from local_operator.guard.outbox import GuardOutbox
+
+TENANT = "ten_acme"
+TERMS = "sha256:" + "ab" * 32
+ACCOUNT = "acct_member_1"
+#: 2026-11-27 12:00 UTC (a Friday, ISO week 2026-W48).
+NOW = dt.datetime(2026, 11, 27, 12, 0, tzinfo=dt.UTC).timestamp()
+YESTERDAY = "2026-11-26"
+TODAY = "2026-11-27"
+
+
+# ---------------------------------------------------------------------------
+# Stand-in server
+# ---------------------------------------------------------------------------
+
+
+class _Fixture:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.ingest_replies: list[tuple[int, dict[str, Any]]] = []
+        self.grant_replies: list[tuple[int, dict[str, Any]]] = []
+        self.lock = threading.Lock()
+        self.base = ""
+
+    def ingests(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return [r for r in self.requests if r["path"] == "/v1/guard/ingest"]
+
+
+def _handler(fx: _Fixture) -> type[BaseHTTPRequestHandler]:
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _reply(self, status: int, body: dict[str, Any]) -> None:
+            raw = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length)) if length else None
+            with fx.lock:
+                fx.requests.append(
+                    {
+                        "path": self.path,
+                        "body": body,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                    }
+                )
+            if self.path == "/v1/guard/consents":
+                with fx.lock:
+                    grant = fx.grant_replies.pop(0) if fx.grant_replies else None
+                self._reply(*(grant or (201, {"result": {"kind": "started"}})))
+            elif self.path == "/v1/guard/consents/revoke":
+                self._reply(200, {"result": {"revoked_consents": 1}})
+            elif self.path == "/v1/guard/ingest":
+                with fx.lock:
+                    reply = fx.ingest_replies.pop(0) if fx.ingest_replies else None
+                if reply is None:
+                    assert body is not None
+                    batch = body["payload"]["batch_id"]
+                    reply = (202, {"result": {"batch_id": batch, "accepted": 1}})
+                self._reply(*reply)
+            else:
+                self._reply(404, {"code": "not_found", "error": "refused"})
+
+        def do_GET(self) -> None:
+            with fx.lock:
+                fx.requests.append({"path": self.path, "body": None, "headers": {}})
+            if self.path.startswith("/v1/guard/status?"):
+                self._reply(200, {"result": {"status": "sharing"}})
+            else:
+                self._reply(404, {"code": "not_found", "error": "refused"})
+
+    return Handler
+
+
+@pytest.fixture
+def fx() -> Iterator[_Fixture]:
+    fixture = _Fixture()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(fixture))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    fixture.base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    try:
+        yield fixture
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class MemoryKeyStore:
+    name = "memory"
+
+    def __init__(self) -> None:
+        self.items: dict[str, str] = {}
+        self.writes = 0
+
+    def load(self, install_id: str) -> str | None:
+        return self.items.get(install_id)
+
+    def store(self, install_id: str, secret_hex: str) -> None:
+        self.writes += 1
+        self.items[install_id] = secret_hex
+
+    def delete(self, install_id: str) -> None:
+        self.items.pop(install_id, None)
+
+
+@pytest.fixture
+def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setenv(install_key.BACKEND_ENV, "file")
+    previous_sink = gd.set_decision_sink(None)
+    previous_task = act.set_task_sink(None)
+    yield config
+    gd.set_decision_sink(previous_sink)
+    act.set_task_sink(previous_task)
+
+
+def _client(fx: _Fixture) -> RadientClient:
+    return RadientClient(api_key=SecretStr("jwt-person"), base_url=fx.base)
+
+
+def _offer_for(rev: int, scopes: list[str], tenant: str) -> C.ConsentOffer:
+    return C.ConsentOffer.from_wire(
+        {
+            "tenant": tenant,
+            "org_display_name": "Acme",
+            "collection_rev": rev,
+            "revocation_gen": 3,
+            "scopes": scopes,
+            "added_scopes": [],
+            "rendered_terms_digest": TERMS,
+            "reason": "new_org",
+        }
+    )
+
+
+def _grant(
+    root: Path,
+    fx: _Fixture,
+    store: MemoryKeyStore,
+    scopes: list[str],
+    rev: int = 1,
+    tenant: str = TENANT,
+) -> C.GuardConsentHost:
+    host = C.GuardConsentHost(root, transport=_client(fx), key_store=store, mirror=False)
+    host.offer(_offer_for(rev, scopes, tenant))
+    if host.sticky(tenant):
+        host.share_again(tenant)
+        host.offer(_offer_for(rev, scopes, tenant))
+    outcome = host.accept(tenant, rev, capability=True, signature=None, source="tui")
+    assert outcome.status == "granted", outcome
+    return host
+
+
+@dataclass
+class _Clock:
+    now: float = NOW
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@dataclass
+class _Rng:
+    """Deterministic draws: pops values, then repeats the last."""
+
+    values: list[float] = field(default_factory=lambda: [0.1])
+
+    def __call__(self) -> float:
+        return self.values.pop(0) if len(self.values) > 1 else self.values[0]
+
+
+def _producers(root: Path, fx: _Fixture, store: MemoryKeyStore, **kw: Any) -> P.GuardProducers:
+    calls = kw.pop("calls", None)
+
+    def factory():
+        if calls is not None:
+            calls.append(1)
+        return _client(fx), ACCOUNT
+
+    return P.GuardProducers(
+        root,
+        transport_factory=factory,
+        key_store=store,
+        clock=kw.pop("clock", _Clock()),
+        rng=kw.pop("rng", _Rng()),
+        **kw,
+    )
+
+
+def _decision(day: str = YESTERDAY, outcome: str = "block") -> gd.GuardDecisionRecord:
+    return gd.GuardDecisionRecord(outcome, gd.RULE_CLASS_DANGEROUS_DELETE, "shell", day=day)
+
+
+def _wire_id(root: Path, record_id: str, tenant: str = TENANT) -> str:
+    salt = P.GuardProducers(root)._salt().encode()
+    return P.GuardProducers._wire_record_id(salt, tenant, record_id)
+
+
+def _files(root: Path) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+# ---------------------------------------------------------------------------
+# Zero cost without consent
+# ---------------------------------------------------------------------------
+
+
+def test_no_consent_store_means_no_file_no_call_no_sink(root: Path, fx: _Fixture) -> None:
+    calls: list[int] = []
+    producers = _producers(root, fx, MemoryKeyStore(), calls=calls)
+    before = _files(root)
+    for _ in range(3):
+        report = producers.tick()
+        assert report.skipped == "no_consent_store"
+    assert _files(root) == before == []
+    assert calls == [] and fx.requests == []
+    assert gd.get_decision_sink() is gd.NOOP_SINK and act.get_task_sink() is None
+
+
+# ---------------------------------------------------------------------------
+# Decisions: signed, closed days only, idempotent, revoke stops
+# ---------------------------------------------------------------------------
+
+
+def test_live_consent_uploads_closed_day_decisions_signed_by_the_install_key(
+    root: Path, fx: _Fixture
+) -> None:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()  # sets the floor and installs the sink
+    assert isinstance(gd.get_decision_sink(), P.GatedDecisionSink)
+    outbox = GuardOutbox(root)
+    old, fresh = _decision(YESTERDAY), _decision(TODAY)
+    outbox.append(old)
+    outbox.append(fresh)
+    report = producers.tick()
+    assert report.sent == {"decisions": 1}
+    (req,) = fx.ingests()
+    env = req["body"]
+    payload = env["payload"]
+    assert payload["tenant"] == TENANT and payload["collection_rev"] == 1
+    assert payload["revocation_gen"] == 3 and payload["schema"] == ingest.BATCH_SCHEMA
+    # Today stays local; the wire id is this org's derived id, never the raw one.
+    assert [r["record_id"] for r in payload["decisions"]] == [_wire_id(root, old.record_id)]
+    assert old.record_id not in json.dumps(payload)
+    assert set(payload) == {
+        "schema",
+        "tenant",
+        "install_id",
+        "batch_id",
+        "collection_rev",
+        "revocation_gen",
+        "nonce",
+        "ts",
+        "decisions",
+    }
+    assert "origin" not in req["headers"]
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(next(iter(store.items.values()))))
+    sig = base64.urlsafe_b64decode(env["signature"] + "==")
+    key.public_key().verify(sig, ingest.BATCH_SIGNING_DOMAIN + C.canonical_json(payload))
+    # Settled: never sent twice.
+    producers.tick()
+    assert len(fx.ingests()) == 1
+
+
+def test_records_queued_before_the_grant_are_never_sent_under_it(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    pre = _decision()
+    GuardOutbox(root).append(pre)  # an outbox left from an earlier authority
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    assert fx.ingests() == []
+
+
+def test_retry_reuses_the_batch_id_and_backs_off(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    fx.ingest_replies.append((503, {"code": "unavailable", "error": "try later"}))
+    assert producers.tick().results == ["retry"]
+    clock.now += 10  # inside the backoff window: nothing sent
+    producers.tick()
+    assert len(fx.ingests()) == 1
+    clock.now += P.BACKOFF_CAP_S
+    producers.reset_transport()
+    assert producers.tick().results == ["accepted"]
+    first, second = fx.ingests()
+    assert first["body"]["payload"]["batch_id"] == second["body"]["payload"]["batch_id"]
+    assert first["body"]["payload"]["nonce"] != second["body"]["payload"]["nonce"]
+
+
+def test_revoke_pending_stops_uploads_and_drops_the_queue(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    # The revoke call fails: the consent is left revoke_pending (N-3 = stopped).
+    host._transport = None
+    host.revoke(TENANT)
+    assert (host.consent(TENANT) or {}).get("state") == "revoke_pending"
+    report = producers.tick()
+    assert report.skipped == "no_live_consent" and fx.ingests() == []
+    assert GuardOutbox(root).count() == 0
+    assert gd.get_decision_sink() is gd.NOOP_SINK
+
+
+def test_server_revocation_refusal_records_a_console_revoke(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    fx.ingest_replies.append((409, {"code": "guard_revocation_stale", "error": "revoked"}))
+    assert producers.tick().results == ["revoked"]
+    assert (host.consent(TENANT) or {}).get("state") == "revoked"
+    assert host.sticky(TENANT) == C.STICKY_REVOKED
+    producers.tick()
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).count() == 0
+
+
+def test_paused_consent_sends_nothing_until_a_new_grant(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    fx.ingest_replies.append((403, {"code": "guard_org_not_on", "error": "off"}))
+    assert producers.tick().results == ["paused"]
+    GuardOutbox(root).append(_decision())
+    producers.tick()
+    assert len(fx.ingests()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Posture: bit only, memo per (account, fact, value), survives everything
+# ---------------------------------------------------------------------------
+
+
+def test_memo_is_reused_on_value_return_and_drawn_only_for_a_new_value(root: Path) -> None:
+    draws = _Rng([0.1, 0.9, 0.1])  # truthful, then lie, then (unused)
+    memo = pst.PostureMemo(root, rng=draws)
+    fact = pst.FACT_GUARDRAILS_ENABLED
+    first = memo.bit(ACCOUNT, fact, pst.VALUE_RECOMMENDED)
+    assert first == 1  # 0.1 < 0.75: truthful
+    other = memo.bit(ACCOUNT, fact, pst.VALUE_OTHER)
+    assert other == 1  # 0.9 >= 0.75: complement of 0
+    # R -> O -> R -> O: the memo answers; no further draw.
+    for _ in range(3):
+        assert memo.bit(ACCOUNT, fact, pst.VALUE_RECOMMENDED) == first
+        assert memo.bit(ACCOUNT, fact, pst.VALUE_OTHER) == other
+    assert memo.memo_count(ACCOUNT) == 2
+    assert draws.values == [0.1]  # exactly two draws consumed
+    # Another account draws its own.
+    memo.bit("acct_other", fact, pst.VALUE_RECOMMENDED)
+    assert memo.memo_count("acct_other") == 1
+
+
+def test_randomised_response_rate_is_p_three_quarters(root: Path) -> None:
+    import random
+
+    rng = random.Random(1234)
+    memo = pst.PostureMemo(root, rng=rng.random)
+    n = 4000
+    truthful = sum(
+        memo.bit(f"acct_{i}", pst.FACT_GUARDRAILS_ENABLED, pst.VALUE_RECOMMENDED) for i in range(n)
+    )
+    assert pst.P_TRUTH == pytest.approx(0.75)
+    # 4 sigma of a binomial(4000, 0.75): sqrt(4000*.75*.25) = 27.4
+    assert abs(truthful - 0.75 * n) < 4 * 27.4
+
+
+def _posture_sends(fx: _Fixture) -> list[dict[str, Any]]:
+    return [r["body"]["payload"] for r in fx.ingests() if "posture" in r["body"]["payload"]]
+
+
+def _bits(payload: dict[str, Any]) -> dict[str, int]:
+    return {r["fact"]: r["bit"] for r in payload["posture"]}
+
+
+def _posture_rows(root: Path) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(P.producers_path(root))
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            "SELECT week, sent_values, sent_bits, closed FROM posture_weeks ORDER BY week"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _day_closed_reply(week: str) -> tuple[int, dict[str, Any]]:
+    return (
+        200,
+        {
+            "result": {
+                "batch_id": "x",
+                "replayed": False,
+                "accepted": 0,
+                "refused_fields": [],
+                "posture": {
+                    "status": "accepted",
+                    "accepted": 0,
+                    "duplicate": 0,
+                    "rejected": [{"ref": f"guardrails_enabled@{week}", "code": "guard_day_closed"}],
+                },
+            }
+        },
+    )
+
+
+def test_open_week_memo_is_sent_on_a_friday_tick_carries_the_bit_only_and_memo_survives(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {
+        pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED,
+        pst.FACT_CRITICAL_OVERRIDE_OFF: pst.VALUE_OTHER,
+    }
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock, rng=_Rng([0.1, 0.1]))
+    # Friday 2026-11-27, W48 is OPEN: the server takes its memo now, and a
+    # laptop that is off all weekend must not lose the week by waiting.
+    assert producers.tick().sent == {"posture": 2}
+    (req,) = fx.ingests()
+    posture = req["body"]["payload"]["posture"]
+    assert {tuple(sorted(r)) for r in posture} == {("bit", "fact", "schema", "week")}
+    assert {r["week"] for r in posture} == {"2026-W48"}
+    bits = _bits(req["body"]["payload"])
+    assert "recommended" not in json.dumps(req["body"]) and "other" not in json.dumps(req["body"])
+    memo_file = pst.memo_path(root)
+    before = memo_file.read_bytes()
+
+    # Revoke, namespace reset, re-grant: the memo file is untouched and the
+    # re-grant reports the SAME bits for the same true values.
+    host.revoke(TENANT)
+    producers.tick()
+    producers.namespace_reset()
+    assert memo_file.read_bytes() == before
+    _grant(root, fx, store, ["posture"], rev=2)
+    producers._rng = _Rng([0.99])  # any fresh draw would now LIE: must not be used
+    producers.tick()
+    assert _bits(_posture_sends(fx)[-1]) == bits
+    assert pst.PostureMemo(root).memo_count(ACCOUNT) == 2
+
+
+def test_changed_bit_is_sent_again_unchanged_bit_is_not_and_the_batch_id_is_stable(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    calls: list[int] = []
+    producers = _producers(root, fx, store, calls=calls, rng=_Rng([0.1]))
+    producers.tick()
+    assert len(_posture_sends(fx)) == 1 and _bits(_posture_sends(fx)[0]) == {
+        pst.FACT_GUARDRAILS_ENABLED: 1
+    }
+
+    # Idle tick: no change, so no request AND no sign-in resolution at all.
+    used = len(calls)
+    producers.reset_transport()
+    assert producers.tick().results == []
+    assert len(fx.ingests()) == 1 and len(calls) == used
+
+    # The member turns guardrails off: its (first-seen, truthful) bit is 0.
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    assert producers.tick().sent == {"posture": 1}
+    first, second = _posture_sends(fx)
+    assert _bits(second) == {pst.FACT_GUARDRAILS_ENABLED: 0}
+    # lop's batch_id derivation is unchanged (tenant + fact@week ids, no bit):
+    # the changed re-send reuses it, which A3 accepts as last-report-wins.
+    assert first["batch_id"] == second["batch_id"]
+    assert first["nonce"] != second["nonce"]
+
+    # Turning it back reuses the memo (bit 1 again) and is a change vs. the
+    # last SENT bit, so it is sent; a further idle tick is not.
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_RECOMMENDED
+    producers.reset_transport()
+    producers.tick()
+    assert _bits(_posture_sends(fx)[-1]) == {pst.FACT_GUARDRAILS_ENABLED: 1}
+    producers.reset_transport()
+    producers.tick()
+    assert len(_posture_sends(fx)) == 3
+
+
+def test_a_moved_true_value_with_the_same_memoised_bit_sends_nothing(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    # recommended draws truthfully (0.1 < 0.75 -> 1); other then LIES (0.99 -> 1).
+    producers = _producers(root, fx, store, rng=_Rng([0.1, 0.99]))
+    producers.tick()
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    producers.tick()
+    assert [_bits(p) for p in _posture_sends(fx)] == [{pst.FACT_GUARDRAILS_ENABLED: 1}]
+    # ...and the move is remembered, so it is not recomputed every tick.
+    (row,) = _posture_rows(root)
+    assert row["sent_values"] == pst.values_digest({pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_OTHER})
+
+
+def test_day_closed_on_posture_drops_the_week_and_never_marks_it_sent(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append(_day_closed_reply("2026-W48"))
+    producers.tick()
+    (row,) = _posture_rows(root)
+    # Too late is NOT delivered: nothing recorded as sent, and the week is
+    # retired so it is not retried every tick.
+    assert row["closed"] == 1 and row["sent_bits"] is None and row["sent_values"] is None
+    truth[pst.FACT_GUARDRAILS_ENABLED] = pst.VALUE_OTHER
+    producers.reset_transport()
+    producers.tick()
+    assert len(fx.ingests()) == 1
+    # The next week is a fresh start and is sent.
+    clock.now += 4 * 86400  # Tuesday 2026-12-01, W49
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for r in _posture_sends(fx)[-1]["posture"]] == ["2026-W49"]
+
+
+def test_an_unsent_week_is_still_sent_on_the_monday_after_but_not_later(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append((503, {"code": "unavailable", "error": "try later"}))
+    assert producers.tick().results == ["retry"]  # the Friday send failed
+    # Monday 2026-11-30 12:00 UTC: W48 closed Sunday and is inside A3's 24 h.
+    clock.now = dt.datetime(2026, 11, 30, 12, 0, tzinfo=dt.UTC).timestamp()
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for p in _posture_sends(fx)[1:] for r in p["posture"]] == [
+        "2026-W48",
+        "2026-W49",
+    ]
+    # A week that never got through and is now past its window is dropped
+    # unsent: the server would answer guard_day_closed.
+    weeks = [r["week"] for r in _posture_rows(root)]
+    assert weeks == ["2026-W48", "2026-W49"]
+    assert not pst.week_is_open("2026-W48", dt.date(2026, 12, 1))
+    assert pst.week_is_open("2026-W48", dt.date(2026, 11, 30))
+    assert pst.week_is_open("2026-W49", dt.date(2026, 12, 1))
+    assert not pst.week_is_open("garbage", dt.date(2026, 11, 30))
+
+
+def test_a_week_past_its_window_is_never_sent(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    truth = {pst.FACT_GUARDRAILS_ENABLED: pst.VALUE_RECOMMENDED}
+    monkeypatch.setattr(pst, "read_facts", lambda _c: dict(truth))
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["posture"])
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    fx.ingest_replies.append((503, {"code": "unavailable", "error": "try later"}))
+    producers.tick()  # W48 observed, send failed
+    clock.now = dt.datetime(2026, 12, 1, 12, 0, tzinfo=dt.UTC).timestamp()  # Tuesday W49
+    producers.reset_transport()
+    producers.tick()
+    assert [r["week"] for p in _posture_sends(fx)[1:] for r in p["posture"]] == ["2026-W49"]
+
+
+def test_no_posture_consent_means_no_posture_observation_or_send(
+    root: Path, fx: _Fixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pst, "read_facts", lambda _c: {pst.FACT_GUARDRAILS_ENABLED: "recommended"})
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    assert fx.ingests() == [] and _posture_rows(root) == []
+    assert not pst.memo_path(root).exists()
+
+
+# ---------------------------------------------------------------------------
+# Task time: interval union
+# ---------------------------------------------------------------------------
+
+
+def test_interval_union_never_double_counts_nested_or_parallel_spans() -> None:
+    spans = [(0, 100), (10, 20), (50, 150), (200, 210), (205, 209)]
+    assert act.interval_union(spans) == [(0, 150), (200, 210)]
+    assert act.active_seconds(spans) == 160
+    assert act.active_seconds([]) == 0
+
+
+@dataclass
+class _Children:
+    jobs: list[Any]
+
+    def list(self) -> list[Any]:
+        return self.jobs
+
+
+@dataclass
+class _Job:
+    type: str = "task"
+    status: str = "completed"
+    # The field a real ``task`` job carries (``subagent.py`` stamps it); a fake
+    # with ``agent_id`` is how review M1 hid for a whole round.
+    agent_role: str | None = "coder"
+    started_at: float | None = 1000.0
+    settled_at: float | None = 1100.0
+    child_jobs: Any = None
+
+
+def test_task_record_uses_the_union_of_the_job_and_its_children() -> None:
+    # Parent 1000-1100; two parallel children 1050-1500 and 1060-1400:
+    # union 1000-1500 = 500 s (5m-15m). A sum would be 100+450+340 = 890 s.
+    kids = _Children(
+        [_Job(started_at=1050, settled_at=1500), _Job(started_at=1060, settled_at=1400)]
+    )
+    record = act.record_from_job(_Job(child_jobs=kids, settled_at=1100.0))
+    assert record is not None
+    assert record.active_duration_band == "5m_15m" and record.workflow_class == "coder"
+    assert record.terminal_state == "done"
+    assert set(record.wire()) == {
+        "record_id",
+        "schema",
+        "day",
+        "workflow_class",
+        "terminal_state",
+        "active_duration_band",
+    }
+    cancelled = act.record_from_job(_Job(status="cancelled", agent_role="my-secret-agent"))
+    assert cancelled is not None and cancelled.active_duration_band is None
+    assert cancelled.workflow_class == "other" and "active_duration_band" not in cancelled.wire()
+    assert act.record_from_job(_Job(status="running")) is None
+    assert act.record_from_job(_Job(type="bash")) is None
+
+
+def test_task_sink_is_installed_only_under_a_live_task_time_consent(
+    root: Path, fx: _Fixture
+) -> None:
+    store = MemoryKeyStore()
+    act.note_job_settled(_Job())  # no sink: nothing, no file
+    assert not act.activity_path(root).exists()
+    _grant(root, fx, store, ["task_time"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    assert isinstance(act.get_task_sink(), act.StoreTaskSink)
+    assert gd.get_decision_sink() is gd.NOOP_SINK  # decisions not consented
+    act.note_job_settled(_Job(settled_at=dt.datetime(2026, 11, 26, tzinfo=dt.UTC).timestamp()))
+    producers.tick()
+    (req,) = fx.ingests()
+    assert list(req["body"]["payload"]["task_time"][0]) == [
+        "record_id",
+        "schema",
+        "day",
+        "workflow_class",
+        "terminal_state",
+        "active_duration_band",
+    ]
+    assert "decisions" not in req["body"]["payload"]
+
+
+# ---------------------------------------------------------------------------
+# Review cycles
+# ---------------------------------------------------------------------------
+
+
+def _entry(
+    state: str, passes: list[dict[str, Any]], key: str = "github.com/o/r#7"
+) -> dict[str, Any]:
+    return {"key": key, "state": state, "convention": {"pieces": {"comments": passes}}}
+
+
+def _write_entry(root: Path, name: str, entry: dict[str, Any]) -> None:
+    folder = root / "cache" / "code_requests" / "github.com"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(json.dumps(entry))
+
+
+def test_review_adapter_counts_distinct_agent_rounds_once_per_change(root: Path) -> None:
+    passes = [
+        {"lane": "agent", "kind": "review", "round": 1},
+        {"lane": "agent", "kind": "review", "round": 1},  # fix-verification pass
+        {"lane": "agent", "kind": "remediation", "round": 1},
+        {"lane": "qa", "kind": "review", "round": 1},
+        {"lane": "agent", "kind": "review", "round": 2},
+    ]
+    store = act.ActivityStore(root)
+    _write_entry(root, "o%2Fr__7.json", _entry("open", passes))
+    _write_entry(root, "o%2Fr__8.json", _entry("merged", passes, key="github.com/o/r#8"))
+    assert store.scan_reviews(today=TODAY) == 0  # #7 tracked, #8 pre-enrolment: skipped
+    _write_entry(root, "o%2Fr__7.json", _entry("merged", passes))
+    assert store.scan_reviews(today=TODAY) == 1
+    assert store.scan_reviews(today=TODAY) == 0  # dedup
+    (row,) = store.pending_after("review_cycles", 0, before_day="9999-12-31")
+    assert row[1]["rounds_band"] == "2" and row[1]["terminal_outcome"] == "merged"
+    assert "o/r" not in json.dumps(row[1]) and "github" not in json.dumps(row[1])
+    assert act.rounds_band(7) == "4_plus"
+
+
+def test_review_change_with_no_parsed_round_is_incomplete_not_zero(root: Path) -> None:
+    store = act.ActivityStore(root)
+    _write_entry(root, "x.json", _entry("open", []))
+    store.scan_reviews(today=TODAY)
+    _write_entry(root, "x.json", _entry("closed", []))
+    assert store.scan_reviews(today=TODAY) == 0
+
+
+# ---------------------------------------------------------------------------
+# Friction, outbox migration, built-in digest pin
+# ---------------------------------------------------------------------------
+
+
+def test_friction_counter_is_local_and_banded(root: Path, fx: _Fixture) -> None:
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["reports"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    for _ in range(7):
+        gd.emit_decision("block", gd.RULE_CLASS_CUSTOM, "shell")
+    gd.emit_decision("allow", gd.RULE_CLASS_CUSTOM, "shell")
+    assert act.ActivityStore(root).friction(gd.RULE_CLASS_CUSTOM) == "6_20"
+    assert not GuardOutbox(root).path.exists()  # decisions not consented
+    producers.tick()
+    assert fx.ingests() == []
+
+
+def test_outbox_v1_migrates_and_seq_never_rewinds_after_prune(root: Path) -> None:
+    outbox = GuardOutbox(root)
+    outbox.path.parent.mkdir(parents=True)
+    raw = sqlite3.connect(outbox.path)
+    raw.execute(
+        "CREATE TABLE decision_records (record_id TEXT PRIMARY KEY, schema TEXT NOT NULL,"
+        " day TEXT NOT NULL, outcome TEXT NOT NULL, rule_class TEXT NOT NULL,"
+        " tool_class TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', seq INTEGER NOT NULL)"
+    )
+    rec = _decision()
+    raw.execute(
+        "INSERT INTO decision_records VALUES (?, ?, ?, ?, ?, ?, 'pending', 5)",
+        (rec.record_id, rec.schema, rec.day, rec.outcome, rec.rule_class, rec.tool_class),
+    )
+    raw.execute("PRAGMA user_version = 1")
+    raw.commit()
+    raw.close()
+    assert outbox.max_seq() == 5
+    outbox.mark_sent([rec.record_id])
+    outbox.prune()
+    assert outbox.count() == 0
+    outbox.append(_decision())
+    assert outbox.max_seq() == 6  # MAX(seq)+1 would have restarted at 1
+    assert outbox.pending_after(5, before_day="9999-12-31")[0][0] == 6
+
+
+def test_builtin_policy_digest_pin_matches_the_shipped_default() -> None:
+    assert pst._builtin_digest() == pst.BUILTIN_POLICY_SHA256
+
+
+def test_ingest_payload_refuses_unknown_families_and_fields() -> None:
+    def build(families: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+        return ingest.build_payload(
+            tenant=TENANT,
+            install_id="a" * 32,
+            collection_rev=1,
+            revocation_gen=0,
+            ts=1,
+            families=families,
+        )
+
+    with pytest.raises(ValueError):
+        build({"paths": [{"x": 1}]})
+    with pytest.raises(ValueError):
+        build({"decisions": [{"record_id": "r", "command": "rm -rf /"}]})
+
+
+# ---------------------------------------------------------------------------
+# A3 wire contract alignment (agent-server PR #519 "Deltas for lop")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [
+        # Delta 1: what A3 emits after a revoke / for a dead consent.
+        ("guard_revocation_stale", "revoked"),
+        ("guard_consent_not_live", "paused"),
+        ("guard_binding_stale", "paused"),
+        ("guard_device_unknown", "paused"),
+        ("guard_device_revoked", "device_revoked"),
+        # Delta 3: codes that used to fall through to "retry".
+        ("guard_batch_too_large", "split"),
+        ("guard_scope_not_consented", "drop"),
+        ("guard_request_expired", "resign"),
+        ("guard_replay", "drop"),
+        ("guard_invalid_request", "drop"),
+        # Delta 4: namespace loss is A0's 404, and it is not a retry loop.
+        ("guard_not_available", "unavailable"),
+        ("guard_rate_limited", "retry"),
+        # Never emitted by A3: no longer special-cased (Deltas 1, 2 and 4).
+        ("guard_consent_revoked", "retry"),
+        ("guard_settings_stale", "retry"),
+        ("guard_namespace_reset", "retry"),
+        ("day_closed", "retry"),
+        ("guard_batch_stale", "retry"),
+    ],
+)
+def test_classify_matches_the_a3_refusal_table(code: str, kind: str) -> None:
+    assert ingest.classify(code) == kind
+
+
+def test_family_caps_fit_a3s_per_batch_caps() -> None:
+    a3 = {"decisions": 1024, "task_time": 256, "review_cycles": 64, "posture": 16}
+    assert set(ingest.FAMILY_CAPS) == set(a3)
+    assert all(ingest.FAMILY_CAPS[f] <= a3[f] for f in a3)
+
+
+def _seeded(
+    root: Path, fx: _Fixture, n: int = 1, **kw: Any
+) -> tuple[MemoryKeyStore, P.GuardProducers]:
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store, **kw)
+    producers.tick()  # floor
+    for _ in range(n):
+        GuardOutbox(root).append(_decision())
+    return store, producers
+
+
+def test_per_record_day_closed_inside_the_200_is_retired_with_the_batch(
+    root: Path, fx: _Fixture
+) -> None:
+    _, producers = _seeded(root, fx, 2)
+    fx.ingest_replies.append(
+        (
+            200,
+            {
+                "result": {
+                    "batch_id": "x",
+                    "replayed": False,
+                    "accepted": 1,
+                    "refused_fields": [],
+                    "decisions": {
+                        "status": "accepted",
+                        "accepted": 1,
+                        "duplicate": 0,
+                        "rejected": [{"ref": "r", "code": "guard_day_closed"}],
+                    },
+                }
+            },
+        )
+    )
+    assert producers.tick().results == ["accepted"]
+    assert GuardOutbox(root).pending() == []
+    producers.tick()
+    assert len(fx.ingests()) == 1
+
+
+@pytest.mark.parametrize("code", ["guard_replay", "guard_scope_not_consented"])
+def test_replay_and_whole_batch_scope_refusal_drop_without_retry(
+    root: Path, fx: _Fixture, code: str
+) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    status = 409 if code == "guard_replay" else 403
+    fx.ingest_replies.append((status, {"code": code, "error": "refused"}))
+    assert producers.tick().results == ["drop"]
+    clock.now += P.BACKOFF_CAP_S
+    producers.tick()
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+
+
+def test_batch_too_large_is_split_and_sent_again_at_once(root: Path, fx: _Fixture) -> None:
+    _, producers = _seeded(root, fx, 4)
+    fx.ingest_replies.append((413, {"code": "guard_batch_too_large", "error": "big"}))
+    assert producers.tick().results == ["split", "accepted", "accepted"]
+    sizes = [len(r["body"]["payload"]["decisions"]) for r in fx.ingests()]
+    assert sizes == [4, 2, 2]
+    assert GuardOutbox(root).pending() == []
+
+
+def test_batch_too_large_at_one_record_is_dropped_not_looped(root: Path, fx: _Fixture) -> None:
+    _, producers = _seeded(root, fx, 1)
+    fx.ingest_replies.append((413, {"code": "guard_batch_too_large", "error": "big"}))
+    assert producers.tick().results == ["split"]
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+
+
+def test_request_expired_is_re_signed_once_with_the_current_clock(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    fx.ingest_replies.append((400, {"code": "guard_request_expired", "error": "old"}))
+    assert producers.tick().results == ["resign", "accepted"]
+    first, second = fx.ingests()
+    assert first["body"]["payload"]["batch_id"] == second["body"]["payload"]["batch_id"]
+    assert first["body"]["payload"]["nonce"] != second["body"]["payload"]["nonce"]
+
+
+def test_request_expired_twice_backs_off_instead_of_looping(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    for _ in range(2):
+        fx.ingest_replies.append((400, {"code": "guard_request_expired", "error": "old"}))
+    assert producers.tick().results == ["resign", "retry"]
+    clock.now += 10
+    producers.tick()
+    assert len(fx.ingests()) == 2
+
+
+def test_not_available_waits_the_whole_backoff_cap(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    fx.ingest_replies.append((404, {"code": "guard_not_available", "error": "off"}))
+    assert producers.tick().results == ["unavailable"]
+    clock.now += P.BACKOFF_CAP_S - 60
+    producers.tick()
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).count() == 1  # queue kept
+    clock.now += 120
+    producers.reset_transport()
+    assert producers.tick().results == ["accepted"]
+
+
+def _offer(rev: int = 1, reason: str = "new_device") -> C.ConsentOffer:
+    return C.ConsentOffer.from_wire(
+        {
+            "tenant": TENANT,
+            "org_display_name": "Acme",
+            "collection_rev": rev,
+            "revocation_gen": 3,
+            "scopes": ["decisions"],
+            "added_scopes": [],
+            "rendered_terms_digest": TERMS,
+            "reason": reason,
+        }
+    )
+
+
+def _grant_envelopes(fx: _Fixture) -> list[dict[str, Any]]:
+    with fx.lock:
+        return [r["body"] for r in fx.requests if r["path"] == "/v1/guard/consents"]
+
+
+def test_ingest_device_revoked_stops_retires_the_key_and_needs_a_fresh_accept(
+    root: Path, fx: _Fixture
+) -> None:
+    store, producers = _seeded(root, fx)
+    host = C.GuardConsentHost(root, transport=_client(fx), key_store=store, mirror=False)
+    install_id = host.enrolled_install_id()
+    assert install_id and store.writes == 1
+    fx.ingest_replies.append((403, {"code": "guard_device_revoked", "error": "removed"}))
+    assert producers.tick().results == ["device_revoked"]
+    # Stopped for every org, the dead key retired, nothing minted silently.
+    assert (host.consent(TENANT) or {}).get("state") == "device_revoked"
+    assert host.sticky(TENANT) is None  # the member did not say stop
+    assert host.enrolled_install_id() is None and store.items == {} and store.writes == 1
+    assert producers.tick().skipped == "no_live_consent"
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+    # The server's new_device offer at the SAME rev queues a fresh prompt ...
+    assert host.offer(_offer()).status == "queued"
+    assert store.writes == 1
+    # ... and only the member's accept mints and enrols a NEW key.
+    outcome = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert outcome.status == "granted", outcome
+    assert store.writes == 2 and host.install_id() == install_id
+    first, again = _grant_envelopes(fx)
+    assert "enroll" in again["payload"] and again["key_id"] != first["key_id"]
+
+
+def test_grant_device_revoked_retires_the_key_and_leaves_the_prompt_answerable(
+    root: Path, fx: _Fixture
+) -> None:
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    # The computer is removed, the org re-activates (rev 2), and the member
+    # accepts the new prompt still holding the OLD key.
+    assert host.offer(_offer(rev=2, reason="reactivated")).status == "queued"
+    fx.grant_replies.append((403, {"code": "guard_device_revoked", "error": "removed"}))
+    outcome = host.accept(TENANT, 2, capability=True, signature=None, source="tui")
+    assert (outcome.status, outcome.code) == ("failed", "guard_device_revoked")
+    assert store.items == {} and host.enrolled_install_id() is None
+    old, refused = _grant_envelopes(fx)
+    assert "enroll" not in refused["payload"] and refused["key_id"] == old["key_id"]
+    row = host.prompt(TENANT, 2)
+    assert row is not None and row.state == C.PROMPT_PENDING  # answer again
+    outcome = host.accept(TENANT, 2, capability=True, signature=None, source="tui")
+    assert outcome.status == "granted", outcome
+    fresh = _grant_envelopes(fx)[-1]
+    assert "enroll" in fresh["payload"] and fresh["key_id"] != old["key_id"]
+
+
+def test_status_read_carries_the_install_id_once_one_exists(root: Path, fx: _Fixture) -> None:
+    client = _client(fx)
+    client.guard_status(TENANT)
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    client.guard_status(TENANT, install_id=host.install_id())
+    with fx.lock:
+        paths = [r["path"] for r in fx.requests if r["path"].startswith("/v1/guard/status")]
+    assert paths == [
+        f"/v1/guard/status?tenant={TENANT}",
+        f"/v1/guard/status?tenant={TENANT}&install_id={host.install_id()}",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (review M1, m2, m4, m5; security S-1..S-5)
+# ---------------------------------------------------------------------------
+
+
+def _set_signed_in_account(root: Path, account: str | None) -> None:
+    from local_operator.hub_org import eligibility
+
+    eligibility.update_record(root, lambda data: data.update(account_id=account))
+
+
+def _rows(root: Path, sql: str) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(P.producers_path(root))
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(sql).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.asyncio
+async def test_real_task_job_records_its_role_not_general(root: Path) -> None:
+    """M1: through a REAL ``AsyncJobManager`` job, shaped as ``subagent.py`` shapes it.
+
+    ``subagent.py`` registers a ``task`` job WITHOUT ``agent_id`` and stamps the
+    role as ``job.agent_role`` right after; the producer must read that field.
+    """
+
+    import asyncio
+
+    from local_operator.harness.jobs import AsyncJobManager
+
+    store = act.ActivityStore(root)
+    previous = act.set_task_sink(act.StoreTaskSink(store))
+    try:
+        manager = AsyncJobManager()
+        gate = asyncio.Event()
+
+        async def runner(job_id, signal, report_progress):
+            await gate.wait()
+            return "ok"
+
+        ids = {}
+        for role in ("coder", "reviewer", "my-secret-agent", "team:radientdev", None):
+            job_id = manager.register("task", f"t-{role}", runner)
+            job = manager.get(job_id)
+            assert job is not None and job.agent_id is None  # the real shape
+            job.agent_role = role
+            ids[role] = job_id
+        await asyncio.sleep(0)
+        gate.set()
+        for job_id in ids.values():
+            await asyncio.wait_for(manager.settled_event(job_id).wait(), 5)
+    finally:
+        act.set_task_sink(previous)
+    raw = sqlite3.connect(store.path)
+    try:
+        classes = sorted(
+            json.loads(body)["workflow_class"]
+            for (body,) in raw.execute("SELECT body FROM records").fetchall()
+        )
+    finally:
+        raw.close()
+    # Folded through the closed vocabulary: a built-in role keeps its name, a
+    # custom agent or a team launch is ``other``, no role at all is ``general``.
+    assert classes == ["coder", "general", "other", "other", "reviewer"]
+
+
+def _bad_values() -> list[tuple[str, dict[str, Any]]]:
+    good_task = {
+        "record_id": "a" * 32,
+        "schema": act.TASK_SCHEMA,
+        "day": YESTERDAY,
+        "workflow_class": "coder",
+        "terminal_state": "done",
+        "active_duration_band": "5m_15m",
+    }
+    good_dec = {
+        "record_id": "b" * 32,
+        "schema": gd.DECISION_SCHEMA,
+        "day": YESTERDAY,
+        "outcome": "block",
+        "rule_class": "dangerous_delete",
+        "tool_class": "shell",
+    }
+    good_rev = {
+        "record_id": "c" * 32,
+        "schema": act.REVIEW_SCHEMA,
+        "day": YESTERDAY,
+        "terminal_outcome": "merged",
+        "rounds_band": "2",
+        "source": "harness_code_requests",
+    }
+    good_post = {
+        "schema": pst.POSTURE_SCHEMA,
+        "fact": "guardrails_enabled",
+        "bit": 1,
+        "week": "2026-W48",
+    }
+    out: list[tuple[str, dict[str, Any]]] = []
+    for family, good, edits in (
+        (
+            "task_time",
+            good_task,
+            {
+                "workflow_class": "/Users/damian/secret-repo",
+                "day": "2026-11-26T10:11:12",
+                "record_id": "not-hex",
+                "active_duration_band": "forever",
+                "terminal_state": ["done"],
+                "schema": "x",
+            },
+        ),
+        (
+            "decisions",
+            good_dec,
+            {
+                "outcome": "rm -rf /",
+                "rule_class": "../etc",
+                "tool_class": "ssh",
+                "day": "yesterday",
+                "record_id": "B" * 32,
+            },
+        ),
+        (
+            "review_cycles",
+            good_rev,
+            {
+                "terminal_outcome": "pr title",
+                "rounds_band": "9",
+                "source": "github.com/o/r",
+                "day": "2026-13-40",
+            },
+        ),
+        ("posture", good_post, {"fact": "home_dir", "bit": 2, "week": "week 48", "schema": "p"}),
+    ):
+        out.append((family, dict(good)))  # the control: the good record is accepted
+        for key, value in edits.items():
+            out.append((family, {**good, key: value}))
+    return out
+
+
+def test_validate_record_checks_values_against_the_closed_grammar() -> None:
+    results = [(family, rec, ingest.validate_record(family, rec)) for family, rec in _bad_values()]
+    goods = [r for r in results if r[2]]
+    assert len(goods) == 4  # exactly the four controls
+    for family, rec, ok in results:
+        if ok:
+            continue
+        with pytest.raises(ValueError, match="closed grammar"):
+            ingest.build_payload(
+                tenant=TENANT,
+                install_id="a" * 32,
+                collection_rev=1,
+                revocation_gen=0,
+                ts=1,
+                families={family: [rec]},
+            )
+    # A non-done task carries no band; a done one must.
+    done = {**_bad_values()[0][1]}
+    assert not ingest.validate_record("task_time", {**done, "terminal_state": "cancelled"})
+    assert ingest.validate_record(
+        "task_time",
+        {
+            k: v
+            for k, v in {**done, "terminal_state": "cancelled"}.items()
+            if k != "active_duration_band"
+        },
+    )
+    assert not ingest.validate_record(
+        "task_time", {k: v for k, v in done.items() if k != "active_duration_band"}
+    )
+
+
+def test_a_tampered_queue_row_is_never_signed_and_does_not_take_the_batch_with_it(
+    root: Path, fx: _Fixture
+) -> None:
+    """S-1, through the real tick: the hand-edited row is retired, the good row still goes."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["task_time"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    day = dt.datetime(2026, 11, 26, tzinfo=dt.UTC).timestamp()
+    act.note_job_settled(_Job(settled_at=day))
+    act.note_job_settled(_Job(settled_at=day))
+    conn = sqlite3.connect(act.activity_path(root))
+    body, rid = conn.execute("SELECT body, record_id FROM records ORDER BY seq LIMIT 1").fetchone()
+    tampered = json.loads(body)
+    tampered["workflow_class"] = "/Users/damian/secret-repo"
+    conn.execute("UPDATE records SET body = ? WHERE record_id = ?", (json.dumps(tampered), rid))
+    conn.commit()
+    conn.close()
+    producers.tick()
+    (req,) = fx.ingests()
+    wire = json.dumps(req["body"])
+    assert "secret-repo" not in wire
+    assert len(req["body"]["payload"]["task_time"]) == 1  # the good row, alone
+    producers.tick()
+    assert len(fx.ingests()) == 1  # and the damaged one is not retried every tick
+
+
+def test_no_producers_file_is_created_without_a_live_consent(root: Path, fx: _Fixture) -> None:
+    """S-2: an unanswered prompt (a consent store, no live consent) creates nothing of ours."""
+
+    host = C.GuardConsentHost(root, transport=_client(fx), key_store=MemoryKeyStore(), mirror=False)
+    host.offer(_offer_for(1, ["decisions"], TENANT))
+    assert C.GuardConsentStore(root).exists()
+    before = _files(root)
+    producers = _producers(root, fx, MemoryKeyStore())
+    for _ in range(3):
+        assert producers.tick().skipped == "no_live_consent"
+    assert _files(root) == before
+    assert not P.producers_path(root).exists() and fx.requests == []
+
+
+def test_revoke_stops_collection_at_once_and_purges_every_local_trace(
+    root: Path, fx: _Fixture
+) -> None:
+    """S-3: no tick between the revoke and the next record; then the tick purges it all."""
+
+    store = MemoryKeyStore()
+    host = _grant(
+        root, fx, store, ["decisions", "reports", "task_time", "review_cycles", "posture"]
+    )
+    clock = _Clock()
+    producers = _producers(root, fx, store, clock=clock)
+    _write_entry(root, "a.json", _entry("open", []))
+    producers.tick()
+    gd.emit_decision("block", gd.RULE_CLASS_CUSTOM, "shell")
+    assert act.ActivityStore(root).friction(gd.RULE_CLASS_CUSTOM) == "1_5"
+    assert _rows(root, "SELECT * FROM posture_obs") != []
+    assert (
+        sqlite3.connect(act.activity_path(root))
+        .execute("SELECT COUNT(*) FROM review_seen")
+        .fetchone()[0]
+        == 1
+    )
+    assert GuardOutbox(root).count() == 1
+
+    host.revoke(TENANT)  # local state flips first; NO tick has run since
+    gd.emit_decision("block", gd.RULE_CLASS_CUSTOM, "shell")
+    act.note_job_settled(_Job())
+    assert GuardOutbox(root).count() == 1  # the new decision was not kept
+    assert act.ActivityStore(root).max_seq() == 0 or not _task_rows(root)
+    assert act.ActivityStore(root).friction(gd.RULE_CLASS_CUSTOM) == "1_5"  # not counted either
+
+    clock.now += 60 * 86400  # past the 30 days friction would have been kept anyway
+    producers.tick()
+    assert GuardOutbox(root).count() == 0
+    assert act.ActivityStore(root).friction(gd.RULE_CLASS_CUSTOM) == "0"
+    assert _rows(root, "SELECT * FROM posture_obs") == []
+    assert (
+        sqlite3.connect(act.activity_path(root))
+        .execute("SELECT COUNT(*) FROM review_seen")
+        .fetchone()[0]
+        == 0
+    )
+    # The memo of randomised bits is kept on purpose (§10').
+    assert pst.PostureMemo(root).path.exists()
+
+
+def _task_rows(root: Path) -> list[Any]:
+    conn = sqlite3.connect(act.activity_path(root))
+    try:
+        return conn.execute("SELECT * FROM records WHERE family = 'task_time'").fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_different_signed_in_account_does_not_inherit_the_consent(
+    root: Path, fx: _Fixture
+) -> None:
+    """S-4: granted as one account; another account's bearer never sends, nothing collected."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    _set_signed_in_account(root, ACCOUNT)
+    producers = _producers(root, fx, store)
+    producers.tick()  # binds the consent to ACCOUNT at first sight
+    assert _rows(root, "SELECT account_id FROM tenant_state")[0][0] == ACCOUNT
+    GuardOutbox(root).append(_decision())
+    # A second person signs in on the same computer.
+    _set_signed_in_account(root, "acct_someone_else")
+    report = producers.tick()
+    assert report.live == 0 and report.skipped == "no_live_consent"
+    assert fx.ingests() == []
+    assert _rows(root, "SELECT paused_code FROM tenant_state")[0][0] == P.ACCOUNT_CHANGED
+    assert GuardOutbox(root).count() == 0  # the queue was purged, the sink is off
+    assert gd.get_decision_sink() is gd.NOOP_SINK
+    # Signing back in as the granting account does not resume it: only a new grant does.
+    _set_signed_in_account(root, ACCOUNT)
+    GuardOutbox(root).append(_decision())
+    producers.tick()
+    assert fx.ingests() == []
+
+
+def test_the_bearer_account_is_rechecked_at_send_time(root: Path, fx: _Fixture) -> None:
+    """S-4: the hub record names nobody, so the first send binds; another bearer is refused."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    accounts = [ACCOUNT, "acct_intruder"]  # one per resolved transport
+
+    def factory():
+        return _client(fx), accounts.pop(0)
+
+    producers = P.GuardProducers(
+        root, transport_factory=factory, key_store=store, clock=_Clock(), rng=_Rng()
+    )
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    assert producers.tick().sent == {"decisions": 1}  # bound to ACCOUNT by this send
+    assert _rows(root, "SELECT account_id FROM tenant_state")[0][0] == ACCOUNT
+    GuardOutbox(root).append(_decision())
+    producers.reset_transport()
+    report = producers.tick()
+    assert report.results == ["paused"] and len(fx.ingests()) == 1
+    assert _rows(root, "SELECT paused_code FROM tenant_state")[0][0] == P.ACCOUNT_CHANGED
+
+
+def test_two_orgs_get_unrelated_record_ids_for_the_same_record(root: Path, fx: _Fixture) -> None:
+    """S-5: same install, different per-org record ids; raw ids never leave."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"], tenant="ten_a")
+    _grant(root, fx, store, ["decisions"], tenant="ten_b")
+    producers = _producers(root, fx, store)
+    producers.tick()
+    record = _decision()
+    GuardOutbox(root).append(record)
+    producers.tick()
+    by_tenant = {r["body"]["payload"]["tenant"]: r["body"]["payload"] for r in fx.ingests()}
+    assert set(by_tenant) == {"ten_a", "ten_b"}
+    ids = {t: p["decisions"][0]["record_id"] for t, p in by_tenant.items()}
+    assert ids["ten_a"] != ids["ten_b"] and record.record_id not in ids.values()
+    assert all(len(v) == 32 for v in ids.values())
+    # The A3 contract fixes one install_id per computer; that linkability is documented.
+    assert by_tenant["ten_a"]["install_id"] == by_tenant["ten_b"]["install_id"]
+    # A retry of the same record is the same id (idempotent batch).
+    assert ids["ten_a"] == _wire_id(root, record.record_id, "ten_a")
+
+
+def test_a_later_org_does_not_starve_the_earlier_one(root: Path, fx: _Fixture) -> None:
+    """m2: rows older than org B's floor settle on A's delivery alone and free A's window."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"], tenant="ten_a")
+    producers = _producers(root, fx, store)
+    producers.tick()
+    outbox = GuardOutbox(root)
+    for _ in range(1100):
+        outbox.append(_decision())
+    _grant(root, fx, store, ["decisions"], tenant="ten_b")  # floor above all 1100
+    producers.tick()
+    assert sum(len(r["body"]["payload"].get("decisions", [])) for r in fx.ingests()) == 1100
+    # Settled (marked sent): owed to A only, and A has them.
+    assert outbox.pending_after(0, before_day="9999-12-31", limit=5000) == []
+    fresh = _decision()
+    outbox.append(fresh)
+    fx.requests.clear()
+    producers.tick()
+    got = {
+        r["body"]["payload"]["tenant"]: [d["record_id"] for d in r["body"]["payload"]["decisions"]]
+        for r in fx.ingests()
+    }
+    assert got["ten_a"] == [_wire_id(root, fresh.record_id, "ten_a")]
+    assert got["ten_b"] == [_wire_id(root, fresh.record_id, "ten_b")]
+
+
+def test_a_paused_org_alone_does_not_turn_the_sinks_on(root: Path, fx: _Fixture) -> None:
+    """m4."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions", "task_time", "reports"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    GuardOutbox(root).append(_decision())
+    fx.ingest_replies.append((403, {"code": "guard_org_not_on", "error": "off"}))
+    assert producers.tick().results == ["paused"]
+    producers.tick()
+    assert gd.get_decision_sink() is gd.NOOP_SINK and act.get_task_sink() is None
+    gd.emit_decision("block", gd.RULE_CLASS_CUSTOM, "shell")
+    assert GuardOutbox(root).count() == 0  # purged with the sink off, nothing refilled
+
+
+def test_close_never_waits_for_a_running_tick(root: Path, fx: _Fixture) -> None:
+    """m5: a tick holding the tick lock (an HTTP call in flight) cannot stall shutdown."""
+
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store)
+    producers.tick()
+    assert isinstance(gd.get_decision_sink(), P.GatedDecisionSink)
+    assert producers._lock.acquire(timeout=1)  # a tick in a worker thread
+    try:
+        done = threading.Event()
+        threading.Thread(target=lambda: (producers.close(), done.set()), daemon=True).start()
+        assert done.wait(2), "close() blocked on the tick lock"
+        assert gd.get_decision_sink() is gd.NOOP_SINK
+    finally:
+        producers._lock.release()
+    producers.tick()  # a tick that was already running cannot reinstall a sink
+    assert gd.get_decision_sink() is gd.NOOP_SINK

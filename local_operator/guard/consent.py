@@ -365,7 +365,7 @@ def _row(row: sqlite3.Row) -> PromptRow:
 class GuardTransport(Protocol):
     """The three Guard calls. ``RadientClient`` implements them (``clients/radient.py``)."""
 
-    def guard_status(self, tenant_id: str) -> dict[str, Any]: ...
+    def guard_status(self, tenant_id: str, *, install_id: str | None = None) -> dict[str, Any]: ...
 
     def guard_grant(self, envelope: Mapping[str, Any]) -> dict[str, Any]: ...
 
@@ -492,6 +492,138 @@ class GuardConsentHost:
             ]
         finally:
             conn.close()
+
+    def live_consents(self) -> list[dict[str, Any]]:
+        """Consents in state ``live`` ONLY, with the revision the member was shown.
+
+        Slice L3's producers run only for these. ``revoke_pending`` is a STOPPED
+        state (carried precondition N-3): the member already asked to stop, so
+        nothing more may be collected or sent while the revoke is undelivered.
+        ``revocation_gen`` comes from the accepted prompt row -- the value the
+        grant signed -- because the ``consents`` row does not carry it.
+        """
+
+        if not self._store.exists():
+            return []
+        conn = self._store.connect()
+        try:
+            rows = conn.execute(
+                "SELECT c.tenant, c.collection_rev, c.scopes, c.granted_at,"
+                " p.revocation_gen FROM consents c JOIN prompts p"
+                " ON p.tenant = c.tenant AND p.collection_rev = c.collection_rev"
+                " WHERE c.state = 'live' ORDER BY c.tenant"
+            ).fetchall()
+            return [
+                {
+                    "tenant": r["tenant"],
+                    "collection_rev": int(r["collection_rev"]),
+                    "revocation_gen": int(r["revocation_gen"]),
+                    "scopes": tuple(json.loads(r["scopes"])),
+                    "granted_at": float(r["granted_at"]),
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
+
+    def enrolled_install_id(self) -> str | None:
+        """This install's id once the server has enrolled its key, else ``None``. No writes."""
+
+        if not self._store.exists():
+            return None
+        conn = self._store.connect()
+        try:
+            found = conn.execute("SELECT install_id, enrolled FROM install WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+        if found is None or not found["enrolled"]:
+            return None
+        return str(found["install_id"])
+
+    def install_id(self) -> str | None:
+        """This install's id whether or not its key is enrolled, else ``None``. No writes.
+
+        Sent on ``GET /v1/guard/status`` (agent-server A2 review m1): the RFC
+        defines a prompt per (account, tenant, install), and without it the
+        server cannot tell a ``new_device`` (a second computer, or this one
+        after its key was removed) from an account that already consented.
+        ``None`` before the first accept ever created the row, which is the
+        server's per-account answer -- the fail-safe A2 documents.
+        """
+
+        if not self._store.exists():
+            return None
+        conn = self._store.connect()
+        try:
+            found = conn.execute("SELECT install_id FROM install WHERE id = 1").fetchone()
+        finally:
+            conn.close()
+        return None if found is None else str(found["install_id"])
+
+    def observe_device_revoked(self) -> None:
+        """The server refused this install's key as ``guard_device_revoked``.
+
+        A device revoke (Console "remove computer", agent-server A2
+        ``POST /v1/guard/devices/{id}/revoke``) kills the signing key for every
+        org at once, and A2 refuses an ``enroll`` of that key forever, on any
+        install id. So, in one transaction: every ``live`` consent becomes
+        ``device_revoked`` (a STOPPED state the producers never read, and NOT
+        sticky -- the member did not say stop, so the server's ``new_device``
+        offer may queue a fresh prompt), and ``install.enrolled`` drops to 0.
+        Then the dead key is deleted from the key store.
+
+        THIS NEVER MINTS A KEY. The only place a key is created stays
+        ``_commit_claimed``, inside an accept the member admitted; with the
+        old key gone and ``enrolled = 0`` that accept creates a new key and
+        sends ``enroll`` for it. A key-store delete that fails is harmless:
+        ``enrolled = 0`` makes the next accept re-send the old key, A2 refuses
+        it again, and this runs again -- never a silent re-enrolment.
+        """
+
+        from local_operator.guard import install_key
+
+        if not self._store.exists():
+            return
+        conn = self._store.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            found = conn.execute("SELECT install_id FROM install WHERE id = 1").fetchone()
+            conn.execute("UPDATE install SET enrolled = 0 WHERE id = 1")
+            conn.execute("UPDATE consents SET state = 'device_revoked' WHERE state = 'live'")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        if found is None:
+            return
+        store = self._key_store or install_key.default_store(self._config_dir)
+        try:
+            store.delete(str(found["install_id"]))
+        except Exception:  # noqa: BLE001 -- see the docstring: the refusal repeats safely
+            logger.info("guard could not delete a removed install key; it is unusable anyway")
+        logger.info("guard install key was removed on the server; sharing stopped")
+
+    def observe_console_revoke(self, tenant: str) -> None:
+        """An ingest refusal said a revoke landed first (Console or another surface).
+
+        Same transition as a stale-``revocation_gen`` grant refusal (§5.2.6):
+        consent ``revoked``, sticky ``revoked`` (origin console), a calm notice.
+        """
+
+        if not self._store.exists():
+            return
+        conn = self._store.connect()
+        try:
+            found = conn.execute(
+                "SELECT * FROM prompts WHERE tenant = ? ORDER BY collection_rev DESC", (tenant,)
+            ).fetchone()
+        finally:
+            conn.close()
+        if found is not None:
+            self._observe_console_revoke(_row(found))
 
     def mark_notice_shown(self, notice_id: int) -> None:
         self._exec("UPDATE notices SET shown = 1 WHERE id = ?", (notice_id,))
@@ -944,6 +1076,15 @@ class GuardConsentHost:
             transport.guard_grant(envelope)
         except Exception as exc:  # noqa: BLE001 -- classified; the row stays pending
             code = str(getattr(exc, "code", "") or "guard_grant_failed")
+            if code == "guard_device_revoked":
+                # This key was removed on the server (A2 review m2): retire it.
+                # The row goes back to pending, so the member's NEXT answer --
+                # a fresh, admitted accept -- mints and enrols a new key. It is
+                # deliberately not retried here with a new key: the member
+                # answered under a computer that has since been removed.
+                self.observe_device_revoked()
+                logger.info("guard consent grant refused: this computer was removed")
+                return AcceptOutcome("failed", code)
             if code in _STALE_REVOCATION_CODES:
                 # §5.2.5/§5.2.6: a revoke landed first. Revocation wins. When it
                 # was THIS install's own revoke (sticky ``revoked`` already set
@@ -1308,12 +1449,14 @@ def check_point(
         if transport is None:
             return []
         host = GuardConsentHost(config_dir, transport=transport, key_store=key_store)
+        install_id: str | None = None
         if host.store.exists():
             host.fold_desktop_answers()
+            install_id = host.install_id()
         outcomes: list[OfferOutcome] = []
         for tenant_id, _name in tenants:
             try:
-                answer = transport.guard_status(tenant_id)
+                answer = transport.guard_status(tenant_id, install_id=install_id)
             except Exception as exc:  # noqa: BLE001 -- e.g. 404 before A2 ships
                 logger.debug(
                     "guard status read failed (%s, %s)", boundary, getattr(exc, "code", "")
