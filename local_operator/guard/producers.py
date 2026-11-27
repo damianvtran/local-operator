@@ -186,6 +186,12 @@ class GuardProducers:
         self._sink: GatedDecisionSink | None = None
         self._task_sink: act.StoreTaskSink | None = None
         self._resolved: tuple[Any, str | None] | None = None
+        #: Per-org record ceiling after a 413 ``guard_batch_too_large``: half the
+        #: largest family of the refused batch, halved again per refusal and
+        #: cleared by the next accepted or dropped batch.
+        #: In memory on purpose: with the caps at or under A3's a 413 is not
+        #: expected at all, and a daemon restart simply starts at full size.
+        self._split: dict[str, int] = {}
         self._lock = threading.Lock()
 
     # -- paths ---------------------------------------------------------------
@@ -204,7 +210,9 @@ class GuardProducers:
         )
 
     def _host(self) -> GuardConsentHost:
-        return GuardConsentHost(self._config_dir, transport=None, mirror=False)
+        return GuardConsentHost(
+            self._config_dir, transport=None, mirror=False, key_store=self._key_store
+        )
 
     def live(self) -> list[LiveConsent]:
         """Live consents only; ``[]`` without touching disk when no consent store exists."""
@@ -261,6 +269,7 @@ class GuardProducers:
             state = self._tenant_state(consent.tenant)
             if state is None or state["paused_code"] or state["next_at"] > now:
                 continue
+            resigned = False
             for _ in range(MAX_BATCHES_PER_TICK):
                 built = self._build(consent, state, today)
                 if built is None:
@@ -270,12 +279,23 @@ class GuardProducers:
                     if transport is None:
                         report.skipped = "signed_out"
                         return report
-                outcome = self._send(consent, built, transport, now)
+                outcome = self._send(consent, built, transport, now, resigned=resigned)
                 report.results.append(outcome.kind)
                 if outcome.kind == "accepted":
                     for family, rows in built.families.items():
                         report.sent[family] = report.sent.get(family, 0) + len(rows)
-                if outcome.kind != "accepted":
+                if outcome.kind == "device_revoked":
+                    # The key is dead for every org on this install; nothing
+                    # else this tick may sign with it.
+                    self._settle(self.live())
+                    return report
+                # A3 ``guard_batch_too_large`` (smaller batch next) and the
+                # FIRST ``guard_request_expired`` (re-sign now) are sent again
+                # at once; every other non-accept ends this org's tick.
+                if outcome.kind == "resign" and not resigned:
+                    resigned = True
+                    continue
+                if outcome.kind not in ("accepted", "split"):
                     break
                 state = self._tenant_state(consent.tenant)
                 if state is None:
@@ -453,7 +473,14 @@ class GuardProducers:
         delivered = self._delivered(consent.tenant)
         families: dict[str, list[dict[str, Any]]] = {}
         seqs: dict[str, int] = {}
-        limit = ingest.MAX_RECORDS_PER_FAMILY
+        # A3's per-family caps, lowered after a 413 (``_split``).
+        ceiling = self._split.get(consent.tenant)
+
+        def cap(family: str) -> int:
+            base = ingest.FAMILY_CAPS.get(family, ingest.MAX_RECORDS_PER_FAMILY)
+            return base if ceiling is None else max(1, min(base, ceiling))
+
+        limit = cap(ingest.FAMILY_DECISIONS)
         if ingest.FAMILY_DECISIONS in consent.families:
             rows = [
                 (seq, rec)
@@ -480,6 +507,7 @@ class GuardProducers:
         ):
             if family not in consent.families:
                 continue
+            limit = cap(family)
             rows2 = [
                 (seq, body)
                 for seq, body in self.activity.pending_after(
@@ -552,6 +580,8 @@ class GuardProducers:
         batch: GuardProducers._Batch,
         transport: tuple[Any, Any],
         now: float,
+        *,
+        resigned: bool = False,
     ) -> ingest.IngestResult:
         from local_operator.guard import install_key
 
@@ -582,9 +612,16 @@ class GuardProducers:
             collection_rev=consent.collection_rev,
             revocation_gen=consent.revocation_gen,
             families=batch.families,
-            ts=int(now),
+            # The clock at SIGNING, not the tick start: A3 refuses a ts more
+            # than 15 min off, and a re-sign after ``guard_request_expired``
+            # must carry the time it is actually sent.
+            ts=int(self._clock()),
         )
         result = ingest.send(transport[0], ingest.sign(key, payload))
+        if result.kind == "resign" and resigned:
+            # Re-signed with the current clock and refused again: the local
+            # clock is off. Back off instead of looping.
+            result = ingest.IngestResult("retry", result.code)
         self._apply(consent, batch, result, now)
         return result
 
@@ -597,6 +634,7 @@ class GuardProducers:
     ) -> None:
         tenant = consent.tenant
         if result.kind in ("accepted", "drop"):
+            self._split.pop(tenant, None)
             # Accepted, field-refused or uncountable (day closed / stale): none
             # of these records is ever sent to this org again.
             conn = self._state()
@@ -625,6 +663,10 @@ class GuardProducers:
                 conn.close()
             if result.kind == "drop":
                 logger.info("guard ingest dropped a batch (%s)", result.code)
+            elif result.rejected:
+                # Per-record ``guard_day_closed`` and the like (inside the 200):
+                # retired with the batch above, because they can never count.
+                logger.info("guard ingest: %d records rejected one by one", result.rejected)
             return
         if result.kind == "revoked":
             if result.code != "guard_revoked_locally":
@@ -644,12 +686,32 @@ class GuardProducers:
                 conn.close()
             logger.info("guard ingest paused for an org (%s)", result.code)
             return
-        if result.kind == "reset":
-            self.namespace_reset()
+        if result.kind == "device_revoked":
+            # Every live consent on this install stops and the dead key is
+            # retired; only a fresh person-admitted accept enrols a new one.
+            stopped = {c.tenant for c in self.live()} | {tenant}
+            self._host().observe_device_revoked()
+            for other in sorted(stopped):
+                self._drop_tenant(other)
+            return
+        if result.kind == "split":
+            largest = max(len(rows) for rows in batch.families.values())
+            if largest <= 1:
+                # One record per family and still too large: these records can
+                # never be sent; retire them rather than loop.
+                self._apply(consent, batch, ingest.IngestResult("drop", result.code), now)
+                return
+            self._split[tenant] = largest // 2
+            return
+        if result.kind == "resign":
+            return  # the tick re-signs at once (one time)
+        if result.kind == "unavailable":
+            # A3: "no retry loop". Wait the whole cap, not the doubling ladder.
+            self._backoff(tenant, now, delay=BACKOFF_CAP_S)
             return
         self._backoff(tenant, now)
 
-    def _backoff(self, tenant: str, now: float) -> None:
+    def _backoff(self, tenant: str, now: float, *, delay: float | None = None) -> None:
         conn = self._state()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -657,8 +719,9 @@ class GuardProducers:
                 "SELECT failures FROM tenant_state WHERE tenant = ?", (tenant,)
             ).fetchone()
             failures = (int(row["failures"]) if row is not None else 0) + 1
-            delay = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** min(failures - 1, 20)))
-            delay *= 0.5 + 0.5 * self._jitter()
+            if delay is None:
+                delay = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** min(failures - 1, 20)))
+                delay *= 0.5 + 0.5 * self._jitter()
             conn.execute(
                 "UPDATE tenant_state SET failures = ?, next_at = ? WHERE tenant = ?",
                 (failures, now + delay, tenant),

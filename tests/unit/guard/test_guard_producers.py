@@ -49,6 +49,7 @@ class _Fixture:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
         self.ingest_replies: list[tuple[int, dict[str, Any]]] = []
+        self.grant_replies: list[tuple[int, dict[str, Any]]] = []
         self.lock = threading.Lock()
         self.base = ""
 
@@ -82,7 +83,9 @@ def _handler(fx: _Fixture) -> type[BaseHTTPRequestHandler]:
                     }
                 )
             if self.path == "/v1/guard/consents":
-                self._reply(201, {"result": {"kind": "started"}})
+                with fx.lock:
+                    grant = fx.grant_replies.pop(0) if fx.grant_replies else None
+                self._reply(*(grant or (201, {"result": {"kind": "started"}})))
             elif self.path == "/v1/guard/consents/revoke":
                 self._reply(200, {"result": {"revoked_consents": 1}})
             elif self.path == "/v1/guard/ingest":
@@ -93,6 +96,14 @@ def _handler(fx: _Fixture) -> type[BaseHTTPRequestHandler]:
                     batch = body["payload"]["batch_id"]
                     reply = (202, {"result": {"batch_id": batch, "accepted": 1}})
                 self._reply(*reply)
+            else:
+                self._reply(404, {"code": "not_found", "error": "refused"})
+
+        def do_GET(self) -> None:
+            with fx.lock:
+                fx.requests.append({"path": self.path, "body": None, "headers": {}})
+            if self.path.startswith("/v1/guard/status?"):
+                self._reply(200, {"result": {"status": "sharing"}})
             else:
                 self._reply(404, {"code": "not_found", "error": "refused"})
 
@@ -640,3 +651,231 @@ def test_ingest_payload_refuses_unknown_families_and_fields() -> None:
         build({"paths": [{"x": 1}]})
     with pytest.raises(ValueError):
         build({"decisions": [{"record_id": "r", "command": "rm -rf /"}]})
+
+
+# ---------------------------------------------------------------------------
+# A3 wire contract alignment (agent-server PR #519 "Deltas for lop")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"),
+    [
+        # Delta 1: what A3 emits after a revoke / for a dead consent.
+        ("guard_revocation_stale", "revoked"),
+        ("guard_consent_not_live", "paused"),
+        ("guard_binding_stale", "paused"),
+        ("guard_device_unknown", "paused"),
+        ("guard_device_revoked", "device_revoked"),
+        # Delta 3: codes that used to fall through to "retry".
+        ("guard_batch_too_large", "split"),
+        ("guard_scope_not_consented", "drop"),
+        ("guard_request_expired", "resign"),
+        ("guard_replay", "drop"),
+        ("guard_invalid_request", "drop"),
+        # Delta 4: namespace loss is A0's 404, and it is not a retry loop.
+        ("guard_not_available", "unavailable"),
+        ("guard_rate_limited", "retry"),
+        # Never emitted by A3: no longer special-cased (Deltas 1, 2 and 4).
+        ("guard_consent_revoked", "retry"),
+        ("guard_settings_stale", "retry"),
+        ("guard_namespace_reset", "retry"),
+        ("day_closed", "retry"),
+        ("guard_batch_stale", "retry"),
+    ],
+)
+def test_classify_matches_the_a3_refusal_table(code: str, kind: str) -> None:
+    assert ingest.classify(code) == kind
+
+
+def test_family_caps_fit_a3s_per_batch_caps() -> None:
+    a3 = {"decisions": 1024, "task_time": 256, "review_cycles": 64, "posture": 16}
+    assert set(ingest.FAMILY_CAPS) == set(a3)
+    assert all(ingest.FAMILY_CAPS[f] <= a3[f] for f in a3)
+
+
+def _seeded(
+    root: Path, fx: _Fixture, n: int = 1, **kw: Any
+) -> tuple[MemoryKeyStore, P.GuardProducers]:
+    store = MemoryKeyStore()
+    _grant(root, fx, store, ["decisions"])
+    producers = _producers(root, fx, store, **kw)
+    producers.tick()  # floor
+    for _ in range(n):
+        GuardOutbox(root).append(_decision())
+    return store, producers
+
+
+def test_per_record_day_closed_inside_the_200_is_retired_with_the_batch(
+    root: Path, fx: _Fixture
+) -> None:
+    _, producers = _seeded(root, fx, 2)
+    fx.ingest_replies.append(
+        (
+            200,
+            {
+                "result": {
+                    "batch_id": "x",
+                    "replayed": False,
+                    "accepted": 1,
+                    "refused_fields": [],
+                    "decisions": {
+                        "status": "accepted",
+                        "accepted": 1,
+                        "duplicate": 0,
+                        "rejected": [{"ref": "r", "code": "guard_day_closed"}],
+                    },
+                }
+            },
+        )
+    )
+    assert producers.tick().results == ["accepted"]
+    assert GuardOutbox(root).pending() == []
+    producers.tick()
+    assert len(fx.ingests()) == 1
+
+
+@pytest.mark.parametrize("code", ["guard_replay", "guard_scope_not_consented"])
+def test_replay_and_whole_batch_scope_refusal_drop_without_retry(
+    root: Path, fx: _Fixture, code: str
+) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    status = 409 if code == "guard_replay" else 403
+    fx.ingest_replies.append((status, {"code": code, "error": "refused"}))
+    assert producers.tick().results == ["drop"]
+    clock.now += P.BACKOFF_CAP_S
+    producers.tick()
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+
+
+def test_batch_too_large_is_split_and_sent_again_at_once(root: Path, fx: _Fixture) -> None:
+    _, producers = _seeded(root, fx, 4)
+    fx.ingest_replies.append((413, {"code": "guard_batch_too_large", "error": "big"}))
+    assert producers.tick().results == ["split", "accepted", "accepted"]
+    sizes = [len(r["body"]["payload"]["decisions"]) for r in fx.ingests()]
+    assert sizes == [4, 2, 2]
+    assert GuardOutbox(root).pending() == []
+
+
+def test_batch_too_large_at_one_record_is_dropped_not_looped(root: Path, fx: _Fixture) -> None:
+    _, producers = _seeded(root, fx, 1)
+    fx.ingest_replies.append((413, {"code": "guard_batch_too_large", "error": "big"}))
+    assert producers.tick().results == ["split"]
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+
+
+def test_request_expired_is_re_signed_once_with_the_current_clock(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    fx.ingest_replies.append((400, {"code": "guard_request_expired", "error": "old"}))
+    assert producers.tick().results == ["resign", "accepted"]
+    first, second = fx.ingests()
+    assert first["body"]["payload"]["batch_id"] == second["body"]["payload"]["batch_id"]
+    assert first["body"]["payload"]["nonce"] != second["body"]["payload"]["nonce"]
+
+
+def test_request_expired_twice_backs_off_instead_of_looping(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    for _ in range(2):
+        fx.ingest_replies.append((400, {"code": "guard_request_expired", "error": "old"}))
+    assert producers.tick().results == ["resign", "retry"]
+    clock.now += 10
+    producers.tick()
+    assert len(fx.ingests()) == 2
+
+
+def test_not_available_waits_the_whole_backoff_cap(root: Path, fx: _Fixture) -> None:
+    clock = _Clock()
+    _, producers = _seeded(root, fx, clock=clock)
+    fx.ingest_replies.append((404, {"code": "guard_not_available", "error": "off"}))
+    assert producers.tick().results == ["unavailable"]
+    clock.now += P.BACKOFF_CAP_S - 60
+    producers.tick()
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).count() == 1  # queue kept
+    clock.now += 120
+    producers.reset_transport()
+    assert producers.tick().results == ["accepted"]
+
+
+def _offer(rev: int = 1, reason: str = "new_device") -> C.ConsentOffer:
+    return C.ConsentOffer.from_wire(
+        {
+            "tenant": TENANT,
+            "org_display_name": "Acme",
+            "collection_rev": rev,
+            "revocation_gen": 3,
+            "scopes": ["decisions"],
+            "added_scopes": [],
+            "rendered_terms_digest": TERMS,
+            "reason": reason,
+        }
+    )
+
+
+def _grant_envelopes(fx: _Fixture) -> list[dict[str, Any]]:
+    with fx.lock:
+        return [r["body"] for r in fx.requests if r["path"] == "/v1/guard/consents"]
+
+
+def test_ingest_device_revoked_stops_retires_the_key_and_needs_a_fresh_accept(
+    root: Path, fx: _Fixture
+) -> None:
+    store, producers = _seeded(root, fx)
+    host = C.GuardConsentHost(root, transport=_client(fx), key_store=store, mirror=False)
+    install_id = host.enrolled_install_id()
+    assert install_id and store.writes == 1
+    fx.ingest_replies.append((403, {"code": "guard_device_revoked", "error": "removed"}))
+    assert producers.tick().results == ["device_revoked"]
+    # Stopped for every org, the dead key retired, nothing minted silently.
+    assert (host.consent(TENANT) or {}).get("state") == "device_revoked"
+    assert host.sticky(TENANT) is None  # the member did not say stop
+    assert host.enrolled_install_id() is None and store.items == {} and store.writes == 1
+    assert producers.tick().skipped == "no_live_consent"
+    assert len(fx.ingests()) == 1 and GuardOutbox(root).pending() == []
+    # The server's new_device offer at the SAME rev queues a fresh prompt ...
+    assert host.offer(_offer()).status == "queued"
+    assert store.writes == 1
+    # ... and only the member's accept mints and enrols a NEW key.
+    outcome = host.accept(TENANT, 1, capability=True, signature=None, source="tui")
+    assert outcome.status == "granted", outcome
+    assert store.writes == 2 and host.install_id() == install_id
+    first, again = _grant_envelopes(fx)
+    assert "enroll" in again["payload"] and again["key_id"] != first["key_id"]
+
+
+def test_grant_device_revoked_retires_the_key_and_leaves_the_prompt_answerable(
+    root: Path, fx: _Fixture
+) -> None:
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    # The computer is removed, the org re-activates (rev 2), and the member
+    # accepts the new prompt still holding the OLD key.
+    assert host.offer(_offer(rev=2, reason="reactivated")).status == "queued"
+    fx.grant_replies.append((403, {"code": "guard_device_revoked", "error": "removed"}))
+    outcome = host.accept(TENANT, 2, capability=True, signature=None, source="tui")
+    assert (outcome.status, outcome.code) == ("failed", "guard_device_revoked")
+    assert store.items == {} and host.enrolled_install_id() is None
+    old, refused = _grant_envelopes(fx)
+    assert "enroll" not in refused["payload"] and refused["key_id"] == old["key_id"]
+    row = host.prompt(TENANT, 2)
+    assert row is not None and row.state == C.PROMPT_PENDING  # answer again
+    outcome = host.accept(TENANT, 2, capability=True, signature=None, source="tui")
+    assert outcome.status == "granted", outcome
+    fresh = _grant_envelopes(fx)[-1]
+    assert "enroll" in fresh["payload"] and fresh["key_id"] != old["key_id"]
+
+
+def test_status_read_carries_the_install_id_once_one_exists(root: Path, fx: _Fixture) -> None:
+    client = _client(fx)
+    client.guard_status(TENANT)
+    store = MemoryKeyStore()
+    host = _grant(root, fx, store, ["decisions"])
+    client.guard_status(TENANT, install_id=host.install_id())
+    with fx.lock:
+        paths = [r["path"] for r in fx.requests if r["path"].startswith("/v1/guard/status")]
+    assert paths == [
+        f"/v1/guard/status?tenant={TENANT}",
+        f"/v1/guard/status?tenant={TENANT}&install_id={host.install_id()}",
+    ]

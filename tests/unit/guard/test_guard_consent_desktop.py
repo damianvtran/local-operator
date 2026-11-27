@@ -287,7 +287,7 @@ class _StatusAnswers:
         self.fx = fx
         self.offer: dict[str, Any] | None = None
 
-    def guard_status(self, tenant_id: str) -> dict[str, Any]:
+    def guard_status(self, tenant_id: str, *, install_id: str | None = None) -> dict[str, Any]:
         return {"status": "consent_required", "prompt": self.offer}
 
     def guard_grant(self, envelope: Any) -> dict[str, Any]:
