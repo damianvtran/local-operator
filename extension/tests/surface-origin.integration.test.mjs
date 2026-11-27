@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { build } from "esbuild";
 import { pathToFileURL } from "node:url";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,7 +32,7 @@ const SECRET = "content-the-user-never-approved";
  * controllable: `tabUrl` is what chrome.tabs.get reports, `docUrl` is what the
  * page script sees when it runs (they differ only in the TOCTOU test).
  */
-function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, session = {} }) {
+function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, session = {}, attachError, retirementFails = false }) {
   const areas = {
     session: new Map(Object.entries({ surfaces, ...session })),
     local: new Map(Object.entries({ origins })),
@@ -43,7 +43,7 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
   // `redirectTo`: where a navigation actually lands (a server redirect the
   // interceptor does not see), instead of the requested URL.
   const page = { tabUrl, docUrl, intercept: true, onCdp: null, redirectTo: null };
-  const calls = { scripts: 0, cdp: [], tabsGet: 0 };
+  const calls = { scripts: 0, cdp: [], tabsGet: 0, attach: 0, removals: 0 };
   const event = () => {
     const listeners = new Set();
     return {
@@ -54,6 +54,7 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
     };
   };
   const cdpEvents = event();
+  const events = { removed: event(), replaced: event(), updated: event(), detached: event() };
   const nav = { onCommitted: event(), onCompleted: event(), onErrorOccurred: event() };
   const makeArea = (name) => ({
     get: async (keys) => {
@@ -63,7 +64,12 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
       }
       return out;
     },
-    set: async (obj) => { for (const [k, v] of Object.entries(obj)) areas[name].set(k, structuredClone(v)); },
+    set: async (obj) => {
+      if (retirementFails && name === "session" && obj.surfaces && !Object.keys(obj.surfaces).length) {
+        throw new Error("fixture storage rejected retirement");
+      }
+      for (const [k, v] of Object.entries(obj)) areas[name].set(k, structuredClone(v));
+    },
     remove: async (keys) => { for (const k of Array.isArray(keys) ? keys : [keys]) areas[name].delete(k); },
   });
   globalThis.chrome = {
@@ -73,7 +79,11 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
       ["setBadgeBackgroundColor", "setBadgeTextColor", "setBadgeText", "setTitle"].map((m) => [m, async () => {}]),
     ),
     debugger: {
-      attach: async () => {}, detach: async () => {},
+      attach: async () => {
+        calls.attach += 1;
+        if (attachError) throw Error(attachError);
+      },
+      detach: async () => {},
       sendCommand: async (_target, method) => {
         calls.cdp.push(method);
         page.onCdp?.(method);
@@ -81,7 +91,7 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
         if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
         return {};
       },
-      onEvent: cdpEvents, onDetach: { addListener: () => {} },
+      onEvent: cdpEvents, onDetach: events.detached,
     },
     scripting: {
       // Run the REAL injected function against a fake page, so the test sees
@@ -123,9 +133,8 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
         }, 0);
         return {};
       },
-      remove: async () => {},
-      onRemoved: { addListener: () => {} }, onReplaced: { addListener: () => {} },
-      onUpdated: { addListener: () => {} },
+      remove: async () => { calls.removals += 1; },
+      onRemoved: events.removed, onReplaced: events.replaced, onUpdated: events.updated,
     },
     webNavigation: nav,
     tabGroups: undefined,
@@ -142,6 +151,7 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
     page,
     calls,
     cdpEvents,
+    events,
     nav,
     session: () => areas.session,
     surfaces: () => areas.session.get("surfaces"),
@@ -157,7 +167,13 @@ function installChrome({ surfaces, origins = {}, tabUrl, docUrl = tabUrl, sessio
 // them: each test re-imports it under a fresh query to get a fresh worker.
 const bundleDir = await mkdtemp(join(tmpdir(), "lop-surface-origin-it-"));
 const bundlePath = join(bundleDir, "module.mjs");
-await build({ entryPoints: ["src/worker.ts"], bundle: true, platform: "node", format: "esm", outfile: bundlePath });
+// Targeted smoke runs can exercise the exact artifact from node build.mjs;
+// the regular tests build the same worker entry point without needing dist.
+if (process.env.LOCAL_OPERATOR_TEST_BRIDGE_WORKER) {
+  await copyFile(process.env.LOCAL_OPERATOR_TEST_BRIDGE_WORKER, bundlePath);
+} else {
+  await build({ entryPoints: ["src/worker.ts"], bundle: true, platform: "node", format: "esm", outfile: bundlePath });
+}
 test.after(() => rm(bundleDir, { recursive: true, force: true }));
 
 let loads = 0;
@@ -276,6 +292,68 @@ test("screenshot of an approved page still works", async () => {
     const response = await worker.request("screenshot", { tab: TOKEN });
     assert.equal(response.ok, true, JSON.stringify(response.error));
     assert.equal(response.result.data, "PNGDATA");
+  } finally { worker.chromeState.restore(); }
+});
+
+const CHROME_ATTACH_REFUSAL = "Cannot access a chrome-extension:// URL of different extension";
+
+for (const retirementFails of [false, true]) {
+  test(`attach refusal from an approved HTTPS tab, cleanup ${retirementFails ? "unconfirmed" : "confirmed"}`, async () => {
+    const worker = await loadWorker({
+      surfaces: { [TOKEN]: surface() }, origins: approvedOnly, tabUrl: `${APPROVED}/docs`,
+      attachError: CHROME_ATTACH_REFUSAL, retirementFails,
+    });
+    try {
+      const result = await worker.request("screenshot", { tab: TOKEN });
+      assert.equal(result.ok, false);
+      assert.deepEqual(result.error, {
+        code: "internal", message: "Chrome refused debugger attachment to this tab",
+        data: { undrivable_tab: "different_extension", surface_retired: !retirementFails },
+      });
+      const { calls } = worker.chromeState;
+      assert.equal(calls.attach, 1, "only the requested ordinary attach ran");
+      assert.deepEqual(calls.cdp, [], "no debugger command, including an ownership probe, ran");
+      assert.equal(calls.scripts, 0);
+      assert.equal(calls.removals, 0);
+      assert.equal(worker.frames.some((frame) => frame.event === "tab_closed"), false);
+      assert.equal(Object.hasOwn(worker.chromeState.surfaces(), TOKEN), retirementFails);
+      if (!retirementFails) {
+        const stale = await worker.request("status", { tab: TOKEN });
+        assert.equal(stale.error.code, "tab_closed");
+        assert.equal(calls.attach, 1, "the retired token cannot drive another attach");
+      }
+    } finally { worker.chromeState.restore(); }
+  });
+}
+
+test("update and detach do not retire a handle; removal and replacement do", async () => {
+  for (const lifecycle of ["removed", "replaced"]) {
+    const worker = await loadWorker({ surfaces: { [TOKEN]: surface() }, origins: approvedOnly, tabUrl: `${APPROVED}/docs` });
+    const { events, calls } = worker.chromeState;
+    try {
+      events.updated.fire(42, { status: "loading" }, { id: 42 });
+      events.detached.fire({ tabId: 42 }, "target_closed");
+      assert.equal((await worker.request("status", { tab: TOKEN })).ok, true);
+      if (lifecycle === "removed") events.removed.fire(42, { windowId: 1 });
+      else events.replaced.fire(43, 42);
+      for (let i = 0; i < 400 && !worker.frames.some((f) => f.event === "tab_closed"); i++) await tick();
+      assert.ok(worker.frames.some((f) => f.event === "tab_closed" && f.tab === TOKEN));
+      assert.deepEqual(worker.chromeState.surfaces(), {}, "do not transfer ownership to a replacement");
+      assert.equal((await worker.request("status", { tab: TOKEN })).error.code, "tab_closed");
+      assert.equal(calls.attach, 0);
+    } finally { worker.chromeState.restore(); }
+  }
+});
+
+test("protected top-level page is refused before debugger attach", async () => {
+  const worker = await loadWorker({
+    surfaces: { [TOKEN]: surface() }, origins: approvedOnly, tabUrl: "chrome-extension://fixture/index.html",
+  });
+  try {
+    const result = await worker.request("screenshot", { tab: TOKEN });
+    assert.equal(result.error.code, "origin_denied");
+    assert.equal(worker.chromeState.calls.attach, 0);
+    assert.deepEqual(worker.chromeState.calls.cdp, []);
   } finally { worker.chromeState.restore(); }
 });
 

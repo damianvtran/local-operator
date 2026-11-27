@@ -2479,6 +2479,57 @@ def test_a_malformed_locator_is_not_blamed_on_the_host() -> None:
     assert "predates accessibility locators" not in problem.text
 
 
+@pytest.mark.parametrize(
+    ("host", "pin", "receipt", "cleared"),
+    [
+        ("extension", "bridge:9:nonce", {"surface_retired": True}, True),
+        ("extension", "bridge:9:nonce", {"surface_retired": False}, False),
+        ("extension", "bridge:9:nonce", {}, False),
+        ("ui", "ui:9:nonce", {"surface_retired": True}, False),
+    ],
+)
+def test_attachment_refusal_only_clears_confirmed_extension_pin(
+    monkeypatch, host, pin, receipt, cleared
+) -> None:
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    calls = []
+
+    class Host:
+        async def call(self, action, params):
+            calls.append((action, params["tab"]))
+            raise BridgeError(
+                ErrorCode.INTERNAL,
+                "fixture refusal",
+                {"undrivable_tab": "different_extension", **receipt},
+            )
+
+    _bridge_only(monkeypatch)
+    selected = Host()
+    selected.host = host
+    monkeypatch.setattr(builtin, "_client_for", lambda _: selected)
+    context = _secret_ctx(surface_id=pin)
+    result = asyncio.run(
+        builtin.execute_browser(
+            "t1", {"action": "click", "selector": 'label="Fixture"'}, context=context
+        )
+    )
+
+    assert result.is_error
+    assert calls == [("click", pin)], result.text
+    assert (result.details or {}).get("error_code") == "internal"
+    assert ((result.details or {}).get("surface_retired") is True) == cleared
+    assert context.browser.surface_id == ("" if cleared else pin)
+    assert ("'open' with a URL" in result.text) == cleared
+    if host == "extension":
+        assert "Chrome refused debugger attachment" in result.text
+        assert "predates accessibility locators" not in result.text
+        assert pin not in result.text
+    else:
+        assert "Chrome refused debugger attachment" not in result.text
+
+
 def test_an_old_host_treating_a_locator_as_css_is_explained(monkeypatch) -> None:
     """The additive-param trap, on the failure path.
 

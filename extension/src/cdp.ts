@@ -82,18 +82,22 @@ export async function pruneSurface(token: string, tabId: number): Promise<void> 
  * an error that has already been decided, and a storage failure here must not
  * replace it with a different one.
  */
-async function pruneSurfaceByTabId(tabId: number): Promise<void> {
+async function pruneSurfaceByTabId(tabId: number): Promise<boolean> {
   try {
     const surfaces = await getSurfaces();
-    for (const token of Object.keys(surfaces)) {
-      if (surfaces[token]?.tabId === tabId) await pruneSurface(token, tabId);
-    }
+    const tokens = Object.keys(surfaces).filter((token) => surfaces[token]?.tabId === tabId);
+    for (const token of tokens) await pruneSurface(token, tabId);
+    // The harness can clear its local pin only on a positive receipt; a
+    // storage error (or no matching entry here) is not that receipt.
+    return tokens.length > 0;
   } catch (error) {
     console.warn(`could not prune surfaces for tab ${tabId}`, error);
+    return false;
   }
 }
 
-/** Chrome's refusal to debug a page belonging to a DIFFERENT extension. */
+/** Chrome's attach refusal can come from a pending navigation or a frame, not
+ * necessarily the top-level document that `tabs.get` would report. */
 const DIFFERENT_EXTENSION = "chrome-extension:// URL of different extension";
 
 export async function attach(tabId: number): Promise<void> {
@@ -137,22 +141,16 @@ export async function attach(tabId: number): Promise<void> {
       throw new BridgeCommandError("debugger_conflict", message);
     }
     if (message.includes(DIFFERENT_EXTENSION)) {
-      // The tab is (or redirected to) another extension's page, which Chrome
-      // refuses to debug. It is alive but can NEVER be driven, and unlike a
-      // failed `chrome.tabs.get` this refusal used to leave the surface in the
-      // map — so every later command for it failed the same way permanently,
-      // including a fresh `open` (reported from a live session: a `scroll`
-      // timeout, then this message on the retry, then the same on `open`).
-      // Retire the surface so the session's next `open` starts from a clean
-      // map, and say what happened and what to do about it: `internal` plus a
-      // data discriminator is this protocol's pattern for exactly this shape
-      // (`tab_crashed`), and a NEW wire code would be silently dropped by any
-      // already-released daemon that does not know it.
-      await pruneSurfaceByTabId(tabId);
+      // A committed HTTPS URL cannot rule out the protected entries Chrome
+      // checked. Do not probe, retry or infer what page the user is looking at.
+      // Retire the surface without closing the Chrome tab. Keep the legacy
+      // discriminator as a wire classification, not a page diagnosis: older
+      // daemons silently drop errors with a new enum code.
+      const retired = await pruneSurfaceByTabId(tabId);
       throw new BridgeCommandError(
         "internal",
-        "Chrome refused to debug this tab: it is another extension's page",
-        { undrivable_tab: "different_extension" },
+        "Chrome refused debugger attachment to this tab",
+        { undrivable_tab: "different_extension", surface_retired: retired },
       );
     }
     throw new BridgeCommandError("internal", message);

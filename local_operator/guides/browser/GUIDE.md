@@ -1410,13 +1410,19 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   preserved). The named call (`chrome.debugger.sendCommand(…)`,
   `chrome.storage.local.get(…)`, `chrome.tabs.get(…)`) says which layer gave
   up, which is the useful part when reporting it.
-- **"that tab cannot be driven: it is another extension's page"** —
-  Chrome refuses to attach the debugger to a page belonging to a DIFFERENT
-  extension, and that refusal is permanent for that tab. The bridge has already
-  dropped the handle; `open` the URL again to get a new tab. Do not retry
-  against the old handle.
-- **"tab is gone" / "tab crashed"** — the user closed or crashed it; `open` the
-  URL again to get a fresh surface.
+- **"Chrome refused debugger attachment to this tab"** (`internal`,
+  `undrivable_tab`) — Chrome refused the attachment, not the Local Operator site
+  approval. The refusal can come from a pending navigation or a protected frame
+  even when the visible page is HTTPS; it does not identify the page or prove
+  another extension interfered. Local Operator does not retry or probe around
+  the refusal. If the extension confirms it retired the handle, that removes
+  it from the extension's `tabs` list, not from Chrome. Do not reuse the
+  old handle. Once cleanup is confirmed, `open` a known URL to get a new tab;
+  otherwise, `tabs` can show what the extension still lists.
+- **"This browser tab handle is no longer usable"** (`tab_closed`) — the tab
+  may have closed or been replaced, or the extension may have retired the
+  handle. An absent entry in `tabs` is not proof that Chrome closed the page.
+  Use `open` for a fresh surface. A **"tab crashed"** response is separate.
 - **"another debugger is attached"** — ask the user to close DevTools on that
   tab.
 - **"the browser extension cannot serve 'download'"** — expected, and not a bug to

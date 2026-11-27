@@ -27640,6 +27640,7 @@ async def _bridge_call(
         BridgeError,
         BridgeUnreachable,
         format_error,
+        is_extension_attach_refusal,
     )
     from local_operator.browser_bridge.protocol import CAPABILITY_GATED_METHODS
 
@@ -27660,8 +27661,9 @@ async def _bridge_call(
         return await selected.call(action, params), None
     except BridgeError as exc:
         message = format_error(exc, action=action, surface=surface, host=host)
+        attach_refused = is_extension_attach_refusal(exc, host=host)
         kind = _locator_kind(str(params.get("selector") or ""))
-        if kind and exc.code.value == "internal":
+        if kind and exc.code.value == "internal" and not attach_refused:
             # A `role=…` selector that reaches CSS is either a MALFORMED locator
             # on a current host or a well-formed one on a host that predates
             # locators. Saying the second alone sent a caller with a typo to
@@ -27700,7 +27702,7 @@ async def _bridge_call(
                 if available
                 else " (none reported)"
             )
-        if action == "hover":
+        if action == "hover" and not attach_refused:
             # Older host copy suggests hit_test for the inner target, but that
             # tool only sees the iframe itself. Do not leave conflicting advice
             # ahead of the corrective hint.
@@ -27714,6 +27716,16 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        # Do not treat Chrome's error family alone as a retirement receipt. A
+        # legacy worker or a failed cleanup supplies no positive evidence, and
+        # an adoption/new allocation must not clear this session's other pin.
+        if (
+            attach_refused
+            and exc.data.get("surface_retired") is True
+            and surface
+            and params.get("tab") == surface
+        ):
+            problem.details["surface_retired"] = True
         # The host's own REASON travels too. Callers that must decide whether a
         # host still holds state — the recording approval above all — cannot do
         # it from the code alone (`busy` covers `record_active` and
@@ -32861,6 +32873,35 @@ def _browser_secret_ref(
 
 
 async def _execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Route one command, then reconcile an explicit retirement of this pin."""
+    state = getattr(context, "browser", None)
+    pin = getattr(state, "surface_id", "")
+    result = await _dispatch_browser(tool_call_id, args, signal, on_update, context)
+    if (
+        state is not None
+        and _host_of_surface(pin) == HOST_BRIDGE_PREFIX
+        and state.surface_id == pin
+        and result.is_error
+        and (result.details or {}).get("surface_retired") is True
+    ):
+        # This runs inside the ownership lane, before it persists the pin. A
+        # physical closure has its own handling; never replay an attach refusal.
+        # Only now will an explicit `open` allocate rather than resume this pin.
+        state.surface_id = ""
+        for block in result.content:
+            if isinstance(block, TextContent):
+                block.text += " Use 'open' with a URL to get a new tab."
+                break
+    return result
+
+
+async def _dispatch_browser(
     tool_call_id: str,
     args: dict[str, Any],
     signal: AbortSignal | None = None,
