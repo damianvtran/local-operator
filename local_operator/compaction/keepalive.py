@@ -81,8 +81,9 @@ KEEPALIVE_ROW_PREFIX = "cache-keepalive:"
 KEEPALIVE_TTL_S = 3600.0
 
 #: Fire this long before expiry: the supervisor's scan slice (10 s) plus its
-#: engage deadline (180 s, ``wakes/supervisor.py``) plus a relaunch's MCP wait,
-#: so a ping that starts late still reads before the entry lapses.
+#: engage deadline (180 s, ``wakes/supervisor.py``) plus a relaunch's MCP wait
+#: (``DECLARED_MCP_READY_TIMEOUT_S`` = 30 s, ``session/declared_mcp_ready.py``)
+#: is 220 s, so a ping that starts late still reads before the entry lapses.
 KEEPALIVE_LEAD_S = 300.0
 
 #: Spacing of a chain's pings (``ttl - lead``); the economic pass's cold-next
@@ -155,6 +156,7 @@ def arm_decision(
     route_matches: bool,
     other_wake_due_ms: int | None,
     remaining_pings: int,
+    saver_active: bool,
 ) -> KeepaliveDecision:
     """Whether a turn end (or a ping) should arm the next keep-alive row.
 
@@ -170,6 +172,13 @@ def arm_decision(
     cold request (read 0, the whole prefix written at 1h) is exactly the one
     worth keeping warm. Only a request that neither read nor wrote a 1h entry
     has nothing to keep.
+
+    ``saver_active``: Radient Saver reduces (or may reduce) this session's
+    turns. The splice rewrites a turn's leading messages into epochs, and the
+    ping, not being a turn, is never spliced, so it would pay a full write of
+    a prefix the next turn does not send. Routing the ping through the splice
+    instead was rejected: a splice can upload, bill and re-cut epochs, which a
+    request that must be a pure re-read cannot risk.
     """
     if mode == "off":
         return KeepaliveDecision(False, "mode_off")
@@ -177,6 +186,8 @@ def arm_decision(
         return KeepaliveDecision(False, "subagent")
     if not covered:
         return KeepaliveDecision(False, "not_covered")
+    if saver_active:
+        return KeepaliveDecision(False, "saver_active")
     if remaining_pings <= 0:
         return KeepaliveDecision(False, "consecutive_cap")
     if ttl_s != KEEPALIVE_TTL_S:
@@ -206,6 +217,7 @@ def fire_decision(
     current_digest: str | None,
     route_matches: bool,
     busy: bool,
+    saver_active: bool,
 ) -> KeepaliveDecision:
     """Whether a fired keep-alive row may send its ping now.
 
@@ -218,6 +230,10 @@ def fire_decision(
         return KeepaliveDecision(False, "expired")
     if attempt >= max_consecutive:
         return KeepaliveDecision(False, "consecutive_cap")
+    if saver_active:
+        # Checked again at fire: Saver can be switched on between the arm and
+        # a relaunched runtime's fire, and the digest does not see the splice.
+        return KeepaliveDecision(False, "saver_active")
     if busy:
         # A turn, compaction or advisor owns the conversation; its own end
         # re-arms with a fresher anchor.

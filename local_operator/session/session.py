@@ -5882,6 +5882,12 @@ class Session:
         self._advisor_calls = 0  # against settings.advisor_max_calls
         self._advisor_last_turn = -(10**9)  # turn index of the last call, for every_n_turns
         self._advisor_cooldown_until = -1  # turn index the cooldown expires at
+        # Cache keep-alive (``compaction/keepalive.py``). The turn-end count
+        # lets a ping's late write tell that a turn ended while it streamed
+        # (that turn's arm owns the row then); the Team Bridge half of the
+        # mode is resolved once per session, not per turn end (review R1-4).
+        self._keepalive_turn_ends = 0
+        self._keepalive_bridge_covered: bool | None = None
         # Kill switch. An advisor-triggered pass that fails to clear the
         # recovery band proved the advice was not merely early but wrong about
         # there being headroom to reclaim, and repeating it is a compaction
@@ -31794,8 +31800,10 @@ class Session:
     # fires (usually in a runtime the supervisor relaunched for it), ONE
     # read-only request re-reads the prefix and the row is re-armed from that
     # request's start, up to ``keepalive_max_consecutive`` times per gap. The
-    # ping joins nothing: no transcript row, no event, no ``_last_usage``; the
+    # ping joins nothing: no conversation row, no event, no ``_last_usage``; the
     # analytics ledger's ``purpose=cache_keepalive`` row is its only record.
+    # The fire does rewrite the transcript's ``wake_schedules`` entry (retire
+    # plus re-arm), because the wake index is derived from it.
 
     def _keepalive_settings(self) -> Any | None:
         """Compaction settings when this session may keep its cache warm, else ``None``.
@@ -31819,18 +31827,48 @@ class Session:
             return True
         if mode != "always_on" or not self._session_id:
             return False
+        if self._keepalive_bridge_covered is None:
+            self._keepalive_bridge_covered = self._keepalive_is_bridge_session()
+        return self._keepalive_bridge_covered
+
+    def _keepalive_is_bridge_session(self) -> bool:
+        """Whether ``team_bridge.session`` names this session, read once.
+
+        From THIS session's config root (``self._config_dir``), as
+        :meth:`_aida_filter_rows` does, so a session built against an injected
+        root does not answer from the process-global one. Cached by the caller:
+        a relaunched runtime (where every ping runs) reads it fresh, and a
+        rebind mid-runtime costs at most that runtime's chain.
+        """
         try:
             from local_operator.config import read_config_values
-            from local_operator.paths import config_dir
             from local_operator.team_bridge.settings import TeamBridgeSettings
 
-            values = read_config_values(config_dir())
+            values = read_config_values(self._config_dir)
             if values is None:
                 return False
             return TeamBridgeSettings.from_values(values).session == self._session_id
         except Exception:  # noqa: BLE001 — a lookup; failing closed sends nothing
             logger.debug("cache keep-alive: could not read team_bridge.session", exc_info=True)
             return False
+
+    def _keepalive_saver_active(self) -> bool:
+        """Whether Radient Saver reduces, or may reduce, this session's turns.
+
+        Asked of the stream (``SessionStreamFn.saver_may_reduce``), which owns
+        the chain and the resolver inputs. A stream without the hook (an SDK
+        or test ``stream_fn``) has no Saver. A failure counts as active: the
+        cost of a wrong "no" is a full write per gap, of a wrong "yes" one
+        cold start.
+        """
+        probe = getattr(self._stream_fn, "saver_may_reduce", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe(self._model))
+        except Exception:  # noqa: BLE001 - fail closed: no ping
+            logger.debug("cache keep-alive: saver probe failed", exc_info=True)
+            return True
 
     def _keepalive_route_matches(self, usage: Usage | None) -> bool:
         """Whether a ping on ``self._model`` would land in ``usage``'s cache namespace.
@@ -31896,6 +31934,7 @@ class Session:
             route_matches=self._keepalive_route_matches(usage),
             other_wake_due_ms=other_due,
             remaining_pings=int(settings.keepalive_max_consecutive) - int(attempt),
+            saver_active=self._keepalive_saver_active(),
         )
 
     def _keepalive_remaining_pings(self) -> int:
@@ -31925,6 +31964,9 @@ class Session:
         """
         if self._disposed or self._parent_session_id:
             return
+        # Synchronously, before the spawn: a ping streaming right now must see
+        # this turn end when its own write lands, whichever lands first.
+        self._keepalive_turn_ends += 1
         try:
             self._spawn_background(
                 self._rearm_cache_keepalive(
@@ -31938,7 +31980,14 @@ class Session:
             logger.debug("cache keep-alive: arm spawn failed", exc_info=True)
 
     async def _rearm_cache_keepalive(
-        self, *, usage: Usage | None, ttl_s: float | None, anchor_ms: int, attempt: int
+        self,
+        *,
+        usage: Usage | None,
+        ttl_s: float | None,
+        anchor_ms: int,
+        attempt: int,
+        turn_epoch: int | None = None,
+        clear_only: bool = False,
     ) -> None:
         """Replace this session's keep-alive row with a fresh one, or clear it. Total.
 
@@ -31947,6 +31996,17 @@ class Session:
         retiring the row that just fired can never remove its successor. Under
         ``_ask_wake_lock`` as well, because the ask queue's writers snapshot
         the full list there and would otherwise write this row back out.
+
+        ``turn_epoch`` is set by a ping's write (re-arm or chain end): the
+        turn-end count when the fire began. If a turn ended since, or a row
+        with a newer anchor is already there, that turn's arm owns the row:
+        this write adds nothing and drops only rows no newer than its own
+        anchor (review R1-3). A turn-end write (``None``) always owns it.
+
+        ``clear_only`` is a chain's end, for every stop reason: an explicit
+        clear rather than a bare return, so a fired row that a stale full-list
+        snapshot (``arm_ask_wake``, the wake tool) wrote back cannot fire again
+        outside the consecutive count (review R1-5).
         """
         from local_operator.compaction import keepalive
         from local_operator.wakes.store import is_cache_keepalive_row
@@ -31954,7 +32014,7 @@ class Session:
         try:
             settings = self._keepalive_settings()
             row: WakeSchedule | None = None
-            if settings is not None:
+            if settings is not None and not clear_only:
                 decision = self._keepalive_arm_check(
                     settings, usage=usage, ttl_s=ttl_s, anchor_ms=anchor_ms, attempt=attempt
                 )
@@ -31974,10 +32034,27 @@ class Session:
                         prefix_digest=await self._keepalive_prefix_digest(),
                     )
             async with self._ask_wake_lock:
-                if row is None and not any(is_cache_keepalive_row(r) for r in self._wake.schedules):
+                keep_newer_than: int | None = None
+                if turn_epoch is not None and (
+                    turn_epoch != self._keepalive_turn_ends
+                    or any(
+                        int(r.cache_anchor_ms) > anchor_ms
+                        for r in self._wake.schedules
+                        if is_cache_keepalive_row(r)
+                    )
+                ):
+                    row = None
+                    keep_newer_than = anchor_ms
+
+                def drop(r: WakeSchedule) -> bool:
+                    if not is_cache_keepalive_row(r):
+                        return False
+                    return keep_newer_than is None or int(r.cache_anchor_ms) <= keep_newer_than
+
+                if row is None and not any(drop(r) for r in self._wake.schedules):
                     # Nothing to clear: not a wake-list write at all.
                     return
-                await self._wake.replace_rows(is_cache_keepalive_row, [row] if row else [])
+                await self._wake.replace_rows(drop, [row] if row else [])
         except Exception:  # noqa: BLE001 - best effort, like every wake-index writer
             logger.warning("cache keep-alive: could not write the wake row", exc_info=True)
 
@@ -31992,13 +32069,29 @@ class Session:
 
     async def _run_cache_keepalive(self, row: WakeSchedule) -> None:
         """Gate, ping, re-arm. Total: any refusal or failure ends the chain."""
+        epoch = self._keepalive_turn_ends
+        if await self._cache_keepalive_fire(row, epoch=epoch):
+            # Re-armed, or cleared by the re-arm's own refusal (a spent chain).
+            return
+        # Every stop reason ends in an explicit clear (review R1-5).
+        await self._rearm_cache_keepalive(
+            usage=None,
+            ttl_s=None,
+            anchor_ms=int(row.cache_anchor_ms),
+            attempt=int(row.attempt),
+            turn_epoch=epoch,
+            clear_only=True,
+        )
+
+    async def _cache_keepalive_fire(self, row: WakeSchedule, *, epoch: int) -> bool:
+        """The fire's body: ``True`` once the chain is re-armed, ``False`` when it ends."""
         from local_operator.compaction import keepalive
 
         try:
             settings = self._keepalive_settings()
             if settings is None:
                 logger.debug("cache keep-alive %s: mode no longer covers this session", row.id)
-                return
+                return False
             # The next turn waits for its declared MCP tools before publishing
             # its array; hashing before they connect would compare a smaller
             # array than either side sends.
@@ -32016,18 +32109,19 @@ class Session:
                 current_digest=digest,
                 route_matches=self._keepalive_route_matches(self._last_usage),
                 busy=not self._idle_may_proceed(self._generation),
+                saver_active=self._keepalive_saver_active(),
             )
             if not decision.ok:
                 logger.info("cache keep-alive %s: not sent (%s)", row.id, decision.reason)
-                return
+                return False
             started_ms = int(time.time() * 1000)
             usage = await self._cache_keepalive_ping()
         except Exception:  # noqa: BLE001 - a 429/provider error retires the chain
             logger.warning("cache keep-alive %s: ping failed; chain ended", row.id, exc_info=True)
-            return
+            return False
         if usage is None:
             logger.warning("cache keep-alive %s: no usage reported; chain ended", row.id)
-            return
+            return False
         context = int(getattr(self._last_usage, "context_tokens", 0) or 0)
         read = int(usage.cache_read_tokens or 0)
         logger.info(
@@ -32047,7 +32141,7 @@ class Session:
                 read,
                 context,
             )
-            return
+            return False
         from local_operator.compaction.idle import cache_ttl_from_usage
 
         await self._rearm_cache_keepalive(
@@ -32057,7 +32151,9 @@ class Session:
             ttl_s=cache_ttl_from_usage(usage) or keepalive.KEEPALIVE_TTL_S,
             anchor_ms=started_ms,
             attempt=int(row.attempt) + 1,
+            turn_epoch=epoch,
         )
+        return True
 
     def _keepalive_daily_count(self) -> int | None:
         """This session's keep-alive requests in the trailing 24 h, or ``None``.

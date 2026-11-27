@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator
 
 import httpx
 import pytest
@@ -116,12 +117,22 @@ class Wire:
     """A session ``stream_fn`` over the real Anthropic client; records bodies.
 
     A script that is an ``int`` answers that HTTP status instead (a 429).
+    ``client_kw`` reaches ``AnthropicClient`` (the 1h size threshold);
+    ``saver`` answers ``saver_may_reduce`` as ``SessionStreamFn`` does, whose
+    real answer over a Saver-reduced turn ``tests/unit/saver/test_seam.py`` pins.
     """
 
-    def __init__(self, scripts: list[bytes | int]) -> None:
+    def __init__(
+        self, scripts: list[bytes | int], *, client_kw: dict[str, Any] | None = None
+    ) -> None:
         self.scripts = scripts
+        self.client_kw = dict(client_kw or {})
+        self.saver = False
         self.requests: list[ChatRequest] = []
         self.bodies: list[dict[str, Any]] = []
+
+    def saver_may_reduce(self, model: Any) -> bool:
+        return self.saver
 
     def __call__(self, request: ChatRequest, signal: Any = None):
         self.requests.append(request)
@@ -140,7 +151,8 @@ class Wire:
                 )
 
             async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-                async for event in AnthropicClient(http_client=http).stream(request, KEY):
+                client = AnthropicClient(http_client=http, **self.client_kw)
+                async for event in client.stream(request, KEY):
                     yield event
 
         return gen()
@@ -185,6 +197,22 @@ def _hers(monkeypatch: pytest.MonkeyPatch) -> None:
     # The ledger count is pinned too (its own tests read a real store).
     monkeypatch.setattr(Session, "_aida_is_hers", lambda self: True)
     monkeypatch.setattr(Session, "_keepalive_daily_count", lambda self: 0)
+
+
+@pytest.fixture(autouse=True)
+def _own_analytics_writer(tmp_path: Path) -> Iterator[None]:
+    """Stop the process-wide analytics writer the provider path starts (QA Q-1).
+
+    The same shape as ``tests/unit/tui/test_transcript_scroll_keys.py``: an
+    isolated store for the module, and the ``lo-analytics-writer`` thread
+    closed at teardown so the leak reporter does not pin it here.
+    """
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+
+    recorder = reset_recorder_for_test(AnalyticsStore(tmp_path / "analytics-test.db"))
+    yield
+    recorder.close()
 
 
 async def _drain(session: Session) -> None:
@@ -432,5 +460,174 @@ async def test_economic_cold_next_counts_the_pings_a_turn_end_buys(tmp_path) -> 
         session._compaction_settings = CompactionSettings(keepalive_mode="off")
         assert session._keepalive_remaining_pings() == 0
         assert session._economic_cold_next(two_hours) is True
+    finally:
+        await session.dispose()
+
+
+def _markers(node: Any) -> list[dict[str, Any]]:
+    """Every ``cache_control`` dict in a posted body, in document order."""
+    found: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        if isinstance(node.get("cache_control"), dict):
+            found.append(node["cache_control"])
+        for value in node.values():
+            found.extend(_markers(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_markers(value))
+    return found
+
+
+@pytest.mark.asyncio
+async def test_the_ping_writes_its_markers_at_1h_on_the_wire(tmp_path) -> None:
+    """The ping's markers carry ``ttl: 1h`` in the body actually posted (review R1-2b).
+
+    An API-key client with a 100k main-thread threshold: the ping's size hint is
+    the restored conversation size (~120k), so the policy picks 1h, as it does
+    for the turn request that wrote the entry.
+    """
+    wire = Wire([*TURN, PING], client_kw={"cache_ttl_1h_min_context_tokens": 100_000})
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+    finally:
+        await session.dispose()
+    last_turn, ping = wire.bodies[1], wire.bodies[2]
+    assert _markers(last_turn) and all(m.get("ttl") == "1h" for m in _markers(last_turn))
+    ping_markers = _markers(ping)
+    assert _markers(ping["system"]) and _markers(ping["messages"]), "system and history marked"
+    assert ping_markers and all(m == {"type": "ephemeral", "ttl": "1h"} for m in ping_markers)
+
+
+@pytest.mark.asyncio
+async def test_a_ping_that_read_under_half_the_context_ends_the_chain(tmp_path) -> None:
+    """Review R1-2a: a ping that did not reuse the prefix is sent, and nothing follows."""
+    cold = _signed(2, read=CONTEXT_READ // 2 - 1, write_1h=CONTEXT_READ, tool=False)
+    wire = Wire([*TURN, cold])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        await session._wake.pump(now_ms=row.next_due_at)
+        await _drain(session)
+        assert len(wire.bodies) == 3, "the ping was sent"
+        assert _keepalive_rows(session) == [], "and the chain ended without a re-arm"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_radient_saver_arms_nothing_and_refuses_a_fire(tmp_path) -> None:
+    """Review R1-1: while Saver reduces the turns, no row is armed and none fires."""
+    wire = Wire([*TURN, *TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        # Fire side: Saver switched on between the arm and the fire.
+        wire.saver = True
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert len(wire.bodies) == 2, "no ping"
+        assert _keepalive_rows(session) == [], "the refusal clears the chain"
+        # Arm side: a turn that ends while Saver is on arms nothing.
+        await session.prompt("again")
+        await _drain(session)
+        assert len(wire.bodies) == 4
+        assert _keepalive_rows(session) == []
+        assert session._keepalive_remaining_pings() == 0
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_row_first", [False, True])
+async def test_a_turn_ending_during_the_ping_keeps_its_fresher_row(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, turn_row_first: bool
+) -> None:
+    """Review R1-3: the ping's late re-arm never replaces the row that turn armed."""
+    wire = Wire([*TURN, PING, *TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    real_ping = Session._cache_keepalive_ping
+
+    async def ping_then_a_turn(self: Session) -> Any:
+        usage = await real_ping(self)
+        # A message lands in the relaunched runtime while the ping streamed.
+        await self.prompt("mid")
+        if turn_row_first:
+            await _drain(self)
+        return usage
+
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        monkeypatch.setattr(Session, "_cache_keepalive_ping", ping_then_a_turn)
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert len(wire.bodies) == 5
+        (kept,) = _keepalive_rows(session)
+        assert kept.attempt == 0, "the turn's own row, not the ping's attempt=1"
+        assert kept.cache_anchor_ms > row.cache_anchor_ms
+        assert kept.cache_anchor_ms == session._idle_cache_anchor_ms
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_chain_end_clears_a_fired_row_a_stale_writer_restored(tmp_path) -> None:
+    """Review R1-5: a refusal is an explicit clear, not a bare return."""
+    wire = Wire([*TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        # The pump retired the fired row, then a full-list writer whose snapshot
+        # predates that wrote it straight back.
+        await session._wake.update([])
+        await session._wake.update([row])
+        await session._run_cache_keepalive(row.model_copy(update={"prefix_digest": "stale"}))
+        await _drain(session)
+        assert len(wire.bodies) == 2
+        assert _keepalive_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_always_on_reads_the_sessions_own_root_once(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review R1-4: ``team_bridge.session`` from ``self._config_dir``, read once."""
+    import local_operator.config as config_mod
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.team_bridge.settings import SESSION_PATH
+
+    wire = Wire([])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    monkeypatch.setattr(Session, "_aida_is_hers", lambda self: False)
+    own_root = tmp_path / "own-root"
+    session._config_dir = own_root
+    reads: list[Path] = []
+
+    def read(root: Path) -> dict[str, Any]:
+        reads.append(root)
+        return {SESSION_PATH[0]: {SESSION_PATH[1]: session._session_id}}
+
+    monkeypatch.setattr(config_mod, "read_config_values", read)
+    try:
+        session._compaction_settings = CompactionSettings(keepalive_mode="always_on")
+        assert session._keepalive_settings() is not None
+        assert session._keepalive_settings() is not None
+        assert reads == [own_root], "the session's own root, once"
+        session._compaction_settings = CompactionSettings(keepalive_mode="chief_of_staff")
+        assert session._keepalive_settings() is None
     finally:
         await session.dispose()

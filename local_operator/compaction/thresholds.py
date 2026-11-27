@@ -410,7 +410,9 @@ class CompactionSettings(BaseModel):
             "Re-read an idle session's 1-hour prompt cache shortly before it"
             " expires, so the next message starts warm. chief_of_staff: only"
             " the chief-of-staff session; always_on: also the Team Bridge"
-            " session; off: never. Never subagents."
+            " session; off: never. Never subagents, never while Radient Saver"
+            " reduces the session; pings continue while the chief of staff is"
+            " paused."
         ),
     )
     keepalive_max_consecutive: int = Field(

@@ -40,6 +40,7 @@ def _arm(**overrides: Any) -> keepalive.KeepaliveDecision:
         "route_matches": True,
         "other_wake_due_ms": None,
         "remaining_pings": 4,
+        "saver_active": False,
     }
     args.update(overrides)
     return keepalive.arm_decision(**args)
@@ -59,6 +60,7 @@ def _arm(**overrides: Any) -> keepalive.KeepaliveDecision:
         ({"route_matches": False}, "route_mismatch"),
         ({"other_wake_due_ms": ANCHOR + HOUR_MS - 1}, "wake_keeps_cache_warm"),
         ({"remaining_pings": 0}, "consecutive_cap"),
+        ({"saver_active": True}, "saver_active"),
     ],
 )
 def test_arm_decision_table(overrides: dict[str, Any], reason: str) -> None:
@@ -90,6 +92,7 @@ def _fire(**overrides: Any) -> keepalive.KeepaliveDecision:
         "current_digest": "abc",
         "route_matches": True,
         "busy": False,
+        "saver_active": False,
     }
     args.update(overrides)
     return keepalive.fire_decision(**args)
@@ -103,6 +106,7 @@ def _fire(**overrides: Any) -> keepalive.KeepaliveDecision:
         ({"now_ms": ANCHOR + 3 * HOUR_MS}, "expired"),
         ({"attempt": 4}, "consecutive_cap"),
         ({"busy": True}, "busy"),
+        ({"saver_active": True}, "saver_active"),
         ({"route_matches": False}, "route_mismatch"),
         ({"daily_count": None}, "ledger_unreadable"),
         ({"daily_count": 24}, "daily_cap"),

@@ -5612,6 +5612,41 @@ class SessionStreamFn:
             or not request.messages
         )
 
+    def saver_may_reduce(self, model: ModelSpec) -> bool:
+        """Whether a main turn on ``model`` is, or may be, sent Saver-reduced.
+
+        For the cache keep-alive (``compaction/keepalive.py``), whose ping is
+        ``purpose="cache_keepalive"`` and so always bypasses the splice: while
+        this is true the ping's unreduced prefix is not the one the next turn
+        sends. Local only, never a network read: frozen epochs on the chain
+        are proof, and otherwise the resolver is asked with the best-case
+        availability exactly as :meth:`_saver_splice` asks it before its read.
+        A relaunched runtime has no chain yet, so the second half is what
+        detects a Saver session there. Over-reporting (signed out, no credit)
+        only withholds a ping.
+        """
+        chain = self._saver_chain
+        if chain is not None and getattr(chain, "frozen_ids", None):
+            return True
+        if model.provider in {"radient", "radient-key"}:
+            return False
+        from local_operator.saver.gate import (
+            Availability,
+            configured_mode,
+            resolve_saver,
+        )
+
+        if configured_mode(self._settings) == "off":
+            return False
+        session_choice, agent_pin, parent_value = self._saver_choices()
+        return resolve_saver(
+            self._settings,
+            Availability(True, True),
+            session_choice=session_choice,
+            agent_pin=agent_pin,
+            parent_value=parent_value,
+        ).on
+
     def mark_automation(self) -> None:
         """Mark this conversation as a non-interactive run for the cache-TTL policy.
 

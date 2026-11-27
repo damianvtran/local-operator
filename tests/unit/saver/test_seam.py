@@ -273,6 +273,43 @@ async def test_silent_bypasses_upload_nothing(rig, request_kw: dict[str, Any]) -
 
 
 @pytest.mark.asyncio
+async def test_saver_may_reduce_reports_a_reduced_session_to_the_cache_keepalive(rig) -> None:
+    """The cache keep-alive's Saver probe over a REALLY reduced conversation.
+
+    The keep-alive ping is ``purpose="cache_keepalive"``, so the splice bypasses
+    it and it goes out unreduced while the turns beside it go out reduced; the
+    probe must therefore say "reduced" here (PR #4657 review R1-1).
+    """
+    server, store = rig
+    seen: list[tuple[str, ChatRequest]] = []
+    stream = create_stream_fn(store, ON, wrap_client=Provider(seen, set()).wrap)
+    try:
+        await _drive(stream, range(8, 14))
+        turn = seen[-1][1]
+        assert turn.frozen_prefix_messages, "the turn went out Saver-reduced"
+        assert stream._saver_chain is not None and stream._saver_chain.frozen_ids
+        assert stream.saver_may_reduce(PRIMARY) is True
+        ping = ChatRequest(model=PRIMARY, messages=_history(13), purpose="cache_keepalive")
+        await _run(stream, ping)
+        assert seen[-1][1].frozen_prefix_messages is None, "the ping is never spliced"
+    finally:
+        await stream.close()
+    off = create_stream_fn(store, {"radient": {"saver": {"mode": "off"}}})
+    try:
+        assert off.saver_may_reduce(PRIMARY) is False
+    finally:
+        await off.close()
+    fresh = create_stream_fn(store, ON)
+    try:
+        # A relaunched runtime has no chain yet: the resolver answers for it.
+        assert fresh._saver_chain is None
+        assert fresh.saver_may_reduce(PRIMARY) is True
+        assert fresh.saver_may_reduce(ModelSpec(provider="radient", model_id="m")) is False
+    finally:
+        await fresh.close()
+
+
+@pytest.mark.asyncio
 async def test_signed_out_or_no_credit_uploads_nothing(rig, monkeypatch) -> None:
     server, store = rig
     for availability in (
