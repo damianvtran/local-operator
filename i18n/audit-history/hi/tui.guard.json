@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.guard",
+  "history_sha256": "e060a13b89515ab47854e241ccc7b3fa1f582d58f261147cc81e51e8b46c7a88",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "5147c84a9336a92deb56454e672a199ad496a9d00df23a626fb5e7cddca21138",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the new 94-key tui.guard namespace (Hindi), PR #4650 (Radient Guard L2b) at English head 47d837e8eb; independent audit NOT completed, so hi must not be treated as carrying an audited tui.guard until an independent i18n-auditor appends a passed receipt against this source hash. Translated target sha256 5147c84a9336a92deb56454e672a199ad496a9d00df23a626fb5e7cddca21138. Glossary i18n/glossary.md and i18n/style-guides/hi.md. Placeholders ({org}, {reason}, {scopes}, {surface}, {kind}, {backup_days}, {trial_days}, {date}, {device}, {time}) and the literals /guard, lop, Console, Radient, Radient Guard, Radient Team, Guard preserved; screen_share_again quotes this locale's badge_waiting byte-for-byte. Privacy/consent copy (high-visibility): needs independent semantic audit of consent meaning (k-anonymity thresholds 5/20, retention 14/90/180 days, 'never sent' list, no-auto-send promise in report_confirmed). No rendered, pseudo, RTL-visual or native-speaker audit claimed."
+    }
+  ]
+}
