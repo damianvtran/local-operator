@@ -3807,6 +3807,32 @@ def _case_header_end(text: str) -> int | None:
     return None
 
 
+def _case_pattern_positions(pieces: list[tuple[str, bool, str]]) -> list[bool]:
+    """Which pieces stand where bash accepts only a ``case`` pattern (or ``esac``).
+
+    That is the piece right after a bare ``case WORD in`` header, or after an
+    arm's ``;;`` while a case is open. ``;&``/``;;&`` are not distinguished
+    by the legacy lexer, so arms after them are NOT marked: they stay
+    dynamic words, judged (fail closed). See :func:`_case_pattern_head`.
+    """
+    marks = [False] * len(pieces)
+    open_cases = 0
+    after_header = False
+    for index, (text, _piped, op) in enumerate(pieces):
+        stripped = text.strip()
+        if after_header or (open_cases and index and pieces[index - 1][2] == ";;"):
+            marks[index] = True
+        after_header = False
+        if _CASE_END_RE.match(stripped):
+            open_cases = max(0, open_cases - 1)
+            continue
+        end = _case_header_end(stripped)
+        if end is not None:
+            open_cases += 1
+            after_header = not stripped[end:].strip()
+    return marks
+
+
 def _case_pattern_head(text: str) -> bool:
     """Does this segment open with a ``case`` arm's pattern (``"x/$y"*)``)?
 
@@ -4352,6 +4378,12 @@ class _Walker:
             prior = definitions.get(at)
             opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
             nest_at.append(opened)
+        # #4646 R2-B1: a piece is in case-PATTERN position only right after
+        # a bare ``case … in`` header or an arm's ``;;`` while inside a case.
+        # Bash allows nothing but a pattern (or ``esac``) there, so a dynamic
+        # word in that position is never run. Anywhere else (``( true;
+        # "$cmd" )`` splits into a ``"$cmd" )`` piece) it is a command.
+        pattern_position = _case_pattern_positions(pieces)
         for index, (text, _flag, op) in enumerate(pieces):
             if op == "case-arm":
                 # Patterns may expand substitutions, but their literal words
@@ -4438,12 +4470,24 @@ class _Walker:
             if isolated:
                 snap = self._save()
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
                 self._restore(snap)
             else:
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
             produced = heredocs + _herestring_texts(text)
             upstream_bodies = upstream_bodies + produced
@@ -4881,9 +4925,11 @@ class _Walker:
         stdin_piped: bool = False,
         pipeline: str = "",
         feed: _Feed | None = None,
+        case_position: bool = False,
     ) -> None:
-        # Read before ``_strip_grouping``, which drops the arm's bare ``)``.
-        case_pattern = _case_pattern_head(text)
+        # Both the POSITION (``_case_pattern_positions``) and the shape: read
+        # before ``_strip_grouping``, which drops the arm's bare ``)``.
+        case_pattern = case_position and _case_pattern_head(text)
         text = _strip_grouping(text)
         if not text:
             return

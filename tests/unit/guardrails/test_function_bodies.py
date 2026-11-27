@@ -531,13 +531,38 @@ _SUBSHELL_REACHES = (
     'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( ( "$cmd" ) )',
     'f() { rm -rf ~/x; }\ng() { ( "$1" ); }\ng "$(printf f)"',
     'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( "$cmd" ) ;;\nesac',
+    # #4646 R2-B1: a dynamic word AFTER an operator inside a subshell is a
+    # ``"$cmd" )`` piece, the same shape as an arm pattern, but not in
+    # pattern position.
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( echo | "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\n( true && "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\nx=$( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncat <( true; "$cmd" )',
+    'f() { rm -rf ~/x; }\ng() { ( true; "$1" ); }\ng "$(printf f)"',
+    'f() { rm -rf ~/x; }\ncmd=$(printf f)\ncase a in\n  a) ( true; "$cmd" ) ;;\nesac',
 )
 
 
 @pytest.mark.parametrize(
     "command",
     _SUBSHELL_REACHES,
-    ids=["spaced", "tight-close", "bare", "subst", "nested", "in-function", "in-arm"],
+    ids=[
+        "spaced",
+        "tight-close",
+        "bare",
+        "subst",
+        "nested",
+        "in-function",
+        "in-arm",
+        "after-semicolon",
+        "after-pipe",
+        "after-and",
+        "in-cmd-subst",
+        "in-proc-subst",
+        "after-semicolon-in-function",
+        "after-semicolon-in-arm",
+    ],
 )
 def test_subshell_with_dynamic_word_still_reaches_functions(command: str) -> None:
     verdict = classify_bash(command, cwd="/tmp", env={"HOME": "/tmp"}, scratchpad=None)
