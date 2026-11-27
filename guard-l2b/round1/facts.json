@@ -1,0 +1,66 @@
+{
+  "notice_during_turn": {
+    "streaming": true,
+    "badge": "Guard: choose in /guard",
+    "screen": "TranscriptScreen"
+  },
+  "prompt_during_turn": {
+    "streaming_after_open": true,
+    "screen": "GuardScreen",
+    "focused": "guard-no",
+    "row_state_after_typeahead_enter": "pending"
+  },
+  "esc": {
+    "screen": "TranscriptScreen",
+    "row_state": "pending"
+  },
+  "sharing": {
+    "badge": "",
+    "focused": "guard-close"
+  },
+  "widening": {
+    "badge": "Guard: sharing \u00b7 new items waiting",
+    "focused": "guard-no",
+    "state": "sharing_pending"
+  },
+  "report": {
+    "focused": "guard-later"
+  },
+  "stop_confirm": {
+    "focused": "guard-no"
+  },
+  "readonly": {
+    "Size(width=100, height=34)": {
+      "buttons": [
+        "guard-no",
+        "guard-later"
+      ],
+      "focused": "guard-no"
+    },
+    "Size(width=80, height=24)": {
+      "buttons": [
+        "guard-no",
+        "guard-later"
+      ],
+      "focused": "guard-no"
+    }
+  },
+  "badges": {
+    "configSize(width=100, height=34)": "Guard: report waiting in /guard",
+    "configSize(width=80, height=24)": "Guard: report waiting in /guard"
+  },
+  "08-non-team-card-trial-eligible": {
+    "calls": [
+      "GET /v1/team-trial/eligibility"
+    ],
+    "guard_files": [],
+    "badge": ""
+  },
+  "09-non-team-card-ineligible": {
+    "calls": [
+      "GET /v1/team-trial/eligibility"
+    ],
+    "guard_files": [],
+    "badge": ""
+  }
+}
