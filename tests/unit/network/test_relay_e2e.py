@@ -1243,7 +1243,17 @@ def _pair(
     # An exception inside the answering thread would otherwise present as the JOINER
     # timing out minutes later, pointing at the wrong side of the ceremony.
     assert not failures, f"the inviter's human step raised: {failures[0]!r}"
-    assert joined is not None
+    # Only the tuple means admission. A failure sentence must not send callers
+    # looking for a pairing link that may never have been registered. Report shape
+    # only: the sentence can contain connection details, even in test fixtures.
+    if not isinstance(joined, tuple):
+        if isinstance(joined, str):
+            outcome = "failure string"
+        elif joined is None:
+            outcome = "no result"
+        else:
+            outcome = "unexpected result shape"
+        raise AssertionError(f"pairing fixture join failed: {outcome}")
     _pair_answered[record.network_id] = answered
     return store.load(record.network_id, server_a.root), host, port
 
@@ -1308,6 +1318,64 @@ def _pair_settled(
         _join_link_has_closed
     ), "the pairing's own link never closed (see _pair_settled)"
     return record
+
+
+@pytest.mark.parametrize(
+    ("joined", "failure"),
+    [
+        pytest.param((["joined"], {"ok": True}), None, id="success"),
+        pytest.param("synthetic private join detail", "failure string", id="failure-string"),
+        pytest.param(None, "no result", id="no-result"),
+        pytest.param(types.MeshRefusal("declined", "synthetic decline"), None, id="declined"),
+    ],
+)
+def test_pair_settled_reaches_close_wait_only_after_successful_join(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    joined: tuple[list[str], dict[str, Any]] | str | types.MeshRefusal | None,
+    failure: str | None,
+) -> None:
+    # Keep the fixture and its invite store real, but never start a listener or dial.
+    inviter = SimpleNamespace(
+        root=root,
+        identity=identity.mint(root, name="synthetic-inviter"),
+        settings=relay.NetworkSettings(port=0),
+        audit=SimpleNamespace(recorded_through=0),
+    )
+    joiner = SimpleNamespace(identity=SimpleNamespace(name="synthetic-joiner", device_id="d_test"))
+    pair_devices = cast(relay.RelayServer, inviter), cast(relay.RelayServer, joiner), "fixture", 0
+
+    def join_outcome(**_kwargs: Any) -> Any:
+        if isinstance(joined, types.MeshRefusal):
+            raise joined
+        return joined
+
+    waited = False
+
+    def close_wait(_predicate: Any) -> bool:
+        nonlocal waited
+        waited = True
+        if failure is not None or isinstance(joined, types.MeshRefusal):
+            pytest.fail("failed join reached the pairing link close wait")
+        return True
+
+    monkeypatch.setattr(net_cli, "_join_one", join_outcome)
+    monkeypatch.setattr(
+        __name__ + "._answer_confirmation", lambda _server, *, admit: {"admit": admit}
+    )
+    monkeypatch.setattr(net_fixtures, "wait_for", close_wait)
+    if isinstance(joined, types.MeshRefusal):
+        with pytest.raises(types.MeshRefusal) as excinfo:
+            _pair_settled(pair_devices, monkeypatch, admit=False)
+        assert excinfo.value is joined
+    elif failure is not None:
+        with pytest.raises(AssertionError, match=f"^pairing fixture join failed: {failure}$"):
+            _pair_settled(pair_devices, monkeypatch)
+    else:
+        record, host, port = _pair_settled(pair_devices, monkeypatch)
+        assert (host, port) == ("fixture", 0)
+        assert _pair_answered.pop(record.network_id) == {"admit": True}
+        assert waited
 
 
 def test_a_member_dials_and_gets_a_catalogue_reply(
