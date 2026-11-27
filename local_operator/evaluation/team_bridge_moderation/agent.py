@@ -997,6 +997,23 @@ class AgentLeg:
             self.ask_surface = "missing"
             return
         self.ask_surface = "installed"
+        # THE EVAL AGENT MUST NOT BE OFFERED TEAM INTEGRATIONS. ``set_ask_handler``
+        # now rescues ``integrations`` beside ``ask``, and this session satisfies
+        # every gate that tool reads: an ask hook, a consent seam, and an approval
+        # gate (``ApprovalPolicy.auto()`` is a real, non-None gate - "auto" means
+        # it approves, not that none exists). With one Radient OAuth row on the
+        # machine the model would be handed a tool that revokes apps and drafts
+        # server-side records with the write-tier card auto-approved and nobody
+        # to consent: an unattended grant inside a harness that only measures the
+        # Team Bridge. Excluded by name rather than left to the ambient login
+        # state, so the measured inventory does not depend on whose machine runs
+        # it (the registry audit would otherwise report it as an unknown tool on
+        # one machine and not another).
+        tools = list(getattr(session, "_tools", None) or [])
+        if any(getattr(tool, "name", "") == "integrations" for tool in tools):
+            self._merge_tool(
+                session, [tool for tool in tools if getattr(tool, "name", "") != "integrations"]
+            )
 
     def _sweep(
         self, collector: "_EventCollector"

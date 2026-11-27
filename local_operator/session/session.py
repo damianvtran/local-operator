@@ -1392,7 +1392,29 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "generate_music",
     "modify_music",
     "music_status",
+    # Team Integrations provisioning (RFC "Radient Team Integrations" §8.1) is
+    # gated on THREE session-owned things: the ask hook, the consent seam
+    # (``_integration_consent_seam``: None for a child and under the blocking
+    # ask arm) and a Radient OAuth row. The first is installed by the front end
+    # AFTER ``__init__`` — so this entry alone is not enough, and
+    # ``ASK_HOOK_CAPABILITY_TOOLS`` below is what makes ``set_ask_handler``
+    # re-run it. Before it joined both lists the tool was built nowhere a live
+    # session looked: ``read tool://integrations`` answered "Unknown tool" in
+    # every interactive session while the stub-context QA passed. Appended last
+    # for the same prefix reason as ``sessions``.
+    "integrations",
 )
+
+#: The subset of :data:`SESSION_CAPABILITY_TOOLS` whose createIf reads the
+#: host's ask hook (``ToolContext.ask_user``), directly or through the queue and
+#: consent seam it creates. :meth:`Session.set_ask_handler` re-runs exactly
+#: these on install and drops exactly these on uninstall — one tuple for both
+#: arms so a tool cannot be rescued on install and then orphaned on uninstall.
+#: A SUBSET, not the whole merge set, so installing a question surface can never
+#: resurrect a ``wake``/``task`` that ``_build_child_session`` pruned. Every
+#: createIf condition stays in each builder: this only decides WHEN they re-run,
+#: so it widens nothing a child, headless responder or exec session can reach.
+ASK_HOOK_CAPABILITY_TOOLS: tuple[str, ...] = ("ask", "ask_withdraw", "integrations")
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
 #: a second pass over the same tool object cannot wrap it again. A double wrap is
@@ -4443,6 +4465,13 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # The delegating session as ``origin.json`` records it, read ONCE here.
+        # A child resumed by id has no live parent handle (``_parent_session_id``
+        # is ``""``), yet it is still a child: the divergence judge and
+        # ``_integration_consent_seam`` both need the durable marker, and reading
+        # it in one place keeps the two from disagreeing about who is a child.
+        self._origin_parent_session_id = origin_parent_session_id(transcript.directory)
+
         # The divergence observer (``local_operator/divergence.py``) is
         # SESSION-scoped, and that is the whole reason it is built here: "fire
         # once per novel root" and "escalate on a second turn" are facts about a
@@ -4459,7 +4488,7 @@ class Session:
             # marker on disk: a child resumed by id has no live parent handle,
             # and ``origin.json`` is written once by whoever created the
             # directory — the only place that knows.
-            parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
+            parent_session_id=parent_session_id or self._origin_parent_session_id,
             on_notice=self._record_divergence_notice,
         )
         from local_operator.profile_actions import ProfileActions
@@ -14881,6 +14910,11 @@ class Session:
         ``_build_tool_context`` is not enough on its own — it decides what a
         tool RUNS against, never whether the tool was advertised.
 
+        ``integrations`` rode the same late-hook trap (its createIf also needs
+        ``ask_user``, plus the consent seam this hook's queue provides) and is
+        rescued, and dropped on uninstall, with ``ask``: see
+        ``ASK_HOOK_CAPABILITY_TOOLS``.
+
         Uninstalling drops it again for the same reason it was gated in the
         first place: a tool advertised with no hook behind it can only fail when
         the model calls it.
@@ -14893,13 +14927,15 @@ class Session:
             self._ask_queue.dispose()
             self._ask_queue = None
         if handler is not None:
-            # BOTH queued-ask tools are gated on the queue this hook creates, so
-            # installing the hook rescues the pair: §2.1's ``ask`` and §12's
-            # ``ask_withdraw``.
-            self._merge_capability_tools(("ask", "ask_withdraw"))
-        elif any(tool.name in ("ask", "ask_withdraw") for tool in self._tools):
+            # Every tool gated on this hook is rescued together: both queued-ask
+            # tools (§2.1's ``ask``, §12's ``ask_withdraw``) and Team
+            # Integrations, whose builder needs ``ask_user`` AND the consent seam
+            # the queue this hook creates provides. Each builder still applies
+            # its own refusals (a child, the blocking arm, no Radient login).
+            self._merge_capability_tools(ASK_HOOK_CAPABILITY_TOOLS)
+        elif any(tool.name in ASK_HOOK_CAPABILITY_TOOLS for tool in self._tools):
             self.refresh_tools(
-                [tool for tool in self._tools if tool.name not in ("ask", "ask_withdraw")]
+                [tool for tool in self._tools if tool.name not in ASK_HOOK_CAPABILITY_TOOLS]
             )
 
     # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
@@ -14983,7 +15019,30 @@ class Session:
         §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
         answer rows arrive during the run and reset when the next run starts.
         """
-        if self._parent_session_id or self.ask_queue() is None:
+        # A resumed child carries no constructor parent, but ``origin.json`` still
+        # names the session that delegated it: treat that marker as "child" too,
+        # or a resumed child would get the integration admin surface its first run
+        # was refused (S-2).
+        if self._parent_session_id or self._origin_parent_session_id:
+            return None
+        # What this condition means: the HOST built an approval gate for this
+        # session (``_request_approval``) AND an ask queue exists. It does NOT mean a
+        # person is present: resume workers are factory-built with a headless gate
+        # (``session_factory``), and the moderation eval agent's gate is
+        # ``ApprovalPolicy.auto()``, a real non-None gate. Presence of a person is
+        # what the per-op consent card enforces: ``IntegrationConsent`` files it
+        # on the ask queue and the operations that file one run only on a human
+        # answer. The eval agent is therefore kept out by name
+        # (``evaluation/team_bridge_moderation/agent.py`` drops the ``integrations``
+        # tool), not by this condition.
+        #
+        # Why the gate is required at all (S-1): the operations that never file a
+        # consent card of their own (``revoke``, ``draft_app``, ``status``,
+        # ``list``) rely on the loop's write-tier card, which is skipped when
+        # ``request_approval`` is None, so a gate-less host would run them
+        # unattended. An interactive ``--yolo`` session still holds its gate on the
+        # Session (yolo is applied where the loop is handed it), so it is unaffected.
+        if self._request_approval is None or self.ask_queue() is None:
             return None
         from local_operator.team_bridge.integration_consent import IntegrationConsent
 
