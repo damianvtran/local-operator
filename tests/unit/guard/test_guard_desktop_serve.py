@@ -184,3 +184,5 @@ def test_the_lifespan_publishes_the_capture_on_app_state(
     _serve(captured_server)
     with TestClient(asgi_app, headers={"Host": "127.0.0.1:1111"}):
         assert asgi_app.state.guard_host_can_answer is False
+        # R2-2: the notice allow-list exists before the first request, as an empty set.
+        assert asgi_app.state.guard_notices_listed == set()

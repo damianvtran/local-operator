@@ -296,6 +296,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from local_operator.guard.surface import served_host_can_answer
 
     app.state.guard_host_can_answer = served_host_can_answer()
+    # The receipt ids ``GET /guard/notices`` has listed (``notices/{id}/shown``'s allow-list).
+    # Created here, once, on the loop: the routes run on worker threads, and a lazy
+    # create-on-first-use there could hand two concurrent first requests two different sets.
+    app.state.guard_notices_listed = set()
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)

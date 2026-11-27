@@ -159,7 +159,7 @@ _ALL = (("GET", BASE, None), ("GET", f"{BASE}/non-team-card", None), *_WRITES)
 
 def test_the_route_set_is_exactly_the_contract_and_has_no_grant_route() -> None:
     served = {
-        (method, route.path)
+        (method, getattr(route, "path", ""))
         for route in guard_routes.router.routes
         for method in getattr(route, "methods", set())
     }
@@ -644,7 +644,9 @@ async def test_wire_timestamps_are_floored_to_the_minute_like_the_tui(
     # The wire value is the engine's value floored (never rounded up into the future).
     assert created == surface.to_minute(draft.created_at) <= draft.created_at
     assert surface.to_minute(1795817427.449125) == 1795817400.0
-    assert surface.to_minute("junk") == 0.0
+    # A non-numeric epoch is a wire-boundary guard, so feed it as an untyped value.
+    junk: Any = "junk"
+    assert surface.to_minute(junk) == 0.0
 
 
 @pytest.mark.asyncio

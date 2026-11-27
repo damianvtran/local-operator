@@ -85,7 +85,7 @@ def _require_available(root: Path) -> None:
 
 
 def _engine(error: Exception) -> GuardRefusal:
-    return GuardRefusal(409, error.code or "guard_refused", str(error))
+    return GuardRefusal(409, getattr(error, "code", "") or "guard_refused", str(error))
 
 
 def _scopes(values: Any) -> list[str]:

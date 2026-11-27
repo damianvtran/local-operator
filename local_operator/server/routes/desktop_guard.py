@@ -84,7 +84,11 @@ def _can_answer(request: Request) -> bool:
 
 
 def _listed(request: Request) -> set[int]:
-    """The receipt ids this daemon has listed (``notices/{id}/shown``'s allow-list)."""
+    """The receipt ids this daemon has listed (``notices/{id}/shown``'s allow-list).
+
+    The lifespan creates the set; the fallback is only for an app that never ran it (a test
+    host), where there is no worker-thread race to guard against.
+    """
     state = request.app.state
     if not isinstance(getattr(state, "guard_notices_listed", None), set):
         state.guard_notices_listed = set()
