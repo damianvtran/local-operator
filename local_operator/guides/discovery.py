@@ -51,11 +51,22 @@ def _radient_vault(config_dir: Path | None) -> bool:
     return is_open(config_dir)
 
 
+def _radient_guard(config_dir: Path | None) -> bool:
+    # Radient Guard (RFC v0.9 slice L2b): advertised only where the account is
+    # on Radient Team AND an org turned Guard on for this member -- the same
+    # cached, network-free gate that builds the `guard` tool, so the guide and
+    # the tool appear together or not at all.
+    from local_operator.guard.surface import guard_available  # lazy
+
+    return guard_available(config_dir)
+
+
 #: ``requires:`` value -> predicate over the session's config root. An UNKNOWN
 #: value fails closed: a typo must hide a gated guide, never publish it.
 GUIDE_PREDICATES: dict[str, Callable[[Path | None], bool]] = {
     "radient-team": _radient_team,
     "radient-vault": _radient_vault,
+    "radient-guard": _radient_guard,
 }
 
 

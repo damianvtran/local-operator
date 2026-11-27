@@ -1807,6 +1807,11 @@ TEMPORARY_BAND_TICK_S = 30.0
 #: that a sign-in completed in another window withdraws the card while the user
 #: is still looking at the app.
 TUNNEL_PARK_POLL_S = 5.0
+#: How often the band re-reads Radient Guard's local state. The prompt queue only
+#: changes at an admission point (sign-in, daemon start, the 6 h tick) or on an
+#: answer, so this bounds how late the badge appears, nothing else; it is a UX
+#: cadence, not a correctness bound.
+GUARD_POLL_S = 30.0
 
 #: How often the park watch looks while the SIDEBAR IS CLOSED (see
 #: `_watch_remote_parks`). Five seconds is the tunnel park's own cadence: the
@@ -5438,6 +5443,10 @@ class OperatorApp(App[None]):
         #: card's is "has this park been announced?", the rung's is "is remote
         #: access off right now?" — and only the second must survive a dismissal.
         self._tunnel_parked = False
+        #: The Radient Guard badge the band carries ("" = none). Guard RFC v0.9
+        #: §5.2.3: a pending prompt is a one-line notice plus this badge, never a
+        #: card inside a turn (see `_poll_guard`).
+        self._guard_badge = ""
         #: `(device id, session id) -> parked kind` for parks on PEER devices
         #: this app has seen. The edge rule is `session.peer_rows.park_edges`:
         #: a key that appears, or whose kind changed, is a new episode; a key
@@ -13071,6 +13080,11 @@ class OperatorApp(App[None]):
         # for this, and the notice and the band rung are the only places the
         # terminal admits it.
         self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
+        # Radient Guard's passive indicator (RFC v0.9 slice L2b). Local reads
+        # only (the cached membership record, then the Guard SQLite files when
+        # they exist); a non-Team account returns at the first, memoised read.
+        self.set_interval(GUARD_POLL_S, self._poll_guard)
+        self.call_after_refresh(self._poll_guard)
         # ALWAYS ON, and deliberately NOT the sidebar's timer: that poll is
         # registered paused and pauses whenever the list is closed, which is the
         # app's DEFAULT state (`tui.sidebar_visible` = False) — hanging the park
@@ -46175,6 +46189,8 @@ class OperatorApp(App[None]):
             self._cmd_logout(arg, notice)
         elif command == "/credential":
             self._cmd_credential(arg, notice)
+        elif command == "/guard":
+            self._cmd_guard()
         elif command == "/team":
             self._cmd_team(arg, notice, attachments)
         elif command == "/aida":
@@ -57936,6 +57952,82 @@ class OperatorApp(App[None]):
         editor can ask it BEFORE taking a secret off the operator.
         """
         return not (self._session is None and self._setup_state)
+
+    def _cmd_guard(self) -> None:
+        """``/guard`` — the Radient Guard screen (RFC v0.9 slice L2b).
+
+        A modal over the transcript, never part of a turn: the session keeps
+        running underneath, and nothing here sends to it. A non-Team account
+        gets the Team card, whose one network read (trial eligibility) runs on a
+        worker thread inside the screen.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.widgets.guard_view import (
+            GuardScreen,
+            load_trial_eligibility,
+        )
+
+        root = config_dir()
+
+        def _done(_result: str | None) -> None:
+            self._poll_guard()
+
+        self.push_screen(
+            GuardScreen(root, eligibility_loader=lambda: load_trial_eligibility(root)),
+            _done,
+        )
+
+    def _poll_guard(self) -> None:
+        """Keep the Guard badge and the once-a-day notice in step. Never raises.
+
+        The notice (§15.4' C6) is shown at most once per local day on this
+        surface (``guard.surface.should_show_notice``); the badge on every
+        attach for as long as a choice is waiting.
+        """
+        try:
+            from local_operator.guard import surface as guard_surface
+            from local_operator.guard.consent import GuardConsentHost
+            from local_operator.guard.reports import GuardReports
+            from local_operator.paths import config_dir
+            from local_operator.tui.widgets.guard_view import (
+                badge_text,
+                notice_text,
+                receipt_text,
+            )
+
+            root = config_dir()
+            if not guard_surface.guard_available(root):
+                self._assert_guard_badge("")
+                return
+            states = guard_surface.org_states(root)
+            known = {s.tenant for s in states}
+            drafts = [d for d in GuardReports(root).drafts() if d.tenant in known]
+            self._assert_guard_badge(badge_text(states, reports_waiting=len(drafts)))
+            # The C6 line announces an org turning Guard ON; a widening is said
+            # by the badge ("new items waiting") alone, never by this sentence.
+            waiting = [s for s in states if s.state == guard_surface.STATE_WAITING]
+            if waiting and guard_surface.should_show_notice(root, surface="tui"):
+                self._system_notice(notice_text(waiting[0]))
+            # §15.4' C3 grant receipts ("... Not you? Stop sharing in /guard"):
+            # each shown once, then marked, so a grant this person did not make
+            # (the same-user residual, RFC §5.7c) is surfaced on the next poll.
+            host = GuardConsentHost(root, transport=None, mirror=False)
+            for notice in host.notices(unshown_only=True):
+                text = receipt_text(notice)
+                if text is None:
+                    continue
+                self._system_notice(text)
+                host.mark_notice_shown(int(notice["id"]))
+        except Exception:  # noqa: BLE001 - a passive indicator never breaks the app
+            logger.debug("guard poll failed", exc_info=True)
+
+    def _assert_guard_badge(self, text: str) -> None:
+        if text == self._guard_badge:
+            return
+        self._guard_badge = text
+        status = self._status
+        if status is not None:
+            status.update(guard_badge=text)
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.

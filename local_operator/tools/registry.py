@@ -27,6 +27,7 @@ from local_operator.tools.audio_tool import (
     build_generate_voiceover_tool,
 )
 from local_operator.tools.eval import build_eval_tool
+from local_operator.tools.guard_tool import build_guard_tool
 from local_operator.tools.harness_import_tool import build_harness_import_tool
 from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.integrations_tool import build_integrations_tool
@@ -245,6 +246,12 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # there it costs the inventory phrase until read. Appended at END: appending
     # never shifts a provider-visible array prefix.
     "integrations": lambda context: build_integrations_tool(context),
+    # createIf: rung 3 — Radient Guard (RFC v0.9 slice L2b). Only where the
+    # account is on Radient Team AND an org turned Guard on for this member
+    # (``guard.surface.guard_available``: cached, zero-network); everyone else
+    # pays no schema and is never told about Guard. Deferred. Appended at END:
+    # appending never shifts a provider-visible array prefix.
+    "guard": lambda context: build_guard_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -314,6 +321,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "modify_music",
     "music_status",
     "integrations",
+    "guard",
 ]
 
 

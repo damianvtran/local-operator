@@ -796,6 +796,12 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
     from local_operator.tools import audio_tool
 
     monkeypatch.setattr(audio_tool.audio_availability, "voiceover_reachable", lambda *a, **k: True)
+    # ``guard`` (Radient Guard, slice L2b) is createIf-gated on the machine's
+    # cached Team membership plus an org-raised consent store, which a bare CI
+    # host does not hold: presence-only, as above (review R1-1).
+    from local_operator.tools import guard_tool
+
+    monkeypatch.setattr(guard_tool, "_gate", lambda: (True, False))
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )

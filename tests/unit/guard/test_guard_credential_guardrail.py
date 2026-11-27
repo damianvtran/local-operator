@@ -77,6 +77,39 @@ REFUSED = [
     ("eval", {"code": "open(os.path.expanduser('~/.local-operator/guard/'+'install'+'.key'))"}),
     ("eval", {"code": "open(os.path.join(home, '.local-operator', 'guard', 'install.key'))"}),
     ("bash", {"command": "security find-generic-password -s com.radient.gu''ard -w"}),
+    # L2b (L2a security S-7): the file store's per-writer temp holds the key too.
+    ("bash", {"command": "cat ~/.local-operator/guard/install.key.0a1b2c3d.tmp"}),
+    # L2b (L2a NIT-R2-1, narrowed): a pipe into a bare python RUNS what flows in.
+    ("bash", {"command": "echo 'from local_operator.guard import consent' | python3"}),
+    (
+        "bash",
+        {"command": "rg x | python3 -c 'from local_operator.guard import consent_op'"},
+    ),
+    # L2b security round 2, S-8: a ``-c`` that EXECUTES its input runs the pipe.
+    (
+        "bash",
+        {
+            "command": "echo 'from local_operator.guard.consent import GuardConsentHost' | "
+            "python3 -c 'import sys; exec(sys.stdin.read())'"
+        },
+    ),
+    (
+        "bash",
+        {
+            "command": "printf 'from local_operator.guard import consent_op' | "
+            "python3 -c 'exec(input())'"
+        },
+    ),
+    (
+        "bash",
+        {
+            "command": "echo 'import local_operator.guard.consent' | "
+            "python3 -c 'import runpy;runpy.run_path(\"/dev/stdin\")'"
+        },
+    ),
+    # L2b review round 2, R2-2: the bare glob of the temp after a ``cd``.
+    ("bash", {"command": "cd ~/.local-operator/guard && cat install.key.*.tmp"}),
+    ("bash", {"command": "cd ~/.local-operator/guard && cat install.key.[0-9a-f]*.tmp"}),
 ]
 
 ALLOWED = [
@@ -94,6 +127,16 @@ ALLOWED = [
     ("bash", {"command": "cd tests/unit/guard && ls"}),
     ("bash", {"command": "git diff -- local_operator/server/routes/desktop_credentials.py"}),
     ("monitor", {"op": "create", "tool": "bash", "arguments": {"command": "git status"}}),
+    # L2b (L2a review NIT-R2-2): the key name is matched exactly, not by prefix.
+    ("bash", {"command": "cat ~/.local-operator/guard/install.keyring"}),
+    # L2b (L2a review NIT-R2-1): a pipe into ``python -c`` reads the pipe as DATA.
+    (
+        "bash",
+        {
+            "command": "rg -n GuardConsentHost local_operator | "
+            "python3 -c 'import sys; print(len(sys.stdin.read()))'"
+        },
+    ),
 ]
 
 

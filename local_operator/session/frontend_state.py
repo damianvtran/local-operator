@@ -1383,6 +1383,19 @@ _FRONTEND_LOCAL_SLASHES = {
     # also what keeps it out of `serving.py::_slash_result`, exactly as the
     # `/notifications` clause above states the rule.
     "aida",
+    # FRONTEND-LOCAL because `/guard` is a MODAL SCREEN this terminal draws and
+    # answers (consent prompt, draft-report send/discard, the Team card), and
+    # every fact on it is read from THIS machine's config root
+    # (`guard.surface.org_states(config_dir())`, `GuardReports(root)`). Routed to
+    # a runtime there is no screen to open, and it would describe the runtime
+    # host's consent state while the badge beside the composer paints this one.
+    # The BACKEND enforces consent regardless of surface; the desktop and phone
+    # reach the same state through the settings API (the desktop's entry is the
+    # approvals panel), so withholding the command from the phone's sheet loses
+    # no capability. Also what keeps it out of `serving.py::_slash_result`: an
+    # entry not in this set is advertised `authoritative_session`, which
+    # `test_capability_surface.py` fails unless the runtime dispatches it.
+    "guard",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

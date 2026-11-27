@@ -361,6 +361,23 @@ def _forced_integrations_backend() -> Iterator[None]:
 
 
 @contextmanager
+def _forced_guard_backend() -> Iterator[None]:
+    """Measure ``guard`` as a Guard MEMBER holds it (no admin clause).
+
+    Its gate is the machine's Team membership record plus an org-raised Guard
+    prompt, so a CI runner would otherwise measure one tool lighter.
+    """
+    from local_operator.tools import guard_tool
+
+    saved = guard_tool._gate
+    guard_tool._gate = lambda: (True, False)
+    try:
+        yield
+    finally:
+        guard_tool._gate = saved
+
+
+@contextmanager
 def _forced_music_backend() -> Iterator[None]:
     """Measure the credential-gated music tools without reading real secrets."""
     from local_operator.tools import music_tool
@@ -394,6 +411,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_artifact_data_backend(),
         _forced_music_backend(),
         _forced_integrations_backend(),
+        _forced_guard_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

@@ -210,6 +210,12 @@ def _force_browser_available(monkeypatch):
     from local_operator.tools import integrations_tool
 
     monkeypatch.setattr(integrations_tool, "_gate_bridge_login", lambda *a, **k: True)
+    # ``guard`` (Radient Guard L2b): its gate reads the machine's Team record and
+    # Guard prompt store; forced open as a MEMBER (the closed gate and the admin
+    # clause are pinned in tests/unit/guard/test_guard_tool.py).
+    from local_operator.tools import guard_tool
+
+    monkeypatch.setattr(guard_tool, "_gate", lambda: (True, False))
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -354,17 +360,21 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     default (both DEFERRED, so off the wire until fetched) and appended them,
     in that order, at the end of BOTH tables -- ``skill`` is no longer an
     opt-in builder-only tail. The async music tools (``generate_music``,
-    ``modify_music``, ``music_status``) appended after that, and ``integrations``
-    (Team Integrations provisioning, createIf-gated and deferred) is the newest."""
-    assert list(TOOL_BUILDERS)[-1] == "integrations"
-    assert DEFAULT_TOOL_NAMES[-1] == "integrations"
+    ``modify_music``, ``music_status``) appended after that, then ``integrations``
+    (Team Integrations provisioning, createIf-gated and deferred), and ``guard``
+    (Radient Guard, createIf-gated on Team + an org-raised prompt, deferred) is
+    the newest."""
+    assert list(TOOL_BUILDERS)[-1] == "guard"
+    assert DEFAULT_TOOL_NAMES[-1] == "guard"
+    assert list(TOOL_BUILDERS)[-2] == "integrations"
+    assert DEFAULT_TOOL_NAMES[-2] == "integrations"
     music = ["generate_music", "modify_music", "music_status"]
-    assert list(TOOL_BUILDERS)[-4:-1] == music
-    assert DEFAULT_TOOL_NAMES[-4:-1] == music
-    builders = list(TOOL_BUILDERS)[:-4]
-    assert DEFAULT_TOOL_NAMES[-6:-4] == ["profile_proposal", "skill"]
+    assert list(TOOL_BUILDERS)[-5:-2] == music
+    assert DEFAULT_TOOL_NAMES[-5:-2] == music
+    builders = list(TOOL_BUILDERS)[:-5]
+    assert DEFAULT_TOOL_NAMES[-7:-5] == ["profile_proposal", "skill"]
     assert builders[-2:] == ["profile_proposal", "skill"]
-    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-6]
+    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-7]
     assert defaults[-1] == "notify"
     assert builders[-1] == "notify"
     assert defaults[-2] == "artifact_data"

@@ -154,10 +154,13 @@ def run_boundary(
             # daemon start, the 6 h timer): it is meaningful only for a
             # team-plan account, and its own TTL keeps this a no-op most ticks.
             _refresh_vault_gate(Path(config_dir), boundary, force=force)
-            # Radient Guard's consent status read (Guard RFC v0.9 §5.2.1) rides
-            # the same boundaries, and ONLY behind this ``if orgs``: a non-Team
-            # account never reaches it, so it makes zero /v1/guard/* calls.
-            _guard_check_point(Path(config_dir), boundary)
+        # Radient Guard's admission point (Guard RFC v0.9 §5.2.1) rides the same
+        # boundaries. Deliberately OUTSIDE ``if orgs`` (L2a QA Q4): a member who
+        # lapsed after a failed revoke still needs that revoke retried, and
+        # revoke has no membership precondition (§5.4). ``check_point`` re-gates
+        # itself: with no Team org it touches nothing unless a consent store
+        # already exists, so a never-Team install still makes zero calls.
+        _guard_check_point(Path(config_dir), boundary)
         if orgs and auto_enrol_enabled(Path(config_dir)):
             sync_new_items(Path(config_dir), orgs)
     except Exception:  # noqa: BLE001 - see module docstring

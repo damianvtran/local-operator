@@ -1642,6 +1642,35 @@ class RadientClient:
             json={"tenant": tenant_id},
         )
 
+    def team_trial_eligibility(self) -> Dict[str, Any]:
+        """``GET /v1/team-trial/eligibility``: ``{eligible, reason, trial_days}``.
+
+        The Radient Guard non-Team card's only read (Guard RFC v0.9 §14',
+        §0.13). The desktop backend proxies the same route
+        (``server/routes/desktop_radient.py`` ``team_trial.eligibility``); the
+        TUI reads it directly as the signed-in person. Not a ``/v1/guard/*``
+        call, and it writes nothing.
+        """
+        url = f"{self.base_url}/team-trial/eligibility"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(url, headers=headers, allow_redirects=False, timeout=30)
+            self._refuse_redirect(response)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not read Radient Team trial eligibility",
+                secrets=self._credential_values(),
+            ) from e
+        try:
+            body = response.json()
+        except ValueError:
+            return {}
+        if isinstance(body, dict) and isinstance(body.get("result"), dict):
+            return body["result"]
+        return body if isinstance(body, dict) else {}
+
     def list_org_agents(
         self, tenant_id: str, *, page: int = 1, per_page: int = 20
     ) -> Dict[str, Any]:

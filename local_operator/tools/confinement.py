@@ -1048,7 +1048,10 @@ def _secret_read_denials() -> tuple[str, ...]:
         # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
         # spelling the store writes later is covered too.
         prefix = _seatbelt_regex_literal(str(root))
-        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
+        # ``guard/install.key`` likewise, so the file store's per-writer temp
+        # (``install.key.<hex>.tmp``, which holds the key until it is linked)
+        # is denied too (L2a security S-7).
+        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db|guard/install\\.key)")')
         suffix = _seatbelt_regex_literal(_NETWORK_SECRETS_SUFFIX)
         filters.append(f'(regex #"^{prefix}/network/networks/[^/]*{suffix}$")')
     filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)

@@ -335,6 +335,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "not a session-directory entry. Its consent records live in the existing "
         "ask queue, which already travels; credentials stay in the device secret store.",
     ),
+    "local_operator/tools/guard_tool.py": (
+        1,
+        "``TOOL_NAME`` ('guard') identifies the registered Radient Guard tool, not a "
+        "session-directory entry. Guard's state lives in the config root "
+        "(``<config>/guard/``: the consent queue and report drafts), per install, and "
+        "must never travel with a session.",
+    ),
     "local_operator/session/temporary.py": (
         3,
         "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "

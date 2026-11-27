@@ -220,6 +220,15 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
         outcome = host.accept_signed(approval_id, expected_block)
     except GuardConsentRefused as exc:
         raise _refuse(exc.code, str(exc)) from exc
+    if outcome.status == "revoked_first":
+        # The grant may have reached Radient, but a later stop (or an org-level
+        # "Don't share") landed while it was in flight, and the later choice won
+        # (L2a QA Q5: the old copy claimed Radient recorded nothing).
+        raise _refuse(
+            outcome.code or "guard_revoked_locally",
+            "You stopped sharing (or chose not to share) while this answer was being "
+            "sent, so Guard kept that later choice. Nothing new is being shared.",
+        )
     if outcome.status != "granted":
         raise _refuse(
             outcome.code or "guard_consent_not_granted",
