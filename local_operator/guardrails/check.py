@@ -33,6 +33,7 @@ as the outcome of its call, and its first words are the stable marker
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import re
@@ -130,6 +131,9 @@ DANGEROUS_DELETE_RULE = "dangerous-delete"
 POLICY_WRITE_RULE = "guard-policy-write"
 #: The rule name of the fail-closed refusal when the check itself raises.
 GUARD_ERROR_RULE = "guardrail-error"
+#: The built-in layer that keeps model tool calls away from Radient Guard key
+#: material and the Guard consent routes (Guard RFC v0.9 §5.7a, slice L2a).
+GUARD_CREDENTIAL_RULE = "guard-credential"
 
 
 def guard_version() -> str:
@@ -623,7 +627,11 @@ def _record_decision(rule: str, risk: str, verdict: str) -> None:
             rule_class = gd.RULE_CLASS_CUSTOM
         elif rule == DANGEROUS_DELETE_RULE:
             rule_class = gd.RULE_CLASS_DANGEROUS_DELETE
-        elif rule == POLICY_WRITE_RULE:
+        elif rule in (POLICY_WRITE_RULE, GUARD_CREDENTIAL_RULE):
+            # guard-credential is the guard protecting its OWN authority, the
+            # same class as guard-policy-write. Folded rather than given a fifth
+            # class: the ``decisions`` grid is outcome x rule_class with four
+            # classes (RFC §10'), and the server validator refuses any other.
             rule_class = gd.RULE_CLASS_POLICY_WRITE
         elif rule == GUARD_ERROR_RULE:
             rule_class = gd.RULE_CLASS_GUARD_ERROR
@@ -2778,10 +2786,18 @@ async def check_tool_call(
 
         return private_judge
 
-    from local_operator.guard.decisions import tool_class_of
     from local_operator.guardrails import provenance as prov
 
-    tool_token = _DECISION_TOOL_CLASS.set(tool_class_of(tool_name))
+    # The tool-class lookup is telemetry: its import or lookup failing must
+    # degrade to ``other``, never fail the call before the guard has even run
+    # (L1 review MINOR-1, folded into L2a).
+    try:
+        from local_operator.guard.decisions import tool_class_of
+
+        tool_class = tool_class_of(tool_name)
+    except Exception:  # noqa: BLE001
+        tool_class = "other"
+    tool_token = _DECISION_TOOL_CLASS.set(tool_class)
     token = _OUTPUT_REDACTOR.set(redact)
     # Never read into ``values``/facts: the provider's output goes only to the
     # forge CLI child env (``provenance._forge_cli_env``).
@@ -2829,6 +2845,17 @@ async def _check_tool_call(
     forked_judge: JudgeCall | None = None,
 ) -> GuardOutcome | None:
     """``None`` → run as-is; a non-blocking outcome may carry warnings."""
+    # FIRST, and not gated on ``settings.enabled``: like dangerous-delete it is
+    # built in, and it must hold under auto and ``--yolo`` (RFC §5.7a).
+    credential = guard_credential_hit(tool_name, args)
+    if credential is not None:
+        _journal(GUARD_CREDENTIAL_RULE, "critical", "block", 0.0, credential)
+        return GuardOutcome(
+            blocked=True,
+            text=guard_credential_text(credential),
+            rule=GUARD_CREDENTIAL_RULE,
+            risk="critical",
+        )
     rules = load_rules(*settings.rules_dirs) if settings.enabled else load_rules(None)
     builtin = next((r for r in rules.builtin if r.name == DANGEROUS_DELETE_RULE), None)
     outcome: GuardOutcome | None = None
@@ -2911,6 +2938,224 @@ async def _check_tool_call(
         base.warnings.extend(warnings)
         return base
     return None
+
+
+# ---------------------------------------------------------------------------
+# Built-in guard-credential (Guard RFC v0.9 §5.7a, slice L2a)
+# ---------------------------------------------------------------------------
+#
+# WHAT IT REFUSES. A model tool call that would read or export the Radient
+# Guard install key (the ``com.radient.guard`` credential-store item, or its
+# 0600 fallback file ``<config>/guard/install.key``), read lop's Radient token
+# store (``<config>/auth.db``), or call the Guard grant/org routes
+# (``/v1/guard/consents``, ``/v1/guard/org``). Those are the materials a model
+# would need to opt its member in without the host prompt.
+#
+# WHAT IT IS, HONESTLY. Defence in depth only: a string classifier can be
+# evaded (an encoded command, a script written then run), and the RFC claims no
+# more for it. The load-bearing controls are ``admit_increasing`` admission and
+# the typed ``guard_consent`` op (``guard/consent.py``); the residual -- a
+# same-user process that evades this -- is RFC §5.7 residual (i), detected by
+# the grant receipt and always revocable.
+#
+# WHY THESE SHAPES, NOT A BARE SUBSTRING. Developers grep lop's own source for
+# these names, so the service name alone is not a refusal: it must appear with
+# a credential-store reader. The key file and lop's token store are refused by
+# path because no legitimate model task reads them. A route is refused only in
+# a network-shaped call (a fetch/browser tool, or a shell/eval naming an HTTP
+# client), so reading or grepping the route's source still works.
+#
+# ROUND 1 WIDENING (review MINOR-1, security S-2, QA Q2). Still defence in
+# depth, still evadable, but the CHEAPEST spellings no longer pass:
+# * a ``monitor`` create is scanned as the call it schedules (its ``tool`` +
+#   ``arguments``): scheduled runs never pass through this check, so the
+#   arm-time call is the only place it can refuse them;
+# * in-process answers -- ``eval`` code (or a ``python -c``/heredoc shell)
+#   naming the consent engine (``GuardConsentHost``, ``accept_signed``,
+#   ``guard.consent``/``consent_op``/``install_key``), where ``capability`` is
+#   a caller-asserted bool;
+# * the desktop typed-approval sign/apply routes in a network-shaped call
+#   (the file-only signing path through a claimed daemon's run record);
+# * the key file spelt by glob (``inst*.key``, ``guard/*``), by ``cd`` into
+#   the Guard directory, or built from string pieces (``'install'+'.key'``,
+#   ``os.path.join(..., 'guard', 'install.key')``, ``gu''ard``).
+# Source work stays allowed: ``install_key.py`` is not a glob for the key,
+# and a bare ``grep GuardConsentHost`` in a shell runs no interpreter.
+
+_GUARD_SERVICE = "com.radient.guard"
+_CREDENTIAL_READERS = re.compile(
+    r"(?i)\b(security|secret-tool|keyring|cmdkey|credread|get-storedcredential|vaultcmd|"
+    r"find-generic-password|dump-keychain)\b"
+)
+_GUARD_KEY_FILE = re.compile(r"(?i)guard[\\/]+install\.key\b")
+_LOP_TOKEN_STORE = re.compile(r"(?i)local-operator[^\s'\"]*[\\/]auth\.db\b")
+_GUARD_ROUTES = re.compile(r"(?i)/v1/guard/(consents|org)\b")
+#: The desktop typed-approval sign/apply routes and their shipped aliases
+#: (``server/routes/desktop_credentials.py``, ``desktop_approvals.py``).
+_DESKTOP_SIGN_ROUTES = re.compile(
+    r"(?i)/v1/desktop/approvals/[^\s/'\"]+/(approve|apply)-(operation|credential)\b"
+)
+#: The consent engine's in-process entry points (security S-2).
+_GUARD_ENGINE = re.compile(
+    r"(?i)\b(GuardConsentHost|accept_signed|guard\.(consent|consent_op|install_key)\b|"
+    r"guard\s+import\s+[\w\s,()]*\b(consent|consent_op|install_key)\b)"
+)
+#: A shell running an interpreter on inline code: ``python -c``, ``python -``,
+#: a heredoc, or a pipe into python. A bare ``grep``/``rg``/``pytest`` is not.
+_INLINE_PYTHON = re.compile(
+    r"(?i)(\bpython[\d.]*\s+(-[a-z]*c\b|-(\s|$)|<<)|\|\s*python[\d.]*\b|"
+    r"\b(uv\s+run|ipython)\b[^\n|;&]*\s-c\b)"
+)
+#: A path token directly under a ``guard`` directory (key-file globs).
+_GUARD_DIR_TOKEN = re.compile(r"(?i)([^\s'\"`;|&()<>]*?)\bguard[\\/]+([^\s\\/'\"`;|&()<>]+)")
+#: ``cd`` into a ``guard`` directory (then a bare ``install.key``).
+_CD_GUARD = re.compile(r"(?i)\b(cd|pushd|chdir)\b[^\n;&|]*\bguard[\\/'\"]?(\s|;|&|\||\)|$)")
+#: Adjacent string pieces a model might concatenate a path from.
+_STRING_CONCAT = re.compile(r"""['"]\s*\+\s*['"]""")
+_STRING_JOIN = re.compile(r"""['"]\s*,\s*['"]""")
+_EMPTY_QUOTES = re.compile(r"""''|\"\"""")
+_HTTP_CLIENTS = re.compile(
+    r"(?i)\b(curl|wget|https?|httpie|requests|httpx|urllib\w*|aiohttp|fetch|"
+    r"invoke-webrequest|invoke-restmethod|iwr|irm|nc|ncat|socat|openssl)\b"
+)
+_NETWORK_TOOLS = frozenset({"web_fetch", "browser", "web_search"})
+#: Tools whose arguments are code or a command that RUNS: scanned whole.
+_EXECUTING_TOOLS = frozenset({"bash", "eval", "console"})
+#: For every other tool only these argument keys are scanned (the file or URL
+#: it touches), so writing, editing or grepping source that merely MENTIONS a
+#: Guard name -- lop's own Guard modules do -- is not refused.
+_TARGET_KEYS = frozenset({"path", "file_path", "paths", "url", "cwd", "directory"})
+#: How deep and how much of a call's arguments are scanned. Arguments are
+#: model-authored and small; the bound only stops a pathological payload from
+#: making the scan itself the slow part of a tool call.
+_SCAN_MAX_CHARS = 200_000
+_SCAN_MAX_DEPTH = 8
+
+
+def _arg_strings(value: Any, depth: int = 0) -> list[str]:
+    if depth > _SCAN_MAX_DEPTH:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        out: list[str] = []
+        for key, item in value.items():
+            out.extend(_arg_strings(key, depth + 1))
+            out.extend(_arg_strings(item, depth + 1))
+        return out
+    if isinstance(value, (list, tuple, set, frozenset)):
+        out = []
+        for item in value:
+            out.extend(_arg_strings(item, depth + 1))
+        return out
+    return []
+
+
+def _names_key_file(token: str) -> bool:
+    """``token`` (a path piece under ``guard/``) is or globs to the key file."""
+
+    if token.lower().startswith(KEY_FILE_NAME):
+        return True
+    if not any(ch in token for ch in "*?["):
+        return False
+    return fnmatch.fnmatchcase(KEY_FILE_NAME, token.lower())
+
+
+#: The fallback key file's name (``guard.install_key.KEY_FILENAME``), kept
+#: here as a literal so the guard never imports the module it protects.
+KEY_FILE_NAME = "install.key"
+
+
+def _key_file_hit(text: str, *, executing: bool) -> bool:
+    if _GUARD_KEY_FILE.search(text):
+        return True
+    for match in _GUARD_DIR_TOKEN.finditer(text):
+        prefix, token = match.group(1), match.group(2)
+        if not _names_key_file(token):
+            continue
+        # A glob that also matches source files (``guard/*``) is the key only
+        # under lop's CONFIG dir (``.local-operator``, hyphen), not the source
+        # package (``local_operator/guard/*``), so ``grep x local_operator/guard/*``
+        # stays allowed.
+        if not fnmatch.fnmatchcase("consent.py", token.lower()) or "local-operator" in (
+            prefix.lower()
+        ):
+            return True
+    if executing and _CD_GUARD.search(text):
+        # ``cd ~/.local-operator/guard && cat install.key`` / ``cat inst*``.
+        for token in re.split(r"[\s;&|()<>'\"`]+", text):
+            if token and token != "*" and _names_key_file(token):
+                return True
+    return False
+
+
+def guard_credential_hit(tool_name: str, args: Mapping[str, Any]) -> str | None:
+    """What Guard material this call reaches for, or ``None``. Never raises.
+
+    The answer is a fixed phrase (never call text), so it is safe to journal.
+    """
+
+    if tool_name == "monitor":
+        # A monitor's scheduled runs never reach this check (``monitors/*``
+        # calls no guardrail), so the call it would schedule is judged now.
+        try:
+            nested_tool = args.get("tool")
+            nested_args = args.get("arguments")
+            if isinstance(nested_tool, str) and nested_tool != "monitor":
+                hit = guard_credential_hit(
+                    nested_tool.strip(), nested_args if isinstance(nested_args, Mapping) else {}
+                )
+                if hit is not None:
+                    return hit
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        if tool_name in _EXECUTING_TOOLS or tool_name in _NETWORK_TOOLS:
+            scanned: Any = dict(args)
+        else:
+            scanned = {k: v for k, v in dict(args).items() if k in _TARGET_KEYS}
+        text = "\n".join(_arg_strings(scanned))[:_SCAN_MAX_CHARS]
+    except Exception:  # noqa: BLE001 -- unreadable args are the other checks' business
+        return None
+    executing = tool_name in _EXECUTING_TOOLS
+    if executing:
+        # Scan the raw text AND a de-fragmented copy: ``'install'+'.key'``,
+        # ``join('guard', 'install.key')`` and ``gu''ard`` collapse to the plain
+        # spelling. Raw first so nothing the raw text matched can be lost.
+        joined = _STRING_CONCAT.sub("", _EMPTY_QUOTES.sub("", text))
+        text = text + "\n" + _STRING_JOIN.sub("/", joined)
+    if _key_file_hit(text, executing=executing):
+        return "the Radient Guard install key file"
+    if _GUARD_SERVICE in text.lower() and _CREDENTIAL_READERS.search(text):
+        return "the Radient Guard install key"
+    if _LOP_TOKEN_STORE.search(text):
+        return "Local Operator's Radient sign-in store"
+    network_shaped = tool_name in _NETWORK_TOOLS or (
+        executing and _HTTP_CLIENTS.search(text) is not None
+    )
+    if _GUARD_ROUTES.search(text) and network_shaped:
+        return "a Radient Guard consent route"
+    if _DESKTOP_SIGN_ROUTES.search(text) and network_shaped:
+        return "the desktop approval signing route"
+    if (
+        executing
+        and _GUARD_ENGINE.search(text)
+        and (tool_name == "eval" or _INLINE_PYTHON.search(text))
+    ):
+        return "the Radient Guard consent engine"
+    return None
+
+
+def guard_credential_text(what: str) -> str:
+    """The refusal a model reads. Model-facing, so English by design."""
+
+    return (
+        f"{BLOCK_MARKER} {GUARD_CREDENTIAL_RULE} (block): this call reaches for {what}. "
+        "Nothing was run. Radient Guard sharing is answered only by a person, on a host "
+        "surface (/guard or the approvals panel); an agent cannot read Guard key material "
+        "or call the Guard consent routes, in any approval mode. "
+        f"{REFUSAL_SCOPE}"
+    )
 
 
 def last_user_request(messages: Any) -> str:

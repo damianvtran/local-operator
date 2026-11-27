@@ -1,7 +1,8 @@
 """Every auto-approval path refuses or asks a person for a person-only gate (review R1-2).
 
 ``harness.approval.never_auto_approved`` names gates no auto mode may answer:
-an account profile save and a community post. Each row below is one place a
+an account profile save, a community post and a Radient Guard sharing
+consent. Each row below is one place a
 gate can be answered WITHOUT a card, driven through its real function:
 
 * SDK ``ApprovalPolicy.auto()`` (``sdk._auto_approve_gate``) — the gap R1-2 found;
@@ -31,6 +32,7 @@ from local_operator import sdk, session_factory
 from local_operator.harness.approval import (
     ACCOUNT_PROFILE_GATE,
     COMMUNITY_POST_GATE,
+    GUARD_CONSENT_GATE,
     ApprovalUnavailableError,
     ask_approval,
 )
@@ -41,7 +43,9 @@ from local_operator.harness.bridge_egress import (
 )
 from local_operator.session.session import Session
 
-PERSON_ONLY = [ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE]
+# GUARD_CONSENT_GATE (Guard RFC v0.9 §5.2.4, slice L2a): belt-and-braces -- the
+# consent prompt is not a tool call, but no auto path may answer its name either.
+PERSON_ONLY = [ACCOUNT_PROFILE_GATE, COMMUNITY_POST_GATE, GUARD_CONSENT_GATE]
 
 
 @pytest.mark.asyncio

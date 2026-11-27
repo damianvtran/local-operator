@@ -291,10 +291,17 @@ _NETWORK_MODULES = {
 }
 
 
+#: The L1 decision modules, which stay inert by construction. Slice L2a added
+#: ``consent.py``/``consent_op.py``/``install_key.py``, the admission half that
+#: MAY reach the network -- only from an admission point for a Team member or an
+#: admitted accept, which ``test_guard_consent.py`` pins with a fixture server.
+_INERT_MODULES = ("__init__.py", "decisions.py", "outbox.py")
+
+
 def test_guard_package_imports_no_network_client() -> None:
-    """Inert by construction: no module in the package can reach a network client."""
+    """Inert by construction: no L1 decision module can reach a network client."""
     seen: set[str] = set()
-    for path in sorted(GUARD_PKG.glob("*.py")):
+    for path in sorted(GUARD_PKG / name for name in _INERT_MODULES):
         tree = ast.parse(path.read_text("utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

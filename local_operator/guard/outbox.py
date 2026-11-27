@@ -97,11 +97,24 @@ class GuardOutbox:
 
     def _connect(self) -> sqlite3.Connection:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Re-asserted on EVERY open, not only at creation (L1 review MINOR-3):
+        # a directory made by an older build, a restore or a umask 022 shell
+        # would otherwise stay world-listable / the file world-readable.
+        os.chmod(self._path.parent, 0o700)
         existed = self._path.exists() and self._path.stat().st_size > 0
         conn = sqlite3.connect(self._path, timeout=_BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         try:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if existed:
+                os.chmod(self._path, 0o600)
+            try:
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+            except sqlite3.DatabaseError as exc:
+                # A file that is not SQLite at all is damage too (L1 review
+                # NIT-2): the same refusal, never a raw DatabaseError.
+                raise GuardOutboxRefused(
+                    "outbox_damaged", "the Guard outbox is not a database; refusing it"
+                ) from exc
             if existed and version != GUARD_OUTBOX_SCHEMA_VERSION:
                 # Re-running DDL over an unknown file is not repair (house rule,
                 # team_bridge/outbox.py); a newer generation is not ours to edit.

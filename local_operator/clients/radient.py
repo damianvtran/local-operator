@@ -1563,6 +1563,68 @@ class RadientClient:
         memberships = result.get("memberships")
         return list(memberships) if isinstance(memberships, list) else []
 
+    # -- Radient Guard (Guard RFC v0.9 §5, slice L2a) ----------------------
+    #
+    # WHO CALLS THESE. Only ``local_operator.guard.consent``: ``guard_status``
+    # from ``check_point``, which returns before constructing any client for an
+    # account with no Team (or Team trial) membership in the locally cached
+    # ``/me/memberships`` record -- a non-Team install makes ZERO ``/v1/guard/*``
+    # requests; ``guard_grant`` only from inside an ``admit_increasing``-admitted
+    # accept; ``guard_revoke`` from the member's own revoke. The server half
+    # (agent-server A2) is not built yet; the shapes are the ones
+    # ``guard/consent.py``'s module docstring fixes for A2 to pin.
+    #
+    # NO ``Origin`` HEADER, NO REDIRECTS. ``POST /v1/guard/consents`` refuses any
+    # request carrying a browser ``Origin`` (§5.2.7); ``requests`` sends none,
+    # and redirects are refused so the person's bearer is never re-sent.
+
+    def _guard_call(self, method: str, path: str, *, action: str, **kwargs: Any) -> Dict[str, Any]:
+        url = f"{self.base_url}/guard/{path}"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.request(
+                method, url, headers=headers, allow_redirects=False, timeout=30, **kwargs
+            )
+            self._refuse_redirect(response)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message=f"Could not {action}",
+                secrets=self._credential_values(),
+            ) from e
+        try:
+            body = response.json()
+        except ValueError:
+            return {}
+        if isinstance(body, dict) and isinstance(body.get("result"), dict):
+            return body["result"]
+        return body if isinstance(body, dict) else {}
+
+    def guard_status(self, tenant_id: str) -> Dict[str, Any]:
+        """``GET /v1/guard/status?tenant=``: ``{status, prompt?}`` for this member and org."""
+
+        return self._guard_call(
+            "GET", "status", action="read Radient Guard status", params={"tenant": tenant_id}
+        )
+
+    def guard_grant(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        """``POST /v1/guard/consents``: the ONE install-key-signed enrol+grant request."""
+
+        return self._guard_call(
+            "POST", "consents", action="record your Radient Guard answer", json=dict(envelope)
+        )
+
+    def guard_revoke(self, tenant_id: str) -> Dict[str, Any]:
+        """``POST /v1/guard/consents/revoke``: JWT only, no device signature (§5.4)."""
+
+        return self._guard_call(
+            "POST",
+            "consents/revoke",
+            action="stop sharing Radient Guard stats",
+            json={"tenant": tenant_id},
+        )
+
     def list_org_agents(
         self, tenant_id: str, *, page: int = 1, per_page: int = 20
     ) -> Dict[str, Any]:

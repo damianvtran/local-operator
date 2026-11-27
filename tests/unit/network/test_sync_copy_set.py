@@ -443,6 +443,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "LRU spill store shared by every session on this device -- never an entry of a "
         "session directory, so no session copy carries it.",
     ),
+    # Radient Guard's install key is a per-MACHINE secret (one install's enrolment
+    # credential), like auth.db and the network identity keypair: a copy on another
+    # device would let it sign as this install, so it must never travel.
+    "local_operator/guard/install_key.py": (
+        1,
+        "``KEY_FILENAME`` ('install.key') is the per-DEVICE Radient Guard install-key "
+        "fallback file at <config>/guard/install.key (``key_file``), a secret bound to "
+        "this install's enrolment -- never an entry of a session directory, so no "
+        "session copy carries it.",
+    ),
+    "local_operator/guardrails/check.py": (
+        1,
+        "``KEY_FILE_NAME`` ('install.key') is the guardrail's literal copy of "
+        "``guard.install_key.KEY_FILENAME``, matched against command/path tokens under "
+        "<config>/guard/ to refuse reads of the per-DEVICE install key -- a match "
+        "pattern, never an entry of a session directory.",
+    ),
     "local_operator/guardrails/classify.py": (
         6,
         "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME, _STATE_DIRNAME, "

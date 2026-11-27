@@ -496,14 +496,14 @@ async def test_the_routed_receipt_discloses_the_dark_marker(tmp_path, monkeypatc
     receipt = getattr(handle._approvals_slash(session, "auto", SlashResult), "text", "")
     assert receipt == (
         "tool approvals: auto — every tool runs without asking, except account profile "
-        "saves and community posts (this session); "
+        "saves, community posts and Radient Guard sharing consent (this session); "
         "the band's ! will not follow this — /approvals re-reports the gate"
     ), receipt
 
     report = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
     assert report == (
         "tool approvals: auto — every tool runs without asking, except account profile "
-        "saves and community posts; new sessions open the "
+        "saves, community posts and Radient Guard sharing consent; new sessions open the "
         "same way; the band's ! will not follow this — /approvals re-reports the gate"
     ), report
 

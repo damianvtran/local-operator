@@ -1,7 +1,10 @@
 """The guardrail decision record and its sink (Radient Guard RFC v0.6, slice L1).
 
 WHAT. Every verdict the guardrail checkpoint reaches (``guardrails/check.py``)
-becomes one :class:`GuardDecisionRecord` handed to the process-wide sink. The
+becomes one :class:`GuardDecisionRecord` handed to the process-wide sink --
+ONE RECORD PER GUARD LAYER THAT REACHES A VERDICT, not one per tool call: a
+call a review allows and a user ``warn`` rule then annotates yields two
+records. Anything that counts records must count layer verdicts. The
 sink is a no-op unless something installs another one; slice L1 installs
 nothing, so this module only defines the seam and the vocabulary.
 
@@ -174,7 +177,13 @@ def emit_decision(outcome: str, rule_class: str, tool_class: str) -> None:
         return
     try:
         sink.emit(GuardDecisionRecord(outcome, rule_class, tool_class))
-    except Exception:  # noqa: BLE001 — telemetry must never decide a call
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001 — telemetry must never decide a call
+        # BaseException, not Exception (L1 review NIT-1): a sink raising e.g.
+        # GeneratorExit or a stray CancelledError from its own machinery must
+        # not escape into the guard and fail the call it was only recording.
+        # A person's Ctrl-C and an interpreter exit still propagate.
         return
 
 
