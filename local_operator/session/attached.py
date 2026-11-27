@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, cast
+from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -1322,6 +1322,10 @@ def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
     # (review R2-2).
     update.update(_inherited_identity_fixups(state, session_id))
     return update
+
+
+class _ColdOpenTraceKwargs(TypedDict, total=False):
+    _trace: open_trace.ColdOpenTrace
 
 
 class AttachedSession:
@@ -3309,6 +3313,9 @@ class AttachedSession:
         without a second scan of a transcript that reaches 103 MB.
         """
         trace = getattr(self, "_cold_open_trace", None)
+        # Trace instrumentation is opt-in; the off path keeps both helpers'
+        # original call contracts, not a new keyword with a null value.
+        trace_kwargs: _ColdOpenTraceKwargs = {"_trace": trace} if trace is not None else {}
         state = await synthesise_cold_state(
             config_dir=self._config_dir,
             session_id=self._session_id,
@@ -3321,7 +3328,7 @@ class AttachedSession:
             # A deferred HIT's record-proved reading, or ``None`` to read the
             # journal (see ``cold_model.resolve_conversation_model``).
             selection=selection,
-            _trace=trace,
+            **trace_kwargs,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":
             # Resolve the account metadata the runtime would, so the band does
@@ -3333,7 +3340,7 @@ class AttachedSession:
                         self._config_dir,
                         state.selected_model,
                         stickiness_key=self._session_id,
-                        _trace=trace,
+                        **trace_kwargs,
                     )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
