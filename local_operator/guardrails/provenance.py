@@ -1639,7 +1639,7 @@ def _own_tree_sheds(physical: str) -> bool:
     return not _holds_git(physical)
 
 
-def _merged_tree_sheds(real: str, entry: str) -> bool:
+def _merged_tree_sheds(real: str, entry: str, *, tool_shaped: bool = False) -> bool:
     """May plain removal of a FINISHED tree (any creator) take this ignored entry?
 
     Field case 2026-11-24 (guard 0.112.7, disk-full crashes): a read-only census
@@ -1691,12 +1691,28 @@ def _merged_tree_sheds(real: str, entry: str) -> bool:
         return False
     if name in _OS_METADATA_FILES or name.startswith("._"):
         return stat.S_ISREG(st.st_mode)
-    # #4561 security review R1-MAJOR-1 kept by the #4565 rebase: a name whose
-    # witness is TYPE-bound (Next's stub is a regular file) is held when it
-    # has another type, even here; otherwise this branch would quietly undo
-    # that review for every finished tree. (A link was already judged above.)
+    # #4561 review R1-MAJOR-1 (kept by #4565): a name whose witness is
+    # TYPE-bound (Next's stub is a regular file) is held when it has another
+    # type, even here; otherwise this branch would quietly undo that review
+    # for every finished tree. (A link was already judged above.)
     if name == "next-env.d.ts":
         return stat.S_ISREG(st.st_mode)
+    # #4590 QA Q1 on the ``--force`` finished route (``tool_shaped``): an
+    # entry at or under a tool-cache name is judged by the cache's CONTENT,
+    # not this blanket allowance — ``--force`` of a tagged ``.ruff_cache``
+    # holding ``notes.md`` (or an untagged one) held on base and still holds.
+    # Plain removal keeps #4565's allowance below for these names too.
+    parts = [p for p in entry.rstrip("/").split("/") if p]
+    if tool_shaped and any(p in _TOOL_CACHE_DIRS for p in parts):
+        return _verified_cache_dir(real, entry, tool_shaped=True)
+    # #4565: NO name list here — the finished-tree proof already covers every
+    # ignored entry (``_regenerable`` gating belongs to the routes WITHOUT that
+    # proof: ``--force`` and plain removal of a not-provably-finished tree).
+    # #4590, type-bound like ``next-env.d.ts`` above: a FILE named like a tool
+    # cache directory (``.ruff_cache`` as notes) is not the tool's output —
+    # those names are only ever directories — so it is held.
+    if name in _TOOL_CACHE_DIRS and not stat.S_ISDIR(st.st_mode):
+        return False
     if stat.S_ISDIR(st.st_mode):
         return _no_repository_below(physical)
     return stat.S_ISREG(st.st_mode)
@@ -2569,6 +2585,15 @@ def worktree_state(
             and ".." not in entry.split("/")
             and _next_env_types_file(real, entry)
         )
+        # Same content witness as the cleanup inventories (``_TOOL_CACHE_DIRS``):
+        # a child Git lists under a verified ``.ruff_cache`` is cache too.
+        cached = (
+            not os.path.isabs(entry)
+            and ".." not in entry.split("/")
+            and _verified_cache_dir(real, entry)
+        )
+        if cached:
+            continue
         if (
             not own
             and not linked
@@ -2739,6 +2764,28 @@ def _finder_metadata_file(real: str, entry: str) -> bool:
     return parent == real or parent.startswith(real + os.sep)
 
 
+def _os_metadata_file(real: str, entry: str) -> bool:
+    """A regular-file ``.DS_Store``/``Thumbs.db``/``desktop.ini`` inside the tree.
+
+    The :func:`_finder_metadata_file` rules (``lstat`` regular file, parent
+    realpath inside the tree) for every :data:`_OS_METADATA_FILES` name; the
+    OS rewrites these on its own and they carry only folder view state.
+    """
+    name = os.path.basename(entry)
+    if name not in _OS_METADATA_FILES:
+        return False
+    if name == ".DS_Store":
+        return _finder_metadata_file(real, entry)
+    physical = os.path.join(real, entry)
+    try:
+        if not stat.S_ISREG(os.lstat(physical).st_mode):
+            return False
+        parent = os.path.realpath(os.path.dirname(physical))
+    except OSError:
+        return False
+    return parent == real or parent.startswith(real + os.sep)
+
+
 def _ignored_symlink(real: str, entry: str) -> bool:
     """An ignored entry that is itself a symbolic link (by ``lstat``).
 
@@ -2799,8 +2846,70 @@ _CACHEDIR_TAG_SIGNATURE = b"Signature: 8a477f597d28d172789f06886806bc55"
 #: Bound on one ``__pycache__`` listing; a larger one is held (fail closed).
 _PYCACHE_SCAN_LIMIT = 20000
 
+#: Exact basenames of pure tooling caches whose CHILDREN Git may report one by
+#: one. WHY each is safe: the tool recreates it on its next run, so losing it
+#: costs one slower run, never user data — ``__pycache__`` (CPython bytecode),
+#: ``.pytest_cache`` (pytest's last-failed/node-id state), ``.ruff_cache``
+#: (ruff's per-file lint results) and ``.mypy_cache`` (mypy's incremental
+#: type data). The three tagged ones write a cachedir.org ``CACHEDIR.TAG``.
+#: Deliberately NOT here: ``.tox``/``.nox`` (virtualenvs that may carry
+#: hand-installed packages, #4528 R1-M1) and the generic ``.cache`` (any tool,
+#: or a person, writes there).
+#:
+#: Field case (guard 0.113.2, 2026-11-25, ``.worktrees/eval-budget-stop-cause``,
+#: PR #4580 merged, tracked tree clean): plain ``git worktree remove`` was held
+#: for "3 ignored entries the guard cannot prove regenerable". Ruff writes its
+#: own ``.gitignore`` holding ``*`` INSIDE ``.ruff_cache``, so when the repo does
+#: not ignore the directory itself, ``git status --ignored`` lists its children
+#: (``.ruff_cache/.gitignore``, ``.ruff_cache/0.17.6/``, ``.ruff_cache/CACHEDIR.TAG``)
+#: and none of those basenames or contents proves anything alone. The cache
+#: ROOT does, so :func:`_verified_cache_dir` judges the nearest ancestor with
+#: one of these names by the same content rules.
+_TOOL_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
 
-def _verified_cache_dir(real: str, entry: str) -> bool:
+
+def _verified_cache_dir(real: str, entry: str, *, tool_shaped: bool = False) -> bool:
+    """The ignored ``entry`` is, or lies inside, a content-verified cache.
+
+    Exact basename only: the entry itself (any name, as before) or its
+    nearest in-tree ancestor on :data:`_TOOL_CACHE_DIRS` must pass
+    :func:`_verified_cache_root`. A FILE under a cache name fails there
+    (``lstat`` must be a directory), and the cache root's no-repository walk
+    covers the child. Paths are relative and ``..``-free (``_cleanup_status_path``).
+
+    ``tool_shaped`` (the ``--force`` route, PR #4590 QA Q1): a cachedir.org tag
+    alone trusts a tagged cache's contents wholesale, so a hand-written
+    ``.ruff_cache/notes.md`` passed and ``git worktree remove --force`` deleted
+    it where base held. On that route the cache root must ALSO bear a
+    :data:`_TOOL_CACHE_DIRS` name and hold only what that tool writes
+    (:func:`_tool_shaped_cache`); any other tagged directory stays held there.
+    The plain route keeps its pre-existing tag trust (out of this PR's scope).
+    """
+    if _verified_cache_root(real, entry):
+        if not tool_shaped:
+            return True
+        name = os.path.basename(entry.rstrip("/"))
+        return name in _TOOL_CACHE_DIRS and _tool_shaped_cache(
+            os.path.join(real, entry.rstrip("/")), name
+        )
+    parts = [p for p in entry.rstrip("/").split("/") if p]
+    if ".." in parts or os.path.isabs(entry):
+        return False
+    for depth in range(len(parts) - 1, 0, -1):
+        if parts[depth - 1] in _TOOL_CACHE_DIRS:
+            root = "/".join(parts[:depth])
+            if not _verified_cache_root(real, root):
+                return False
+            if tool_shaped and not _tool_shaped_cache(os.path.join(real, root), parts[depth - 1]):
+                return False
+            # The child must stay inside that root after symlinks resolve.
+            child = os.path.realpath(os.path.join(real, entry.rstrip("/")))
+            base = os.path.realpath(os.path.join(real, root))
+            return child.startswith(base + os.sep)
+    return False
+
+
+def _verified_cache_root(real: str, entry: str) -> bool:
     """An ignored directory whose CONTENTS prove it is regenerable cache.
 
     Why (field case 2026-11-24, guard 0.112.7, disk-recovery session): plain
@@ -2855,6 +2964,103 @@ def _verified_cache_dir(real: str, entry: str) -> bool:
         return _tagged_cache_has_no_repository(physical)
     except OSError:
         return False
+
+
+#: The version directories ruff (``0.17.6``) and mypy (``3.12``) key their
+#: caches by, and ruff's per-package result files (a decimal u64 hash).
+_CACHE_VERSION_DIR = re.compile(r"\d+\.\d+(\.\d+)?")
+_RUFF_RESULT_FILE = re.compile(r"\d+")
+#: First line of the README pytest writes into ``.pytest_cache``.
+_PYTEST_README_HEAD = b"# pytest cache directory #"
+
+
+def _self_ignore_file(path: str) -> bool:
+    """The ``.gitignore`` ruff, mypy and pytest write: comments plus ``*``."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode) or os.path.getsize(path) > 4096:
+            return False
+        with open(path, "rb") as fh:
+            lines = [ln.strip() for ln in fh.read().splitlines()]
+    except OSError:
+        return False
+    rules = [ln for ln in lines if ln and not ln.startswith(b"#")]
+    return rules == [b"*"]
+
+
+def _tool_shaped_cache(physical: str, name: str) -> bool:
+    """Does this tagged cache root hold ONLY the shapes its tool writes?
+
+    Why (PR #4590 QA Q1, reproduced with real ``git worktree remove --force``):
+    the ``--force`` route has no merged-tree name rule behind it, so the
+    content witness is the last line between a person's file and deletion.
+    The tag says "this directory is cache"; it does not say a person never
+    dropped ``notes.md`` into it. Measured layouts (2026-11-25, this machine's
+    real caches): ruff ``.gitignore``, ``CACHEDIR.TAG``, ``<x.y.z>/<u64>``;
+    pytest ``.gitignore``, ``CACHEDIR.TAG``, ``README.md``, ``v/…`` (plus the
+    ``d/`` its ``cache.mkdir`` API makes); mypy ``.gitignore``,
+    ``CACHEDIR.TAG``, ``<x.y>/…`` (``missing_stubs`` at the root).
+
+    Constraints: every entry by ``lstat`` (a symlink anywhere holds), no
+    ``pyvenv.cfg`` or ``.git`` at any depth (#4590 R1-m1), bounded by
+    :data:`_PYCACHE_SCAN_LIMIT`; any other name, type or read error holds.
+    """
+    if name == "__pycache__":
+        return True  # _verified_cache_root already proved ``*.pyc``-only
+    seen = 0
+
+    def _subtree(top: str, files_ok: Callable[[str], bool]) -> bool:
+        nonlocal seen
+        try:
+            with os.scandir(top) as it:
+                children = list(it)
+        except OSError:
+            return False
+        for child in children:
+            seen += 1
+            if seen > _PYCACHE_SCAN_LIMIT or child.name in (".git", "pyvenv.cfg"):
+                return False
+            if child.is_dir(follow_symlinks=False):
+                if name == ".ruff_cache" or not _subtree(child.path, files_ok):
+                    return False  # ruff's version dirs hold files only
+            elif not (child.is_file(follow_symlinks=False) and files_ok(child.name)):
+                return False
+        return True
+
+    try:
+        with os.scandir(physical) as it:
+            top = list(it)
+    except OSError:
+        return False
+    for child in top:
+        seen += 1
+        if seen > _PYCACHE_SCAN_LIMIT:
+            return False
+        is_dir = child.is_dir(follow_symlinks=False)
+        is_file = child.is_file(follow_symlinks=False)
+        if child.name == "CACHEDIR.TAG" and is_file:
+            continue  # signature already read by _verified_cache_root
+        if child.name == ".gitignore" and _self_ignore_file(child.path):
+            continue
+        if name == ".ruff_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
+            if _subtree(child.path, lambda n: _RUFF_RESULT_FILE.fullmatch(n) is not None):
+                continue
+        elif name == ".mypy_cache" and is_dir and _CACHE_VERSION_DIR.fullmatch(child.name):
+            if _subtree(child.path, lambda _n: True):
+                continue
+        elif name == ".mypy_cache" and is_file and child.name == "missing_stubs":
+            continue
+        elif name == ".pytest_cache" and is_dir and child.name in ("v", "d"):
+            if _subtree(child.path, lambda _n: True):
+                continue
+        elif name == ".pytest_cache" and is_file and child.name == "README.md":
+            try:
+                with open(child.path, "rb") as fh:
+                    if fh.read(len(_PYTEST_README_HEAD)) == _PYTEST_README_HEAD:
+                        continue
+            except OSError:
+                return False
+        return False
+    return True
 
 
 def _tagged_cache_has_no_repository(physical: str) -> bool:
@@ -2920,7 +3126,11 @@ class IgnoredInventory:
 
 
 def plain_cleanup_ignored_inventory(
-    real: str, *, own_regenerable: bool = False, merged_regenerable: bool = False
+    real: str,
+    *,
+    own_regenerable: bool = False,
+    merged_regenerable: bool = False,
+    tool_shaped: bool = False,
 ) -> IgnoredInventory | None:
     """Count unverified ignored entries and other changes; ``None`` = unreadable.
 
@@ -2939,6 +3149,12 @@ def plain_cleanup_ignored_inventory(
     NOT a witness for anyone else's tree (#4240's point stands there), and
     any ignored entry off the list (``.env``, ``.terraform``) stays held even
     in an own tree: it may be the only copy of hand-made local data.
+
+    ``tool_shaped`` (PR #4590 QA Q1): set by the ``--force`` finished-tree
+    caller (``classify._merged_force_payload``). Tool-cache entries must then
+    hold only what their tool writes (:func:`_tool_shaped_cache`) rather than
+    pass on a ``CACHEDIR.TAG`` or #4565's blanket finished-tree allowance;
+    every other entry keeps #4565's rule (anything but a nested repository).
     """
     status = _strict_cleanup_status(real)
     if status is None:
@@ -2962,7 +3178,7 @@ def plain_cleanup_ignored_inventory(
         if (
             _shared_dependencies_link(real, entry)
             or _finder_metadata_file(real, entry)
-            or _verified_cache_dir(real, entry)
+            or _verified_cache_dir(real, entry, tool_shaped=tool_shaped)
             or _ignored_symlink(real, entry)
             or _next_env_types_file(real, entry)
         ):
@@ -2971,7 +3187,7 @@ def plain_cleanup_ignored_inventory(
             continue
         # ``merged_regenerable``: the caller ALSO holds a finished-tree proof
         # (``classify``; see :func:`_merged_tree_sheds`).
-        if merged_regenerable and _merged_tree_sheds(real, entry):
+        if merged_regenerable and _merged_tree_sheds(real, entry, tool_shaped=tool_shaped):
             continue
         unverified += 1
     return IgnoredInventory(unverified, changes)
@@ -3008,6 +3224,12 @@ def _interrupted_cleanup_state(
     if status is None:
         return "unknown"
     deleted = False
+    # PR #4590 QA Q2: the operator's field tree carries Finder ``.DS_Store``
+    # beside its caches, and ``--force`` on it stayed HIGH. OS folder metadata
+    # (regular files only, :func:`_os_metadata_file`) is accepted on this route
+    # only BESIDE a tool-shaped cache, so a metadata-only foreign tree keeps
+    # #4503 R1/Q1's base hold; an own tree sheds it via ``_own_tree_sheds``.
+    metadata_pending = cache_seen = False
     rows = status.split("\0")
     if facts is not None:
         facts["ignored"] = any(row.startswith("!! ") for row in rows)
@@ -3039,6 +3261,16 @@ def _interrupted_cleanup_state(
         # regenerable names and links as plain removal (#4493 QA Q-R4-1).
         if _shared_dependencies_link(real, entry):
             continue
+        # 2026-11-25 field case (``_TOOL_CACHE_DIRS``): a CONTENT-verified tool
+        # cache is a witness on every cleanup route, whoever made the tree,
+        # so ``--force`` agrees with plain removal for caches; the walk inside
+        # still refuses a nested repository, unreadable directory or overflow.
+        if _verified_cache_dir(real, entry, tool_shaped=True):
+            cache_seen = True
+            continue
+        if _os_metadata_file(real, entry):
+            metadata_pending = True
+            continue
         # 2026-11-24 field case: the ignored-symlink and ``next-env.d.ts``
         # witnesses are deliberately NOT added here for foreign trees, as with
         # ``.DS_Store`` (#4503 R1/Q1): ``--force`` stays as on base. An own tree
@@ -3047,6 +3279,8 @@ def _interrupted_cleanup_state(
         # the owner's supported spelling.
         if own_regenerable and _own_tree_sheds(physical):
             continue
+        return "dirty"
+    if metadata_pending and not cache_seen and not own_regenerable:
         return "dirty"
     if _nested_repository(real, worktrees=True, linked_root=True) is not None:
         return "dirty"

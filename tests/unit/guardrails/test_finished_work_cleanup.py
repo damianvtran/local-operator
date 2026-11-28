@@ -1958,3 +1958,182 @@ def test_finished_foreign_tree_sheds_regenerable_build_output(
     else:
         assert plain.risk is not Risk.LOW, plain.reasons
         assert plain.targets[0].cleanup_hold, plain.reasons
+
+
+def _tool_caches(wt: Path, payload: str) -> None:
+    """The 2026-11-25 field shape: ruff's self-ignoring ``.ruff_cache`` (Git
+    lists its CHILDREN), pytest's tagged cache and bytecode, nothing else."""
+    ruff = wt / ".ruff_cache"
+    (ruff / "0.17.6").mkdir(parents=True)
+    (ruff / "0.17.6" / "10586927287993054165").write_bytes(b"\x00lint")
+    (ruff / ".gitignore").write_text("# Automatically created by ruff.\n*\n")
+    (ruff / "CACHEDIR.TAG").write_bytes(_CACHEDIR_SIG)
+    pytest_cache = wt / ".pytest_cache" / "v" / "cache"
+    pytest_cache.mkdir(parents=True)
+    (pytest_cache / "nodeids").write_text("[]\n")
+    (wt / ".pytest_cache" / "CACHEDIR.TAG").write_bytes(_CACHEDIR_SIG + b"\n")
+    (wt / "pkg" / "__pycache__").mkdir(parents=True)
+    (wt / "pkg" / "__pycache__" / "m.cpython-314.pyc").write_bytes(b"\x00bytecode")
+    if payload == "ruff-repo":
+        # A nested repository under a cache name keeps the hold (fail closed).
+        subprocess.run(["git", "init", "-q", str(ruff / "0.17.6")], check=True)
+    if payload == "ruff-file":
+        # A FILE named like the cache is not the tool's directory: held.
+        for child in sorted(ruff.rglob("*"), reverse=True):
+            child.rmdir() if child.is_dir() else child.unlink()
+        ruff.rmdir()
+        ruff.write_text("hand-written notes\n")
+    if payload == "ruff-untagged":
+        (ruff / "CACHEDIR.TAG").unlink()
+
+
+@pytest.mark.parametrize("merged", [True, False], ids=["merged", "unmerged"])
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [("caches", True), ("ruff-repo", False), ("ruff-file", False), ("ruff-untagged", False)],
+)
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+def test_tool_caches_shed_on_every_cleanup_route(
+    home: Path, repo: Path, payload: str, shed: bool, merged: bool, force: bool
+) -> None:
+    """Field case (guard 0.113.2, 2026-11-25, ``.worktrees/eval-budget-stop-cause``,
+    PR #4580 merged): plain ``git worktree remove <path>`` held for "3 ignored
+    entries the guard cannot prove regenerable" — the three CHILDREN Git lists
+    under ruff's self-ignoring ``.ruff_cache``. A content-verified tool cache
+    (``_TOOL_CACHE_DIRS``) now sheds on plain AND ``--force``, merged or not,
+    whoever made the tree; a nested repo, a file under the name or an untagged
+    directory still holds.
+    """
+    name = f"tc-{payload}-{merged}-{force}"
+    wt = _branch_tree(home, repo, name)
+    if not merged:
+        # Unmerged commits are only safe to drop for their creator (the branch
+        # ref survives): the unmerged row is this session's own tree.
+        _record(home, wt, creator=ME)
+    if merged:
+        _git("merge", "--ff-only", f"fix/{name}", cwd=repo)
+        _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    # Only ``__pycache__``/``.pytest_cache`` ignored by the repo, as in the
+    # field tree; ``.ruff_cache`` is ignored solely by its own ``.gitignore``.
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n")
+    _tool_caches(wt, payload)
+    if payload == "ruff-file":
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write(".ruff_cache\n")
+    inventory = prov.plain_cleanup_ignored_inventory(str(wt))
+    assert inventory is not None
+    assert (inventory.unverified_ignored == 0) is shed, inventory
+    flag = "--force " if force else ""
+    ranked = _rank(home, f"git -C {repo} worktree remove {flag}{wt}")
+    reasons = " ".join(ranked.reasons)
+    if payload == "ruff-repo":
+        # A nested repository under a cache name holds on every route.
+        assert ranked.risk is not Risk.LOW, ranked.reasons
+        return
+    if force and not merged:
+        # Own unmerged tree: the payload sheds (``_own_tree_sheds``), and the
+        # remaining hold is the forge's branch activity (gh is down in this
+        # fixture) — unrelated to the caches.
+        assert "preservation check failed" not in reasons, reasons
+        assert "branch activity could not be verified" in reasons, reasons
+        return
+    if force:
+        # Foreign finished tree, ``--force``: ONLY the content witness sheds
+        # (no name rule on this route), so untagged/file shapes hold.
+        assert (ranked.risk is Risk.LOW) is shed, ranked.reasons
+        return
+    # Plain route keeps the pre-existing rules on top of the content witness:
+    # an OWN tree sheds every non-repo ignored entry (#4493), a FINISHED tree
+    # sheds ``_REGENERABLE`` names (an untagged ``.ruff_cache`` directory).
+    # A FILE named ``.ruff_cache`` no longer passes that name rule.
+    if merged and payload == "ruff-file":
+        assert ranked.risk is not Risk.LOW, ranked.reasons
+    else:
+        assert ranked.risk is Risk.LOW, ranked.reasons
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+def test_field_argv_ruff_cache_children_rank_low(home: Path, repo: Path, force: bool) -> None:
+    """The literal field argv: ``git worktree remove <path>`` run from the repo."""
+    name = f"eval-budget-stop-cause-{force}"
+    wt = _branch_tree(home, repo, name)
+    _git("merge", "--ff-only", f"fix/{name}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n")
+    _tool_caches(wt, "caches")
+    flag = "--force " if force else ""
+    ranked = classify_bash(
+        f"git worktree remove {flag}{wt}",
+        cwd=str(repo),
+        env=_env(home),
+        scratchpad=None,
+        session_id=ME,
+    )
+    assert ranked.risk is Risk.LOW, ranked.reasons
+
+
+@pytest.mark.parametrize(
+    ("payload", "shed"),
+    [
+        # Q2: the operator's field tree — Finder metadata BESIDE the caches.
+        ("caches-ds", True),
+        # Q1: a person's file inside a tagged tool cache (base held these).
+        ("ruff-notes", False),
+        ("pytest-notes", False),
+        ("ruff-notes-ds", False),
+        # Kept held: a venv or symlink inside a tagged cache, metadata alone
+        # in a foreign tree (#4503 R1/Q1), a directory named ``.DS_Store``.
+        ("ruff-venv", False),
+        ("ruff-symlink", False),
+        ("ds-only", False),
+        ("ds-dir", False),
+    ],
+)
+def test_force_sheds_only_tool_shaped_caches(
+    home: Path, repo: Path, payload: str, shed: bool
+) -> None:
+    """PR #4590 QA round 1 (Q1, Q2), literal argv ``git -C <repo> worktree
+    remove --force <wt>`` on a finished, merged tree this session did not make.
+
+    Q1: a tag alone trusted ``.ruff_cache/notes.md`` and git deleted it (base:
+    HIGH). Q2: with ``.DS_Store`` beside the caches the field shape still read
+    "preservation check failed". Before the fix ``caches-ds`` was HIGH and the
+    three ``notes``/``ruff-venv`` rows were LOW.
+    """
+    name = f"force-shape-{payload}"
+    wt = _branch_tree(home, repo, name)
+    _git("merge", "--ff-only", f"fix/{name}", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("__pycache__/\n.pytest_cache/\n.DS_Store\n")
+    if payload != "ds-only":
+        _tool_caches(wt, "caches")
+    (wt / ".pytest_cache" / "README.md").parent.mkdir(exist_ok=True)
+    (wt / ".pytest_cache" / "README.md").write_text("# pytest cache directory #\n\nThis...\n")
+    (wt / ".pytest_cache" / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+    if payload.endswith("-ds") or payload == "ds-only":
+        (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1" + os.urandom(64))
+    if payload == "ds-dir":
+        (wt / ".DS_Store").mkdir()
+        (wt / ".DS_Store" / "data").write_text("mine\n")
+    if payload.startswith("ruff-notes"):
+        (wt / ".ruff_cache" / "notes.md").write_text("hand-written notes\n")
+    if payload == "pytest-notes":
+        (wt / ".pytest_cache" / "notes.md").write_text("hand-written notes\n")
+    if payload == "ruff-venv":
+        (wt / ".ruff_cache" / "0.17.6" / "pyvenv.cfg").write_text("home = /x\n")
+    if payload == "ruff-symlink":
+        (wt / ".ruff_cache" / "0.17.6" / "123").symlink_to(home)
+    ranked = _rank(home, f"git -C {repo} worktree remove --force {wt}")
+    assert (ranked.risk is Risk.LOW) is shed, ranked.reasons
+    if not shed:
+        assert ranked.targets[0].cleanup_hold, ranked.reasons
+        return
+    # The LOW rank is for the command real Git then runs: it removes the tree.
+    _git("worktree", "remove", "--force", str(wt), cwd=repo)
+    assert not wt.exists()
