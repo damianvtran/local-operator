@@ -117,7 +117,7 @@ and not `/tmp` (macOS prunes it after three days).
 never end a turn with pending items: resolve, `block` with a reason, or `drop` each.
 Re-check each `block`ed item before finishing{{#if has_wake_monitor}}; arm a wake or monitor for
 external waits{{/if}}. A `block` that waits on the operator must be named in your closing{{#if has_ask}}
-and covered by an open `ask` (queue one now){{#if has_wake_monitor}}; a wake is not a substitute{{/if}}{{/if}}.
+and covered by an open `ask` (ask now; one per gate, cite it after){{#if has_wake_monitor}}; a wake is not a substitute{{/if}}{{/if}}.
 
 {{/if}}{{#if has_subagents}}Subagents: `task` delegates to a vetted `agent`; `wait` blocks with one budget
 per job. `hub` inspects/messages/steers/resumes children; inside one,

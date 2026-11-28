@@ -2409,7 +2409,7 @@ def test_system_md_requires_an_ask_for_a_block_that_waits_on_the_operator() -> N
         "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": True}
     )
     assert "A `block` that waits on the operator must be named in your closing" in full
-    assert "covered by an open `ask` (queue one now); a wake is not a substitute." in full
+    assert "covered by an open `ask` (ask now; one per gate, cite it after); a wake is not a substitute." in full
 
     # Without a wake tool the "wake is not a substitute" clause has nothing to
     # contradict, and without `ask` the prompt must not tell the model to queue
@@ -2417,7 +2417,7 @@ def test_system_md_requires_an_ask_for_a_block_that_waits_on_the_operator() -> N
     no_wake = render_template(
         "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": False}
     )
-    assert "covered by an open `ask` (queue one now)." in no_wake
+    assert "covered by an open `ask` (ask now; one per gate, cite it after)." in no_wake
     assert "wake is not a substitute" not in no_wake
     no_ask = render_template(
         "system.md", {**base, "has_todo": True, "has_ask": False, "has_wake_monitor": False}
@@ -2442,8 +2442,12 @@ def test_manager_seed_carries_the_operator_gated_rule() -> None:
     # operator wait with no ask queues one rather than parking.
     for needle in (
         "(i) operator, OPEN ask <id>",
-        "(ii) operator, NO ask -> queue one `ask`",
-        "never park it",
+        "(ii) operator, NO ask -> `ask` now if you\nhold `ask`",
+        # A manager without an ask hook (server/exec/scheduler/subagent) must be
+        # told what to do instead, not handed a tool it does not hold.
+        "otherwise state it in your closing as an open question",
+        "never park it silently",
+        "Ask once per gate: cite the open ask <id> thereafter, never one ask\nper wake or per status.",
         "(iii) external: <party/agent>",
         "(iv) deliberately not started",
     ):

@@ -316,8 +316,13 @@ def test_manager_preamble_carries_the_operator_gated_status_rule(registry: TeamR
     )
     brief = team.manager_preamble()
     assert 'Every end-of-turn status carries an "Operator-gated" section' in brief
-    assert "(ii) operator, NO ask -> queue one `ask` now" in brief
-    assert "never park it" in brief
+    assert "(ii) operator, NO ask -> `ask` now if you hold `ask`" in brief
+    # No ask hook (subagent-launched manager): state it in the closing instead.
+    assert "otherwise state it in your closing as an open question for the operator" in brief
+    assert "never park it silently" in brief
+    assert "Ask once per gate, cite its id after, never one per wake or status" in brief
+    for needle in ("(iii) external", "(iv) deliberately not started"):
+        assert needle in brief, needle
     assert 'Say "nothing needs you" only when (i) and (ii) are both empty.' in brief
     assert "`operator:`, `external:` or `deliberate:`" in brief
     assert 'never "report quietly"' in brief

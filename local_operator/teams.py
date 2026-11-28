@@ -690,9 +690,12 @@ class Team(BaseModel):
         parts.append(
             'Every end-of-turn status carries an "Operator-gated" section, '
             "re-derived from the todo/project ledger that turn. File each blocked "
-            "item as: (i) operator, OPEN ask <id>; (ii) operator, NO ask -> queue "
-            "one `ask` now (exact question, options with consequences, "
-            "recommendation, long timeout), never park it; (iii) external: "
+            "item as: (i) operator, OPEN ask <id>; (ii) operator, NO ask -> `ask` "
+            "now if you hold `ask` (exact question, options with consequences, "
+            "recommendation, long timeout); otherwise state it in your closing "
+            "as an open question for the operator (exact decision, your "
+            "recommendation); never park it silently. Ask once per gate, cite "
+            "its id after, never one per wake or status; (iii) external: "
             "<party>, chase <when/how>; (iv) deliberately not started: <why>. Say "
             '"nothing needs you" only when (i) and (ii) are both empty. Todo '
             "`block` reasons start with `operator:`, `external:` or `deliberate:`. "

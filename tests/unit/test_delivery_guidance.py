@@ -63,10 +63,13 @@ def _fields(**overrides):
 # Measured with `len(body.split('---',2)[2].strip())`: manager 3726 -> 4485. The
 # rule is a reporting invariant, not explanation, so the budget moves with it
 # rather than the rule being trimmed to fit.
+# Review round 1 (MAJOR-1): the (ii) branch must also cover a manager that holds
+# no `ask` (server/exec/scheduler/subagent runs) and say one ask per gate
+# (+233 chars, same measurement: manager 4485 -> 4718), so 4500 -> 4750.
 BUDGETS = {
     "coder": 2800,
     "reviewer": 3740,
-    "manager": 4500,
+    "manager": 4750,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
