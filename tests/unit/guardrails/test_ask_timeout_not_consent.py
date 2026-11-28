@@ -1981,6 +1981,78 @@ async def test_explicit_parent_alternative_respects_target_and_trust(
     assert (deep / "hyperplane-cpp/build").is_dir()  # No command is dispatched.
 
 
+def _fs_fingerprint(root: Path) -> dict[str, tuple[int, int, bytes | None]]:
+    """(st_dev, st_ino, bytes) for every entry under ``root``; dirs carry None."""
+    out: dict[str, tuple[int, int, bytes | None]] = {}
+    for entry in [root, *sorted(root.rglob("*"))]:
+        st = entry.lstat()
+        out[str(entry)] = (st.st_dev, st.st_ino, None if entry.is_dir() else entry.read_bytes())
+    return out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", [".", ":", ".:"], ids=["dot", "colon", "mixed"])
+@pytest.mark.parametrize(
+    "delete, keep",
+    [
+        # The PICKED label carries the terminal punctuation; the unpicked one is plain.
+        pytest.param("Delete ~/hyperplane-cpp{s}", "Keep ~/hyperplane-cpp", id="picked-punct"),
+        # The UNPICKED label carries it; the picked one is plain. The comparator
+        # runs once per label, so each label is an independent call site.
+        pytest.param("Delete ~/hyperplane-cpp", "Keep ~/hyperplane-cpp{s}", id="unpicked-punct"),
+    ],
+)
+async def test_punctuated_parent_label_keeps_competing_option_veto(
+    deep: Path, delete: str, keep: str, suffix: str
+) -> None:
+    """Q-R5-1 (PR #4599): a label ending in ``.``/``:`` is a different literal path.
+
+    Prose expansion trims terminal dots/colons, so ``~/hyperplane-cpp.`` reads
+    as ``~/hyperplane-cpp``. ``_literal_compatibility_target`` must NOT equate
+    them, otherwise a newer broader pick would look compatible with the older
+    exact approval, silently suppress the competing-option veto, and let the
+    superseded exact citation authorise ``rm -rf``. With the veto kept the
+    preview defers to the judge and the checkpoint rejects that citation.
+    Sentinels prove neither decision entry point touched the filesystem.
+    """
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    delete, keep = delete.format(s=suffix), keep.format(s=suffix)
+    child = deep / "hyperplane-cpp/build"
+    sibling = deep / "hyperplane-cpp/sibling-keep"
+    for base in (child, sibling):
+        (base / "sentinel-dir").mkdir(parents=True)
+        (base / "sentinel-dir" / "sentinel.txt").write_bytes(b"keep-me:" + base.name.encode())
+        (base / "sentinel.txt").write_bytes(b"top:" + base.name.encode())
+    before = {base: _fs_fingerprint(base) for base in (child, sibling)}
+
+    _answered_at(deep, "a-e1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000)
+    # The PICKED answer is always the Delete label; only its spelling varies.
+    _answered_at(
+        deep, "a-b1", "Delete ~/hyperplane-cpp?", [delete, keep], answer=delete, ago_ms=10_000
+    )
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = _ctx(deep, command)
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    judge = _Judge("ALLOW ask=a-e1")
+    result = await _check(deep, command, judge)
+    verdict = _rank(deep, command)
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, ctx)
+    exact, exact_missing = case.verify("ALLOW ask=a-e1", forked=True)
+    broader, broader_missing = case.verify("ALLOW ask=a-b1", forked=True)
+
+    assert preview.builtin_effect == "judge"
+    assert len(judge.prompts) == 1  # exactly one fake-judge call, from the checkpoint
+    assert result is not None and result.blocked  # superseded exact citation rejected
+    assert not exact and exact_missing
+    assert not broader and broader_missing  # the broader pick grants no authority
+    assert {base: _fs_fingerprint(base) for base in (child, sibling)} == before
+    assert child.is_dir() and sibling.is_dir()  # No command is dispatched.
+
+
 @pytest.mark.asyncio
 async def test_exact_trusted_answer_does_not_change_critical_precedence(deep: Path) -> None:
     _answered_at(
