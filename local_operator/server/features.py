@@ -65,6 +65,9 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # `/v1/desktop/sessions/{id}/notification-avatar`; it is the desktop main
         # process's OS-banner image, and a phone told it may ask would 404.
         "desktop_session_notification_avatar",
+        # Same class: the phone relay serves no `/v1/desktop/guard*` (the phone's Guard
+        # surface is a relay twin M1 owns), so a phone told it may ask would 404.
+        "guard",
     }
 )
 
@@ -1084,6 +1087,15 @@ def static_feature_flags() -> dict[str, Any]:
         # POST would 404 on a backend without it. Absent, the tab simply has no
         # approval affordance, which is the pre-onboarding state.
         "approvals": 1,
+        # RADIENT GUARD ON THE DESKTOP PLANE: `GET /v1/desktop/guard` and its writes
+        # (`routes/desktop_guard.py`, contract `docs/design/guard-desktop-routes.md`).
+        # ITS OWN KEY, not a bump of `approvals`: the pending `guard_consent` card
+        # already rides `approvals`, and a renderer must be able to ask whether the
+        # status/revoke/share-again routes exist before it draws a Guard panel whose
+        # calls would 404 on an older backend. It says the ROUTES exist, not that
+        # Guard applies to this account (that is the status route's `mode`).
+        # Desktop-only (DESKTOP_ONLY_FEATURES): the phone relay serves none of them.
+        "guard": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
         # TYPED CREDENTIAL APPROVAL: `POST /v1/desktop/approvals/{id}/approve-credential`

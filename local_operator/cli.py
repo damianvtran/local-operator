@@ -13133,7 +13133,13 @@ def _serve_command(
     # for why all THREE names go (the escape hatch included) and why the removal
     # is in place rather than a returned copy.
     from local_operator.agent_shell import drop_agent_shell_marker_from_environ
+    from local_operator.guard.surface import capture_host_can_answer
 
+    # BEFORE the drop, in this order on purpose (Guard RFC, security review S-1): "was this
+    # daemon started by an agent's shell or a console pane" is exactly what the drop erases,
+    # and the desktop Guard routes' person-only gate (``share-again``, ``can_answer``) needs
+    # the answer. Read once here, published as ``app.state.guard_host_can_answer``.
+    capture_host_can_answer()
     drop_agent_shell_marker_from_environ()
 
     try:

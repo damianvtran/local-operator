@@ -57,11 +57,27 @@ STATE_PAUSED: Final = "paused"
 STATE_WILL_ASK: Final = "will_ask"
 
 #: How many days backup copies of deleted step-by-step timing survive (RFC §5.4
-#: "X", recorded by G2). ``None`` until measured: while it is, the consent engine
-#: refuses ``trace_detail``/``admin_share`` offers
-#: (``guard.consent.UNMEASURED_SCOPES``), so the revoke confirm that must state
-#: X can never render without it (copy review round 1, C1).
-BACKUP_DAYS: Final[int | None] = None
+#: "X", recorded by G2): the revoke confirm states it ("Copies in backups are
+#: gone within {backup_days} days"), on the TUI and on the desktop route's
+#: ``backup_days``. THE ONE PLACE both read it.
+#:
+#: MEASURED 31 on 2026-11-27 from the Atlas backup policy of the production
+#: cluster (G2 receipt "Atlas backup retention", read-only describe, then the
+#: operator-confirmed change: yearly snapshots dropped, monthly kept 1 month,
+#: weekly 4 weeks, hourly/daily 7 days, no cross-region copies). The longest a
+#: copy of a deleted row can persist is the monthly snapshot's one month = 31
+#: days (weekly is 28; PITR is 7). Snapshots taken before the change keep their
+#: original expiry but hold no Guard data (the namespace epoch was unset), so
+#: X holds for every Guard row. If the Atlas policy is ever lengthened, this
+#: constant and the RFC §11.1' disclosure change together.
+#:
+#: SETTING IT DOES NOT LIFT ``guard.consent.UNMEASURED_SCOPES``. The engine
+#: still refuses ``trace_detail``/``admin_share`` offers: offering a scope
+#: members can consent to is its own decision (copy and server readiness), not a
+#: side effect of knowing X. Until then no consent can hold ``trace_detail``, so
+#: the trace-detail revoke sentence stays unreachable and the TUI keeps showing
+#: the plain revoke body.
+BACKUP_DAYS: Final[int | None] = 31
 
 #: The process-environment markers that mean "this terminal may be driven by an
 #: agent, not a person" (security round 1, S-1). ``LOCAL_OPERATOR_AGENT_SHELL``
@@ -105,6 +121,88 @@ class OrgState:
     since: float = 0.0
 
 
+def one_line(text: str) -> str:
+    """An org-supplied name flattened to one line: no control characters, capped (S-3).
+
+    The TUI renders the result with markup off; the desktop routes ship it as
+    JSON text. Either way a name an org controls cannot carry a newline, an
+    escape sequence or an unbounded run into a client.
+    """
+
+    flat = "".join(" " if unicodedata.category(ch)[0] == "C" else ch for ch in text)
+    flat = " ".join(flat.split())
+    return flat[:79] + "…" if len(flat) > 80 else flat
+
+
+def badge_kind(states: list[OrgState], *, reports_waiting: int = 0) -> str:
+    """The status badge as an enum (``""`` = none); the TUI and the desktop agree on it.
+
+    Order: a waiting consent choice, then a waiting report draft (UX round 1,
+    U6), then a pending widening (still sharing, never "paused", §13.3'
+    ``consent_stale``), then plain sharing.
+    """
+
+    if any(s.state == STATE_WAITING for s in states):
+        return "waiting"
+    if reports_waiting > 0:
+        return "report_waiting"
+    if any(s.state == STATE_SHARING_PENDING for s in states):
+        return "sharing_pending"
+    if any(s.state == STATE_SHARING for s in states):
+        return "sharing"
+    return ""
+
+
+def computer_name() -> str:
+    """This computer's short name for "this computer" lines, ``""`` when unknown."""
+
+    import socket
+
+    try:
+        return socket.gethostname().split(".")[0].strip()
+    except OSError:
+        return ""
+
+
+def load_trial_eligibility(config_dir: Path | str) -> Mapping[str, Any] | None:
+    """``GET /v1/team-trial/eligibility`` as the signed-in person, or ``None``.
+
+    The non-Team card's only read (§14', §0.13). It is NOT a ``/v1/guard/*``
+    call and writes nothing. Blocking (it resolves the person's OAuth access on
+    a private loop): run it off the event loop. Lives here, not in the TUI
+    widget, so the desktop route can call it without importing Textual.
+    """
+
+    from local_operator.hub_org import eligibility
+
+    resolved = eligibility.person_client(Path(config_dir))
+    if resolved is None:
+        return None
+    return resolved[0].team_trial_eligibility()
+
+
+def is_sharing(state: OrgState) -> bool:
+    """ "Stop sharing" is offered: this computer is sharing with the org.
+
+    ONE predicate for the TUI's button and the desktop route's ``can_revoke`` /
+    revoke refusal, so the two cannot disagree about when a stop is offered. A
+    ``revoke_pending`` org is NOT sharing (the stop is committed, only the
+    request to Radient is outstanding), so it is not offered a second stop.
+    """
+
+    return state.state in (STATE_SHARING, STATE_SHARING_PENDING)
+
+
+def is_stopped(state: OrgState) -> bool:
+    """ "Share again" is offered for this org (still subject to :func:`host_can_answer`).
+
+    ONE predicate for the button and its handler (review R1-2): never a
+    ``revoke_pending`` org, whose stop has not been delivered yet.
+    """
+
+    return state.state in (STATE_NOT_SHARING, STATE_PAUSED) and state.reason != "revoke_pending"
+
+
 def host_can_answer() -> bool:
     """May THIS process answer an authority-increasing Guard question? Never raises.
 
@@ -127,6 +225,87 @@ def host_can_answer() -> bool:
         return not any(os.environ.get(name, "").strip() for name in _AGENT_DRIVEN_MARKERS)
     except Exception:  # noqa: BLE001 - unknown means not a person
         return False
+
+
+#: The one name a served daemon's CHILDREN read the capture through (see
+#: :func:`capture_host_can_answer`). Only ever written as ``"0"``; ``"1"`` or absence means
+#: "decide from the live environment", so a process can never WIDEN the gate by setting it.
+HOST_CAN_ANSWER_ENV = "LOCAL_OPERATOR_GUARD_HOST_CAN_ANSWER"
+
+#: The capture a ``lop serve`` process took before it dropped its own agent-shell markers
+#: (``None`` = no capture: an embedded app, a test host, a TUI).
+_SERVE_CAPTURE: bool | None = None
+
+
+def capture_host_can_answer() -> bool:
+    """Record :func:`host_can_answer` for a daemon about to erase the evidence. Never raises.
+
+    WHY (security review S-1 on L2c). ``lop serve`` strips the agent-shell markers from its
+    OWN ``os.environ`` at startup (``agent_shell.drop_agent_shell_marker_from_environ``) so
+    that sessions the daemon mints for the operator are not stamped ``agent-shell``. A
+    :func:`host_can_answer` read per request therefore always sees a clean environment and
+    answers ``True`` on every served daemon, however it was started: the share-again
+    person-only gate and the ``can_answer`` hint were unreachable in production. The answer
+    is a fact about how the process was STARTED, so it is read once, here, BEFORE the drop
+    (``cli.serve_command`` calls this first), kept in this module and published to routes as
+    ``app.state.guard_host_can_answer``.
+
+    Also written to :data:`HOST_CAN_ANSWER_ENV` when the answer is no, because a ``--reload``
+    child and a re-exec read a copy of the already-cleaned environment: without the flag the
+    refusal would last exactly one process. Fail closed: only ``"0"`` is ever written, and
+    :func:`served_host_can_answer` only ever reads it to REFUSE.
+    """
+
+    import os
+
+    global _SERVE_CAPTURE
+    try:
+        answer = host_can_answer() and os.environ.get(HOST_CAN_ANSWER_ENV, "") != "0"
+    except Exception:  # noqa: BLE001 - unknown means not a person
+        answer = False
+    _SERVE_CAPTURE = answer
+    if not answer:
+        os.environ[HOST_CAN_ANSWER_ENV] = "0"
+    return answer
+
+
+def served_host_can_answer() -> bool:
+    """The capture a served daemon took at start, else the live read. Never raises.
+
+    What the desktop Guard routes use. With no capture (an embedded app or a test host that
+    never went through ``lop serve``) it is the live :func:`host_can_answer`, still refused
+    when an ancestor daemon left :data:`HOST_CAN_ANSWER_ENV` ``"0"``.
+    """
+
+    import os
+
+    try:
+        if _SERVE_CAPTURE is not None:
+            return _SERVE_CAPTURE
+        return host_can_answer() and os.environ.get(HOST_CAN_ANSWER_ENV, "") != "0"
+    except Exception:  # noqa: BLE001 - unknown means not a person
+        return False
+
+
+def reset_serve_capture() -> None:
+    """Forget the capture (test isolation; nothing in the product calls it)."""
+
+    global _SERVE_CAPTURE
+    _SERVE_CAPTURE = None
+
+
+def to_minute(epoch: float) -> float:
+    """Floor an epoch to its minute, as the TUI renders it (``%H:%M``). Never raises.
+
+    The wire must not carry finer timing than the TUI shows (security review S-4): a
+    renderer cannot show more than the screen it mirrors, and a phone-relay twin does not
+    forward sub-minute timing of when a receipt was written.
+    """
+
+    try:
+        return float(int(float(epoch)) // 60 * 60)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _team_orgs(config_dir: Path) -> list[Any]:
@@ -373,13 +552,7 @@ def non_team_card(eligibility: Mapping[str, Any] | None) -> NonTeamCard:
             days = raw
     org: str | None = None
     if isinstance(eligibility, Mapping) and isinstance(eligibility.get("tenant_name"), str):
-        # An org-supplied name: one line, no control characters, capped (the
-        # S-3 shape; the TUI renders it with markup off).
-        flat = "".join(
-            " " if unicodedata.category(ch)[0] == "C" else ch for ch in eligibility["tenant_name"]
-        )
-        flat = " ".join(flat.split())
-        org = (flat[:79] + "…" if len(flat) > 80 else flat) or None
+        org = one_line(eligibility["tenant_name"]) or None
     return NonTeamCard(trial_days=days, url=team_url(), org=org)
 
 
@@ -395,13 +568,23 @@ __all__ = [
     "STATE_WAITING",
     "STATE_WILL_ASK",
     "BACKUP_DAYS",
+    "badge_kind",
+    "computer_name",
     "guard_available",
     "guard_insights_tenants",
+    "HOST_CAN_ANSWER_ENV",
+    "capture_host_can_answer",
     "host_can_answer",
+    "is_sharing",
+    "is_stopped",
+    "load_trial_eligibility",
+    "one_line",
     "insights_tenants",
     "insights_url",
     "non_team_card",
     "org_states",
+    "served_host_can_answer",
     "should_show_notice",
     "team_url",
+    "to_minute",
 ]

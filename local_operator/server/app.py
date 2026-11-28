@@ -60,6 +60,7 @@ from local_operator.server.routes import (
     desktop_code_requests,
     desktop_community,
     desktop_credentials,
+    desktop_guard,
     desktop_hub,
     desktop_imports,
     desktop_librarian,
@@ -289,6 +290,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_cross_platform_environment()
 
     app.state.config_manager = ConfigManager(config_dir=config_dir)
+    # Whether this daemon was started by a person (Guard's person-only gate). Taken from the
+    # capture ``lop serve`` made BEFORE it dropped the agent-shell markers; a per-request
+    # read of ``os.environ`` would always see the cleaned environment.
+    from local_operator.guard.surface import served_host_can_answer
+
+    app.state.guard_host_can_answer = served_host_can_answer()
+    # The receipt ids ``GET /guard/notices`` has listed (``notices/{id}/shown``'s allow-list).
+    # Created here, once, on the loop: the routes run on worker threads, and a lazy
+    # create-on-first-use there could hand two concurrent first requests two different sets.
+    app.state.guard_notices_listed = set()
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
@@ -1503,6 +1514,10 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The GUARD surface (`features.guard`): the TUI's `/guard` screen over HTTP (status, stop
+# sharing, share again, the non-Team card, receipts). Device-local and additive; every
+# template sits under `/v1/desktop/guard`, which no router above declares.
+app.include_router(desktop_guard.router)
 # The op-generic TYPED approval routes (`{id}/approve-operation`, `{id}/apply-operation`):
 # their own router because `desktop_approvals.router`'s route set is a pinned contract.
 # Two-segment children of the same template family, so they collide with nothing above.

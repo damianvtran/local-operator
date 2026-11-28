@@ -176,14 +176,17 @@ def badge_text(states: list[surface.OrgState], *, reports_waiting: int = 0) -> s
     then the sharing states.
     """
 
-    if any(s.state == surface.STATE_WAITING for s in states):
+    # The order lives in ``surface.badge_kind`` so the desktop's badge enum
+    # cannot drift from this sentence.
+    kind = surface.badge_kind(states, reports_waiting=reports_waiting)
+    if kind == "waiting":
         return _t(_keys.badge_waiting())
-    if reports_waiting > 0:
+    if kind == "report_waiting":
         return _t(_keys.badge_report_waiting())
-    if any(s.state == surface.STATE_SHARING_PENDING for s in states):
+    if kind == "sharing_pending":
         # Still sharing (§13.3' consent_stale): never "paused", never "choose" alone.
         return _t(_keys.badge_sharing_pending())
-    if any(s.state == surface.STATE_SHARING for s in states):
+    if kind == "sharing":
         return _t(_keys.badge_sharing())
     return ""
 
@@ -312,28 +315,13 @@ class GuardScreen(ModalScreen[str]):
         return tenant
 
     def _sharing(self) -> surface.OrgState | None:
-        return next(
-            (
-                s
-                for s in self._states
-                if s.state in (surface.STATE_SHARING, surface.STATE_SHARING_PENDING)
-            ),
-            None,
-        )
+        return next((s for s in self._states if surface.is_sharing(s)), None)
 
     def _stopped(self) -> surface.OrgState | None:
         """The org "Share again" acts on. ONE predicate for the button and its
         handler (review R1-2): never a ``revoke_pending`` org, whose stop is unsent."""
 
-        return next(
-            (
-                s
-                for s in self._states
-                if s.state in (surface.STATE_NOT_SHARING, surface.STATE_PAUSED)
-                and s.reason != "revoke_pending"
-            ),
-            None,
-        )
+        return next((s for s in self._states if surface.is_stopped(s)), None)
 
     # -- compose -------------------------------------------------------------
 
@@ -396,9 +384,10 @@ class GuardScreen(ModalScreen[str]):
             consent = _consent_scopes(self._config_dir, self._revoke.tenant)
             body = (
                 _t(_keys.revoke_body_trace(backup_days=str(surface.BACKUP_DAYS)))
-                # Unreachable while BACKUP_DAYS is None: the engine refuses the
-                # scope, so no consent can hold it (C1). Kept so lifting the
-                # refusal is one constant plus the measured X, never new copy.
+                # Unreachable while the engine refuses ``trace_detail``
+                # (``consent.UNMEASURED_SCOPES``), so no consent can hold it
+                # (C1). X is measured now (``surface.BACKUP_DAYS``); lifting the
+                # refusal is one constant, never new copy.
                 if "trace_detail" in consent and surface.BACKUP_DAYS is not None
                 else _t(_keys.revoke_body())
             )
@@ -848,17 +837,11 @@ def _consent_scopes(config_dir: Path, tenant: str) -> set[str]:
 def load_trial_eligibility(config_dir: Path | str) -> Mapping[str, Any] | None:
     """``GET /v1/team-trial/eligibility`` as the signed-in person, or ``None``.
 
-    The non-Team card's only read (§14', §0.13). It is NOT a ``/v1/guard/*``
-    call and writes nothing. Run it off the event loop (it resolves the
-    person's OAuth access on a private loop).
+    The implementation is ``surface.load_trial_eligibility`` (shared with the
+    desktop route); this name stays because the TUI app and tests patch it here.
     """
 
-    from local_operator.hub_org import eligibility
-
-    resolved = eligibility.person_client(Path(config_dir))
-    if resolved is None:
-        return None
-    return resolved[0].team_trial_eligibility()
+    return surface.load_trial_eligibility(config_dir)
 
 
 __all__ = [
