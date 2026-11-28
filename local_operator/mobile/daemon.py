@@ -3323,6 +3323,10 @@ def _feature_flags() -> dict[str, Any]:
         flags.update(live_feature_flags())
     except Exception:  # noqa: BLE001 — fail closed: advertise no live key at all
         pass
+    # `guard` is NOT in DESKTOP_ONLY_FEATURES (the relay now serves /api/guard*), but the key
+    # is a promise that those routes exist, so it follows the mount rather than the build.
+    if not _GUARD_TWIN_MOUNTED:
+        flags.pop("guard", None)
     return flags
 
 
@@ -7431,6 +7435,34 @@ def _notification_models() -> Any:
     from local_operator.server.routes import desktop_notifications
 
     return desktop_notifications
+
+
+#: Whether this process mounted the Guard relay twin (``/api/guard*``). ``features.guard`` is
+#: the phone's only signal that those routes exist, so :func:`_feature_flags` republishes it
+#: only while this is true: a relay that could not load the twin must not point a phone at
+#: routes that 404. Set by :func:`_guard_relay_routes`, i.e. by ``build_app``.
+_GUARD_TWIN_MOUNTED = False
+
+
+def _guard_relay_routes(gate: Callable[[Request], Response | None]) -> list[Any]:
+    """The Guard twin's routes (``mobile/guard_relay.py``), or none if they cannot load.
+
+    Failing to load them must not take the phone's whole relay down (Guard is one Settings
+    section, sessions are the product), so the failure is logged and the routes, and with
+    them ``features.guard``, are simply absent: the phone then shows its calm "unavailable"
+    line and makes no Guard request.
+    """
+    global _GUARD_TWIN_MOUNTED
+    try:
+        from local_operator.mobile import guard_relay
+        from local_operator.paths import config_dir
+
+        mounted = guard_relay.routes(gate, config_dir=config_dir)
+    except Exception:  # noqa: BLE001 - one section of the app, never the relay's startup
+        logger.warning("relay: Guard twin unavailable", exc_info=True)
+        mounted = []
+    _GUARD_TWIN_MOUNTED = bool(mounted)
+    return mounted
 
 
 def _notification_refusal(error: BaseException) -> Response | None:
@@ -13641,6 +13673,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/notifications/{item_id:str}", api_notification_detail),
         Route("/api/notifications", api_notifications_patch, methods=["PATCH"]),
         Route("/api/notifications/seen", api_notifications_seen, methods=["POST"]),
+        # Radient Guard's relay twin (slice L2d, docs/design/guard-relay-twin.md): the SAME
+        # engine calls as the desktop's /v1/desktop/guard, behind this app's own `gate` (the
+        # paired-device cookie + exact-Origin mutation check). `features.guard` is advertised
+        # because, and only while, these are mounted.
+        *_guard_relay_routes(gate),
         # The armed index (mobile parity, read half): one fetch feeds the
         # phone's Schedules surface — the machine-wide wakes and monitors
         # listings, straight off the derived indexes. Read-only by design:

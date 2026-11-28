@@ -4,7 +4,8 @@ Status: contract for slice L2c (Guard RFC v0.9, C3 under the RFC approved
 2026-11-27). Clients: the desktop app (U1) and the phone (M1). Machine form:
 `local_operator/server/models/desktop_guard.py` (typed Pydantic models; the two
 change together). Capability key: `features.guard` = `1` in
-`GET /v1/capabilities` (desktop-only: the phone relay does not republish it).
+`GET /v1/capabilities`. (L2d: the phone relay now republishes it, because it serves its own
+twin at `/api/guard`; see `docs/design/guard-relay-twin.md`.)
 
 ## 0. What this is, and what it is not
 
@@ -164,8 +165,8 @@ by guessing small integers. Idempotent: a repeat for a receipt already shown is 
 The §15.4' C6 once-per-local-day host notice (`surface.should_show_notice`).
 **Asking consumes the day.** Call it only when about to show the notice.
 The plane has one shared bearer and **no per-caller identity**, so the surface is bound
-per capability instead: this router is desktop-only (`features.guard` is in
-`DESKTOP_ONLY_FEATURES`), so `desktop` is the only accepted value (`mobile` is 422) and
+per capability instead: this router serves the desktop only (the phone's twin has no
+notice route), so `desktop` is the only accepted value (`mobile` is 422) and
 no caller can consume another surface's day. Residual: any holder of the bearer can still
 spend the *desktop* day (suppressing the host notice for that day); the bearer holder is
 the desktop app. A phone-relay twin carries its own authenticated surface (§4).
@@ -178,8 +179,7 @@ reading it returns to "Guard only via the approvals card". Nothing is migrated.
 
 ## 4. Not in this contract
 
-* A phone-relay twin of these routes (the relay serves its own `/api/...`
-  surface; M1 decides whether to proxy these or add relay twins).
+* A phone-relay twin of these routes: `docs/design/guard-relay-twin.md` (slice L2d).
 * Report confirm, and any scope change/grant (typed approvals card only).
 * Lifting `guard.consent.UNMEASURED_SCOPES` (`trace_detail`, `admin_share`). X is measured
   (31, `surface.BACKUP_DAYS`) but offering those scopes is a separate decision.

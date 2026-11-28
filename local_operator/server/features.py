@@ -65,9 +65,6 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # `/v1/desktop/sessions/{id}/notification-avatar`; it is the desktop main
         # process's OS-banner image, and a phone told it may ask would 404.
         "desktop_session_notification_avatar",
-        # Same class: the phone relay serves no `/v1/desktop/guard*` (the phone's Guard
-        # surface is a relay twin M1 owns), so a phone told it may ask would 404.
-        "guard",
     }
 )
 
@@ -1094,7 +1091,12 @@ def static_feature_flags() -> dict[str, Any]:
         # status/revoke/share-again routes exist before it draws a Guard panel whose
         # calls would 404 on an older backend. It says the ROUTES exist, not that
         # Guard applies to this account (that is the status route's `mode`).
-        # Desktop-only (DESKTOP_ONLY_FEATURES): the phone relay serves none of them.
+        # ALSO REPUBLISHED BY THE PHONE RELAY (deliberately NOT in DESKTOP_ONLY_FEATURES): the
+        # relay serves the same engine at `/api/guard*` (`mobile/guard_relay.py`, slice L2d), so
+        # the same key tells a phone those routes exist. The relay still withholds it unless it
+        # actually mounted them (`mobile/daemon._GUARD_TWIN_MOUNTED`), so a relay that failed to
+        # load the twin never points a phone at a 404. The base path differs per plane
+        # (`/v1/desktop/guard` vs `/api/guard`); the key means "this plane's Guard routes".
         "guard": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
