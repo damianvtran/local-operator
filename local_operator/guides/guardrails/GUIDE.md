@@ -268,6 +268,23 @@ session made. Everything CRITICAL is still refused.
   not a proof. The facts say which
   proof was used ("merged by content …").
 
+- **A failed removal's remnant.** A guard-allowed `git worktree remove` can fail
+  "Directory not empty" when Finder or a watcher writes mid-delete; Git has then
+  already deleted the admin directory, leaving an unregistered folder. `rm -rf
+  <exact path>` of it is LOW (no judge, no ask) when its `.git` pointer file
+  names a dropped admin directory, no process runs inside it, and every
+  remaining file is byte-identical to a blob the repository already holds. Since
+  2026-11-28 a TOP-LEVEL entry named like regenerable build output
+  (`node_modules`, `.pnpm-store`, `.cache`, `build`, `dist`, `.next`, `target`,
+  `.venv` …) is shed by name without being read: a symlink (unlinked, never
+  followed) or a same-device directory with no nested repository anywhere below
+  it (`.git`, bare layout), so pnpm's internal symlink farm no longer holds the
+  rest. Any other untracked file or directory (`.env`, `notes.txt`, `secrets/`),
+  a listed name nested deeper, a regular file named like build output, a nested
+  repository, an unreadable or oversized walk, or a process with its cwd inside
+  holds the ordinary "git repository root" rank. This is not a way to delete a
+  top-level folder: `$HOME`, the state root, an install and a primary checkout
+  are CRITICAL/HIGH whatever they hold.
 - **Interrupted registered worktree.** Before any removal attempt, use
   `preview_tool_call` on one standalone `git -C <absolute-repo> worktree remove
   [--force] -- <absolute-worktree>` with exact canonical paths (quote paths with

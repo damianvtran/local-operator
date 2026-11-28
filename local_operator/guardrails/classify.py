@@ -1460,6 +1460,65 @@ _REMNANT_MEMO: dict[str, tuple[int, float]] = {}
 _REMNANT_MEMO_TTL_S = 120.0
 
 
+def _remnant_regenerable_entry(real: str, name: str) -> bool:
+    """May a remnant's TOP-LEVEL entry ``name`` be shed by NAME, unread?
+
+    Field case 2026-11-28 (guard 0.113.23, read-only previews of the operator's
+    own leftovers): a guard-allowed plain ``git worktree remove`` of a clean,
+    merged tree failed "Directory not empty" (Finder/a watcher wrote
+    mid-delete). Git had already dropped the admin directory, so the folder was
+    a remnant, but one still holding ``node_modules`` (a pnpm symlink farm),
+    ``.pnpm-store``, ``.cache``, ``build``: the blob walk below returns False on
+    ANY symlink, so a remnant that Git itself would have deleted needed an
+    operator approval.
+
+    WHY a name is a witness HERE (and not for an arbitrary tree, #4240): the
+    remnant exists only because ``git worktree remove`` WITHOUT ``--force``
+    started deleting it, and plain removal refuses a tree with tracked edits
+    before it deletes anything. So tracked content was clean when Git began;
+    what is left outside the names below is still verified blob-by-blob by the
+    caller. The names are :data:`provenance._REGENERABLE` (build output any
+    checkout regenerates), top level only: a file or directory of that name
+    nested deeper is walked as ordinary content, never trusted by name.
+
+    Shed only when ALL hold, else ``False`` (the caller then holds):
+
+    - ``name`` is on ``_REGENERABLE`` and is not ``.git``;
+    - it is a symlink (``lstat``; ``rm`` unlinks the entry and never follows
+      it, so only the pointer is lost, the same reasoning as
+      ``provenance._ignored_symlink``), or a real directory on the SAME device
+      as the remnant (a mounted volume is not build output) in which
+      ``provenance._no_repository_below`` finds no ``.git``, bare-repository
+      layout, unreadable directory or overflow. That is the full-depth fail-
+      closed walk the merged-tree route uses, not ``_nested_repository``:
+      that one is capped at 20,000 entries, which a real ``node_modules``
+      exceeds, so it would hold the very case this exists for.
+
+    A regular file of such a name is NOT shed here (``build`` the file, or
+    ``out``): it goes through the blob check like any other file. The entry is
+    never descended into by the caller, so pnpm's internal symlinks do not
+    hold. Narrow on purpose: nothing here touches the critical class, consent
+    or ``--force``.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    # ``.DS_Store``/``Thumbs.db``/``desktop.ini`` are on the list as FILE names:
+    # a directory (or link) wearing one is not Finder's, so it is never shed by
+    # name and goes through the ordinary walk, which holds.
+    if name == ".git" or name in _REMNANT_OS_METADATA or name not in prov._REGENERABLE:
+        return False
+    full = os.path.join(real, name)
+    try:
+        st = os.lstat(full)
+        if stat.S_ISLNK(st.st_mode):
+            return True
+        if not stat.S_ISDIR(st.st_mode) or st.st_dev != os.lstat(real).st_dev:
+            return False
+    except OSError:
+        return False
+    return prov._no_repository_below(full)
+
+
 def _removed_worktree_remnant(path: str) -> bool:
     """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
     nothing when deleted?
@@ -1481,6 +1540,10 @@ def _removed_worktree_remnant(path: str) -> bool:
       path) to ``<repo>/.git/worktrees/<name>``, ``<repo>/.git`` is a real
       directory, and that admin directory is GONE, so Git no longer tracks
       this folder;
+    - a TOP-LEVEL entry on ``provenance._REGENERABLE`` (``node_modules``,
+      ``.pnpm-store``, ``.cache``, ``build`` …) that is a symlink, or a
+      same-device directory holding no nested repository, is shed by name
+      without being read (2026-11-28, :func:`_remnant_regenerable_entry`);
     - EVERY remaining regular file is either a Finder/Explorer metadata file
       or byte-identical to a blob already in ``<repo>``'s object store
       (``git hash-object --stdin-paths`` then ``git cat-file
@@ -1531,6 +1594,13 @@ def _removed_worktree_remnant(path: str) -> bool:
                     return False
             if root == real and ".git" in dirs:
                 return False
+            if root == real:
+                # Top-level regenerable build output is shed by NAME and never
+                # descended into (:func:`_remnant_regenerable_entry`). It must
+                # leave ``dirs``/``names`` BEFORE the symlink hold below, which
+                # would otherwise reject pnpm's ``node_modules`` link farm.
+                dirs[:] = [d for d in dirs if not _remnant_regenerable_entry(real, d)]
+                names[:] = [n for n in names if not _remnant_regenerable_entry(real, n)]
             for name in dirs:
                 if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
                     return False  # a symlinked directory

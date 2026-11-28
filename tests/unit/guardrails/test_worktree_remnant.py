@@ -301,8 +301,10 @@ def test_tsbuildinfo_is_shed_only_by_content(repo: Path, payload: str, remnant: 
     from local_operator.guardrails.classify import _removed_worktree_remnant
 
     wt = _committed_tree(repo, f"tsb-{remnant}-{abs(hash(payload))}")
-    (wt / ".cache" / "typecheck").mkdir(parents=True)
-    (wt / ".cache" / "typecheck" / "node.tsbuildinfo").write_text(payload)
+    # Not under ``.cache``: that top-level name is shed wholesale since
+    # 2026-11-28, which would make this CONTENT witness untestable.
+    (wt / "tsc-state" / "typecheck").mkdir(parents=True)
+    (wt / "tsc-state" / "typecheck" / "node.tsbuildinfo").write_text(payload)
     shutil.rmtree(repo / ".git" / "worktrees" / wt.name)
     assert _removed_worktree_remnant(str(wt)) is remnant
 
@@ -477,15 +479,18 @@ def test_orphan_with_unknown_cwd_inventory_keeps_the_rank(
     assert _rank(repo, _orphan(repo, "unknown")).risk is Risk.HIGH
 
 
-@pytest.mark.parametrize("extra", ["untracked", "node-modules-link"])
+@pytest.mark.parametrize("extra", ["untracked", "nested-node-modules-link"])
 def test_orphan_with_content_git_does_not_hold_keeps_the_rank(repo: Path, extra: str) -> None:
-    """The real remnant's shape: pnpm symlinks and blobs Git never had."""
+    """Blobs Git never had hold, and so does a symlink that is NOT top-level
+    regenerable build output (a top-level ``node_modules`` farm is shed by name
+    since 2026-11-28: ``test_worktree_remnant_regenerable.py``)."""
     wt = _orphan(repo, f"content-{extra}")
     if extra == "untracked":
         (wt / "notes.md").write_text("never committed\n")
     else:
-        (wt / "node_modules").mkdir()
-        (wt / "node_modules" / "zod").symlink_to(".pnpm/zod@3/node_modules/zod")
+        (wt / "src").mkdir()
+        (wt / "src" / "node_modules").mkdir()
+        (wt / "src" / "node_modules" / "zod").symlink_to(".pnpm/zod@3/node_modules/zod")
     assert not _removed_worktree_remnant(str(wt))
 
 
