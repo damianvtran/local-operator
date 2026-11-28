@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.remote_compute",
-  "history_sha256": "7ac0f61677b08a2cda3ec4b63cd19d73ee593cd2c414314b562a424443fab752",
+  "history_sha256": "1498c9933501ab8b679f5033617d8e90ebf4e8a2767071687172517ad5e090c5",
   "entries": [
     {
       "locale": "zh-CN",
@@ -36,6 +36,141 @@
       "note": "Independent i18n audit of the nine keys this PR added to wire.remote_compute (run_limit, run_busy, refusal_conflict, repo_no_remote, repo_not_https_remote, repo_unpushed_commit, tier_cloud_run, tier_dedicated, option_spot), each value read in full against the en source and catalogues/en/wire.remote_compute.context.json, at head 217ccff46f5b in .worktrees/rc-client-core. DELTA PROOF (so this row does not claim the 43 carried values as freshly read): `git diff origin/main..217ccff46f5b` on en and on each of the seven locales adds exactly these 9 keys, 0 changed, 0 removed, and the previous passed row's source_sha256 d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8 equals origin/main's en bytes; those 43 values are the bytes that row already audited and are byte-identical here. MECHANICAL, 63 values: key parity 52/52 in every locale; {detail} is the only placeholder and appears exactly once in each value that has it; ICU parse clean; NFC; no Cc/Cf characters (no bidi controls, per the ur guide); no leading/trailing padding. Tier labels inside the context sidecar's 24-cell budget, measured with rich.cells.cell_len (cloud_run/dedicated/spot): fr 15/5/4, es 20/8/4, zh-CN 8/4/4, ru 15/10/4, hi 7/5/3, ur 8/5/5, vi 21/11/4. MEANING against the sidecar roles: run_limit reads as a concurrency ceiling and never as credit, billing or idempotency; run_busy reads correctly for a run or a workload; refusal_conflict names no idempotency key (the misreading this PR removes); the repo_* values state the fact first and put the remedy last; tier_cloud_run never says spot; tier_dedicated never mentions spot; option_spot reads as an opt-in capacity under Dedicated, not as a tier. TERMINOLOGY reuses the namespace's shipped renderings: run = exécution / ejecución / 运行 / запуск / रन / رن / lần chạy; remote compute = calcul distant / cómputo remoto / 远程计算 / удалённые вычисления / रिमोट कंप्यूट / ریموٹ کمپیوٹ / tính toán từ xa; commit/push stay English per glossary §2's kept-English set (fr/es/ru/vi) and Latin (zh-CN/hi/ur); Radient, origin, https:// and SSH are untouched in every locale. Register per guide: fr vous with U+202F before : ; es tú; zh-CN 请 on each refusal's next-step clause; ru вы; hi आप; ur آپ; vi drops bạn and uses plain verbs. No finding. 请 leads the next-step clause of each refusal that has one (run_limit, run_busy, refusal_conflict, repo_not_https_remote after the full stop, repo_unpushed_commit after 因此) and is absent from repo_no_remote, which states a fact with no next step — the guide's per-value rule, not a sweep of the older values in this namespace. No space between Chinese and Latin runs, matching the shipped values; 云端工作 for cloud work and 工作负载 for workload are standard; \"Spot\" is kept as the Latin capacity label the other five Latin-script locales use. Verdict: CLEAN, 0 blocker/major open. Native-speaker review and rendered-frame certification are not claimed; the width figures are cell measurements, not terminal screenshots. Evidence: this receipt; the rendering check quoted on the PR.",
       "round": "rc4196a1",
       "keys_audited": 9
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "a33d3b7c3678443be6d45448cd6f02721754c81fbeb1997494fdf9350861a7c6",
+      "target_sha256": "ca5f3d43c2a55654ac96f0a8b5258882345c10adc5406f13bcac8ca2f7b930c0",
+      "translator": {
+        "agent": "coder (team lopdev) authoring PR c01406efc in session deb385678bc3; the fifteen keys were authored in that session",
+        "session": "deb385678bc3",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR c01406efc, round 1; independent of the translator and the implementer",
+        "session": "5cf08f3165eb",
+        "model": "deepseek/deepseek-flash",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "changes requested",
+        "findings": 8,
+        "unresolved_blocker_major": 3,
+        "severity_counts": {
+          "blocker": 1,
+          "major": 2,
+          "minor": 5,
+          "nit": 1
+        },
+        "finding_ids": [
+          "I18N-1",
+          "I18N-2",
+          "I18N-3",
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5",
+          "n1"
+        ],
+        "locale_verdict": "FAIL"
+      },
+      "status": "changes_requested",
+      "round": "pr-c01406efc-r1",
+      "note": "Independent i18n audit round 1 of PR c01406efc (fix/rc-remote-delete), zh-CN/wire.remote_compute at the c01406efc bytes. 15 keys audited: 13 wire.remote_compute (alone, run_limit, deleted, delete_already, delete_in_flight, delete_confirm, delete_confirm_unnamed, delete_declined, delete_needs_yes, yes_only_with_delete, slot_heading, slot_row, slot_row_unnamed) and cli.exec_remote_help.delete/.yes. Mechanical: key/placeholder parity exact, flag and literal parity exact, no manual bidi controls, no maxCells budget. Semantic: permanent-delete warning and 'nothing was deleted' facts preserved; run_limit correct on both server versions in all eight languages. Open at this round: BLOCKER I18N-1 (a merged head ships English-only until the passed receipts land), MAJOR I18N-2 (help delete claimed a finished run holds a slot) and MAJOR I18N-3 (help yes read as deleting the flag); locale-scoped minors fr U+202F, ru удалённый/удалён, zh-CN and vi 'the running run', es/hi pronoun antecedent. No native-speaker or rendered-frame certification claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "a33d3b7c3678443be6d45448cd6f02721754c81fbeb1997494fdf9350861a7c6",
+      "context_sha256": "3d08284e0d82ead808b11fca8558e667e3e4480b6512235dba8e04b5e676ccf9",
+      "target_sha256": "d4466d5b33abc9fc8c00c3018ec3029a2453618b78c987049ed9cfedfae77514",
+      "round": "pr-c01406efc-r2",
+      "keys_audited": 15,
+      "translator": {
+        "agent": "coder (team lopdev): the fifteen keys were authored for PR c01406efc in session deb385678bc3; the round-1 findings were remediated by commit 03d8e6ecf (git author Ola Fagbemi)",
+        "session": "deb385678bc3",
+        "session_kind": "authoring session recorded in the round-1 receipts; the remediation commit names no session id",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR c01406efc, round 2; independent of the translator and of the remediation",
+        "session": "022cf2402a25",
+        "session_kind": "auditor's own lop subagent session id (lane rc-delete-i18n-audit-r2)",
+        "model": "deepseek/deepseek-flash",
+        "model_kind": "served model per the auditor session record (selected_model, effort high)",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "pass",
+        "independent_from_translator": true,
+        "unresolved_blocker_major": 0,
+        "findings": 3,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 1,
+          "nit": 2
+        },
+        "finding_ids": [
+          "r2-m1",
+          "r2-n1",
+          "r2-n2"
+        ],
+        "finding_detail": "0 blocker, 0 major, 1 minor (ru облачный/удалённый split across the namespace), 2 nit (zh-CN 原本 for 'otherwise'; hi/ur yes-help phrasing diverges from its sibling) — all deferred, none gating",
+        "locale_verdict": "PASS",
+        "scope": "round 2 delta c01406efc..03d8e6ecf: the 15 keys read against en, the en context sidecars, i18n/glossary.md, the locale style guide and namespace usage; all eight round-1 findings retested individually; order-insensitive diff of the en context sidecar (63 keys, one note changed); placeholder/literal/NFC/bidi/space parity over 15 keys x 8 locales; checks: catalogue checks 0 problems, ledger validate --base 8c1a8c92c clean; targeted tests recorded, remaining failures are the shipped-set-dark mechanism only"
+      },
+      "status": "passed",
+      "note": "zh-CN/wire.remote_compute: Independent i18n audit round 2 retested PR c01406efc at head 03d8e6ecf7b75c03cc686e8872ae9a4a19278ebf: the fifteen keys against en, all eight round-1 findings and this locale's own copy all pass (locale_verdict PASS, 0 blocker, 0 major); the new r2-m1 (ru облачный/удалённый split), r2-n1 (zh-CN 原本 for 'otherwise') and r2-n2 (hi/ur yes-help phrasing) findings are deferred, none gating."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "8b465ec610aabb245aad1c5f9fad01799796bc4a81026325c36a67156acb2a0e",
+      "context_sha256": "ef9ea368656c6c1cfd9fb1ce1755c26f4fbc517a50aa7feb82a280726face30f",
+      "target_sha256": "a1ab13b448229bf96c59d89ea11612553ff82e606922d9483fd31fa38ea14ba1",
+      "round": "pr-c01406efc-r3",
+      "keys_audited": 2,
+      "translator": {
+        "agent": "coder (team lopdev): run_limit rewritten and run_limit_legacy added for PR 4624 in commit f02a1a8b6; the seven locale strings are that commit's work (git author Ola Fagbemi)",
+        "session": "unknown — the commit names no authoring session",
+        "session_kind": "authoring commit recorded here; no session id is recorded for it",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "reviewer (team lopdev), independent i18n audit of PR 4624, round 3; independent of the translator",
+        "session": "925dd9407c78",
+        "session_kind": "auditor's own lop subagent session id (lane 4624-i18n-audit-r3)",
+        "model": "deepseek/deepseek-flash",
+        "model_kind": "served model per the auditor session record (selected_model, effort high)",
+        "fallback": "none observed",
+        "date": "2026-11-25",
+        "result": "pass",
+        "independent_from_translator": true,
+        "unresolved_blocker_major": 0,
+        "findings": 5,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 2,
+          "nit": 3
+        },
+        "finding_ids": [
+          "r3-m1",
+          "r3-m2",
+          "r3-n1",
+          "r3-n2",
+          "r3-n3"
+        ],
+        "finding_detail": "0 blocker, 0 major, 2 minor (ur relative-clause gender attaches the confirmation to the run; ru расчёт reads as payment settlement), 3 nit (hi प्रतीक्षा vs sibling इंतज़ार; es/hi leave the confirming command unnamed; en 'running runs' stutter) — all deferred, none gating",
+        "locale_verdict": "PASS",
+        "scope": "round 3 delta 05265bda5..f02a1a8b: wire.remote_compute.run_limit rewritten and .run_limit_legacy added in all seven locales, read against en, the en context sidecar notes, i18n/glossary.md and each locale's style guide; all other 13 keys of wire.remote_compute and all 13 of cli.exec_remote_help verified byte-identical to 05265bda5; placeholder/literal/NFC/bidi/space parity over 2 keys x 8 locales; en context sidecar order-insensitive diff (64 keys, exactly run_limit note, run_limit_legacy role/tone/note and slot_heading role/note changed); checks: catalogue checks 0 problems, ledger validate --base 05265bda5 clean, generate --check 212 artifacts byte-identical; the three test_cli_remote locale assertions still render en because the shipped set is dark pending these receipts"
+      },
+      "status": "passed",
+      "note": "zh-CN/wire.remote_compute: independent i18n audit round 3 on head f02a1a8b6fccaa16b8b8c84853c4d42fefd27a01 — run_limit now leads with waiting or cancelling and names no delete, run_limit_legacy carries the legacy delete remedy, the permanence warning and the confirmation, both against en and the rewritten context notes; locale_verdict PASS, 0 blocker, 0 major; r3-m1..r3-n3 are deferred and none gates."
     }
   ]
 }

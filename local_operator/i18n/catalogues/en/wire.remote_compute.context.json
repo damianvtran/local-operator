@@ -2,7 +2,7 @@
   "wire.remote_compute.alone": {
     "role": "CLI runtime message for lop exec --remote",
     "tone": "plain, one sentence; commands and flags stay verbatim",
-    "note": "No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
+    "note": "No placeholders. Names the three single-purpose commands, so all three flags must stay verbatim. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility."
   },
   "wire.remote_compute.cancelled": {
     "role": "CLI runtime message for lop exec --remote",
@@ -248,7 +248,12 @@
   "wire.remote_compute.run_limit": {
     "role": "CLI runtime message for a refusal that says the account is at a concurrent limit",
     "tone": "plain, two sentences; the remedy last",
-    "note": "No placeholders. MUST NOT read as a credit, billing or idempotency problem, and must read correctly for both the run limit and the workload limit."
+    "note": "No placeholders. The angle-bracketed <run id> is literal placeholder text for the operator to replace, not an ICU argument. MUST NOT read as a credit, billing or idempotency problem, and must read correctly for both the run limit and the workload limit. The server frees a finished run's slot once that run is SETTLED, so the remedy is to wait for running work to finish and settle, or to cancel it. MUST NOT name --remote-delete: deleting is permanent, and it is only the legacy server's remedy, which wire.remote_compute.run_limit_legacy carries instead."
+  },
+  "wire.remote_compute.run_limit_legacy": {
+    "role": "CLI sentence introducing the run list when the server still counts finished runs",
+    "tone": "plain, three sentences; why, then the permanence warning, then the command",
+    "note": "No placeholders beyond the literal angle-bracketed <run id>, which is placeholder text for the operator to replace, not an ICU argument. Must say this server still counts finished runs until they are deleted, that a delete is permanent because the run's logs and results go with it, and that lop exec --remote-delete asks for confirmation. It follows wire.remote_compute.run_limit, so it must not repeat that sentence's remedy; the list it introduces only PRINTS commands, it never deletes anything itself."
   },
   "wire.remote_compute.tier_cloud_run": {
     "role": "Product label for the on-demand remote-compute tier",
@@ -261,5 +266,60 @@
     "tone": "one word where the locale has one; a tier label, capitalised like a proper noun",
     "note": "No placeholders. The spot choice sits UNDER this label as an option, so the label itself must not mention spot. Must stay short enough for a picker row.",
     "maxCells": 24
+  },
+  "wire.remote_compute.delete_already": {
+    "role": "CLI message when lop exec --remote-delete finds the run already gone",
+    "tone": "plain, one sentence; states the end state",
+    "note": "Placeholder {run_id} must be preserved exactly. Used when the server answers 404 (indistinguishable from a repeat of a delete this command already made) and when the read reports status deleted. Nothing was sent and nothing was destroyed; the command succeeds because the requested end state holds."
+  },
+  "wire.remote_compute.delete_confirm": {
+    "role": "Interactive terminal question confirming a named run's deletion",
+    "tone": "a question, then one warning sentence; keep the [y/N] marker verbatim",
+    "note": "Placeholders {run_id} and {name} must be preserved exactly; {name} is a user-supplied run label and must not be translated. The default answer is NO, so [y/N] is syntax and stays as written. The warning states the delete is permanent and takes the run's logs and results with it."
+  },
+  "wire.remote_compute.delete_confirm_unnamed": {
+    "role": "Interactive terminal question confirming an unnamed run's deletion",
+    "tone": "a question, then one warning sentence; keep the [y/N] marker verbatim",
+    "note": "Placeholder {run_id} must be preserved exactly. Used when the run carries no name. The default answer is NO, so [y/N] is syntax and stays as written. The warning states the delete is permanent and takes the run's logs and results with it."
+  },
+  "wire.remote_compute.delete_declined": {
+    "role": "CLI message after a person answered NO to the delete confirmation",
+    "tone": "plain, one sentence; states that nothing changed",
+    "note": "Placeholder {run_id} must be preserved exactly. The run was not deleted and nothing was sent."
+  },
+  "wire.remote_compute.delete_in_flight": {
+    "role": "CLI refusal: lop exec --remote-delete was asked to delete a run that has not settled",
+    "tone": "plain, two sentences; the remedy last, commands and flags verbatim",
+    "note": "Placeholder {run_id} appears twice and must be preserved exactly both times. The fact to keep is that the run was NOT deleted and can still spend; the remedy is the cancel command."
+  },
+  "wire.remote_compute.delete_needs_yes": {
+    "role": "CLI refusal: lop exec --remote-delete with no terminal and no --yes",
+    "tone": "plain, two sentences; the remedy last, flags verbatim",
+    "note": "Placeholder {run_id} must be preserved exactly; --yes is a flag and stays verbatim. Nothing was deleted. The remedy is to re-run with --yes."
+  },
+  "wire.remote_compute.deleted": {
+    "role": "CLI runtime message after lop exec --remote-delete has deleted a run",
+    "tone": "plain, one sentence; terse",
+    "note": "Placeholder {run_id} is a run id and must be preserved exactly. Printed on stdout after a successful delete, including when another delete wins the race between the read and the delete."
+  },
+  "wire.remote_compute.slot_heading": {
+    "role": "Heading above the finished runs a legacy-server run-limit refusal lists",
+    "tone": "a short label ending in a colon",
+    "note": "No placeholders. The heading follows wire.remote_compute.run_limit_legacy, which says why these runs are worth deleting; the rows below carry the ids and the delete command."
+  },
+  "wire.remote_compute.slot_row": {
+    "role": "One listed run in a run-limit refusal: its id, its name, and the command that deletes it",
+    "tone": "one line, terse; the command verbatim",
+    "note": "Placeholder {run_id} appears twice and {name} once; preserve all three exactly. {name} is a user-supplied run label and must not be translated. The command is syntax."
+  },
+  "wire.remote_compute.slot_row_unnamed": {
+    "role": "One listed run with no name in a run-limit refusal: its id and the command that deletes it",
+    "tone": "one line, terse; the command verbatim",
+    "note": "Placeholder {run_id} appears twice and must be preserved exactly both times. The command is syntax."
+  },
+  "wire.remote_compute.yes_only_with_delete": {
+    "role": "CLI refusal: --yes was passed beside something other than --remote-delete",
+    "tone": "plain, one sentence; flags verbatim",
+    "note": "No placeholders. Both flags stay verbatim. --yes confirms only the remote delete."
   }
 }

@@ -17,6 +17,10 @@ def cancel() -> Msg:
     return Msg("cli.exec_remote_help.cancel", {})
 
 
+def delete() -> Msg:
+    return Msg("cli.exec_remote_help.delete", {})
+
+
 def detach() -> Msg:
     return Msg("cli.exec_remote_help.detach", {})
 
@@ -51,3 +55,7 @@ def size() -> Msg:
 
 def status() -> Msg:
     return Msg("cli.exec_remote_help.status", {})
+
+
+def yes() -> Msg:
+    return Msg("cli.exec_remote_help.yes", {})
