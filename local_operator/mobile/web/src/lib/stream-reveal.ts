@@ -8,15 +8,25 @@ export function allowsReveal(): boolean {
 	return typeof window !== "undefined" && !!window.matchMedia?.(MOTION_QUERY).matches;
 }
 
-function reveal(node: HTMLElement | null, settled?: () => void): void {
+/** A whole arriving row (tool card, user echo): a light, quick settle. */
+const ROW_FADE = { from: 0.65, duration: 120 } as const;
+/**
+ * Appended STREAMING TEXT: a deep, longer ramp. Words are released a few at a
+ * time by `paced-reveal.ts`, so each suffix is small and several overlap; with
+ * the old 0.65 -> 1 over 120 ms the ramp spanned ~10 frames on the 120 Hz bench display, at a
+ * barely visible contrast, which read as "chunks just appear". Text
+ * starting nearly transparent and settling over ~240 ms is clearly a fade, and
+ * the overlap of consecutive suffixes is what makes it read as a flow. No fill
+ * mode: complete content is always the element's natural resting style.
+ */
+const TEXT_FADE = { from: 0.15, duration: 240 } as const;
+
+function reveal(node: HTMLElement | null, fade: { from: number; duration: number }, settled?: () => void): void {
 	if (!node || revealed.has(node)) return;
 	revealed.add(node);
 	if (!node.animate || !allowsReveal()) { settled?.(); return; }
-	// Keep the first paint legible while still distinguishing a fresh suffix.
-	const animation = node.animate([{ opacity: 0.65 }, { opacity: 1 }], {
-		// The relay's existing fast motion token is 120 ms. No fill mode:
-		// complete content is always the element's natural resting style.
-		duration: 120,
+	const animation = node.animate([{ opacity: fade.from }, { opacity: 1 }], {
+		duration: fade.duration,
 		easing: "ease-out",
 	});
 	animation.id = REVEAL_ID;
@@ -25,8 +35,8 @@ function reveal(node: HTMLElement | null, settled?: () => void): void {
 	if (settled) void animation.finished.then(settled, settled);
 }
 
-export const revealText = (node: HTMLElement | null, settled?: () => void) => reveal(node, settled);
-export const revealRow = (node: HTMLElement | null) => reveal(node);
+export const revealText = (node: HTMLElement | null, settled?: () => void) => reveal(node, TEXT_FADE, settled);
+export const revealRow = (node: HTMLElement | null) => reveal(node, ROW_FADE);
 
 export function settleReveals(root: Element | null, subtree = true): void {
 	for (const animation of root?.getAnimations?.({ subtree }) ?? []) {
