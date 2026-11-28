@@ -92,8 +92,7 @@ def test_the_has_console_note_teaches_the_ask_handover() -> None:
     # as a secret question"); pin the sentence whole so the password half can't
     # be dropped while the command half survives.
     assert (
-        "`ask` with the exact command and its effect, and for the password as a "
-        "secret question"
+        "`ask` with the exact command and its effect, and for the password as a " "secret question"
     ) in note
     assert "then relay it with `input secret_ref=<key>`" in note
     assert "never attempt a password yourself" not in note
