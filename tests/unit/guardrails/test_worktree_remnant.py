@@ -14,10 +14,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.classify import _removed_worktree_remnant
 from local_operator.guardrails.provenance import CwdEntry
 
@@ -26,6 +28,44 @@ ENV = {**os.environ, "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0
 
 def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=ENV)
+
+
+class _HostTable:
+    """The process table these tests believe in: only processes they register.
+
+    ``_removed_worktree_remnant`` asks for a FRESH cwd inventory with
+    ``hidden_blocks=True`` and treats anything but a definite ``False`` as
+    "held" (fail closed, #4599). The real scan reads the HOST: on a GitHub
+    runner another same-uid process has an unreadable cwd (``(pid, None)``) and
+    no readable fd/maps evidence, so the answer is ``None`` and every remnant
+    holds, whatever the fixture tree looks like. A remnant fixture therefore
+    must not depend on the host. This stand-in replaces ONLY the scan
+    (``provenance._cwd_entries``); ``_live_cwd_inside`` and its cache/fresh/
+    ``hidden_blocks`` logic still run for real, and the cache contract is kept
+    so the cached-idle-then-owner-enters case stays testable. The real scan and
+    its hidden-pid handling are covered by ``test_cwd_inventory_hidden_pid.py``.
+    """
+
+    def __init__(self) -> None:
+        self.owners: list[tuple[int, Path]] = []
+
+    def scan(self, *, fresh: bool = False) -> tuple[CwdEntry, ...]:
+        cached = prov._cwd_inventory_cache
+        age = time.monotonic() - cached[0] if cached is not None else None
+        if not fresh and cached is not None and age is not None and age < prov._CWD_INVENTORY_TTL_S:
+            return cached[1]
+        inventory = tuple((pid, os.path.realpath(cwd)) for pid, cwd in self.owners)
+        prov._cwd_inventory_cache = (time.monotonic(), inventory)
+        return inventory
+
+
+@pytest.fixture(autouse=True)
+def host_table(monkeypatch: pytest.MonkeyPatch) -> _HostTable:
+    """Pin the cwd inventory to a known, empty host (see :class:`_HostTable`)."""
+    table = _HostTable()
+    monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
+    monkeypatch.setattr(prov, "_cwd_entries", table.scan)
+    return table
 
 
 @pytest.fixture
@@ -443,8 +483,9 @@ def test_nested_gitfile_holds_when_native_lookup_finds_it(repo: Path, spelling: 
         assert risk.risk is Risk.LOW and risk.reason == REMNANT_REASON
 
 
-def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(repo: Path) -> None:
-    from local_operator.guardrails import provenance as prov
+def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(
+    repo: Path, host_table: _HostTable
+) -> None:
     from local_operator.guardrails.classify import REMNANT_REASON, Risk
 
     wt = _orphan(repo, "owned")
@@ -452,9 +493,12 @@ def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(repo: Path) -
     assert idle.risk is Risk.LOW and idle.reason == REMNANT_REASON
     cached = prov._cwd_inventory_cache
     assert cached is not None
-    # Popen returns after exec, so its cwd is in place before the next check.
+    # A real child, registered with the pinned table: Popen returns after exec,
+    # so its cwd is in place before the next check.
     proc = subprocess.Popen(["sleep", "30"], cwd=wt, start_new_session=True)
     try:
+        host_table.owners.append((proc.pid, wt))
+        # The cached idle answer is still there; only a fresh scan sees the owner.
         assert prov._cwd_inventory_cache is cached
         assert _rank(repo, wt).risk is Risk.HIGH
         entries = prov._cwd_entries()
@@ -475,6 +519,45 @@ def test_orphan_with_unknown_cwd_inventory_keeps_the_rank(
 
     monkeypatch.setattr(prov, "_cwd_entries", lambda **_: inventory)
     assert _rank(repo, _orphan(repo, "unknown")).risk is Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    ("inventory", "lossless"),
+    [
+        ((), True),
+        (None, False),
+        (((42, None),), False),
+        (((42, "{tree}"),), False),
+        (((42, "{tree}/sub"),), False),
+        (((42, "/somewhere/else"),), True),
+    ],
+    ids=["idle", "unavailable", "hidden-cwd", "cwd-at-root", "cwd-below", "elsewhere"],
+)
+def test_remnant_exemption_fails_closed_on_the_cwd_inventory(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory: tuple[CwdEntry, ...] | None,
+    lossless: bool,
+) -> None:
+    """The real fail-closed rule, host-independent: only a fresh inventory that
+    is known (no unreadable pid) and has no holder inside grants the exemption.
+    Unknown (``None`` or a hidden pid) holds exactly like a live holder."""
+    wt = _orphan(repo, "inventory")
+    entries = (
+        None
+        if inventory is None
+        else tuple((pid, cwd.format(tree=wt.resolve()) if cwd else cwd) for pid, cwd in inventory)
+    )
+    seen: list[bool] = []
+
+    def scan(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
+        seen.append(fresh)
+        return entries
+
+    monkeypatch.setattr(prov, "_cwd_entries", scan)
+    assert _removed_worktree_remnant(str(wt)) is lossless
+    # A cached idle miss must never grant a judge-free delete.
+    assert seen == [True]
 
 
 @pytest.mark.parametrize("extra", ["untracked", "node-modules-link"])
