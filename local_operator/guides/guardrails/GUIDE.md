@@ -273,18 +273,28 @@ session made. Everything CRITICAL is still refused.
   already deleted the admin directory, leaving an unregistered folder. `rm -rf
   <exact path>` of it is LOW (no judge, no ask) when its `.git` pointer file
   names a dropped admin directory, no process runs inside it, and every
-  remaining file is byte-identical to a blob the repository already holds. Since
-  2026-11-28 a TOP-LEVEL entry named like regenerable build output
-  (`node_modules`, `.pnpm-store`, `.cache`, `build`, `dist`, `.next`, `target`,
-  `.venv` …) is shed by name without being read: a symlink (unlinked, never
-  followed) or a same-device directory with no nested repository anywhere below
-  it (`.git`, bare layout), so pnpm's internal symlink farm no longer holds the
-  rest. Any other untracked file or directory (`.env`, `notes.txt`, `secrets/`),
-  a listed name nested deeper, a regular file named like build output, a nested
-  repository, an unreadable or oversized walk, or a process with its cwd inside
-  holds the ordinary "git repository root" rank. This is not a way to delete a
-  top-level folder: `$HOME`, the state root, an install and a primary checkout
-  are CRITICAL/HIGH whatever they hold.
+  remaining file is byte-identical to a blob the repository already holds (reason
+  "every byte already in Git"; a lapsed ask does not hold it back).
+  A top-level `node_modules`, `.pnpm-store`, `.cache`, `build` … is NOT trusted
+  by its name. It is skipped unread only when ALL of this holds, each checked at
+  that moment: the `.git` pointer file exists; Git ignores the entry by the
+  remnant's own `.gitignore`/exclude rules; no branch, tag, other ref or
+  worktree HEAD tracks anything under that name; and a walk of every level finds
+  only regular files, directories and symlinks (links are unlinked, never
+  followed) on the remnant's device, with no `.git` (any case or spelling), bare
+  repository layout or mount point. That is a LOW with its own reason ("ignored
+  build output, shed unread"): it is not lossless, so a timed-out, withdrawn,
+  declined or unverified ask about the path still refuses it. Its limit: a
+  commit no ref or worktree HEAD reaches is not consulted.
+  Everything else keeps the ordinary rank: a folder with no `.git` pointer, an
+  unignored or tracked entry, a regular file named like build output, a listed
+  name nested deeper, any other untracked file (`.env`, `notes.txt`,
+  `secrets/`), a FIFO, device or other special file, a nested repository, an
+  unreadable or oversized walk, a process with its cwd inside. Those go through
+  the blob-by-blob proof above and hold "a git repository root" unless every
+  byte is in Git. This is not a way to delete a top-level folder: `$HOME`, the
+  state root, an install and a primary checkout are CRITICAL/HIGH whatever they
+  hold.
 - **Interrupted registered worktree.** Before any removal attempt, use
   `preview_tool_call` on one standalone `git -C <absolute-repo> worktree remove
   [--force] -- <absolute-worktree>` with exact canonical paths (quote paths with
