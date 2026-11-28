@@ -268,6 +268,52 @@ session made. Everything CRITICAL is still refused.
   not a proof. The facts say which
   proof was used ("merged by content …").
 
+- **A failed removal's remnant.** A guard-allowed `git worktree remove` can fail
+  "Directory not empty" when Finder or a watcher writes mid-delete; Git has then
+  already deleted the admin directory, leaving an unregistered folder. `rm -rf
+  <exact path>` of it is LOW (no judge, no ask) when its `.git` pointer file
+  names a dropped admin directory, no process runs inside it, and every
+  remaining file is byte-identical to a blob the repository already holds (reason
+  "every byte already in Git"; a lapsed ask does not hold it back).
+  A top-level dependency or tool cache — `node_modules`, `.pnpm-store`, `.cache`,
+  `.next`, `.turbo`, `.expo`, `.venv`, `venv`, `__pycache__`, `.pytest_cache`,
+  `.mypy_cache`, `.ruff_cache`, `.tox`, `.eggs`, `.parcel-cache`, `.nuxt`,
+  `.svelte-kit`, `.gradle` — is NOT trusted by its name. It is skipped unread
+  only when ALL of this holds, each checked at that moment: the `.git` pointer
+  file exists; Git ignores the entry by the remnant's own `.gitignore`/exclude
+  rules; no branch, tag, other ref or worktree HEAD tracks a top-level name that
+  matches it (names compare case- and Unicode-normalization-insensitively, so
+  `Node_Modules` is `node_modules` on a case-insensitive disk); and a walk of
+  every level finds only regular files, directories and symlinks (links are
+  unlinked, never followed) on the remnant's device, with no `.git` (any case or
+  spelling), bare repository layout or mount point. A mount, device boundary,
+  special file or unsafe walk inside ANY such entry holds the WHOLE remnant at
+  once; it never falls back to hashing the files a mount exposes. Once any entry
+  is shed, the same boundary veto also covers the ENTIRE rest of the remnant,
+  ordinary subtrees such as `build/` included (a plain remnant with no shed
+  entry keeps the ordinary blob proof alone). That is a LOW
+  with its own reason ("ignored build output, shed unread"): it is not lossless,
+  so a timed-out, withdrawn, declined or unverified ask about the path still
+  refuses it.
+  Stated limit: the tip check consults ref tips and linked worktrees' HEADs. A
+  commit reachable from no ref or worktree HEAD (a detached HEAD whose admin
+  directory `git worktree prune` removed) and a reachable commit that is not a
+  tip are NOT checked; the short name list above is why that is acceptable, since
+  they are names repositories do not track. Generic output names — `build`,
+  `dist`, `out`, `coverage`, `target`, `dist-ssr` — are deliberately NOT on it
+  (repositories do track them) and use the ordinary blob-by-blob proof below: a
+  `build/` whose every file is byte-identical to a blob in Git stays LOW, and one
+  holding anything Git lacks holds. A folder with no `.git` pointer keeps the
+  base behaviour (no shed route).
+  Everything else keeps the ordinary rank: a folder with no `.git` pointer, an
+  unignored or tracked entry, a regular file named like build output, a listed
+  name nested deeper, any other untracked file (`.env`, `notes.txt`,
+  `secrets/`), a FIFO, device or other special file, a nested repository, an
+  unreadable or oversized walk, a process with its cwd inside. Those go through
+  the blob-by-blob proof above and hold "a git repository root" unless every
+  byte is in Git. This is not a way to delete a top-level folder: `$HOME`, the
+  state root, an install and a primary checkout are CRITICAL/HIGH whatever they
+  hold.
 - **Interrupted registered worktree.** Before any removal attempt, use
   `preview_tool_call` on one standalone `git -C <absolute-repo> worktree remove
   [--force] -- <absolute-worktree>` with exact canonical paths (quote paths with

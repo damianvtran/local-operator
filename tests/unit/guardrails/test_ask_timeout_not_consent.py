@@ -1363,7 +1363,11 @@ def test_lapsed_supersession_requires_exact_later_trusted_answer(deep: Path, mod
         session_id=S,
         env=_env(deep),
     )
-    if mode in ("brace", "revision-approval", "same-ask-revision"):
+    # ``expired-answer`` (2026-11-25): the expired ask's late decline is 8 days
+    # older than the exact approval, so the newest answer decides. It is still
+    # never displaced as SILENCE; a late decline newer than the approval holds
+    # (``test_expired_late_decline_newer_than_approval_still_holds``).
+    if mode in ("brace", "revision-approval", "same-ask-revision", "expired-answer"):
         assert hit is None
     else:
         assert hit is not None, mode
@@ -1741,3 +1745,375 @@ def test_ask_docs_say_name_every_full_path_and_descriptions_approve_nothing() ->
     )
     assert "background-started runtime has none" not in notes
     assert "restart" not in notes.lower()
+
+
+# -- 10. newest answered ask wins (field 2026-11-25: a-e630 vetoed a-ba0f) --------
+
+
+def _answered_at(
+    home: Path,
+    ask_id: str,
+    question: str,
+    labels: list[str],
+    *,
+    answer: str,
+    ago_ms: int,
+    queued_ago_ms: int | None = None,
+    session: str = S,
+    surface: str = "desktop",
+) -> None:
+    """One synthetic answer; creation order need not match answer order."""
+    wall = int(time.time() * 1000)
+    now = wall - ago_ms
+    created = wall - queued_ago_ms if queued_ago_ms is not None else now - 60_000
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": created,
+            "created_at": created,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "questions": [
+                {
+                    "id": "q",
+                    "question": question,
+                    "options": [{"label": label} for label in labels],
+                    "multi": False,
+                    "question_id": "",
+                }
+            ],
+        },
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": ask_id,
+            "at": now,
+            "by": {"surface": surface},
+            "answers": {"q": [answer]},
+        },
+    ]
+    path = home / ".local-operator" / "sessions" / session / "asks.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+def _block(home: Path, rel: str) -> Any:
+    from local_operator.guardrails.check import _ask_block
+
+    return _ask_block(
+        prov.unanswered_asks(S),
+        str(home / rel),
+        home=str(home),
+        cwd=str(home),
+        stop=(),
+        escalating=True,
+        session_id=S,
+        env=_env(home),
+    )
+
+
+BUILD_Q = "Delete ~/hyperplane-cpp/build?"
+
+
+@pytest.mark.asyncio
+async def test_newest_exact_approval_beats_older_decline_and_narrower_pick(deep: Path) -> None:
+    """Three answered asks name one path; the newest (exact yes) decides.
+
+    Store order puts the older decline first, which is what the field refusal
+    cited. Neither it nor the older narrower pick may veto the newer answer.
+    """
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=600_000)
+    _answered_at(
+        deep,
+        "a-narrow",
+        "Delete ~/hyperplane-cpp/build or only ~/hyperplane-cpp/build/obj?",
+        ["Delete only ~/hyperplane-cpp/build/obj", "Keep"],
+        answer="Delete only ~/hyperplane-cpp/build/obj",
+        ago_ms=300_000,
+    )
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=10_000)
+    assert _block(deep, "hyperplane-cpp/build") is None
+    judge = _Judge("BLOCK")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is None or not result.blocked, result and result.text
+    assert not judge.prompts
+
+
+@pytest.mark.parametrize("suffix", [".", ":", ".:"], ids=["dot", "colon", "mixed"])
+def test_compatibility_target_does_not_equate_punctuated_basenames(
+    tmp_path: Path, suffix: str
+) -> None:
+    from local_operator.guardrails.check import _literal_compatibility_target
+
+    plain = tmp_path / "example"
+    punctuated = tmp_path / f"example{suffix}"
+    assert plain != punctuated
+    assert _literal_compatibility_target("~/example", str(tmp_path), None) == str(plain.resolve())
+    assert _literal_compatibility_target(str(punctuated), str(tmp_path), None) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exact, older_decline", [(False, False), (False, True), (True, True), (True, False)]
+)
+@pytest.mark.parametrize("explicit", [False, True], ids=["generic", "explicit"])
+async def test_compatible_broader_answer_is_neutral(
+    deep: Path, exact: bool, older_decline: bool, explicit: bool
+) -> None:
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    if older_decline:
+        _answered_at(deep, "a-c1", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=600_000)
+    if exact:
+        _answered_at(deep, "a-e1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000)
+    # Tilde and absolute spellings name the same resolved parent.
+    labels = (
+        ["Delete ~/hyperplane-cpp", f"Keep {deep / 'hyperplane-cpp'}"]
+        if explicit
+        else ["Approve", "Keep"]
+    )
+    _answered_at(deep, "a-b1", "Delete ~/hyperplane-cpp?", labels, answer=labels[0], ago_ms=10_000)
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = _ctx(deep, command)
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    hit = _block(deep, "hyperplane-cpp/build")
+    judge = _Judge("ALLOW ask=a-b1")
+    result = await _check(deep, command, judge)
+    # Exercise citation validation even when normal dispatch is unnecessary
+    # (exact authority) or ineligible (the older decline still holds).
+    verdict = _rank(deep, command)
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, ctx)
+    basis, missing = case.verify("ALLOW ask=a-b1", forked=True)
+    assert not basis and missing
+    if exact:
+        basis, missing = case.verify("ALLOW ask=a-e1", forked=True)
+        assert (
+            preview.builtin_effect,
+            hit[0].ask_id if hit else None,
+            bool(result and result.blocked),
+            len(judge.prompts),
+            basis,
+            missing,
+        ) == (
+            "pass",
+            None,
+            False,
+            0,
+            f"{(deep / 'hyperplane-cpp/build').resolve()} named by ask a-e1",
+            "",
+        )
+    elif older_decline:
+        assert hit is not None and hit[0].ask_id == "a-c1"
+        assert preview.builtin_effect == "refuse-lapsed-ask"
+        assert result is not None and result.blocked
+    else:
+        # Without a decline the child keeps its base LOW rank, not an ask waiver.
+        assert hit is None and preview.builtin_effect == "pass"
+        assert not (result and result.blocked)
+    assert not judge.prompts
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "keep, pick_keep, surface, prior_exact, effect",
+    [
+        pytest.param("Keep ~/other/x", False, "desktop", True, "pass", id="distinct-disjoint"),
+        pytest.param("Keep ~/hyperplane-cpp/build", False, "desktop", True, "judge", id="leaf"),
+        pytest.param(
+            "Keep ~/hyperplane-cpp/build/out", False, "desktop", True, "judge", id="nested"
+        ),
+        pytest.param("Keep ~/hyperplane-cpp", True, "desktop", True, "judge", id="selected-keep"),
+        pytest.param(
+            "Keep ~/hyperplane-cpp", False, "remote", False, "refuse-lapsed-ask", id="remote-only"
+        ),
+    ],
+)
+async def test_explicit_parent_alternative_respects_target_and_trust(
+    deep: Path, keep: str, pick_keep: bool, surface: str, prior_exact: bool, effect: str
+) -> None:
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    _answered_at(
+        deep,
+        "a-e1",
+        BUILD_Q,
+        ["Approve", "Keep"],
+        answer="Approve" if prior_exact else "Keep",
+        ago_ms=200_000,
+    )
+    delete = "Delete ~/hyperplane-cpp"
+    _answered_at(
+        deep,
+        "a-b1",
+        f"{delete}?",
+        [delete, keep],
+        answer=keep if pick_keep else delete,
+        ago_ms=10_000,
+        surface=surface,
+    )
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = _ctx(deep, command)
+    preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+    judge = _Judge("ALLOW ask=a-e1")
+    result = await _check(deep, command, judge)
+    verdict = _rank(deep, command)
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, ctx)
+    exact, exact_missing = case.verify("ALLOW ask=a-e1", forked=True)
+    broader, broader_missing = case.verify("ALLOW ask=a-b1", forked=True)
+    assert (preview.builtin_effect, bool(result and result.blocked), len(judge.prompts)) == (
+        effect,
+        effect != "pass",
+        int(effect == "judge"),
+    )
+    assert (bool(exact), bool(exact_missing)) == (effect == "pass", effect != "pass")
+    assert not broader and broader_missing
+    assert (deep / "hyperplane-cpp/build").is_dir()  # No command is dispatched.
+
+
+@pytest.mark.asyncio
+async def test_exact_trusted_answer_does_not_change_critical_precedence(deep: Path) -> None:
+    _answered_at(
+        deep, "a-e1", f"Delete {deep}?", ["Approve", "Keep"], answer="Approve", ago_ms=10_000
+    )
+    command = "rm -rf ~"
+    preview = preview_tool_call(
+        "bash", {"command": command}, _ctx(deep, command), settings=GuardSettings()
+    )
+    judge = _Judge("ALLOW ask=a-e1")
+    result = await _check(deep, command, judge)
+    assert preview.builtin_effect == "refuse-critical"
+    assert result is not None and result.blocked and not judge.prompts
+    assert deep.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_newest_answer_naming_another_path_does_not_approve_this_one(deep: Path) -> None:
+    """Supersession is per path: a newer yes to ~/other/x leaves the decline."""
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=600_000)
+    _answered_at(
+        deep, "a-ba0f", "Delete ~/other/x?", ["Approve", "Keep"], answer="Approve", ago_ms=10_000
+    )
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == "a-e630"
+    judge = _Judge("ALLOW ask=a-ba0f")
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert result is not None and result.blocked
+    assert (deep / "hyperplane-cpp/build").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_decline_answered_after_the_approval_still_holds(deep: Path) -> None:
+    """Control: recency cuts both ways; the operator's later "Keep" wins."""
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=600_000)
+    _answered_at(deep, "a-e630", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=10_000)
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == "a-e630"
+    result = await _check(deep, "rm -rf ~/hyperplane-cpp/build", _Judge("ALLOW ask=a-ba0f"))
+    assert result is not None and result.blocked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct_turn", [False, True])
+async def test_latest_decline_wins_across_lineage_and_rejects_stale_citation(
+    deep: Path, direct_turn: bool
+) -> None:
+    state = deep / ".local-operator"
+    prov.record_lineage(CHILD, origin="subagent", parent=S, state_root=state)
+    prov.record_lineage(S, origin="subagent", parent=PARENT, state_root=state)
+    _answered_at(
+        deep, "a-c1", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=500_000, session=CHILD
+    )
+    _answered_at(
+        deep, "a-a1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000, session=PARENT
+    )
+    _answered_at(
+        deep,
+        "a-d1",
+        BUILD_Q,
+        ["Approve", "Keep"],
+        answer="Keep",
+        ago_ms=10_000,
+        queued_ago_ms=900_000,
+        session=PARENT,
+    )
+    command = "rm -rf ~/hyperplane-cpp/build"
+    ctx = _ctx(deep, command)
+    if direct_turn:
+        # A direct turn can keep the judge eligible; it does not make a
+        # losing ask citation a valid basis for the judge's ALLOW.
+        assert ctx.operator is not None
+        ctx.operator.words.append(
+            prov.OperatorWords("operator, direct", "Review cleanup of ~/hyperplane-cpp/build")
+        )
+    else:
+        preview = preview_tool_call("bash", {"command": command}, ctx, settings=GuardSettings())
+        assert preview.builtin_effect == "refuse-lapsed-ask" and "a-d1" in preview.render()
+    judge = _Judge("ALLOW ask=a-a1")
+    result = await check_tool_call(
+        "bash", {"command": command}, ctx, judge=judge, settings=GuardSettings(), forked_judge=judge
+    )
+    assert result is not None and result.blocked
+    assert len(judge.prompts) == int(direct_turn)
+    assert "a-d1" in (judge.prompts[0] if direct_turn else result.text)
+
+
+def test_later_preservation_yes_is_not_a_compatible_broader_approval(deep: Path) -> None:
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    _answered_at(deep, "a-e1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000)
+    _answered_at(
+        deep,
+        "a-f1",
+        "Keep ~/hyperplane-cpp?",
+        ["Yes", "No"],
+        answer="Yes",
+        ago_ms=10_000,
+    )
+    command = "rm -rf ~/hyperplane-cpp/build"
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == "a-f1"
+    verdict = _rank(deep, command)
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, _ctx(deep, command))
+    basis, missing = case.verify("ALLOW ask=a-e1", forked=True)
+    assert not basis and missing
+
+
+def test_citation_rechecks_for_a_decline_recorded_after_judge_dispatch(deep: Path) -> None:
+    from dataclasses import replace
+
+    from local_operator.guardrails.check import build_delete_case
+
+    _answered_at(deep, "a-a1", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=200_000)
+    command = "rm -rf ~/hyperplane-cpp/build"
+    verdict = _rank(deep, command)
+    # Test the citation boundary directly, independent of why the classifier
+    # would need a judge on this target. No shell command is dispatched.
+    high = replace(verdict, risk=Risk.HIGH, targets=[replace(verdict.targets[0], risk=Risk.HIGH)])
+    case = build_delete_case(high, _ctx(deep, command))
+    basis, missing = case.verify("ALLOW ask=a-a1", forked=True)
+    assert "a-a1" in basis and not missing
+    _answered_at(deep, "a-d1", BUILD_Q, ["Approve", "Keep"], answer="Keep", ago_ms=10_000)
+    basis, missing = case.verify("ALLOW ask=a-a1", forked=True)
+    assert not basis and missing
+
+
+def test_expired_late_decline_newer_than_approval_still_holds(deep: Path) -> None:
+    """An expired ask carrying a late "Keep" answered AFTER the approval wins."""
+    _answered_at(deep, "a-ba0f", BUILD_Q, ["Approve", "Keep"], answer="Approve", ago_ms=600_000)
+    _deep_ask(deep, answer="Keep everything", expired=True)
+    hit = _block(deep, "hyperplane-cpp/build")
+    assert hit is not None and hit[0].ask_id == DEEP_ASK
