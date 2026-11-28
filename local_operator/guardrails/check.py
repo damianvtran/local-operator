@@ -1121,6 +1121,11 @@ class DeleteCase:
     lapsed_only: Mapping[str, str] = field(default_factory=dict)
     #: An outstanding contrary ask must not be bypassed by creation evidence.
     ask_blocked: frozenset[str] = frozenset()
+    ask_decisions: Mapping[str, _PathAskDecision] = field(default_factory=dict)
+
+    def _current_ask(self, path: str, words: Any) -> bool:
+        decision = self.ask_decisions.get(path)
+        return decision is None or decision.permits(words)
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -1142,7 +1147,7 @@ class DeleteCase:
         ``(None, "")`` = no deterministic approval: the judge decides.
         """
         hit = _ask_approval(
-            [w for w in self.operator.words if w.ask_id],
+            [w for w in self.operator.words if w.ask_id and self._current_ask(path, w)],
             path,
             self.session_id,
             names=lambda text: self._named_by(path, _Approved(text)),
@@ -1263,6 +1268,10 @@ class DeleteCase:
             if e
         ]
         ask_ids = re.findall(r"ask\s*=\s*(a-[0-9a-f]+)", first)
+        # Keep the dispatch decision, but also honor a trusted decline that
+        # arrived while the judge was running. The model's answer grants no
+        # snapshot lease on the operator's approval.
+        current_asks = prov.unanswered_asks(self.session_id) if ask_ids and self.session_id else []
         ledger = re.search(r"(?<![\w-])ledger(?![\w-])", first) is not None
         operator = re.search(r"(?<![\w-])operator(?![\w-])", first) is not None
         # ``unverifiable`` targets (opaque, unresolved) keep the pre-provenance
@@ -1325,6 +1334,18 @@ class DeleteCase:
                 if record is not None:
                     basis.append(f"{path} in the creation ledger ({record.creator}, {record.kind})")
                     continue
+            current = (
+                _path_ask_decision(
+                    current_asks,
+                    path,
+                    home=self.home,
+                    cwd=self.cwd,
+                    stop=self.stop,
+                    session_id=self.session_id,
+                )
+                if current_asks
+                else _PathAskDecision()
+            )
             words = next(
                 (
                     w
@@ -1335,6 +1356,8 @@ class DeleteCase:
                         # option names (review R2-m6).
                         w.ask_id
                         and w.ask_id in ask_ids
+                        and self._current_ask(path, w)
+                        and current.permits(w)
                         and prov.ask_citation_covers(
                             w, path, home=self.home, cwd=self.cwd, protected=self.stop
                         )
@@ -1437,14 +1460,44 @@ _BARE_YES = re.compile(r"(?i)(?:yes|approve|approved|confirm|go ahead)[.! ]*")
 _DELETE_QUESTION = re.compile(r"(?i)^(?:delete|remove)\s+")
 
 
-def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
+def _literal_compatibility_target(word: str, home: str, cwd: str | None) -> str | None:
+    from local_operator.guardrails import provenance as prov
+
+    # Prose expansion trims terminal dots and colons. Do not let that turn
+    # distinct basenames into the same literal target and suppress a veto.
+    if word.endswith((".", ":")):
+        return None
+    match = prov._PATHISH.fullmatch(word)
+    if (
+        match is None
+        or match[1] != word
+        or prov._GLOBISH.search(word)
+        or "{" in word
+        or "}" in word
+        or any(part in (".", "..") for part in word.split("/"))
+    ):
+        return None
+    expanded = prov._expand_word(word, home, cwd)
+    return os.path.realpath(expanded) if expanded is not None else None
+
+
+def _exact_firm_ask(
+    ask: Any,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None,
+    compatible_parent: Sequence[str] | None = None,
+) -> bool:
     """Verify a trusted deletion proposition and its literal path in the same question.
 
     A generic yes to keeping or backing up a path is not authority to delete it.
     Read the folded question/pick pair, not the concatenated text of all answers:
     a deletion pick for one question cannot authorize another question's paths.
     Qualified wording fails closed (``_APPROVAL_VETO``); brace expansion still
-    names concrete leaves, never globs or parents.
+    names concrete leaves, never globs or parents. Only the contrary-decision
+    check asks for a compatible parent instead; that match cannot grant exact
+    authority. It uses the same protected boundaries as the ask's reach.
     """
     from local_operator.asks import store
     from local_operator.guardrails import provenance as prov
@@ -1516,24 +1569,54 @@ def _exact_firm_ask(ask: Any, path: str, *, home: str, cwd: str | None) -> bool:
                         continue
                     if any(part in (".", "..") for part in word.split("/")):
                         continue
-                    if prov._expand_word(word, home, cwd) == path:
-                        return True
+                    if compatible_parent is None:
+                        if prov._expand_word(word, home, cwd) == path:
+                            return True
+                    else:
+                        hit = prov.ask_reach(
+                            word, path, home=home, cwd=cwd, protected=compatible_parent
+                        )
+                        if hit is not None and hit[0] == "under":
+                            return True
                 return False
 
-            # SEC-R2-B2: an option the operator did NOT pick that names this
-            # path means the choice was between paths; the pick did not choose
-            # this one, whatever the question listed.
-            unpicked = [
-                f"{o.get('label') or ''}\n{o.get('description') or ''}"
-                for o in (q.get("options") or [])
-                if isinstance(o, Mapping) and str(o.get("label") or "").strip() != label
-            ]
-            if any(names(text) for text in unpicked):
+            # SEC-R2-B2: an unpicked overlapping option normally represents a
+            # competing target. Only in the compatibility check, a literal
+            # Delete X / Keep X pair is a choice of action, not of target. It
+            # preserves existing exact consent but cannot grant it. Descriptions
+            # and distinct overlapping options still contribute to the veto.
+            pick_names_target = names(words.firm)
+            picked_parent = None
+            if compatible_parent is not None and label_delete is not None and pick_names_target:
+                picked_parent = _literal_compatibility_target(
+                    label[label_delete.end() :].strip(), home, cwd
+                )
+
+            def competing_option(option: Mapping[str, Any]) -> bool:
+                unpicked = str(option.get("label") or "").strip()
+                if unpicked == label:
+                    return False
+                keep = re.match(r"(?i)^keep\s+", unpicked)
+                if (
+                    picked_parent is not None
+                    and keep is not None
+                    and _literal_compatibility_target(unpicked[keep.end() :], home, cwd)
+                    == picked_parent
+                ):
+                    unpicked = ""
+                text = f"{unpicked}\n{option.get('description') or ''}"
+                return names(text) or (
+                    compatible_parent is not None
+                    and prov.ask_reach(text, path, home=home, cwd=cwd, protected=compatible_parent)
+                    is not None
+                )
+
+            if any(competing_option(o) for o in q.get("options") or [] if isinstance(o, Mapping)):
                 continue
             # A pick that names paths authorises exactly those. Only a pick
             # that names none ("Approve removing all 33 ...", "Remove them",
             # a bare yes) refers back to the paths its question lists.
-            if names(words.firm):
+            if pick_names_target:
                 return True
             # A pick that carries ANY stand-alone path word other than this
             # path narrowed the question ("only <repo>/.worktrees/*/node_modules",
@@ -1612,7 +1695,6 @@ def apply_cleanup_consent(verdict: Verdict, ctx: CallContext) -> Verdict:
     prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
     stop = tuple(sorted({*prot.homes, *prot.state_roots, *prot.install_roots, "/"}))
     asks = prov.unanswered_asks(ctx.session_id)
-    lineage = set(prov.session_lineage(ctx.session_id)[0])
     targets = []
     for ranked in verdict.targets:
         t = ranked.target
@@ -1637,35 +1719,15 @@ def apply_cleanup_consent(verdict: Verdict, ctx: CallContext) -> Verdict:
             and not t.landings
             and os.path.abspath(t.raw_path or path) == os.path.realpath(t.raw_path or path)
         )
-        approved = (
-            [
-                a
-                for a in asks
-                if a.session_id in lineage
-                and a.answered_at
-                and _exact_firm_ask(a, path, home=home, cwd=ctx.cwd)
-            ]
-            if eligible
-            else []
-        )
-        latest = max((a.answered_at for a in approved), default=0)
-        # A newer preservation/ambiguous yes is not erased by an older delete
-        # approval, even though the general ask policy treats its paths as firm.
-        contrary = (
-            any(
-                a.answer is not None
-                and a.answered_at >= latest
-                and a not in approved
-                and prov.ask_reach(a.text, path, home=home, cwd=ctx.cwd, protected=stop) is not None
-                for a in asks
+        decision = (
+            _path_ask_decision(
+                asks, path, home=home, cwd=ctx.cwd, stop=stop, session_id=ctx.session_id
             )
-            if latest
-            else False
+            if eligible
+            else _PathAskDecision()
         )
         if (
-            eligible
-            and approved
-            and not contrary
+            decision.exact is not None
             and _ask_settles_git_root(path, ctx.session_id, require_known_forge=True) is not None
             and _ask_block(
                 asks,
@@ -1676,6 +1738,7 @@ def apply_cleanup_consent(verdict: Verdict, ctx: CallContext) -> Verdict:
                 escalating=False,
                 session_id=ctx.session_id,
                 env=ctx.env,
+                decision=decision,
             )
             is None
         ):
@@ -1695,6 +1758,67 @@ def cleanup_consent_fresh(before: Verdict, verdict: Verdict, ctx: CallContext) -
     )
 
 
+@dataclass(frozen=True)
+class _PathAskDecision:
+    exact: Any = None
+    contrary: Any = None
+    vetoed_exact: bool = False
+
+    def permits(self, words: Any) -> bool:
+        # A citation cannot do what the veto could not: only the verified
+        # exact winner supersedes a contrary decision. Compare the answer,
+        # not just its ask id, which survives revisions.
+        return self.contrary is None or (self.exact is not None and self.exact.answer == words)
+
+
+def _path_ask_decision(
+    asks: Sequence[Any],
+    path: str,
+    *,
+    home: str,
+    cwd: str | None,
+    stop: Sequence[str],
+    session_id: str,
+) -> _PathAskDecision:
+    from local_operator.guardrails import provenance as prov
+
+    # Family can veto; only this session's lineage can authorize a lift.
+    lineage = set(prov.session_lineage(session_id)[0]) if session_id else set()
+    answered = tuple(a for a in asks if a.answered_at and a.trusted_answer)
+    exact = [
+        a
+        for a in answered
+        if a.session_id in lineage and _exact_firm_ask(a, path, home=home, cwd=cwd)
+    ]
+    newest = max(exact, key=lambda a: a.answered_at, default=None)
+    contrary = max(
+        (
+            a
+            for a in answered
+            if a not in exact
+            and prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop) is not None
+            and (
+                a.answer is None
+                or not prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop)
+                # Coverage alone can describe keeping the directory. Only a
+                # verified deletion of a parent is compatible with an older
+                # exact deletion decision, and it never becomes that decision.
+                or (
+                    newest is not None
+                    and not _exact_firm_ask(a, path, home=home, cwd=cwd, compatible_parent=stop)
+                )
+            )
+        ),
+        key=lambda a: a.answered_at,
+        default=None,
+    )
+    # Effective answer time (revision or answer), not card creation. Ties
+    # retain the veto: there is no proof the approval came later.
+    if newest is not None and contrary is not None and contrary.answered_at >= newest.answered_at:
+        return _PathAskDecision(contrary=contrary, vetoed_exact=True)
+    return _PathAskDecision(newest, contrary)
+
+
 def _ask_block(
     lapsed: Sequence[Any],
     path: str,
@@ -1705,6 +1829,7 @@ def _ask_block(
     escalating: bool,
     session_id: str = "",
     env: Mapping[str, str] | None = None,
+    decision: _PathAskDecision | None = None,
 ) -> tuple[Any, bool] | None:
     """The non-consenting ask that blocks ``path``, and whether it refuses outright.
 
@@ -1739,33 +1864,37 @@ def _ask_block(
         return hit is not None and hit[0] in ("exact", "under")
 
     now = int(time.time() * 1000)
-    # Family asks are refusal evidence, but only this session's lineage can
-    # authorize a supersession: a sibling's decision belongs to its own task.
-    lineage = set(prov.session_lineage(session_id)[0]) if session_id else set()
-    superseding = [
-        a
-        for a in lapsed
-        if a.session_id in lineage
-        and a.answered_at
-        and _exact_firm_ask(a, path, home=home, cwd=cwd)
-    ]
+    if decision is None:
+        decision = _path_ask_decision(
+            lapsed, path, home=home, cwd=cwd, stop=stop, session_id=session_id
+        )
+    approval = decision.exact
+    ordered = sorted(lapsed, key=lambda a: (a.untrusted_yes, -(a.answered_at or a.created_at)))
     judge_only = None
-    for a in lapsed:
+    for a in ordered:
+        if approval is not None and 0 < a.answered_at < approval.answered_at:
+            continue
         # Expired can also contain a late answer: only genuine silence is
         # displaced, and only by an independently verified later answer.
         if (
             a.status in ("timed_out", "expired")
             and not a.has_answer
             and a.expires_at
-            and any(
-                b.created_at > a.expires_at and b.answered_at >= b.created_at for b in superseding
-            )
+            and approval is not None
+            and approval.created_at > a.expires_at
+            and approval.answered_at >= approval.created_at
         ):
             continue
-        if escalating and a.created_at and now - a.created_at > prov.ASK_ESCALATION_MAX_AGE_MS:
+        activity = a.answered_at if a.trusted_answer and a.answered_at else a.created_at
+        if escalating and activity and now - activity > prov.ASK_ESCALATION_MAX_AGE_MS:
             continue
         reach = prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop)
         if reach is None:
+            continue
+        if decision.vetoed_exact and a is decision.contrary and a.answer is not None:
+            # An incompatible affirmative is not silence, but its generic
+            # path coverage must not undo the veto used by citation validation.
+            judge_only = judge_only or (a, False)
             continue
         if prov.ask_consents(a, path, home=home, cwd=cwd, protected=stop):
             continue  # firm approval only (``UnansweredAsk.approved``)
@@ -2141,17 +2270,21 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     # the judge must never infer consent from a timeout notice or from the
     # agent's own "the ask timed out, proceeding" in the command or intent.
     lapsed = prov.unanswered_asks(ctx.session_id) if ctx.session_id and paths else []
-    # QA round 2 Q3 (PR #4098): ``_ask_block`` names the FIRST matching ask,
-    # so a remote "Remove all" (an untrusted yes) listed before the
-    # operator's own "Keep them" headed the refusal and blamed the yes. A
-    # decline, lapse or withdrawal is what actually refuses; list untrusted
-    # yeses last (stable sort, store order otherwise kept) so it is named.
-    lapsed = sorted(lapsed, key=lambda a: bool(getattr(a, "untrusted_yes", False)))
-    asked_at = {a.ask_id: a.created_at for a in lapsed}
+    # The fact limit is for display, never for authority checks on a target.
+    ask_decisions = (
+        {
+            path: _path_ask_decision(
+                lapsed, path, home=home, cwd=ctx.cwd, stop=stop, session_id=ctx.session_id
+            )
+            for path in [*paths, *operator_only]
+        }
+        if lapsed
+        else {}
+    )
     lapsed_only: dict[str, str] = {}
     ask_blocked: set[str] = set()
     facts: list[str] = []
-    for path in [*paths, *operator_only][:_MAX_FACTS]:
+    for index, path in enumerate([*paths, *operator_only]):
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
         named = next(
             (
@@ -2179,6 +2312,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             escalating=False,
             session_id=ctx.session_id,
             env=ctx.env,
+            decision=ask_decisions.get(path),
         )
         not_consent = _not_consent_fact(fact_hit[0]) if fact_hit is not None else ""
         if fact_hit is not None and path in destroying:
@@ -2193,6 +2327,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 escalating=True,
                 session_id=ctx.session_id,
                 env=ctx.env,
+                decision=ask_decisions.get(path),
             )
             if not_consent and path in destroying
             else None
@@ -2205,26 +2340,13 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if refusing is None or record is None
             else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots), family=False)
         )
-        # An older affirmative cannot erase a later pending ask or veto, so an
-        # ask answer that names the path counts only when its ask is NEWER
-        # than the refusing one. A typed operator turn carries no timestamp
-        # here and keeps the judge (guide://guardrails exception 2: the judge
-        # reads that turn); before #4493 any naming row did.
-        # An ask answer must also be a deletion approval (``_exact_firm_ask``):
-        # a yes to "Keep <path> instead of deleting it?" names the path but
-        # is a veto, not a reason to reopen the judge (SEC-R1-B1).
-        named_after = refusing is not None and any(
-            prov.names_path(w.text, path, home=home, cwd=ctx.cwd, protected=stop)
-            and (
-                not w.ask_id
-                or (
-                    asked_at.get(w.ask_id, 0) > refusing[0].created_at
-                    and any(
-                        a.ask_id == w.ask_id and _exact_firm_ask(a, path, home=home, cwd=ctx.cwd)
-                        for a in lapsed
-                    )
-                )
-            )
+        # If an exact ask can supersede the veto, _ask_block already did so.
+        # Do not reopen it using a competing chronology. A trusted direct
+        # turn is separate authority: the judge still reads and checks it.
+        direct_named = refusing is not None and any(
+            not w.ask_id
+            and w.label == "operator, direct"
+            and prov.names_path(w.text, path, home=home, cwd=ctx.cwd, protected=stop)
             for w in operator.words
         )
         if (
@@ -2232,9 +2354,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             and refusing[1]
             and not ids
             and own_record is None
-            and not named_after
+            and not direct_named
         ):
             lapsed_only[path] = _not_consent_fact(refusing[0])
+        if index >= _MAX_FACTS:
+            continue
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             state = prov.worktree_state(
@@ -2312,6 +2436,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         cwd=ctx.cwd,
         lapsed_only=lapsed_only,
         ask_blocked=frozenset(ask_blocked),
+        ask_decisions=ask_decisions,
     )
 
 

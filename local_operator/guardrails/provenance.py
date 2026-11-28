@@ -1995,7 +1995,7 @@ def _inside(cwd: str | None, real: str) -> bool:
     return cwd is not None and (cwd == real or cwd.startswith(real + os.sep))
 
 
-def _live_cwd_inside(real: str, *, hidden_blocks: bool = False) -> bool | None:
+def _live_cwd_inside(real: str, *, hidden_blocks: bool = False, fresh: bool = False) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
     Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
@@ -2025,9 +2025,13 @@ def _live_cwd_inside(real: str, *, hidden_blocks: bool = False) -> bool | None:
     ``True`` (``busy`` / never delete); an unreadable ``/proc`` or a failed
     scan is ``None`` for every caller.
     """
+    # Callers granting a new judge-free exception cannot use a cached miss:
+    # a holder may have entered since the inventory was collected.
     cached = _cwd_inventory_cache
-    from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
-    entries = _cwd_entries()
+    from_cache = (
+        not fresh and cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
+    )
+    entries = _cwd_entries(fresh=fresh)
     if entries is None:
         return None
     if from_cache and any(_inside(cwd, real) for _pid, cwd in entries):
@@ -5726,6 +5730,9 @@ class UnansweredAsk:
     untrusted_yes: bool = False
     #: Effective answer time is the revision time, not the first answer time.
     answered_at: int = 0
+    #: Negative decisions have no OperatorWords. Retain the same local-surface
+    #: and non-bridge requirements for ordering them against approvals.
+    trusted_answer: bool = False
     #: An expired folded record can still contain a late answer or a decline.
     has_answer: bool = False
     expires_at: int = 0
@@ -5880,6 +5887,11 @@ def unanswered_asks(
                     never_answered=status in _UNANSWERED_LABEL,
                     untrusted_yes=words is None and _untrusted_yes(record, status, questions),
                     answered_at=int(record.get("revised_at") or record.get("answered_at") or 0),
+                    trusted_answer=(
+                        str((record.get("answered_by") or {}).get("surface") or "")
+                        in TRUSTED_ASK_SURFACES
+                        and not any(q.get("question_id") for q in questions)
+                    ),
                     has_answer=bool(record.get("answered_at") or record.get("answers")),
                     expires_at=int(record.get("expires_at") or 0),
                 )

@@ -14,17 +14,58 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.classify import _removed_worktree_remnant
+from local_operator.guardrails.provenance import CwdEntry
 
 ENV = {**os.environ, "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
 
 
 def _git(*args: str, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=ENV)
+
+
+class _HostTable:
+    """The process table these tests believe in: only processes they register.
+
+    ``_removed_worktree_remnant`` asks for a FRESH cwd inventory with
+    ``hidden_blocks=True`` and treats anything but a definite ``False`` as
+    "held" (fail closed, #4599). The real scan reads the HOST: on a GitHub
+    runner another same-uid process has an unreadable cwd (``(pid, None)``) and
+    no readable fd/maps evidence, so the answer is ``None`` and every remnant
+    holds, whatever the fixture tree looks like. A remnant fixture therefore
+    must not depend on the host. This stand-in replaces ONLY the scan
+    (``provenance._cwd_entries``); ``_live_cwd_inside`` and its cache/fresh/
+    ``hidden_blocks`` logic still run for real, and the cache contract is kept
+    so the cached-idle-then-owner-enters case stays testable. The real scan and
+    its hidden-pid handling are covered by ``test_cwd_inventory_hidden_pid.py``.
+    """
+
+    def __init__(self) -> None:
+        self.owners: list[tuple[int, Path]] = []
+
+    def scan(self, *, fresh: bool = False) -> tuple[CwdEntry, ...]:
+        cached = prov._cwd_inventory_cache
+        age = time.monotonic() - cached[0] if cached is not None else None
+        if not fresh and cached is not None and age is not None and age < prov._CWD_INVENTORY_TTL_S:
+            return cached[1]
+        inventory = tuple((pid, os.path.realpath(cwd)) for pid, cwd in self.owners)
+        prov._cwd_inventory_cache = (time.monotonic(), inventory)
+        return inventory
+
+
+@pytest.fixture(autouse=True)
+def host_table(monkeypatch: pytest.MonkeyPatch) -> _HostTable:
+    """Pin the cwd inventory to a known, empty host (see :class:`_HostTable`)."""
+    table = _HostTable()
+    monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
+    monkeypatch.setattr(prov, "_cwd_entries", table.scan)
+    return table
 
 
 @pytest.fixture
@@ -361,3 +402,178 @@ def test_remnant_review_minors(repo: Path, monkeypatch: pytest.MonkeyPatch) -> N
     deep = gone / "deep.tsbuildinfo"
     deep.write_text("[" * 200_000 + "]" * 200_000)
     assert c._removed_worktree_remnant(str(gone)) is False
+
+
+# -- 2026-11-25: the orphan-ask-cascade shape ---------------------------------------
+# ``~/local-operator-ui/.worktrees/orphan-ask-cascade``: a dangling one-line
+# ``.git`` pointer, no admin dir, no registration. Synthetic copy plus the
+# controls the remnant rule must still hold.
+
+
+def _orphan(repo: Path, name: str = "orphan-ask-cascade") -> Path:
+    wt = repo / ".worktrees" / name
+    wt.mkdir(parents=True)
+    (wt / ".git").write_text(f"gitdir: {repo}/.git/worktrees/{name}\n")
+    return wt
+
+
+def _rank(repo: Path, wt: Path):
+    from local_operator.guardrails.classify import classify_bash
+
+    return classify_bash(
+        f"rm -rf {wt}",
+        cwd=str(repo),
+        env={"HOME": str(repo.parent)},
+        scratchpad=None,
+        session_id="aaaaaaaaaaa1",
+    ).targets[0]
+
+
+def test_orphan_with_dangling_pointer_and_empty_tree_ranks_low(repo: Path) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
+    wt = _orphan(repo)
+    (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    assert _removed_worktree_remnant(str(wt))
+    t = _rank(repo, wt)
+    assert t.risk is Risk.LOW and t.reason == REMNANT_REASON, t.reason
+
+
+@pytest.mark.parametrize("nested", ["git-dir", "empty-git-dir", "pointer-file", "root-git-dir"])
+def test_orphan_holding_a_nested_repository_keeps_the_rank(repo: Path, nested: str) -> None:
+    """An empty ``.git`` dir has no file to hash; it passed as lossless before."""
+    wt = _orphan(repo, f"nested-{nested}")
+    if nested == "git-dir":
+        _git("init", "-q", str(wt / "sub"), cwd=repo)
+    elif nested == "empty-git-dir":
+        (wt / "sub" / ".git").mkdir(parents=True)
+    elif nested == "pointer-file":
+        (wt / "sub").mkdir()
+        (wt / "sub" / ".git").write_text("gitdir: /elsewhere\n")
+    else:
+        (wt / ".git").unlink()
+        (wt / ".git").mkdir()
+    assert not _removed_worktree_remnant(str(wt))
+
+
+@pytest.mark.parametrize("spelling", [".git", ".GiT"])
+def test_nested_gitfile_holds_when_native_lookup_finds_it(repo: Path, spelling: str) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
+    wt = _orphan(repo, "nested-native")
+    nested = wt / "sub"
+    nested.mkdir()
+    marker = nested / spelling
+    marker.write_text(f"gitdir: {repo}/.git\n")
+    # The outer repo already holds these bytes, so a content-only check passes.
+    _git("hash-object", "-w", str(marker), cwd=repo)
+    risk = _rank(repo, wt)
+    if (nested / ".git").exists():
+        probe = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=nested,
+            env=ENV,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert Path(probe.stdout.strip()).resolve() == nested.resolve()
+        assert risk.risk is Risk.HIGH
+    else:
+        assert risk.risk is Risk.LOW and risk.reason == REMNANT_REASON
+
+
+def test_orphan_with_a_live_owner_after_cached_idle_keeps_the_rank(
+    repo: Path, host_table: _HostTable
+) -> None:
+    from local_operator.guardrails.classify import REMNANT_REASON, Risk
+
+    wt = _orphan(repo, "owned")
+    idle = _rank(repo, wt)
+    assert idle.risk is Risk.LOW and idle.reason == REMNANT_REASON
+    cached = prov._cwd_inventory_cache
+    assert cached is not None
+    # A real child, registered with the pinned table: Popen returns after exec,
+    # so its cwd is in place before the next check.
+    proc = subprocess.Popen(["sleep", "30"], cwd=wt, start_new_session=True)
+    try:
+        host_table.owners.append((proc.pid, wt))
+        # The cached idle answer is still there; only a fresh scan sees the owner.
+        assert prov._cwd_inventory_cache is cached
+        assert _rank(repo, wt).risk is Risk.HIGH
+        entries = prov._cwd_entries()
+        assert entries is not None and (proc.pid, str(wt.resolve())) in entries
+    finally:
+        os.killpg(proc.pid, 9)
+        proc.wait()
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)
+
+
+@pytest.mark.parametrize("inventory", [None, ((42, None),)], ids=["unavailable", "hidden-cwd"])
+def test_orphan_with_unknown_cwd_inventory_keeps_the_rank(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: tuple[CwdEntry, ...] | None
+) -> None:
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import Risk
+
+    monkeypatch.setattr(prov, "_cwd_entries", lambda **_: inventory)
+    assert _rank(repo, _orphan(repo, "unknown")).risk is Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    ("inventory", "lossless"),
+    [
+        ((), True),
+        (None, False),
+        (((42, None),), False),
+        (((42, "{tree}"),), False),
+        (((42, "{tree}/sub"),), False),
+        (((42, "/somewhere/else"),), True),
+    ],
+    ids=["idle", "unavailable", "hidden-cwd", "cwd-at-root", "cwd-below", "elsewhere"],
+)
+def test_remnant_exemption_fails_closed_on_the_cwd_inventory(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory: tuple[CwdEntry, ...] | None,
+    lossless: bool,
+) -> None:
+    """The real fail-closed rule, host-independent: only a fresh inventory that
+    is known (no unreadable pid) and has no holder inside grants the exemption.
+    Unknown (``None`` or a hidden pid) holds exactly like a live holder."""
+    wt = _orphan(repo, "inventory")
+    entries = (
+        None
+        if inventory is None
+        else tuple((pid, cwd.format(tree=wt.resolve()) if cwd else cwd) for pid, cwd in inventory)
+    )
+    seen: list[bool] = []
+
+    def scan(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
+        seen.append(fresh)
+        return entries
+
+    monkeypatch.setattr(prov, "_cwd_entries", scan)
+    assert _removed_worktree_remnant(str(wt)) is lossless
+    # A cached idle miss must never grant a judge-free delete.
+    assert seen == [True]
+
+
+@pytest.mark.parametrize("extra", ["untracked", "node-modules-link"])
+def test_orphan_with_content_git_does_not_hold_keeps_the_rank(repo: Path, extra: str) -> None:
+    """The real remnant's shape: pnpm symlinks and blobs Git never had."""
+    wt = _orphan(repo, f"content-{extra}")
+    if extra == "untracked":
+        (wt / "notes.md").write_text("never committed\n")
+    else:
+        (wt / "node_modules").mkdir()
+        (wt / "node_modules" / "zod").symlink_to(".pnpm/zod@3/node_modules/zod")
+    assert not _removed_worktree_remnant(str(wt))
+
+
+def test_guard_git_never_lazy_fetches() -> None:
+    """A partial clone must answer "missing" locally, never ask the promisor."""
+    from local_operator.guardrails.classify import _git_env
+
+    assert _git_env()["GIT_NO_LAZY_FETCH"] == "1"
