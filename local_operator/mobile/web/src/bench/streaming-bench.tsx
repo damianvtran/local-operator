@@ -40,6 +40,11 @@ const SID = "bench-session";
 const params = new URLSearchParams(location.search);
 const MODE = params.get("mode") === "fade" ? "fade" : "perf";
 const SPEED = Number(params.get("speed") ?? 2);
+/** Source length of the synthetic answer. speed=0.5 with chars=5000 is the
+ *  realistic profile (~400 chars/s ~ 100 tokens/s, 100 ms-ish snapshot lumps);
+ *  the default speed=2/14000 replays ~1500 chars/s, a deliberate stress profile
+ *  roughly 4-5x faster than any model streams. */
+const CHARS = Number(params.get("chars") ?? 14000);
 const BURN = Number(params.get("burn") ?? 0);
 const SEED = Number(params.get("seed") ?? 7);
 const LABEL = params.get("label") ?? "";
@@ -113,7 +118,7 @@ async function run() {
 	createRoot(document.getElementById("root")!).render(<Probe />);
 	while (!sink) await sleep(5);
 
-	const { text, chunks } = buildSyntheticStream(SEED, 14000, SPEED);
+	const { text, chunks } = buildSyntheticStream(SEED, CHARS, SPEED);
 	// Calibration happens BEFORE the clock starts: it is not part of the measurement.
 	const rendered = chunks.map((chunk) => renderedLength(text.slice(0, chunk.length)));
 	const finalRendered = renderedLength(text);
@@ -247,6 +252,7 @@ async function run() {
 	const slice = commitMs.slice(commitsBefore);
 	const result = {
 		label: LABEL, mode: MODE, speed: SPEED, burn: BURN, seed: SEED, rows: ROWS,
+		charsPerSec: Math.round(text.length / ((chunks[chunks.length - 1]?.atMs ?? 1) / 1000)),
 		chars: text.length, events: chunks.length,
 		frames: {
 			n: deltas.length, p50: r1(pct(deltas, 50)), p95: r1(pct(deltas, 95)), max: r1(Math.max(0, ...deltas)),
