@@ -2585,6 +2585,7 @@ class AskQueue:
         *,
         drafts: bool = False,
         lapsed_visible_ms: int = store.DEFAULT_LAPSED_VISIBLE_MS,
+        conversation_only: bool = False,
     ) -> list[dict[str, Any]]:
         """The ``PendingAsk`` rows for a surface, open first, capped.
 
@@ -2603,11 +2604,18 @@ class AskQueue:
         index writer (:meth:`_refresh`) does NOT, so the derived index stays
         data at the 7 d horizon the sweep shares, and its readers apply the
         window themselves (``asks/store._shown_rows``).
+
+        ``conversation_only`` keeps native Team Bridge requests in their
+        dedicated Requests inbox rather than in the pending conversation card.
+        The log and index must still carry them for signed decisions and expiry.
         """
         stamp = now_ms if now_ms is not None else self._now()
         horizon_ms = store.LATE_WINDOW_S * 1000
         rows: list[dict[str, Any]] = []
         for record in self.records(stamp):
+            # Exclude before the cap so hidden requests cannot displace visible asks.
+            if conversation_only and store.is_native_bridge_request(record):
+                continue
             status = record["status"]
             if status == store.STATUS_EXPIRED:
                 continue

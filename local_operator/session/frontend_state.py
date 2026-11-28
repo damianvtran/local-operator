@@ -10700,10 +10700,10 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     a runtime that cannot answer at all is ``(None, None)``; the split is the
     WIRE FIX's capability contract, spelled out below.
 
-    The single derivation every publisher uses (``Session.publish_ask_state``,
-    ``refresh_from_session``, the aggregate routes through the index), so the
-    frontend state, the projection and the list rows cannot disagree about which
-    asks are OUTSTANDING.
+    Both conversation publishers (``Session.publish_ask_state`` and the runtime
+    projection refresh) use the same fold. The durable index is a separate view:
+    native Team Bridge requests stay available to the Requests inbox without
+    becoming conversation cards or contributing to ``asks_open`` here.
 
     THE TALLY IS THE OUTSTANDING SET, which is ``open`` alone: an ask settles
     once the agent is told — by its deadline (``timed_out``, #2388) or by an
@@ -10764,16 +10764,20 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         # longer shows. Read off the queue, because the queue knows the config
         # directory its log lives under.
         window = getattr(queue, "lapsed_visible_ms", None)
+        options: dict[str, Any] = {"drafts": True}
+        if callable(window):
+            options["lapsed_visible_ms"] = window()
         try:
-            if callable(window):
-                rows = [
-                    dict(row)
-                    for row in cast("Any", folder(drafts=True, lapsed_visible_ms=window()))
-                ]
-            else:
-                rows = [dict(row) for row in cast("Any", folder(drafts=True))]
+            rows = [dict(row) for row in cast("Any", folder(**options, conversation_only=True))]
         except TypeError:
-            rows = [dict(row) for row in cast("Any", folder())]
+            # A pre-flag queue may still support drafts and the lapsed window.
+            # Its fold may already be capped, but never publish its native rows.
+            try:
+                legacy_rows = folder(**options)
+            except TypeError:
+                legacy_rows = folder()
+            rows = [dict(row) for row in cast("Any", legacy_rows)]
+            rows = [row for row in rows if not store.is_native_bridge_request(row)]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero
         logger.debug("ask: could not fold the queue for the wire", exc_info=True)
         return None, None

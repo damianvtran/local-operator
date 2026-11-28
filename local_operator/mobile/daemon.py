@@ -3015,9 +3015,9 @@ def _durable_projection(
     # The phone's asks sheet lists only the conversation it was opened from, so
     # this screen is the one place a stopped conversation's asks can appear —
     # and with no runtime folding them, the derived index (``asks/store``) is the
-    # only source. Same rows the aggregate serves for this session, capped like
-    # a live runtime's projection, with the tally counted over every row rather
-    # than the cap (the live fold's contract, see ``ProjectionFold.set_asks``).
+    # only source. Apply the live conversation filter before counting or capping
+    # so Requests inbox rows do not reappear when the runtime stops. The tally
+    # spans all visible rows, not just the prefix (``ProjectionFold.set_asks``).
     # No index entry at all leaves BOTH fields absent: ``asks_open: 0`` would
     # claim a live, empty queue, which a stopped conversation does not have. An
     # entry whose rows are all hidden is the other case, handled below.
@@ -3035,7 +3035,9 @@ def _durable_projection(
 
     read_root = root if root is not None else config_dir()
     window = lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(read_root)
-    ask_rows = ask_store.session_asks(read_root, session_id, lapsed_visible_ms=window)
+    ask_rows = ask_store.session_asks(
+        read_root, session_id, lapsed_visible_ms=window, conversation_only=True
+    )
     if ask_rows:
         outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
         fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
