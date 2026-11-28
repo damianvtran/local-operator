@@ -29,6 +29,6 @@ export default defineConfig({
 		// `pele/lazy` (mermaid diagrams) is dynamic-imported and the synthetic stream
 		// has no diagram fence, so it is never loaded; externalising it keeps the
 		// bench buildable from a node_modules tree that predates the pele dep.
-		rollupOptions: { input: path.resolve("src/bench/streaming.html"), external: ["pele/lazy"] },
+		rollupOptions: { input: [path.resolve("src/bench/streaming.html"), path.resolve("src/bench/suite.html")], external: ["pele/lazy"] },
 	},
 });

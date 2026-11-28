@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+	<head><meta charset="UTF-8" /><title>relay streaming bench suite</title></head>
+	<body>
+		<!--
+			Runs `streaming.html` once per query string below, one iframe at a time
+			(each run needs its own module graph: the bench replaces `window.fetch` and
+			the store is a singleton), and gathers every run's JSON into #all so the
+			harness browser reads one page. Usage: suite.html?q=<qs>&q=<qs>...
+			Example: suite.html?q=mode=perf%26speed=0.5%26chars=5000%26label=x
+		-->
+		<pre id="all" style="white-space:pre-wrap;font:10px monospace"></pre>
+		<script>
+			const queries = new URLSearchParams(location.search).getAll("q");
+			const out = document.getElementById("all");
+			const results = [];
+			(async () => {
+				for (const q of queries) {
+					const frame = document.createElement("iframe");
+					frame.style.cssText = "width:390px;height:700px;border:0";
+					frame.src = `./streaming.html?${q}`;
+					document.body.appendChild(frame);
+					const deadline = Date.now() + 120000;
+					let text = "";
+					while (Date.now() < deadline) {
+						await new Promise((r) => setTimeout(r, 500));
+						text = frame.contentDocument?.getElementById("result")?.textContent ?? "";
+						if (text) break;
+					}
+					results.push(text || "TIMEOUT " + q);
+					out.textContent = results.join("\n");
+					frame.remove();
+				}
+				// Optional: a host that accepts POST (see `suite-server.py`) keeps the raw
+				// JSON lines on disk, so reported tables never rest on hand-copied numbers.
+				await fetch(`./save?name=${encodeURIComponent(new URLSearchParams(location.search).get("name") ?? "suite")}`,
+					{ method: "POST", body: results.join("\n") + "\n" }).catch(() => undefined);
+				document.title = "done";
+			})();
+		</script>
+	</body>
+</html>

@@ -716,6 +716,14 @@ export function Transcript({
 				   error and command controls never enter an arrival animation. */
 				if (!before && (!tail || (seam >= 0 && index > seam)) &&
 					(row.kind === "tool" || (row.kind === "assistant" && !row.final && row.text))) arrivals.push(row.id);
+				/* A NEW ASSISTANT ROW IS PACED FROM ITS FIRST WORD too: its first burst
+				   can be a hundred characters, and showing that lump at once is the
+				   "chunk appears" look the paced reveal removes. Membership here is
+				   what makes `Markdown` release the words at its own cadence; the
+				   whole-row arrival fade above stays (it only softens the first word
+				   for ~120 ms) and the words that follow fade themselves. */
+				if (!before && row.kind === "assistant" && !row.final && row.text &&
+					(!tail || (seam >= 0 && index > seam))) liveTextIds.add(key);
 			});
 		}
 		return { liveTextIds, arrivals, settle, advanced, continuous };

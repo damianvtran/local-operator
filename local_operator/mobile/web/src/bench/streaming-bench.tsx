@@ -272,6 +272,8 @@ async function run() {
 		},
 		firstTextMs: r1(anyVisible - firstEmit),
 		firstChunkMs: r1(firstVisible - firstEmit),
+		// The first frames after the first snapshot: [ms since it, characters on screen].
+		early: frameT.map((t, i) => [r1(t - firstEmit), frameShown[i]] as const).filter(([ms]) => ms >= -10).slice(0, 12),
 		reveal: {
 			steps: perFrame.length, charsPerStepP50: pct(perFrame, 50), charsPerStepP95: pct(perFrame, 95),
 			charsPerStepMax: Math.max(0, ...perFrame), stepsOver40Chars: perFrame.filter((d) => d > 40).length,

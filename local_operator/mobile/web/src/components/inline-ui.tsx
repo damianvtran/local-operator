@@ -83,11 +83,14 @@ export function AssistantContent({ text, overlay, live = false, askChips = false
 	// Only the authenticated renderer contract can create widgets. In its
 	// absence the row is prose, including literal fences in older journals.
 	if (!overlay?.length) return <Markdown text={text} live={live} askChips={askChips} />;
+	const lastProse = overlay.reduce((last, part, i) => (part.kind === "markdown" ? i : last), -1);
 	return (
 		<div className="flex min-w-0 flex-col gap-2">
 			{/* Keep each prose segment's own append boundary; a widget is never a Markdown fade span. */}
 			{overlay.map((part, i) => part.kind === "markdown"
-				? <Markdown key={`prose-${i}`} text={part.text} live={live} askChips={askChips} />
+				/* Only the last prose segment is still growing; pacing an earlier one
+				   would reveal it in parallel with the segment being written. */
+				? <Markdown key={`prose-${i}`} text={part.text} live={live && i === lastProse} askChips={askChips} />
 				: <InlineUiPreview key={`preview-${i}`} value={part.value} />)}
 		</div>
 	);

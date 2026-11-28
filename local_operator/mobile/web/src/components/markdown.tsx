@@ -20,6 +20,7 @@ import { diagramKey, shouldDrawDiagram } from "../lib/diagram-fence";
 import { DiagramBlock } from "./diagram-block";
 import { AskIdChip } from "./ask-id";
 import { askIdSegments, isAskId } from "../lib/ask-chip";
+import { usePacedText } from "../lib/use-paced-text";
 import { allowsReveal, revealText, settleReveals } from "../lib/stream-reveal";
 
 /* ------------------------------------------------------------------ */
@@ -793,8 +794,17 @@ function diagramOwner(block: Block) {
 	return owner;
 }
 
-export const Markdown = memo(function Markdown({ text, live = false, askChips = false }: { text: string; live?: boolean; askChips?: boolean }) {
+/**
+ * `live` marks the answer that is still streaming. It does two things: the
+ * received `text` is released at a word-by-word pace (`usePacedText`) instead of
+ * in the lumps the transport delivers, and each appended suffix fades in
+ * (`stream-reveal.ts`). Everything below renders `shown`, a prefix of `text`
+ * that becomes `text` itself the moment `live` goes false, so settled output is
+ * byte-identical to the received text.
+ */
+export const Markdown = memo(function Markdown({ text: received, live = false, askChips = false }: { text: string; live?: boolean; askChips?: boolean }) {
 	const root = useRef<HTMLDivElement>(null);
+	const text = usePacedText(received, live, root);
 	const committed = useRef<ParsedMarkdown | null>(null);
 	const previous = committed.current;
 	const blocks = parseMarkdown(text, previous);

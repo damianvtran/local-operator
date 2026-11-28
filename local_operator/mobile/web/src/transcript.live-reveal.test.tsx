@@ -2,6 +2,12 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { useEffect } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+// This file pins the FADE/WRAPPER mechanics at snapshot granularity: which
+// suffix animates, what retires, what a selection protects. The word-by-word
+// release that now sits in front of those mechanics has its own suite
+// (`transcript.paced-reveal.test.tsx`); mocked to a pass-through here so each
+// frame's whole appended suffix is what the fade machinery sees, as before.
+vi.mock("./lib/use-paced-text", () => ({ usePacedText: (text: string) => text }));
 import { Transcript } from "./components/transcript";
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 import { projectionRevealEpoch, retainProjectionStream, useProjection } from "./store";
@@ -79,7 +85,8 @@ it("reveals only live suffix and tool arrivals, preserving markup and settling c
 	const bold = anchor("answer")?.querySelector("strong");
 	await frame(source, 3, [history, row("answer", "**Ready** for this new addition")]);
 	expect(effects.map(effect => effect.text.trimStart())).toEqual(["Ready for this", "new addition"]);
-	expect(effects[1].frames).toEqual([{ opacity: 0.65 }, { opacity: 1 }]);
+	// Appended text fades from nearly transparent (deep ramp), not the row-level 0.65.
+	expect(effects[1].frames).toEqual([{ opacity: 0.15 }, { opacity: 1 }]);
 	expect(effects[0].cancel).toHaveBeenCalledOnce();
 	expect(anchor("answer")?.querySelector("strong")).toBe(bold);
 	const tool = row("tool", "", { kind: "tool", tool_call_id: "read", tool_name: "read_file", summary: "README.md", final: true });

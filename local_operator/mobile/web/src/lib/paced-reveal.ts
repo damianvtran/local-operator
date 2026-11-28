@@ -55,12 +55,10 @@ const JOINING_START = /^(?:\p{M}|\p{Emoji_Modifier}|\u200c|\u200d|\ufe0f)/u;
 
 const codePointAt = (text: string, at: number) => String.fromCodePoint(text.codePointAt(at) ?? 0);
 
-/**
- * The end of the unit starting at `from`, or -1 when no complete unit is there.
- * A unit is a word plus the whitespace after it (the space travels with the word
- * before it), or a single ideograph, or a bare whitespace run.
- */
-export function unitEnd(text: string, from: number): number {
+const HAS_TEXT = /[\p{L}\p{N}]/u;
+
+/** One word plus the whitespace after it; -1 while the word may still grow. */
+function wordEnd(text: string, from: number): number {
 	const length = text.length;
 	let at = from;
 	if (at >= length) return -1;
@@ -74,15 +72,40 @@ export function unitEnd(text: string, from: number): number {
 		if (WHITESPACE.test(ch) || IDEOGRAPH.test(ch)) break;
 		at += ch.length;
 	}
-	const wordEnd = at;
+	const stop = at;
 	while (at < length) {
 		const ch = codePointAt(text, at);
 		if (!WHITESPACE.test(ch)) break;
 		at += ch.length;
 	}
 	// No whitespace after the word yet = the word may still be growing.
-	if (at === wordEnd && wordEnd === length) return -1;
+	if (at === stop && stop === length) return -1;
 	return JOINING_START.test(text.slice(at, at + 2)) ? -1 : at;
+}
+
+/**
+ * The end of the unit starting at `from`, or -1 when no complete unit is there.
+ * A unit is a word plus the whitespace after it (the space travels with the word
+ * before it), or a single ideograph, or a bare whitespace run.
+ *
+ * MARKUP TRAVELS WITH THE WORD IT OPENS. The pacer sees the RAW markdown the
+ * model wrote, not the rendered text. A unit with no letter or digit in it
+ * (`##`, `-`, `>`, `|`, `---`) renders as nothing or as an empty heading/bullet
+ * line, so releasing it alone would paint a blank block for a tick and then
+ * grow it (a layout jump, and a first "text" that shows no text). It is merged
+ * with the next unit; if that one is still incomplete the answer is -1 and the
+ * caller's first-word fallback or the lag bound shows what has arrived.
+ */
+export function unitEnd(text: string, from: number): number {
+	let at = from;
+	for (;;) {
+		const end = wordEnd(text, at);
+		if (end < 0) return -1;
+		if (HAS_TEXT.test(text.slice(at, end))) return end;
+		// Whitespace-only runs are units of their own; markup-only ones are not.
+		if (!/\S/u.test(text.slice(at, end))) return end;
+		at = end;
+	}
 }
 
 type Arrival = { len: number; at: number };
