@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 import local_operator.tools.builtin as builtin
-from local_operator.harness.types import BrowserSurface, ToolContext
+from local_operator.harness.types import BrowserSurface, ToolContext, ToolResult
 
 #: Enough of a PNG to satisfy the magic-byte guard without shipping a fixture.
 FAKE_PNG = builtin.PNG_MAGIC + b"\x00" * 64
@@ -2490,15 +2490,18 @@ def test_a_malformed_locator_is_not_blamed_on_the_host() -> None:
     ],
 )
 def test_attachment_refusal_only_clears_confirmed_extension_pin(
-    monkeypatch, host, pin, receipt, cleared
+    monkeypatch: pytest.MonkeyPatch, host: str, pin: str, receipt: dict[str, object], cleared: bool
 ) -> None:
     from local_operator.browser_bridge.backend import BridgeError
     from local_operator.browser_bridge.protocol import ErrorCode
 
-    calls = []
+    calls: list[tuple[str, str]] = []
 
     class Host:
-        async def call(self, action, params):
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        async def call(self, action: str, params: dict[str, Any]) -> None:
             calls.append((action, params["tab"]))
             raise BridgeError(
                 ErrorCode.INTERNAL,
@@ -2507,20 +2510,23 @@ def test_attachment_refusal_only_clears_confirmed_extension_pin(
             )
 
     _bridge_only(monkeypatch)
-    selected = Host()
-    selected.host = host
+    selected = Host(host)
     monkeypatch.setattr(builtin, "_client_for", lambda _: selected)
     context = _secret_ctx(surface_id=pin)
-    result = asyncio.run(
-        builtin.execute_browser(
-            "t1", {"action": "click", "selector": 'label="Fixture"'}, context=context
+
+    # The guarded tool promises an Awaitable; asyncio.run requires a coroutine.
+    async def click() -> ToolResult:
+        return await builtin.execute_browser(
+            "t1", {"action": "click", "selector": 'label="Fixture"'}, None, None, context
         )
-    )
+
+    result = asyncio.run(click())
 
     assert result.is_error
     assert calls == [("click", pin)], result.text
     assert (result.details or {}).get("error_code") == "internal"
     assert ((result.details or {}).get("surface_retired") is True) == cleared
+    assert context.browser is not None
     assert context.browser.surface_id == ("" if cleared else pin)
     assert ((result.details or {}).get("attach_refused") is True) == (host == "extension")
     assert ("Chrome may still have the tab open. Use 'open'" in result.text) == cleared
