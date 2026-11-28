@@ -1050,7 +1050,18 @@ async def test_resumed_local_team_uses_approved_manager_instructions(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["approved", "autonomous", "changed-binding", "replica", "busy"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "approved",
+        "autonomous",
+        "changed-binding",
+        "replica",
+        "busy",
+        "depth-lowered",
+        "depth-raised",
+    ],
+)
 async def test_live_owner_retries_local_team_after_receipt_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -1062,6 +1073,8 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
 
     from local_operator import profile_approval, profile_proposals
     from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import read_max_team_depth
     from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
     from local_operator.mobile.daemon import (
         MobileDaemon,
@@ -1105,6 +1118,8 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
     directory = root / "sessions" / sid
     binding = directory / move_team.LOCAL_BINDING_NAME
     prior = binding.read_bytes()
+    recorded_depth = json.loads(prior)[move_team.KEY]["delegation"]["max_depth"]
+    assert recorded_depth == 3
     publish, at_publication = Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     write = profile_proposals._durable_json
@@ -1178,6 +1193,14 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
                         unchanged.setattr(owner.team_registry, "refresh", unexpected_refresh)
                         await refused(prior)
                         await refused(prior)
+                    if case in {"depth-lowered", "depth-raised"}:
+                        # Change config after this owner has begun waiting. A receipt
+                        # cannot authorize persisting an unrelated ceiling change.
+                        configured_depth = 1 if case == "depth-lowered" else 4
+                        ConfigManager(root).set_config_value(
+                            "subagents", {"max_team_depth": configured_depth}
+                        )
+                        assert read_max_team_depth(root) == configured_depth
                     publish.set()
                     await accepting
                     assert json.loads(receipt.read_bytes())["state"] == "accepted"
@@ -1194,6 +1217,10 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
                             unchanged.setattr(owner.team_registry, "refresh", unexpected_refresh)
                             await refused(unchanged_bytes)
                         return
+                    if case == "depth-lowered":
+                        await refused(prior)
+                        print("provider_calls=0 durable_command=false binding_byte_identical=true")
+                        return
                     if case == "busy":
                         async with owner._turn_lock:
                             await refused(prior)
@@ -1208,7 +1235,12 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
                     assert (
                         owner.active_team_name == team.name and not owner.attachment_restore_notice
                     )
-                    assert binding.read_bytes() != prior
+                    current = binding.read_bytes()
+                    assert current != prior
+                    assert (
+                        json.loads(current)[move_team.KEY]["delegation"]["max_depth"]
+                        == recorded_depth
+                    )
                     request = stream.requests[0]
                     state = [
                         m.model_dump_json()
@@ -1225,6 +1257,7 @@ async def test_live_owner_retries_local_team_after_receipt_publication(
                     print(
                         case,
                         "provider_calls=1 exact_approved_team_state=true binding_advanced=true",
+                        f"recorded_depth={recorded_depth} (unchanged)",
                     )
             finally:
                 dial.cancel()

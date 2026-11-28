@@ -987,6 +987,12 @@ def _same_instruction_ceiling(expected: Any, actual: dict[str, Any]) -> bool:
     ):
         return False
 
+    # Ordinary restore may persist a lower live cap; an instruction receipt
+    # authorizes only the digest. The effective cap is already clamped to the recorded cap.
+    recorded_depth = expected["delegation"].get("max_depth")
+    if type(recorded_depth) is not int or recorded_depth != actual["delegation"]["max_depth"]:
+        return False
+
     def same_ceiling(old: Any, new: dict[str, Any]) -> bool:
         # The ordinary ceiling accepts narrowing, even for the other roster
         # roles; tool/delegation edits aren't part of a role digest.
