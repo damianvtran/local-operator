@@ -62,6 +62,7 @@ from lop_osworld_v2_adapter import (
     guest_loss,
     guest_supervisor,
     guest_xcursor,
+    scorer_preflight,
     scoring,
 )
 from lop_osworld_v2_adapter.cleanup import (
@@ -817,6 +818,7 @@ class AwsProvider:
         region: str,
         lease_ref: str,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        scorer_runtime: scorer_preflight.FreeCADRuntime | None = None,
         readiness_timeout_s: float = 600.0,
         action_delay_s: float = DEFAULT_ACTION_DELAY_S,
         terminate_timeout_s: float = 55.0,
@@ -829,6 +831,7 @@ class AwsProvider:
         self._region = region
         self._lease_ref = lease_ref
         self._ttl_seconds = ttl_seconds
+        self._scorer_runtime = scorer_runtime
         self._readiness_timeout_s = readiness_timeout_s
         self._action_delay_s = action_delay_s
         # Below the release-instance action's 60 s ``timeout_ms`` so the
@@ -2805,7 +2808,10 @@ class AwsProvider:
             getter_capture = _UnreadGetterTargetCapture()
             getter_logger.addHandler(getter_capture)
             try:
-                raw = env.evaluate()
+                # Cancelling the RPC await doesn't stop this thread. The
+                # evaluator may still resolve FreeCAD after the cancellation.
+                with scorer_preflight.score_environment(self._scorer_runtime):
+                    raw = env.evaluate()
             finally:
                 for logger in loggers:
                     logger.removeHandler(capture)
