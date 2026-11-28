@@ -105,9 +105,20 @@ def row_id(anchor_ms: int) -> str:
 
 
 def prefix_digest(
-    system_blocks: Sequence[str], tools: Iterable[Any], last_message_id: str | None
+    system_blocks: Sequence[str], tools: Iterable[Any], message_ids: Sequence[str]
 ) -> str:
-    """sha256 over what the cached prefix is made of: system, tools, history tail.
+    """sha256 over what the cached prefix is made of: system, tools, history ids.
+
+    ``message_ids`` is the id of every message the arm saw, in order (``""`` for
+    one without an id, so positions still count). The row stores the digest AND
+    that count; the fire hashes only its context's FIRST ``count`` ids. A
+    message appended since (a quiet peer message, which never runs a turn) is
+    therefore not part of the comparison: the ping sends it as uncached tail
+    and still reads the prefix. Hashing the arm-time LAST id instead refused
+    every such fire, which on the chief of staff (a peer message every ~30
+    min) killed every overnight chain before its first ping. A message removed
+    or replaced at or before the recorded span (compaction rewrote history)
+    shifts an id and still refuses.
 
     Computed by the SAME call at turn end (stored on the row) and at fire (after
     the relaunched runtime's tools connected). A mismatch means the ping would
@@ -127,7 +138,9 @@ def prefix_digest(
         {
             "system": list(system_blocks),
             "tools": wire_tools,
-            "last_message_id": last_message_id or "",
+            # A key the pre-split digest never used, so a row armed by that
+            # build can never compare equal here: it refuses once and clears.
+            "message_ids": list(message_ids),
         },
         sort_keys=True,
         default=str,
@@ -138,7 +151,7 @@ def prefix_digest(
 
 @dataclass(frozen=True)
 class KeepaliveDecision:
-    """``ok`` plus the reason, logged at debug either way."""
+    """``ok`` plus the reason, logged at INFO either way (the runtime log is INFO-only)."""
 
     ok: bool
     reason: str

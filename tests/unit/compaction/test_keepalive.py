@@ -132,13 +132,17 @@ def _tool(name: str, description: str = "d") -> Any:
     return SimpleNamespace(name=name, description=description, parameters={"type": "object"})
 
 
-def test_prefix_digest_tracks_system_tools_and_history_tail() -> None:
-    base = keepalive.prefix_digest(["a", "b"], [_tool("bash")], "m1")
-    assert base == keepalive.prefix_digest(["a", "b"], [_tool("bash")], "m1")
-    assert base != keepalive.prefix_digest(["a", "c"], [_tool("bash")], "m1")
-    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash"), _tool("read")], "m1")
-    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash", "other")], "m1")
-    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash")], "m2")
+def test_prefix_digest_tracks_system_tools_and_history_ids() -> None:
+    ids = ["m0", "m1"]
+    base = keepalive.prefix_digest(["a", "b"], [_tool("bash")], ids)
+    assert base == keepalive.prefix_digest(["a", "b"], [_tool("bash")], list(ids))
+    assert base != keepalive.prefix_digest(["a", "c"], [_tool("bash")], ids)
+    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash"), _tool("read")], ids)
+    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash", "other")], ids)
+    # Any id in the span moving (a replaced head, a dropped middle) changes it.
+    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash")], ["m0", "m2"])
+    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash")], ["mX", "m1"])
+    assert base != keepalive.prefix_digest(["a", "b"], [_tool("bash")], ["m1"])
 
 
 def test_the_ping_is_marked_at_the_main_threads_ttl() -> None:

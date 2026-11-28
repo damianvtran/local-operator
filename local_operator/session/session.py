@@ -31953,20 +31953,24 @@ class Session:
         )
         return route == (self._model.provider, self._model.model_id)
 
-    async def _keepalive_prefix_digest(self) -> str:
-        """The digest of the prefix a ping would send NOW (system, tools, history tail)."""
+    async def _keepalive_prefix_digest(self, count: int | None = None) -> tuple[str | None, int]:
+        """``(digest, count)`` of the prefix a ping would send NOW.
+
+        ``count=None`` (the arm) hashes every context message; the fire passes
+        the row's count so messages appended since are left out (see
+        ``keepalive.prefix_digest``). A context now SHORTER than that count
+        lost part of the cached span: ``None``, which refuses.
+        """
         from local_operator.compaction import keepalive
 
         _desired, blocks = await self._read_only_system_blocks()
-        last_id = next(
-            (
-                str(message.id)
-                for message in reversed(self._context.messages)
-                if getattr(message, "id", None)
-            ),
-            None,
-        )
-        return keepalive.prefix_digest(blocks, self._side_channel_tools(), last_id)
+        messages = list(self._context.messages)
+        if count is None:
+            count = len(messages)
+        elif len(messages) < count:
+            return None, count
+        ids = [str(getattr(message, "id", "") or "") for message in messages[:count]]
+        return keepalive.prefix_digest(blocks, self._side_channel_tools(), ids), count
 
     def _keepalive_arm_check(
         self,
@@ -32087,8 +32091,11 @@ class Session:
                 decision = self._keepalive_arm_check(
                     settings, usage=usage, ttl_s=ttl_s, anchor_ms=anchor_ms, attempt=attempt
                 )
-                logger.debug("cache keep-alive arm (attempt %d): %s", attempt, decision.reason)
+                # INFO, not DEBUG: the runtime file log is INFO-only, and a
+                # row that was never armed otherwise leaves no trace of why.
+                logger.info("cache keep-alive arm (attempt %d): %s", attempt, decision.reason)
                 if decision.ok:
+                    digest, count = await self._keepalive_prefix_digest()
                     row = WakeSchedule(
                         id=keepalive.row_id(anchor_ms),
                         message="prompt-cache keep-alive",
@@ -32100,7 +32107,8 @@ class Session:
                         origin="tool",
                         attempt=attempt,
                         cache_anchor_ms=int(anchor_ms),
-                        prefix_digest=await self._keepalive_prefix_digest(),
+                        prefix_digest=digest or "",
+                        prefix_message_count=count,
                     )
             async with self._ask_wake_lock:
                 keep_newer_than: int | None = None
@@ -32165,7 +32173,7 @@ class Session:
             # its array; hashing before they connect would compare a smaller
             # array than either side sends.
             await self._await_declared_mcp_ready()
-            digest = await self._keepalive_prefix_digest()
+            digest, _count = await self._keepalive_prefix_digest(int(row.prefix_message_count))
             daily = await asyncio.to_thread(self._keepalive_daily_count)
             decision = keepalive.fire_decision(
                 now_ms=int(time.time() * 1000),
