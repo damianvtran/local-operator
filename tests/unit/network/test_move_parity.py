@@ -760,7 +760,12 @@ def _role(registry: Any, name: str, prompt: str) -> None:
 
 
 def _session_with_stored_attachment(
-    dest: Path, *, team: str = "", agent: str = "", session_id: str = SID
+    dest: Path,
+    *,
+    team: str = "",
+    agent: str = "",
+    session_id: str = SID,
+    scoped_profiles: bool = False,
 ) -> tuple[Any, Any]:
     """Open a session whose stored attachment names a not-yet-loaded definition."""
     from local_operator.agents import AgentRegistry
@@ -769,6 +774,7 @@ def _session_with_stored_attachment(
         StreamEvent,
         StreamTextDelta,
     )
+    from local_operator.profile_scope import scope_session_registries
     from local_operator.prompts_api import build_system_blocks
     from local_operator.resume import write_session_attachment
     from local_operator.session.goal import GoalState
@@ -798,6 +804,9 @@ def _session_with_stored_attachment(
     provider.append_only_state = True  # type: ignore[attr-defined]
     reply: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
     stream = ScriptedStream([reply, reply, reply])
+    agents, teams = AgentRegistry(dest), TeamRegistry(dest)
+    if scoped_profiles:
+        agents, teams = scope_session_registries(agents, teams, session_dir)
     session = Session(
         model=MODEL,
         stream_fn=stream,
@@ -805,8 +814,8 @@ def _session_with_stored_attachment(
         transcript=Transcript(session_dir),
         system_blocks_provider=provider,
         goal_state=goal_state,
-        agent_registry=AgentRegistry(dest),
-        team_registry=TeamRegistry(dest),
+        agent_registry=agents,
+        team_registry=teams,
     )
     return session, stream
 
@@ -816,6 +825,193 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
     session, stream = _session_with_stored_attachment(dest, team=team, agent=agent)
     await session.prompt("answered before the definitions landed")
     return session, stream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "desktop",
+        "conversation",
+        "edit-then-accept",
+        "recorded-effort-and-tier",
+        "pending",
+        "autonomous",
+        "unapproved",
+        "missing-transaction",
+        "incomplete-transaction",
+        "wrong-actor",
+        "wrong-before",
+        "current-mismatch",
+        "multi-edge",
+        "extra-model-field",
+        "role-pins",
+        "role-delegation",
+        "role-hosting",
+        "roster-structure",
+        "replaced-id",
+        "scoped-shadow",
+        "non-explicit",
+        "replica-marker",
+    ],
+)
+async def test_resumed_local_team_uses_approved_manager_instructions(
+    tmp_path: Path, change: str
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator import profile_approval, profile_proposals
+    from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.network import move_team
+    from local_operator.profile_scope import scope_agent_registry
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.placement import MESH_STAMP_NAME
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    root = tmp_path
+    agents = AgentRegistry(root)
+    _role(agents, "local-lead", "Original instructions.\n")
+    role = agents.get_agent_by_name("local-lead")
+    assert role is not None
+    team = TeamRegistry(root).create_team(
+        TeamEditFields(
+            name="local-team", manager="local-lead", members=[TeamMember(role="local-lead")]
+        )
+    )
+    session, _ = _session_with_stored_attachment(root, scoped_profiles=True)
+    session.attach_team(team)
+    directory = root / "sessions" / SID
+    binding = directory / move_team.LOCAL_BINDING_NAME
+    attached = cast("AttachedSession", SimpleNamespace(_config_dir=root, _session_id=SID))
+    initially_bound = binding.read_bytes()
+    assert AttachedSession._cold_bound_team(attached) == team.name
+    assert binding.read_bytes() == initially_bound
+
+    old_text, new_text = "Original instructions.\n", "Accepted instructions.\n"
+    if change == "current-mismatch":
+        new_text = new_text.ljust(MAX_INSTRUCTIONS_CHARS, "x")
+    if change == "wrong-before":
+        # A different, genuinely accepted edge still cannot prove the bound digest.
+        agents.set_agent_system_prompt(role.id, old_text.rstrip("\n"))
+    elif change == "recorded-effort-and-tier":
+        agents.update_agent(role.id, AgentEditFields(tags=["role", "effort:hi"]))
+        TeamRegistry(root).update_team(
+            team.id, TeamEditFields(members=[TeamMember(role=role.name, tier="hi")])
+        )
+    if change == "unapproved":
+        agents.set_agent_system_prompt(role.id, new_text)
+    else:
+        def file_edit(text: str, **extra: Any) -> dict[str, Any]:
+            before = profile_approval.snapshot(root, "agent", role.id)
+            assert before is not None
+            return profile_proposals.file(
+                root,
+                profile_kind="agent",
+                operation="update",
+                target_id=role.id,
+                name=role.name,
+                before=before,
+                after={**before, "instructions": text, **extra},
+                session_id=SID,
+            )
+
+        if change == "multi-edge":
+            step = file_edit("Intermediate instructions.\n")
+            profile_proposals.apply(root, step["id"], actor="desktop")
+        after = "Suggested instructions.\n" if change == "edit-then-accept" else new_text
+        extra = {"model": "other-model"} if change == "extra-model-field" else {}
+        proposal = file_edit(after, **extra)
+        if change == "pending":
+            agents.set_agent_system_prompt(role.id, new_text)
+        else:
+            actor = {
+                "conversation": f"conversation:{SID}",
+                "autonomous": f"agent:{SID}",
+            }.get(change, "desktop")
+            profile_proposals.apply(
+                root,
+                proposal["id"],
+                actor=actor,
+                edited_after={"instructions": new_text} if change == "edit-then-accept" else None,
+            )
+            if change in {"missing-transaction", "incomplete-transaction", "wrong-actor"}:
+                (journal,) = (root / "profile-transactions").glob(f"{proposal['id']}-*.json")
+                if change == "missing-transaction":
+                    journal.unlink()
+                else:
+                    record = json.loads(journal.read_text())
+                    if change == "incomplete-transaction":
+                        record["state"] = "prepared"
+                    else:
+                        record["binding"]["actor"] = f"agent:{SID}"
+                    journal.write_text(json.dumps(record))
+
+    if change == "current-mismatch":
+        # Same bounded runtime text is not enough: the full authored image matters.
+        agents.set_agent_system_prompt(role.id, new_text + "Unapproved addition.\n")
+    elif change in {"role-pins", "role-delegation", "role-hosting"}:
+        edits: dict[str, Any] = {
+            "role-pins": {"tags": ["role", "tools:edit"]},
+            "role-delegation": {"tags": ["role", "delegate:yes"]},
+            "role-hosting": {"hosting": "openai"},
+        }[change]
+        agents.update_agent(role.id, AgentEditFields(**edits))
+    elif change == "roster-structure":
+        TeamRegistry(root).update_team(
+            team.id, TeamEditFields(members=[TeamMember(role=role.name), TeamMember(role="task")])
+        )
+    elif change == "replaced-id":
+        agents.delete_agent(role.id)
+        _role(agents, role.name, new_text)
+    elif change == "scoped-shadow":
+        # An identical UUID/name can be copied into the conversation scope.
+        # Its own instructions must not consume an account-wide approval.
+        scoped = scope_agent_registry(agents, directory)
+        scoped.session_registry.save_agent(agents.get_agent(role.id))
+        scoped.session_registry.set_agent_system_prompt(role.id, new_text)
+    elif change == "non-explicit":
+        raw = json.loads(binding.read_text())
+        raw[move_team.KEY]["explicit_local"] = False
+        binding.write_text(json.dumps(raw))
+    elif change == "replica-marker":
+        (directory / MESH_STAMP_NAME).write_text("{}")
+
+    before_preview = binding.read_bytes()
+    # The ownerless display is a recorded-name hint, not warm admission.
+    assert AttachedSession._cold_bound_team(attached) == team.name
+    assert binding.read_bytes() == before_preview, "the cold observer must never rebind"
+    live_agents = scope_agent_registry(AgentRegistry(root), directory)
+    live_team = TeamRegistry(root).get_team(team.id)
+    if change not in {"desktop", "conversation", "edit-then-accept", "recorded-effort-and-tier"}:
+        with pytest.raises(move_team.TeamIdentityRefused):
+            move_team.bind_runtime_authority(
+                directory, live_team, TeamRegistry(root), live_agents, restoring=True
+            )
+        assert binding.read_bytes() == before_preview
+        return
+
+    # Mobility still requires the exact original revision, even before a
+    # successful local restore updates its normal local binding.
+    with pytest.raises(move_team.TeamIdentityRefused):
+        move_team.check_promotion(root, directory)
+    with pytest.raises(move_team.TeamIdentityRefused):
+        move_team.source_offer(root, directory, supported=True)
+    assert binding.read_bytes() == before_preview
+
+    reopened, stream = _session_with_stored_attachment(
+        root, team="local-team", scoped_profiles=True
+    )
+    await reopened.prompt("follow up without reattaching")
+    assert reopened.active_team_name == team.name
+    assert not reopened.attachment_restore_notice
+    assert "Accepted instructions." in "\n".join(stream.requests[0].system_blocks)
+    assert binding.read_bytes() != before_preview
+    record = json.loads(binding.read_text())[move_team.KEY]
+    assert record["manager"]["digest"] == record["delegation"]["roles"][role.name]["digest"]
+    prior = json.loads(before_preview)[move_team.KEY]
+    assert record[move_team.ROLE_EFFORTS_KEY] == prior[move_team.ROLE_EFFORTS_KEY]
+    assert record[move_team.MEMBER_TIERS_KEY] == prior[move_team.MEMBER_TIERS_KEY]
 
 
 class TestReresolveRefreshesBothRegistries:

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -865,6 +866,165 @@ def _compare(
                 raise TeamIdentityRefused(name, f"team definition {slot!r} does not match")
 
 
+def _local_instruction_continuation(root: Path, directory: Path, expected: Any) -> bool:
+    """Only a device-local authorization can consume this device's decisions."""
+    from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.session.placement import MESH_STAMP_NAME
+
+    if not isinstance(expected, dict) or expected.get("explicit_local") is not True:
+        return False
+    try:
+        if directory.resolve() != root.resolve() / "sessions" / directory.name:
+            return False
+        if not stat.S_ISREG((directory / LOCAL_BINDING_NAME).lstat().st_mode):
+            return False
+        for marker in (MESH_STAMP_NAME, FORK_BOUNDARY_NAME):
+            try:
+                (directory / marker).lstat()
+            except FileNotFoundError:
+                continue
+            return False
+        return not _arrival_lineage(root, directory)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False  # Unreadable placement or local journal proves nothing.
+
+
+def _compare_local_restore(
+    root: Path | None,
+    directory: Path,
+    agents: Any,
+    expected: Any,
+    snapshot: TeamAuthority,
+    actual: dict[str, Any],
+) -> None:
+    try:
+        _compare(expected, actual, local=True)
+        return
+    except _DefinitionNotLoaded:
+        raise  # Preserve the existing move/definition wait semantics.
+    except TeamIdentityRefused:
+        from local_operator.profile_scope import scope_dir_for
+
+        if (
+            root is None
+            or getattr(agents, "config_dir", None) != root
+            or getattr(agents, "scope_dir", None) not in (None, scope_dir_for(directory))
+            or not _local_instruction_continuation(root, directory, expected)
+        ):
+            raise
+        comparison = _compare_with_approved_instructions(
+            root, directory, expected, snapshot, actual
+        )
+        if comparison is actual:
+            raise
+        _compare(expected, comparison, local=True)
+
+
+def _compare_with_approved_instructions(
+    root: Path,
+    directory: Path,
+    expected: dict[str, Any],
+    snapshot: TeamAuthority,
+    actual: dict[str, Any],
+) -> dict[str, Any]:
+    """Substitute only independently proved old digests in a temporary record.
+
+    The runtime still attaches the exact NEW snapshot. Every identity, tool,
+    delegation, shell and roster check runs unchanged against it. Only a direct
+    edge from the binding to today's exact image counts: no search through
+    intermediate versions, undo history, or arbitrary backups.
+    """
+    from local_operator.agent_profiles import (
+        MAX_INSTRUCTIONS_CHARS,
+        resolve_profile_or_specialist_identity,
+    )
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_approval import read_agent_image
+    from local_operator.profile_proposals import approved_instruction_preimages
+    from local_operator.profile_scope import scope_agent_registry
+
+    if (
+        expected.get("id") != actual["id"]
+        or expected.get("name") != actual["name"]
+        or not isinstance(expected.get("delegation"), dict)
+        or not isinstance(expected["delegation"].get("roles"), dict)
+    ):
+        return actual
+
+    registry = scoped = None
+    preimages: dict[tuple[str, str], tuple[AgentProfile, tuple[str, ...]] | None] = {}
+
+    def compare_entry(
+        old: Any, entry: tuple[dict[str, Any], AgentProfile | None, str]
+    ) -> dict[str, Any]:
+        nonlocal registry, scoped
+        meta, profile, prompt = entry
+        if (
+            not isinstance(old, dict)
+            or profile is None
+            or old.get("kind") != "role"
+            or meta["kind"] != "role"
+            or old.get("name") != meta["name"]
+            or not meta["id"]
+            or old.get("id") != meta["id"]
+            or old.get("digest") == meta["digest"]
+        ):
+            return meta
+        role_id, name = meta["id"], meta["name"]
+        key = (role_id, name)
+        if key not in preimages:
+            preimages[key] = None
+            try:
+                if registry is None:
+                    fresh = AgentRegistry(root, initialize=False, migrate=False)
+                    scoped = scope_agent_registry(fresh, directory)
+                    scoped.require_complete_metadata()
+                    registry = fresh
+                # An account proposal never approves a session-scoped shadow,
+                # even if that shadow carries an identical name and UUID.
+                kind, live, _, _, resolved_id = resolve_profile_or_specialist_identity(
+                    name, registry=scoped, strict=True
+                )
+                if (
+                    kind == "role"
+                    and live is not None
+                    and resolved_id == role_id
+                    and scoped.scope_of(scoped.get_agent(role_id)) == "global"
+                ):
+                    current = read_agent_image(registry, role_id)
+                    if (
+                        current is not None
+                        and live.instructions == current["instructions"][:MAX_INSTRUCTIONS_CHARS]
+                    ):
+                        preimages[key] = (
+                            live,
+                            tuple(approved_instruction_preimages(root, current)),
+                        )
+            except (OSError, ValueError, KeyError):
+                return meta  # Missing or unreadable proof leaves the original comparison.
+        evidence = preimages[key]
+        if evidence is not None:
+            live, old_instructions = evidence
+            # Recorded effort is already on the resolved snapshot; hosting and
+            # all other authority fields still come from the fresh live role.
+            if replace(live, effort=profile.effort) == profile and any(
+                _role_digest(replace(profile, instructions=text[:MAX_INSTRUCTIONS_CHARS]), prompt)
+                == old.get("digest")
+                for text in old_instructions
+            ):
+                return {**meta, "digest": old["digest"]}
+        return meta
+
+    manager = compare_entry(expected.get("manager"), snapshot.manager)
+    prior_roles = expected["delegation"]["roles"]
+    roles = {
+        name: compare_entry(prior_roles.get(name), entry) for name, entry in snapshot.roles.items()
+    }
+    if manager is actual["manager"] and roles == actual["delegation"]["roles"]:
+        return actual
+    return {**actual, "manager": manager, "delegation": {**actual["delegation"], "roles": roles}}
+
+
 def _recorded_limits(expected: Any, root: Path | None, role: str) -> tuple[int, bool]:
     from local_operator.harness.subagent import read_max_team_depth
     from local_operator.teams import MAX_ORG_DEPTH
@@ -1178,7 +1338,11 @@ def bind_runtime_authority(
             # A pending move has not yet attached on this owner. It may only
             # recover the revision arrival attested, unlike an ordinary resume
             # of a locally established binding, which can follow brief edits.
-            _compare(expected, record, local=True, exact_revision=pending_move is not None)
+            assert directory is not None  # A restore without a directory refused above.
+            if pending_move is not None:
+                _compare(expected, record, local=True, exact_revision=True)
+            else:
+                _compare_local_restore(root, directory, agents, expected, snapshot, record)
     except _DefinitionNotLoaded as missing:
         missing.binding = expected
         raise

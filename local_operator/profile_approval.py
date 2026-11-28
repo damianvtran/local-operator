@@ -171,24 +171,31 @@ def request_token(value: str) -> str:
     return prefix[: _TOKEN_MAX - len(digest) - 1] + "-" + digest
 
 
+def read_agent_image(registry: Any, target_id: str) -> dict[str, Any] | None:
+    """Project a reader's local agent row exactly as the proposal writer does.
+
+    Callers that write must still take the definition lock around their CAS.
+    A read-only continuation can use the resolved registry without creating a
+    lock or replaying definitions; it must also verify the resolved authority.
+    """
+    try:
+        row = registry.get_agent(target_id)
+    except KeyError:
+        return None
+    data = {key: getattr(row, key) for key in AgentImage.model_fields if key != "instructions"}
+    data["instructions"] = registry.get_agent_system_prompt(target_id)
+    return AgentImage.model_validate(data).model_dump(mode="json")
+
+
 def snapshot(root: Path, kind: str, target_id: str) -> dict[str, Any] | None:
     """Fresh bounded authored image; runtime state is never replayed by a save."""
-    TokenModel = AgentImage if kind == "agent" else TeamImage
     if not target_id or any(c in target_id for c in "/\\."):
         raise _refuse("profile_target_invalid", "invalid profile target identity")
     with definition_lock(root):
         if kind == "agent":
             from local_operator.agents import AgentRegistry
 
-            registry = AgentRegistry(root, migrate=False)
-            try:
-                row = registry.get_agent(target_id)
-            except KeyError:
-                return None
-            data = {
-                key: getattr(row, key) for key in AgentImage.model_fields if key != "instructions"
-            }
-            data["instructions"] = registry.get_agent_system_prompt(target_id)
+            return read_agent_image(AgentRegistry(root, migrate=False), target_id)
         elif kind == "team":
             from local_operator.teams import read_team_snapshot
 
@@ -198,7 +205,7 @@ def snapshot(root: Path, kind: str, target_id: str) -> dict[str, Any] | None:
             data = {key: row.model_dump(mode="json")[key] for key in TeamImage.model_fields}
         else:
             raise _refuse("profile_kind_invalid", "unknown profile kind")
-        return TokenModel.model_validate(data).model_dump(mode="json")
+        return TeamImage.model_validate(data).model_dump(mode="json")
 
 
 def build(
