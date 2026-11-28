@@ -327,6 +327,37 @@ def renew_nudge(_no_renew_nudge: Callable[..., None], monkeypatch: pytest.Monkey
 
 
 @pytest.fixture(autouse=True)
+def _no_pre_expiry_renewal(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Any]:
+    """The holder relay's pre-expiry renewal (G10) is OFF unless a cell opts in.
+
+    Same reasoning as :func:`_no_renew_nudge`: the step rides the definitions tick
+    and may ask the owner for a key a cell borrowed, which would add a grant row or
+    an IdP POST the cell did not cause. The registered tick entry
+    (``renew_push.pre_expiry_tick``) resolves ``pre_expiry_step`` at call time, so
+    this module attribute is the seam. ``test_pre_expiry_renewal`` re-arms it
+    (fixture ``pre_expiry_renewal``).
+    """
+    from local_operator.network.credentials import renew_push
+
+    # ``getattr``/``raising=False``: on a tree without G10 the name does not exist,
+    # and the cells must fail on BEHAVIOUR there, not on this pin.
+    real = getattr(renew_push, "pre_expiry_step", lambda *_a, **_k: None)
+    monkeypatch.setattr(renew_push, "pre_expiry_step", lambda *_a, **_k: None, raising=False)
+    return real
+
+
+@pytest.fixture()
+def pre_expiry_renewal(
+    _no_pre_expiry_renewal: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> Callable[..., Any]:
+    """Re-arm the real pre-expiry step; returns it for cells that drive it by hand."""
+    from local_operator.network.credentials import renew_push
+
+    monkeypatch.setattr(renew_push, "pre_expiry_step", _no_pre_expiry_renewal)
+    return _no_pre_expiry_renewal
+
+
+@pytest.fixture(autouse=True)
 def _uplink_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     """The uplink readings are ``unknown`` unless a cell scripts one.
 
