@@ -26293,8 +26293,20 @@ class Session:
         self._bridge_taint = latch
         self._bridge_latch_row_task: asyncio.Task[None] | None = None
         subscribe = getattr(transcript, "subscribe_commits", None)
-        if subscribe is not None:
-            subscribe(self._on_bridge_taint_commit)
+        # Kept so ``_dispose_impl`` can drop the subscription. The handler is a
+        # bound method, so while subscribed the Transcript holds a STRONG edge
+        # back to this Session: anything that still references the transcript
+        # after dispose pins the whole session. Measured on the flaky
+        # ``test_settled_row_does_not_retain_disposed_child_session``: a
+        # default-executor worker that has delivered a ``Transcript._commit``
+        # write's result but not yet reached its ``del work_item`` (a thread
+        # descheduled under CI load) kept
+        # _WorkItem -> partial -> write closure -> Transcript ->
+        # _commit_handlers -> bound method -> child Session alive past
+        # ``gc.collect()``.
+        self._unsubscribe_bridge_taint: Callable[[], None] | None = (
+            subscribe(self._on_bridge_taint_commit) if subscribe is not None else None
+        )
 
     @property
     def bridge_taint_latch(self) -> Any:
@@ -42005,3 +42017,14 @@ class Session:
                     # exactly what the receipt must not round up to success.
                     self._disposal_hook_failures.append(_dispose_hook_failure_label(hook, exc))
                     logger.warning("session dispose hook failed", exc_info=True)
+            # Cut the Transcript -> Session edge LAST, after every hook has had
+            # its chance to append a row the taint latch should still observe.
+            # Without it a late reference to the transcript (a lingering
+            # executor work item, see ``_init_bridge_taint``) retains this
+            # disposed session; the latch is dead state once disposed, so
+            # nothing observes commits after this point. ``getattr``: hosts
+            # that borrow ``Session`` methods may never have subscribed.
+            unsubscribe_taint = getattr(self, "_unsubscribe_bridge_taint", None)
+            if unsubscribe_taint is not None:
+                self._unsubscribe_bridge_taint = None
+                unsubscribe_taint()
