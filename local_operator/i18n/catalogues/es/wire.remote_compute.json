@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "La ejecución remota {run_id} terminó con fallo.",
   "wire.remote_compute.finished_succeeded": "La ejecución remota {run_id} terminó con éxito.",
   "wire.remote_compute.finished_unknown": "La ejecución remota {run_id} ya no está en marcha, pero Radient no informó de ningún resultado que esta versión pueda leer.",
+  "wire.remote_compute.hosting_radient_only": "Las ejecuciones remotas usan Radient como plataforma, así que --hosting {hosting} no se puede usar con --remote: omite --hosting o pasa --hosting radient.",
   "wire.remote_compute.interrupted": "Se dejó de seguir la ejecución {run_id}; sigue en marcha en remoto. Cancélala con: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient rechazó la solicitud por no ser válida. Es un bug de este cliente, no algo que debas volver a escribir.",
   "wire.remote_compute.key_empty": "Una --idempotency-key vacía se rechaza en lugar de sustituirse por una clave nueva: omite la opción para generar una, o pasa la clave de la ejecución que estás reintentando.",

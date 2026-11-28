@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.remote_compute",
-  "history_sha256": "b0574fe6c7d8c5af22cf4a9bbdd4f48711450fa4a27c2baa1e9ff3fde6ebeb14",
+  "history_sha256": "db16f7a7f2e8aabade7dae426b6595434931de8124fbf18133255fbe9e0c22d0",
   "entries": [
     {
       "locale": "ur",
@@ -38,6 +38,42 @@
       "note": "Independent i18n audit of the nine keys this PR added to wire.remote_compute (run_limit, run_busy, refusal_conflict, repo_no_remote, repo_not_https_remote, repo_unpushed_commit, tier_cloud_run, tier_dedicated, option_spot), each value read in full against the en source and catalogues/en/wire.remote_compute.context.json, at head 217ccff46f5b in .worktrees/rc-client-core. DELTA PROOF (so this row does not claim the 43 carried values as freshly read): `git diff origin/main..217ccff46f5b` on en and on each of the seven locales adds exactly these 9 keys, 0 changed, 0 removed, and the previous passed row's source_sha256 d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8 equals origin/main's en bytes; those 43 values are the bytes that row already audited and are byte-identical here. MECHANICAL, 63 values: key parity 52/52 in every locale; {detail} is the only placeholder and appears exactly once in each value that has it; ICU parse clean; NFC; no Cc/Cf characters (no bidi controls, per the ur guide); no leading/trailing padding. Tier labels inside the context sidecar's 24-cell budget, measured with rich.cells.cell_len (cloud_run/dedicated/spot): fr 15/5/4, es 20/8/4, zh-CN 8/4/4, ru 15/10/4, hi 7/5/3, ur 8/5/5, vi 21/11/4. MEANING against the sidecar roles: run_limit reads as a concurrency ceiling and never as credit, billing or idempotency; run_busy reads correctly for a run or a workload; refusal_conflict names no idempotency key (the misreading this PR removes); the repo_* values state the fact first and put the remedy last; tier_cloud_run never says spot; tier_dedicated never mentions spot; option_spot reads as an opt-in capacity under Dedicated, not as a tier. TERMINOLOGY reuses the namespace's shipped renderings: run = exécution / ejecución / 运行 / запуск / रन / رن / lần chạy; remote compute = calcul distant / cómputo remoto / 远程计算 / удалённые вычисления / रिमोट कंप्यूट / ریموٹ کمپیوٹ / tính toán từ xa; commit/push stay English per glossary §2's kept-English set (fr/es/ru/vi) and Latin (zh-CN/hi/ur); Radient, origin, https:// and SSH are untouched in every locale. Register per guide: fr vous with U+202F before : ; es tú; zh-CN 请 on each refusal's next-step clause; ru вы; hi आप; ur آپ; vi drops bạn and uses plain verbs. 1 MINOR, corrected by this auditor in the audited bytes: ur-I1 repo_not_https_remote spelled the credential loan \"کریڈنشل\" while the shipped ur corpus spells it کریڈینشل 33 times (mobile.setup, tunnel.status, this namespace's api_override); the audited value now uses کریڈینشل. The other eight read clean: اسپاٹ is the Urdu-script loan the guide requires, ریموٹ/کلاؤڈ/رن/ورک لوڈ/ایجنٹ/clone match the shipped corpus, آپ register and Urdu punctuation (۔ ،) throughout, no manual bidi controls. Verdict: CLEAN-WITH-FINDINGS, 0 blocker/major open. Native-speaker review and rendered-frame certification are not claimed; the width figures are cell measurements, not terminal screenshots. Evidence: this receipt; the rendering check quoted on the PR.",
       "round": "rc4196a1",
       "keys_audited": 9
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "7950fd0832425b74010df5684c284e33248d449c9bb90cc56739bbca36fc4ede",
+      "context_sha256": "22a40c237862d1e0668b8928c18606b0e2a9d11408596f38d9f150846132cffa",
+      "target_sha256": "654ec997569f45818a4599e1399129cb4fb7ac868aa352fa5bdf5230babc245d",
+      "translator": {
+        "agent": "PR coder lane (team lopdev, role coder). The single commit ccd4a5ea0 (author Ola Fagbemi) introduced the key into the en source and all seven target catalogues in one change; the translator session id and served model are not recorded in the commit, so they are not asserted here.",
+        "model": null,
+        "date": "2026-11-26"
+      },
+      "auditor": {
+        "agent": "independent i18n audit, round 1 (team lopdev), dispatched by the manager for this PR: session d7e5bebcbcb4. Did not author the English or the translations and made no edit, commit, push or GitHub post on the branch.",
+        "session": "d7e5bebcbcb4",
+        "model": "deepseek/deepseek-flash",
+        "fallback": "none observed",
+        "date": "2026-11-26",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "severity_counts": {
+          "blocker": 0,
+          "major": 0,
+          "minor": 0,
+          "nit": 1
+        },
+        "finding_ids": [
+          "n3"
+        ],
+        "head": "ccd4a5ea0b264c6cb1b3700b56b5b307880fb1c7"
+      },
+      "status": "passed",
+      "round": "radient-r1",
+      "keys_audited": 1,
+      "note": "Independent round-1 i18n audit of the single key this PR added to wire.remote_compute (wire.remote_compute.hosting_radient_only, placeholder {hosting}), each value read in full against the en source and catalogues/en/wire.remote_compute.context.json at head ccd4a5ea0 (worktree rc-radient-hosting), with disk asserted byte-identical to `git show HEAD:` for the en source, the en sidecar and all seven target catalogues before hashing. DELTA SCOPE: `git diff 26887b85f..ccd4a5ea0` adds exactly this one key to every one of the 8 locales — 0 changed, 0 removed, no other namespace file touched — so the 43 carried values are the bytes the previous passed row already audited. MECHANICAL: key parity vs en; {hosting} exactly once in every locale, never renamed or reordered; '--hosting' 3x, '--remote' 1x, lowercase 'radient' 1x in all 8; 'Radient' Latin and capitalised in all 8; NFC; no Cc/Cf characters (no bidi controls); no leading/trailing whitespace. COPY ACCURACY against the code, not the prose: hosting.py::remote_hosting_model accepts absent or radient and raises RemoteHostingRefused otherwise, so \"leave --hosting out, or pass --hosting radient\" is exact; cli.py::_submit calls it before the repository/credential work, so the refusal precedes any request; {hosting} is failure.hosting, the value the operator typed; the desktop route calls remote_hosting_model() with no hosting argument and so can never emit this sentence, keeping the sidecar role (CLI runtime message for lop exec --remote) accurate. ur: آپ-register (\"چھوڑ دیں\", \"پاس کریں\"), Urdu ۔/، and the Arabic-script colon convention the siblings already use; Latin runs (flags, Radient, radient) byte-identical and not reordered; no manual bidi controls, so the render layer's FSI/PDI isolation is not double-applied. n3 NIT: plural verb agreement (\"ریموٹ رن … چلتے ہیں\") where the namespace's other values treat the loan noun as singular. en's subject is plural, so the plural is defensible; recorded so the next wave does not read it as drift. Also recorded, not locale-specific: n4 NIT on the en context sidecar calls radient \"a product name\" where it is the hosting identifier the flag carries (label only, the operative keep-byte-identical instruction is right). Verdict: PASS, 0 blocker, 0 major; deferred findings are follow-ups and do not affect this value's correctness. Served model deepseek/deepseek-flash, no provider fallback."
     }
   ]
 }

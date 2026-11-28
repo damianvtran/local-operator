@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "Remote run {run_id} finished: failed.",
   "wire.remote_compute.finished_succeeded": "Remote run {run_id} finished: succeeded.",
   "wire.remote_compute.finished_unknown": "Remote run {run_id} is no longer running, but Radient reported no outcome this build can read.",
+  "wire.remote_compute.hosting_radient_only": "Remote runs use Radient hosting, so --hosting {hosting} cannot be used with --remote: leave --hosting out, or pass --hosting radient.",
   "wire.remote_compute.interrupted": "Stopped watching run {run_id}; it is still running remotely. Cancel it with: lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient rejected the request as invalid. That is a bug in this client, not something to retype.",
   "wire.remote_compute.key_empty": "An empty --idempotency-key is refused rather than replaced with a fresh key: leave the flag out to mint one, or pass the key of the run you are retrying.",

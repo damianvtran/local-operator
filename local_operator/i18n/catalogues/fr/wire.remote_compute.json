@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "Exécution distante {run_id} terminée : échouée.",
   "wire.remote_compute.finished_succeeded": "Exécution distante {run_id} terminée : réussie.",
   "wire.remote_compute.finished_unknown": "L’exécution distante {run_id} n’est plus en cours, mais Radient n’a signalé aucun résultat que cette version sache lire.",
+  "wire.remote_compute.hosting_radient_only": "Les exécutions distantes passent par l’hébergement Radient : --hosting {hosting} ne peut donc pas être utilisé avec --remote. Omettez --hosting, ou passez --hosting radient.",
   "wire.remote_compute.interrupted": "Suivi de l’exécution {run_id} arrêté ; elle continue de tourner à distance. Pour l’annuler : lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient a rejeté la requête comme invalide. C’est un bug de ce client, pas une saisie à refaire.",
   "wire.remote_compute.key_empty": "Une --idempotency-key vide est refusée plutôt que remplacée par une clé neuve : omettez l’option pour en générer une, ou indiquez la clé de l’exécution que vous relancez.",

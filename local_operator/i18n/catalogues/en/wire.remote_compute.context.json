@@ -261,5 +261,10 @@
     "tone": "one word where the locale has one; a tier label, capitalised like a proper noun",
     "note": "No placeholders. The spot choice sits UNDER this label as an option, so the label itself must not mention spot. Must stay short enough for a picker row.",
     "maxCells": 24
+  },
+  "wire.remote_compute.hosting_radient_only": {
+    "role": "CLI runtime message for lop exec --remote",
+    "tone": "plain, one sentence; commands and flags stay verbatim",
+    "note": "Placeholder {hosting} is the value the operator typed and must be preserved exactly; --hosting, --remote and radient are a flag, a flag and a product name and stay verbatim in every locale. A refusal before any request is sent: the run cannot go to a provider other than Radient, and the remedy is to leave --hosting out or pass --hosting radient."
   }
 }

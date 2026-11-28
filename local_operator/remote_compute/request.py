@@ -128,10 +128,13 @@ class RunSpec:
     way from here into a request, so a caller cannot assemble a body whose
     ``network_id`` came from anywhere but ``resolve_network``.
 
-    ``hosting`` AND ``model`` ARE REQUIRED AND DECLARED. A remote run does not
-    inherit this device's provider keys, so the far end must be told which
-    model to run; the CLI resolves them through the same ladder a local exec
-    uses (agent > flag > team > config) and sends what the operator resolved.
+    ``hosting`` AND ``model`` ARE REQUIRED AND DECLARED, AND THE HOSTING IS NOT
+    THIS DEVICE'S CHOICE. A remote run does not inherit this device's provider
+    keys, so the far end must be told which model to run; the model is the
+    operator's ``--model`` or the far end's ``auto``. The hosting is always
+    ``radient`` because the run token Radient issued is only ever presented to a
+    host Radient operates — see :mod:`local_operator.remote_compute.hosting`,
+    the one place that pair is decided for every surface.
 
     ``budget_usd`` is optional because the server applies its own admission
     default when absent; ``name`` is optional because a run without a label is

@@ -14,11 +14,17 @@ the operator believes was configured one way and was configured another. The
 per-flag decision is in :data:`LOCAL_ONLY_FLAGS`, which is also the list the
 tests iterate.
 
+``--hosting`` IS THE ONE FLAG THAT IS NEITHER REFUSED NOR USED. This device's
+local model configuration is not an input to a remote run at all, and the
+hosting is always Radient's (see :mod:`local_operator.remote_compute.hosting`):
+so ``--hosting radient`` is accepted as the spelling of the same thing, and any
+other value is refused here rather than sent.
+
 WHY THE RUN IS ADDRESSED BEFORE THE REQUEST IS BUILT. The order here is the
 order of the things the operator can FIX: the preview switch, the flags, the
-repository, the prompt, the login, the network, the model. Each refusal names
-one remedy and exits non-zero, so a bad invocation costs a sentence rather than
-a request that was addressed to a host before it was refused.
+repository, the prompt, the login, the network. Each refusal names one remedy
+and exits non-zero, so a bad invocation costs a sentence rather than a request
+that was addressed to a host before it was refused.
 
 CTRL-C DOES NOT CANCEL. Interrupting a watch stops this process watching; it
 does not ask, and it does not cancel the run, because a run id may be burning
@@ -52,7 +58,6 @@ from typing import Any
 
 import httpx
 
-from local_operator.exec_mode import ExecArgs, resolve_hosting_model_dry
 from local_operator.i18n.boot import activate_resolved_locale, configured_language
 from local_operator.i18n.keys import wire_remote_compute as _wr
 from local_operator.i18n.resolve import resolve_language
@@ -84,6 +89,10 @@ from local_operator.remote_compute.client import (
 )
 from local_operator.remote_compute.defaults import DEFAULT_MAX_HOURS, DEFAULT_SIZE
 from local_operator.remote_compute.errors import InvalidIdempotencyKey
+from local_operator.remote_compute.hosting import (
+    RemoteHostingRefused,
+    remote_hosting_model,
+)
 from local_operator.remote_compute.messages import refusal_message
 from local_operator.remote_compute.request import (
     RunCreateRequest,
@@ -362,6 +371,16 @@ def _submit(args: argparse.Namespace) -> int:
     local_only = first_set(args, LOCAL_ONLY_FLAGS)
     if local_only is not None:
         return _refuse(_t(_wr.local_only(flag=local_only)))
+    # A LOCAL REFUSAL, so it lands before the credential read like the flag table
+    # above: the hosting is this surface's decision, not the far end's to
+    # discover after the request was addressed.
+    try:
+        hosting, model = remote_hosting_model(
+            hosting=getattr(args, "hosting", None),
+            model=getattr(args, "model", None),
+        )
+    except RemoteHostingRefused as failure:
+        return _refuse(_t(_wr.hosting_radient_only(hosting=failure.hosting)))
     repo = getattr(args, "repo", None)
     sha = getattr(args, "sha", None)
     if not repo or not sha:
@@ -400,17 +419,6 @@ def _submit(args: argparse.Namespace) -> int:
         binding = resolve_network(getattr(args, "network", None))
     except MeshRefusal as refusal:
         return _refuse(refusal.sentence)
-    exec_args = ExecArgs(
-        hosting=getattr(args, "hosting", None),
-        model=getattr(args, "model", None),
-        agent_name=getattr(args, "agent_name", None),
-        agent_id=getattr(args, "agent_id", None),
-        team=getattr(args, "team", None),
-    )
-    try:
-        hosting, model = resolve_hosting_model_dry(exec_args)
-    except ValueError as failure:
-        return _refuse(_t(_wr.failed(error=str(failure))))
     max_hours = (
         DEFAULT_MAX_HOURS if getattr(args, "max_hours", None) is None else float(args.max_hours)
     )

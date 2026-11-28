@@ -1288,6 +1288,7 @@ export type MessageParams = {
   "wire.remote_compute.finished_failed": { "run_id": string };
   "wire.remote_compute.finished_succeeded": { "run_id": string };
   "wire.remote_compute.finished_unknown": { "run_id": string };
+  "wire.remote_compute.hosting_radient_only": { "hosting": string };
   "wire.remote_compute.interrupted": { "run_id": string };
   "wire.remote_compute.invalid_request": undefined;
   "wire.remote_compute.key_empty": undefined;

@@ -16,6 +16,7 @@
   "wire.remote_compute.finished_failed": "远程运行{run_id}已结束：失败。",
   "wire.remote_compute.finished_succeeded": "远程运行{run_id}已结束：成功。",
   "wire.remote_compute.finished_unknown": "远程运行{run_id}已不再运行，但Radient未报告此构建能够识别的结果。",
+  "wire.remote_compute.hosting_radient_only": "远程运行由 Radient 托管，因此--hosting {hosting}不能与--remote一起使用：省略--hosting，或改为--hosting radient。",
   "wire.remote_compute.interrupted": "已停止监视运行{run_id}；它仍在远程运行。取消命令：lop exec --remote-cancel {run_id}",
   "wire.remote_compute.invalid_request": "Radient以无效为由拒绝了该请求。这是本客户端的缺陷，不是重输一遍就能解决的问题。",
   "wire.remote_compute.key_empty": "空的--idempotency-key会被拒绝，而不会替换为新键：省略该选项以生成新键，或传入你正在重试的那次运行的键。",

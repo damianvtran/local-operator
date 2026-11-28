@@ -22,9 +22,17 @@ from local_operator.i18n.keys import cli_exec_remote_help as _erh
 
 #: ``exec`` destinations that cannot mean anything for a remote run.
 #:
-#: ``--hosting``/``--model`` are NOT here: they are resolved through the same
-#: ladder a local run uses and sent to the far end as declared. ``--name`` is
-#: not here either: it labels the run, which the contract carries.
+#: ``--model`` is NOT here: it can mean something remotely and travels as the
+#: run's model. ``--hosting`` is not here either, but it is not carried as given:
+#: a remote run always declares Radient hosting, so ``--hosting radient`` is
+#: accepted and any other value is refused before a request is composed
+#: (``remote_compute.hosting.remote_hosting_model``). It cannot join this table
+#: because it is refused for its VALUE, not for the flag. ``--name`` is not here
+#: either: it labels the run, which the contract carries.
+#:
+#: ``--agent``/``--agent-id``/``--team`` ARE here, which is also what keeps a
+#: saved agent's or team's model suggestion out of a remote run: no selector is
+#: left that could name one.
 LOCAL_ONLY_FLAGS: tuple[tuple[str, str], ...] = (
     ("background", "--background"),
     ("json_mode", "--json"),

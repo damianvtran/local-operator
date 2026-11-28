@@ -112,6 +112,14 @@ Flags that only mean something to a local run (`--tools`, `--background`,
 `--goal`, `--resume` and the rest) are refused by name beside `--remote`
 rather than silently ignored.
 
+**Hosting and model.** A remote run always runs on Radient hosting, so
+`--hosting radient` is accepted (the spelling of the only value there is) and any
+other `--hosting` is refused before a request is composed: the run token Radient
+issues is presented to a host it operates, and sending it anywhere else is not
+something this command will address. `--model` names the model the far end runs;
+left out, the far end chooses (`auto`). This device's local `hosting`/`model_name`
+config is not an input to a remote run.
+
 **Network binding.** A remote run is bound to one mesh network that this device
 is an active member of. The network the receipt reports is the one Radient's
 response named — confirmed against the request, never assumed from what this
