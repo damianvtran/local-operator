@@ -1066,6 +1066,9 @@ may block for hours.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over calling `ask`.
+  Except an authorization or decision only the operator can give: that is
+  either an open `ask` or an open question stated in your closing — never an
+  unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1092,6 +1095,9 @@ blocks this turn.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over calling `ask`.
+  Except an authorization or decision only the operator can give: that is
+  either an open `ask` or an open question stated in your closing — never an
+  unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1114,6 +1120,9 @@ surface attaches: it waits, unread.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over stalling on a question.
+  Except an authorization or decision only the operator can give: state it
+  in your closing as an open question (what you need, what you did meanwhile)
+  — never an unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1131,6 +1140,9 @@ run has no way to put a question in front of the operator.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over stalling on a question.
+  Except an authorization or decision only the operator can give: state it
+  in your closing as an open question (what you need, what you did meanwhile)
+  — never an unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the

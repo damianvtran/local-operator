@@ -306,6 +306,24 @@ def test_manager_preamble_states_the_projects_tracking_duty(registry: TeamRegist
     ) in team.manager_preamble()
 
 
+def test_manager_preamble_carries_the_operator_gated_status_rule(registry: TeamRegistry) -> None:
+    """A team's manager role may be custom and never read ``agent_seeds/manager.md``,
+    so the preamble repeats the Operator-gated rule: an operator wait with no ask
+    queues one instead of being parked, and "nothing needs you" is reserved for
+    when no operator gate is open."""
+    team = registry.create_team(
+        TeamEditFields(name="gated", manager="manager", members=[TeamMember(role="coder")])
+    )
+    brief = team.manager_preamble()
+    assert 'Every end-of-turn status carries an "Operator-gated" section' in brief
+    assert "(ii) operator, NO ask -> queue one `ask` now" in brief
+    assert "never park it" in brief
+    assert 'Say "nothing needs you" only when (i) and (ii) are both empty.' in brief
+    assert "`operator:`, `external:` or `deliberate:`" in brief
+    assert 'never "report quietly"' in brief
+    assert "status on material deltas (open operator gates always count)" in brief
+
+
 def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegistry) -> None:
     """The duty is stated twice BY DESIGN (the seed §V2.G.1, the team preamble
     §V2.G.2) and the two populations are not fully disjoint — a

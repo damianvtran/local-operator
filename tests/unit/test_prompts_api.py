@@ -1475,6 +1475,9 @@ may block for hours.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over calling `ask`.
+  Except an authorization or decision only the operator can give: that is
+  either an open `ask` or an open question stated in your closing — never an
+  unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1514,6 +1517,9 @@ blocks this turn.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over calling `ask`.
+  Except an authorization or decision only the operator can give: that is
+  either an open `ask` or an open question stated in your closing — never an
+  unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1771,6 +1777,9 @@ surface attaches: it waits, unread.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over stalling on a question.
+  Except an authorization or decision only the operator can give: state it
+  in your closing as an open question (what you need, what you did meanwhile)
+  — never an unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -1803,6 +1812,9 @@ run has no way to put a question in front of the operator.
 
 - Prefer to PROCEED with what you have, or finish the turn with a clear
   statement of what you would have asked, over stalling on a question.
+  Except an authorization or decision only the operator can give: state it
+  in your closing as an open question (what you need, what you did meanwhile)
+  — never an unstated hold.
 - That statement is a decision you already took and the fact that would change
   it, not a question left hanging.
 - Do not take an irreversible or destructive action to avoid asking; when the
@@ -2327,6 +2339,120 @@ def test_wake_and_ask_clauses_render_only_with_their_tools() -> None:
         "system.md", {**base, "has_notify": True, "has_wake_monitor": False, "has_ask": False}
     )
     assert "arm a wake or monitor" not in bare
-    assert "Re-check each `block`ed item before finishing.\n" in bare
+    assert "Re-check each `block`ed item before finishing. A `block` that waits" in bare
     assert "(ask notifies)" not in bare
     assert "never progress. Its title must say what happened" in bare
+
+
+# ---------------------------------------------------------------------------
+# Operator-gated items must never be parked silently
+#
+# Incident: a manager closed turns with "Nothing needs you right now" while
+# approval items that only the operator could give sat parked as "intentional
+# holds", with no `ask` queued and no mention in the closing. Two prompt
+# defects made that the path of least resistance: the "Prefer to PROCEED ...
+# over calling `ask`" bullet had no exception for decisions that are the
+# operator's alone, and the todo guidance accounted for `block`ed items "with a
+# wake armed" — which reads as sufficient for an operator wait. The tests below
+# pin the carve-out in EVERY variant of the bullet, and the system.md rule.
+# ---------------------------------------------------------------------------
+
+_OPERATOR_ONLY_CARVE_OUT = "Except an authorization or decision only the operator can give"
+
+
+def _proceed_bullet_variants() -> dict[str, str]:
+    """Every detached body that carries the PROCEED bullet, via the real selector.
+
+    Going through ``_interactivity_block`` (not the constants) means a variant
+    added to the selector later is picked up here without editing this list.
+    """
+    from local_operator.prompts_api import CHANNEL_ASK, CHANNEL_HUB, CHANNEL_NONE
+    from local_operator.prompts_api import _interactivity_block as block
+
+    return {
+        "ask (blocking)": block(False, CHANNEL_ASK, queued_ask=False),
+        "ask (queued)": block(False, CHANNEL_ASK, queued_ask=True),
+        "hub (subagent)": block(False, CHANNEL_HUB, queued_ask=False),
+        "none": block(False, CHANNEL_NONE, queued_ask=False),
+    }
+
+
+def _proceed_bullet(body: str) -> str:
+    return body.split("Prefer to PROCEED", 1)[1].split("\n- ", 1)[0]
+
+
+@pytest.mark.parametrize("variant", sorted(_proceed_bullet_variants()))
+def test_every_proceed_bullet_exempts_operator_only_decisions(variant: str) -> None:
+    bullet = _proceed_bullet(_proceed_bullet_variants()[variant])
+    # The carve-out sits inside the PROCEED bullet itself, not in a later bullet
+    # a model could read as a separate, optional point.
+    assert _OPERATOR_ONLY_CARVE_OUT in bullet, variant
+    assert "unstated hold" in bullet, variant
+    # What "stated" means must be concrete: the closing, where the operator reads.
+    assert "in your closing" in bullet, variant
+
+
+def test_proceed_carve_out_only_offers_ask_where_the_run_holds_one() -> None:
+    """A run with no ask hook must not be told to `ask` (it cannot)."""
+    variants = _proceed_bullet_variants()
+    for name in ("ask (blocking)", "ask (queued)"):
+        assert "open `ask`" in _proceed_bullet(variants[name]), name
+    for name in ("hub (subagent)", "none"):
+        assert "`ask`" not in _proceed_bullet(variants[name]), name
+
+
+def test_system_md_requires_an_ask_for_a_block_that_waits_on_the_operator() -> None:
+    from local_operator.prompts_api import render_template
+
+    base = {"has_browser": False, "no_browser": False, "has_console": False, "no_console": False}
+    full = render_template(
+        "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": True}
+    )
+    assert "A `block` that waits on the operator must be named in your closing" in full
+    assert "covered by an open `ask` (queue one now); a wake is not a substitute." in full
+
+    # Without a wake tool the "wake is not a substitute" clause has nothing to
+    # contradict, and without `ask` the prompt must not tell the model to queue
+    # one — it can still be told to name the wait in its closing.
+    no_wake = render_template(
+        "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": False}
+    )
+    assert "covered by an open `ask` (queue one now)." in no_wake
+    assert "wake is not a substitute" not in no_wake
+    no_ask = render_template(
+        "system.md", {**base, "has_todo": True, "has_ask": False, "has_wake_monitor": False}
+    )
+    assert "waits on the operator must be named in your closing." in no_ask
+    assert "open `ask`" not in no_ask.split("Keep the todo list honest", 1)[1].split("\n\n", 1)[0]
+
+    # The rule belongs to the todo paragraph: no todo tool, no `block`.
+    assert "waits on the operator" not in render_template(
+        "system.md", {**base, "has_todo": False, "has_ask": True}
+    )
+
+
+def test_manager_seed_carries_the_operator_gated_rule() -> None:
+    from local_operator.agent_profiles import load_seed
+
+    seed = load_seed("manager")
+    assert seed is not None
+    body = seed.instructions
+    assert 'Every end-of-turn status carries an "Operator-gated" section' in body
+    # All four classifications, and the one that used to be missing: an
+    # operator wait with no ask queues one rather than parking.
+    for needle in (
+        "(i) operator, OPEN ask <id>",
+        "(ii) operator, NO ask -> queue one `ask`",
+        "never park it",
+        "(iii) external: <party/agent>",
+        "(iv) deliberately not started",
+    ):
+        assert needle in body, needle
+    assert 'Say "nothing needs you" only when (i)\nand (ii) are both empty.' in body
+    assert "An operator gate is always a material delta." in body
+    assert "(open operator gates always count)" in body
+    for prefix in ("`operator:`", "`external:`", "`deliberate:`"):
+        assert prefix in body, prefix
+    assert 'never "report quietly"' in body
+    # The old status-only-on-material-deltas line must not stand unqualified.
+    assert "status only on material deltas;" not in body
