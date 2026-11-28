@@ -239,7 +239,8 @@ def _saved_mode(config_dir: Path) -> str | None:
 
 @pytest.fixture()
 def config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the config at a temp dir — these tests WRITE one."""
+    """Exercise the Ask flows on an existing config with no saved mode."""
+    (tmp_path / "config.yml").write_text("values: {conversation_length: 12}\n", encoding="utf-8")
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     return tmp_path
 
@@ -1117,7 +1118,7 @@ async def test_the_allow_all_key_reports_and_paints_like_the_command(
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_session_settles_its_live_approval() -> None:
+async def test_a_stopped_session_settles_its_live_approval(config_dir: Path) -> None:
     """A stop must not leave a gate live enough to eat the next keystroke.
 
     Round-5 MAJOR-4: the viewer's stop handler retired the band and the tool
@@ -1218,7 +1219,9 @@ class RemoteGatedSession(GatedSession):
 
 
 @pytest.mark.asyncio
-async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() -> None:
+async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not(
+    config_dir: Path,
+) -> None:
     """The dock card's remote hint, both halves of the condition.
 
     An allow pressed in the origin viewer is refused by the OWNER's runtime by

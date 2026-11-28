@@ -19,7 +19,8 @@ fan-out suppressed, the write is what it factually is — a file edit made on th
 agent's behalf — and every process, including the writer's own watcher (whose
 next stat-poll reads the file), classifies it the way the predicate's docstring
 classifies "another process's edit": it may TIGHTEN a live gate and may never
-loosen one. New sessions read the file as any edit; no value semantics change.
+loosen one. New sessions read the file as any edit, so saving Auto as an
+approval default is reserved for the operator rather than a tool call.
 
 WHAT STAYS SHARED. Everything that is not attribution: ``write_setting`` is
 still the one funnel (validation, the sub-mapping merge, refusals, the trigger
@@ -117,6 +118,14 @@ def apply(manager: "ConfigManager", setting: "Setting", value: Any) -> None:
             f"Setting '{setting.key}' is operator-only: "
             f"{_OPERATOR_ONLY_REASONS[setting.key]}. "
             "Change it on the /settings page or with `lop config edit`."
+        )
+    if setting.key == "tool_approval_mode" and value == "auto":
+        # This is the only Auto value accepted by the registry's enum. Saving
+        # it conveys authority to future unattended runs, even with no watcher
+        # notification. Reading the row and tightening it to Ask still work.
+        raise ValueError(
+            "Saving Automatic tool approval is operator-only. "
+            "Use /settings or `lop config edit tool_approval_mode auto`."
         )
     if setting.kind is settings_io.Kind.CASCADE:
         # The route edits chains under an original-snapshot contract

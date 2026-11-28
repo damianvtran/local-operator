@@ -705,7 +705,7 @@ def create_on_peer(
     ``auto``, the create asks the peer for an unattended session exactly as the local
     equivalent would run — the operator's standing "no routine re-prompts", read
     through the ONE derivation (``session_factory.saved_tool_approval_is_auto`` →
-    ``_approval_mode_is_auto``). An IMPLIED request that a peer without the grant
+    ``ConfigManager.tool_approval_decision``). An IMPLIED request that a peer without the grant
     refuses (``not_permitted``) FALLS BACK to an attended create and carries
     ``unattended_notice`` in the reply — an unattended send must not dead-end in a
     failed create — while nothing durable is left behind by the refusal

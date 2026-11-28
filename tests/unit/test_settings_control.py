@@ -78,6 +78,36 @@ async def test_the_facade_default_keeps_the_operator_attribution(tmp_path: Path)
         await watcher.stop()
 
 
+@pytest.mark.asyncio
+async def test_model_setting_cannot_save_automatic_tool_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session_factory import saved_tool_approval_is_auto
+    from local_operator.tools import builtin
+
+    monkeypatch.setattr(builtin, "config_dir", lambda: tmp_path)
+    manager = ConfigManager(tmp_path)
+    setting = _row("tool_approval_mode")
+    assert settings_control.read(manager, setting) == "auto"
+    refused = await builtin.execute_setting(
+        "test-setting", {"op": "set", "key": setting.key, "value": "auto"}
+    )
+    assert refused.is_error
+    assert "operator-only" in getattr(refused.content[0], "text", "")
+    assert not (tmp_path / "config.yml").exists()
+    assert not saved_tool_approval_is_auto(tmp_path)
+
+    # The authenticated surface still has permission, and a model can tighten.
+    settings_io.write_setting(manager, setting, "auto", notify=False)
+    assert saved_tool_approval_is_auto(tmp_path)
+    tightened = await builtin.execute_setting(
+        "test-setting", {"op": "set", "key": setting.key, "value": "ask"}
+    )
+    assert not tightened.is_error
+    assert not saved_tool_approval_is_auto(tmp_path)
+    assert ConfigManager(tmp_path).get_config_value(setting.key) == "ask"
+
+
 def test_cascade_keys_are_refused_and_the_file_is_untouched(tmp_path: Path) -> None:
     setting = _row("retry.fallbackChains")
     manager = ConfigManager(tmp_path)

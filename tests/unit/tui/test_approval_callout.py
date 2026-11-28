@@ -34,7 +34,8 @@ from tests.unit.tui.test_approvals_ux import (
 
 @pytest.fixture()
 def config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Point the config at a temp dir — these tests WRITE one."""
+    """Exercise the Ask flows on an existing config with no saved mode."""
+    (tmp_path / "config.yml").write_text("values: {conversation_length: 12}\n", encoding="utf-8")
     monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
     return tmp_path
 
@@ -974,7 +975,10 @@ async def test_queued_profile_gate_cannot_inherit_allow_all(config_dir):
         assert await asyncio.wait_for(second, 3) is False
 
 
-def test_approve_all_still_owes_profile_gate_card():
+@pytest.mark.parametrize(
+    "owns_runtime", [pytest.param(True, id="local-owner"), pytest.param(False, id="attached")]
+)
+def test_approve_all_still_owes_profile_gate_card(owns_runtime: bool):
     from types import SimpleNamespace
     from typing import cast
 
@@ -985,17 +989,21 @@ def test_approve_all_still_owes_profile_gate_card():
     app = SimpleNamespace(_ask_screen=None, _approval=None)
     source = SimpleNamespace(
         session=SimpleNamespace(
-            pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE)
+            owns_runtime=owns_runtime,
+            pending_gate=SimpleNamespace(kind="approval", title=ACCOUNT_PROFILE_GATE),
         ),
-        draft=SimpleNamespace(approve_all=True),
+        draft=SimpleNamespace(approve_all=True, approve_scope="session"),
     )
     assert not OperatorApp._sidebar_gate_card_ready(
         cast(OperatorApp, app), cast(SessionInteraction, source)
     )
+    # Genuine local Auto owes no routine card; an attached projection's
+    # approve-all latch is not authority to grant even a routine request.
     source.session.pending_gate.title = "bash"
-    assert OperatorApp._sidebar_gate_card_ready(
+    ready = OperatorApp._sidebar_gate_card_ready(
         cast(OperatorApp, app), cast(SessionInteraction, source)
     )
+    assert ready is owns_runtime
 
 
 def test_approve_all_does_not_skip_prearming_profile_card():
@@ -1012,7 +1020,7 @@ def test_approve_all_does_not_skip_prearming_profile_card():
                 kind="approval", title=ACCOUNT_PROFILE_GATE, detail="Change reviewer"
             )
         ),
-        draft=SimpleNamespace(approve_all=True),
+        draft=SimpleNamespace(approve_all=True, approve_scope="session"),
         display_only=False,
         gate_view_generation=0,
         turn=SimpleNamespace(epoch=0),
@@ -1029,6 +1037,14 @@ def test_approve_all_does_not_skip_prearming_profile_card():
     )
     app._interaction = source
     source.session.owns_runtime = False
+    OperatorApp._prearm_known_gate(cast(OperatorApp, app), cast(SessionInteraction, source))
+    assert mounted == ["profile-card"]
+    # A viewer may hold a machine-default Auto while the owner is on Ask.
+    # A normal pending tool gets a card too, not just the person-only tier.
+    source.session.pending_gate.title = "bash"
+    source.draft.approve_scope = "global"
+    app._approval = None
+    mounted.clear()
     OperatorApp._prearm_known_gate(cast(OperatorApp, app), cast(SessionInteraction, source))
     assert mounted == ["profile-card"]
 

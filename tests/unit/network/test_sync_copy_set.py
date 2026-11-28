@@ -766,7 +766,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "records under ``<config>/run/serve`` — machine-local boot state a receiving "
         "device must mint its own, never inherit; not an entry of a session directory",
     ),
-    "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    "local_operator/config.py": (
+        2,
+        "``config.yml``, the store's configuration file, and ``CONFIG_KEY_INVENTORY_NAME`` "
+        "('.config-keys.json'), the machine-local inventory of setting paths beside it; "
+        "neither travels with a session",
+    ),
     "local_operator/clients/radient_cost.py": (
         1,
         "``HEADER_PREFIX`` (``x-radient-cost-``) prefixes an HTTP RESPONSE header "
@@ -787,12 +792,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (
-        2,
-        "``LEGACY_STAMP_NAME`` ('.migrations') is the marker recording which migrations "
-        "ran, and ``_KEY_INVENTORY_NAME`` ('.config-keys.json') is the per-launch "
-        "inventory of setting paths: both are machine-local config-root machinery "
-        "beside ``config.yml``, written by this device for this device, and neither is "
-        "an entry of a session directory or ever travels with one",
+        1,
+        "``LEGACY_STAMP_NAME`` ('.migrations') is the machine-local marker recording "
+        "which migrations ran beside ``config.yml``; it never travels with a session",
     ),
     "local_operator/logger.py": (1, "the process log at the store root"),
     "local_operator/tools/harness_import_tool.py": (

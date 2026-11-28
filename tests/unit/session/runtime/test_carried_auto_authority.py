@@ -91,6 +91,25 @@ def test_the_stamp_round_trips_the_carry_and_absent_reads_false(root: Path) -> N
     assert parsed is not None and parsed.unattended is False
 
 
+def test_implicit_local_auto_requires_a_clear_placement_and_enrollment(root: Path) -> None:
+    from local_operator.session.approval_policy import may_inherit_local_auto
+    from local_operator.session.placement import stamp_path
+
+    assert may_inherit_local_auto(root, "fresh")
+    _stamp(root, "peer", unattended=False)
+    assert not may_inherit_local_auto(root, "peer")
+
+    broken = stamp_path(root, "unknown")
+    broken.parent.mkdir()
+    broken.write_text("not a stamp", encoding="utf-8")
+    assert not may_inherit_local_auto(root, "unknown")
+    assert may_inherit_local_auto(root, "fresh")
+
+    _record(root, capabilities=["prompt"])
+    assert not may_inherit_local_auto(root, "fresh")
+    assert not _carried_auto_authority(root, "peer")
+
+
 def test_no_stamp_means_no_carry(root: Path) -> None:
     assert _carried_auto_authority(root, "no-such-session") is False
 

@@ -10095,7 +10095,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # for one, exactly as the local equivalent would run — the operator's
         # standing "no routine re-prompts", read once, in the file. The read goes
         # through the ONE derivation (``session_factory.saved_tool_approval_is_auto``
-        # → ``_approval_mode_is_auto``), so the request cannot drift from the gate
+        # → ``ConfigManager.tool_approval_decision``), so the request cannot drift from the gate
         # a session started here would run with. Explicit ``--yolo`` stays the
         # override; with config ``ask`` this call is byte-identical to what it was.
         from local_operator.session_factory import saved_tool_approval_is_auto

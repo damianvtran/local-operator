@@ -25,7 +25,9 @@ from unittest.mock import patch
 
 import pytest
 
+from local_operator.config import ConfigManager
 from local_operator.harness.types import Message, Usage
+from local_operator.paths import config_dir
 from local_operator.tui.app import RESIZE_REFIT_DELAY_S, OperatorApp
 from local_operator.tui.widgets import aside_panel as aside_panel_module
 from local_operator.tui.widgets.aside_panel import (
@@ -684,6 +686,9 @@ async def test_the_aside_yields_to_anything_that_acts_on_the_conversation(
     the composer the card is pointed at. Both are the general form of the
     ctrl+c case, and both already yield the full-page subagent view.
     """
+    if act == "approval":
+        # A mounted card, not an auto-resolved request, displaces the aside.
+        ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     session = AsideSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 40)) as pilot:

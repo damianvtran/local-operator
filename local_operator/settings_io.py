@@ -60,6 +60,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 from local_operator import keymap as _keymap
+from local_operator.config import DEFAULT_TOOL_APPROVAL_MODE
 from local_operator.config_writer import config_write_lock, serialized_config_write
 from local_operator.i18n import catalogues as _catalogues
 from local_operator.i18n import runtime as _i18n_runtime
@@ -3484,7 +3485,7 @@ SETTINGS: tuple[Setting, ...] = (
         section="approvals",
         label=_t(_ws.tool_approval_mode_label()),
         kind=Kind.ENUM,
-        default="ask",
+        default=DEFAULT_TOOL_APPROVAL_MODE,
         # 58 cells, and the number is the LADDER's, not a taste call. The detail
         # line composes ``<help> · default: <default>`` when the row is off its
         # default and sheds whole rungs to fit — so the budget that decides
@@ -7100,6 +7101,11 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         # Registry projections and the request parser must agree even for an
         # old file carrying only an explicit legacy boolean.
         return effective_account_selection_policy(manager.get_config().values)
+    if setting.key == "tool_approval_mode":
+        # Project exactly what the gate uses, not the registry's first-run
+        # default. Invalid or out-of-band values must display Ask, not Auto.
+        mode = manager.get_config_value(setting.key, "ask")
+        return "auto" if str(mode).strip().lower() == "auto" else "ask"
     raw = _walk(manager.get_config().values, setting.path)
     if raw is _MISSING:
         return setting.default
@@ -7135,15 +7141,22 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
     return raw
 
 
+def setting_default(manager: "ConfigManager", setting: Setting) -> Any:
+    """The value a reset will actually restore for this config root."""
+    if setting.key == "tool_approval_mode":
+        return manager.tool_approval_default()
+    return setting.default
+
+
 def is_default(manager: "ConfigManager", setting: Setting) -> bool:
-    """Whether the stored value equals the shipped default.
+    """Whether the stored value equals the applicable default.
 
     Immediate-write's one real cost is undo, so the page marks changed rows and
     offers a reset on them. Compared by VALUE and not by presence: a user who
     explicitly typed the default has not changed anything, and highlighting the
     row would be a lie about the state of their config.
     """
-    return read_setting(manager, setting) == setting.default
+    return read_setting(manager, setting) == setting_default(manager, setting)
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 from textual.widgets.text_area import Selection
 
+from local_operator.config import ConfigManager
+from local_operator.paths import config_dir
 from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
@@ -401,6 +403,9 @@ CLAIMANTS = [
 async def test_focus_is_claimed_covers_every_overlay(
     name: str, opener: Any, expected: bool, tmp_path: Path
 ) -> None:
+    if name == "approval":
+        # A pending card claims focus; an auto-resolved approval cannot.
+        ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     session = FakeSession()
     # `/team chart` resolves against the registry the session carries; the other
     # cases ignore it.

@@ -81,7 +81,9 @@ def session_cwd(session: Any) -> str:
     return str(getattr(session, "_cwd", "") or os.getcwd())
 
 
-async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
+async def run_session(
+    session: Any, prompt: str, args: Any, team: Any, *, detached: bool = False
+) -> int:
     from local_operator.headless_print import run_print_mode
     from local_operator.providers.anthropic_cache_ttl import mark_automation_session
     from local_operator.session.runtime.exec_control import start_exec_control
@@ -157,6 +159,7 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
             # runner is also driven by tests and by the detached worker, which build
             # args objects that predate the flag.
             supervisor_fd=getattr(args, "supervisor_fd", None),
+            require_saved_approval=detached,
         )
         lifetime = asyncio.current_task()
 

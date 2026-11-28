@@ -1007,7 +1007,12 @@ ALLOW_ALL_ANSWER = "a"
 
 
 def approval_question(
-    tool_name: str, description: str, *, person_only: bool = False, notice: str = ""
+    tool_name: str,
+    description: str,
+    *,
+    person_only: bool = False,
+    allow_combined: bool = True,
+    notice: str = "",
 ) -> "AskQuestion":
     """The approval gate as a question the anchored picker can put to the user.
 
@@ -1051,11 +1056,10 @@ def approval_question(
     # D1: as a prefix, the notice alone filled the one row the question is
     # granted, and the address never showed at 100x30 or 80x24). The card
     # paints the notice in its own rows instead (``ApprovalPrompt``).
-    # ``person_only`` (host-computed: a profile save, or any card in a
-    # Team-Bridge-latched session -- team-bridge-egress.md: "Cards") drops the "Allow all" row. The
-    # formatting branch above keys on the profile save alone (S-59): a latched
-    # card keeps ordinary single-paragraph formatting.
-    two_choice = profile_save or person_only
+    # A person-only gate drops the combined row along with its settings chrome.
+    # A viewer drops just the combined row: it can still show the owner's mode
+    # and route the separate settings. Neither changes the question formatting.
+    two_choice = profile_save or person_only or not allow_combined
     return AskQuestion(
         id="approval",
         question=question,
@@ -1286,6 +1290,7 @@ class ApprovalPrompt(AskPickerScreen):
         on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
         on_set_session_ask: Callable[[], ApprovalSettingOutcome | None] | None = None,
         person_only: bool = False,
+        allow_combined: bool = True,
         notice: str = "",
     ) -> None:
         from local_operator.harness.approval import never_auto_approved
@@ -1307,8 +1312,18 @@ class ApprovalPrompt(AskPickerScreen):
         #: card is exactly how a pre-latch-style grant would come back
         #: (team-bridge-egress.md: "Cards", S-50).
         self._person_only = self._profile_save or bool(person_only)
-        if self._person_only:
-            self._ANSWER_KEYS = frozenset({"y", "n"})
+        question = approval_question(
+            tool_name,
+            description,
+            person_only=person_only,
+            allow_combined=allow_combined,
+            notice=notice,
+        )
+        # Direct letters and composer routing follow the options this card can
+        # actually honor, without treating a viewer as a person-only gate.
+        self._ANSWER_KEYS = frozenset(
+            APPROVAL_KEY_BY_LABEL[option.label] for option in question.options
+        )
         #: The Team Bridge notice and the "why no Allow all" line, painted in
         #: the slot the approvals-policy chrome uses on a clean card (design
         #: D1, D2, D5). Empty for every card that is not latched.
@@ -1323,7 +1338,7 @@ class ApprovalPrompt(AskPickerScreen):
         self._options_flash_timer: Any = None
         self._latched_notice_rows = 0
         super().__init__(
-            [approval_question(tool_name, description, person_only=person_only, notice=notice)],
+            [question],
             self._answered,
             allow_free_text=False,
             # A UNIQUE id per prompt, not the bare "approval-prompt".
@@ -2347,7 +2362,7 @@ class ApprovalPrompt(AskPickerScreen):
         authorised. It is also where ``A`` becomes ``a``: see
         :data:`ALLOW_ALL_ANSWER`.
         """
-        if self._person_only and key not in {"y", "n"}:
+        if key not in self._ANSWER_KEYS:
             return
         if key == "y" and self._post_unread():
             # Every Allow route (letter, enter on the row, click, composer

@@ -89,6 +89,7 @@ spawn, and the config dir it writes is the test's own ``tmp_path``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import fcntl
 import json
@@ -103,6 +104,7 @@ import sys
 import termios
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -373,12 +375,10 @@ def _spawn_tui(config_dir: Path, home: Path) -> tuple[int, int]:
 
     ``pty.fork`` makes the child a session leader whose controlling terminal is
     the slave — the object a terminal emulator gives the process it hosts, and
-    the thing that decides whether stdin is a tty at all. The console script is
-    the product's own entry point resolved from this venv, so what runs is the
-    checkout under test rather than a re-implementation of it.
+    the thing that decides whether stdin is a tty at all. Use the product's
+    module entry point from the current interpreter: a shared venv's console
+    script can retain a shebang pointing at a now-removed worktree.
     """
-    script = Path(sys.executable).with_name("local-operator")
-    assert script.is_file(), f"the venv console script is missing: {script}"
     pid, fd = pty.fork()
     if pid == 0:  # pragma: no cover — the forked child execs immediately
         # A process started from a non-interactive shell inherits SIGINT as
@@ -387,8 +387,16 @@ def _spawn_tui(config_dir: Path, home: Path) -> tuple[int, int]:
         # app would ignore the signals this test cleans up with.
         for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
             signal.signal(sig, signal.SIG_DFL)
-        os.execve(str(script), [str(script)], _child_env(config_dir, home))
-        os._exit(127)  # pragma: no cover
+        try:
+            os.execve(
+                sys.executable,
+                [sys.executable, "-m", "local_operator"],
+                _child_env(config_dir, home),
+            )
+        finally:
+            # If exec fails, do not re-enter the parent's pytest teardown in
+            # the fork, which would remove the parent's scratch resources.
+            os._exit(127)  # pragma: no cover
     # Pin the geometry on the pty itself rather than trusting the terminal
     # pytest happens to be running in: a piped or zero-sized parent would
     # otherwise compose a frame at a size these assertions did not choose.
@@ -655,6 +663,211 @@ def _marker_context(
             if data.find(marker) >= 0:
                 return f"{path.name} {_window_around(data, marker, before=before, after=after)}"
     return "the marker is in no log file"
+
+
+def test_first_run_tui_runs_a_tool_then_ask_parks_the_next_call(
+    headless_tui_env: Path, tmp_path: Path
+) -> None:
+    from local_operator.config import ConfigManager
+
+    root = headless_tui_env
+    home = tmp_path / "home"
+    home.mkdir()
+    assert not (root / "config.yml").exists()
+    ConfigManager(root).update_config({"hosting": "test", "model_name": "mock"})
+    pid, fd = _spawn_tui(root, home)
+    terminal = _Terminal(fd)
+    runtime_pid = None
+    try:
+        with bounded(BOOT_BOUND_S, "first-run TUI approval"):
+            deadline = time.monotonic() + BOOT_BOUND_S - 5.0
+            owner = _live_runtime(root)
+            while owner is None and time.monotonic() < deadline:
+                terminal.pump(0.2)
+                owner = _live_runtime(root)
+            assert owner is not None, terminal.tail()
+            session_id, runtime_pid = owner
+            assert terminal.type_until_echoed(b"[bash:0]", ECHO_TIMEOUT_S), terminal.tail()
+            terminal.write(b"\r")
+            transcript = root / "sessions" / session_id / "transcript.jsonl"
+
+            def bash_results() -> list[dict[str, Any]]:
+                if not transcript.is_file():
+                    return []
+                results = []
+                # Only complete JSONL lines count as committed results.
+                for line in transcript.read_text(encoding="utf-8").splitlines(keepends=True):
+                    if not line.endswith("\n"):
+                        continue
+                    payload = json.loads(line).get("payload", {})
+                    if payload.get("role") == "tool" and payload.get("tool_name") == "bash":
+                        results.append(payload)
+                return results
+
+            while not (results := bash_results()) and time.monotonic() < deadline:
+                terminal.pump(0.2)
+            assert len(results) == 1, terminal.tail()
+            assert results[0].get("provider_payload", {}).get("details", {}).get("exit_code") == 0
+            print("Fresh TUI: input [bash:0] reached the live owner; bash exit_code=0")
+
+            # A receipt and sidecar alone do not prove the attached owner (or
+            # its viewer) respected the switch. Exercise the very next call.
+            terminal.write(b"/approvals ask\r")
+            override = transcript.with_name("approvals.json")
+            while not override.is_file() and time.monotonic() < deadline:
+                terminal.pump(0.2)
+            assert override.is_file(), terminal.tail()
+            assert json.loads(override.read_text(encoding="utf-8"))["override"] == "ask"
+            frame_start = len(terminal.output)
+            terminal.write(b"[bash:0]\r")
+            marker = b"waiting for approval"
+            while marker not in terminal.output[frame_start:] and time.monotonic() < deadline:
+                terminal.pump(0.2)
+                assert bash_results() == results, "the second tool ran after /approvals ask"
+            assert marker in terminal.output[frame_start:], terminal.tail()
+            assert bash_results() == results
+            print("Live /approvals ask: sidecar says ask; next call parked; no second bash result")
+    finally:
+        _stop_child(pid, terminal)
+        terminal.close()
+        _stop_other(runtime_pid)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_mode", ["ask", "auto"])
+async def test_new_tui_attachment_renders_owner_mode_and_does_not_answer(
+    headless_tui_env: Path, workspace: Path, owner_mode: str
+) -> None:
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import AgentTool, TextContent, ToolResult
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+    from tests.e2e.harness import text_turn, tool_call_turn, wait_for_adoption
+    from tests.e2e.test_fork_e2e import _never_take_over, _pump
+    from tests.unit.session.test_session import ScriptedStream, make_session
+    from tests.unit.tui.test_app_pilot import _band
+
+    root = headless_tui_env
+    ConfigManager(root).update_config({"hosting": "test", "model_name": "mock"})
+    assert ConfigManager(root).tool_approval_default() == "auto"
+    executed = []
+
+    async def fixture(call_id, *_):
+        executed.append(call_id)
+        return ToolResult(tool_call_id=call_id, tool_name="probe", content=[TextContent(text="ok")])
+
+    def build_owner():
+        turns = ScriptedStream(
+            [
+                tool_call_turn(text="Check", tool_name="probe", tool_call_id="inert", arguments={}),
+                text_turn("Done"),
+            ]
+        )
+
+        def stream(request, signal):
+            if request.purpose == "turn":
+                return turns(request, signal)
+
+            async def auxiliary():
+                for event in text_turn("Approval fixture"):
+                    yield event
+
+            return auxiliary()
+
+        owner = make_session(
+            root / "sessions",
+            stream,
+            tools=[AgentTool(name="probe", execute=fixture)],
+            cwd=str(workspace),
+        )
+        return owner, ServingSessionHandle(
+            owner,
+            asyncio.get_running_loop(),
+            cwd=str(workspace),
+            config_dir=root,
+            auto_approve=True,
+        )
+
+    _, original_handle = build_owner()
+    try:
+        receipt = await original_handle.run_slash_authoritative("approvals", "ask")
+        assert receipt["data"]["approval_mode"] == "ask", receipt
+    finally:
+        await original_handle.dispose()
+
+    owner, handle = build_owner()
+    server = RuntimeServer(handle, kind="daemon")
+    viewers = []
+
+    async def connect():
+        viewer = await AttachedSession.connect(
+            server._record, owner.session_id, config_dir=root, takeover_factory=_never_take_over
+        )
+        viewers.append(viewer)
+        return viewer
+
+    try:
+        await server.start_in_process()
+        with bounded(BOOT_BOUND_S, f"reattach to owner in {owner_mode}"):
+            # Park under restored Ask before the TUI connects: changing the
+            # owner's mode must not answer the already outstanding request.
+            parked = asyncio.Event()
+
+            def on_projection():
+                if handle._fold.projection.pending is not None:
+                    parked.set()
+
+            unsubscribe = handle.subscribe(on_projection)
+            turn = asyncio.create_task(handle.run_headless_prompt("check the fixture"))
+            try:
+                await parked.wait()
+                pending = handle._fold.projection.pending
+                assert pending is not None and pending.title == "probe"
+                if owner_mode == "auto":
+                    receipt = await handle.run_slash_authoritative("approvals", "auto")
+                    assert receipt["data"]["approval_mode"] == "auto", receipt
+                    assert handle._fold.projection.pending == pending
+
+                app = OperatorApp(connect)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await wait_for_adoption(app, pilot)
+                    viewer = viewers[0]
+                    assert app._session is viewer and not viewer.owns_runtime
+                    assert app._approvals_default_auto  # this viewer's machine is on implicit Auto
+                    await _pump(pilot, lambda: turn.done() or bool(app.query(ApprovalPrompt)))
+                    assert viewer.frontend_state.approval_mode == owner_mode
+                    assert ("! auto" in _band(app)) == (owner_mode == "auto"), _band(app)
+                    assert app._status is not None
+                    assert app._status._approvals_auto == (owner_mode == "auto")
+                    assert handle._fold.projection.pending == pending
+                    assert not turn.done() and not executed
+                    card = app.query_one(ApprovalPrompt)
+                    card.focus()
+                    await pilot.press("A")
+                    assert card.answer is None and not turn.done() and not executed
+                    assert handle._fold.projection.pending == pending
+                    assert viewer.frontend_state.approval_mode == owner_mode
+                    assert app._approve_all == (owner_mode == "auto")
+                    assert [option.label for option in card.question.options] == ["Allow", "Deny"]
+                    assert card.answer_keys() == {"y", "n"}
+                    await pilot.press("n")
+                    await _pump(pilot, turn.done)
+                    assert await turn and not executed
+                    print(f"Reattached TUI: {owner_mode} shown; A inert; viewer denial honored")
+            finally:
+                unsubscribe()
+                if not turn.done():
+                    turn.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await turn
+    finally:
+        for viewer in viewers:
+            await viewer.dispose()
+        await server.aclose()
+        await handle.dispose()
 
 
 def test_the_assembled_tui_boots_loads_its_resources_and_survives_legacy_terminal_input(

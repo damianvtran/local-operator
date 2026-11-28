@@ -10,6 +10,7 @@ transcript or an index file.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,9 +18,11 @@ import pytest
 from rich.cells import cell_len
 from rich.text import Text
 
+from local_operator.config import ConfigManager
 from local_operator.harness.wake_types import WakeSchedule
 from local_operator.i18n import catalogues
 from local_operator.i18n import text as i18n_text
+from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tui import schedule as schedule_model
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets import schedule_view as schedule_view_mod
@@ -641,13 +644,16 @@ async def test_ctrl_c_leaves_the_schedule_page_before_warning_about_exit() -> No
 
 
 @pytest.mark.asyncio
-async def test_an_approval_closes_the_schedule_page() -> None:
+async def test_an_approval_closes_the_schedule_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """F2 through the approval path: the question must not mount behind a page."""
     from local_operator.tui.widgets.approval import ApprovalPrompt
 
+    # Boot loads the saved policy; changing the pre-boot latch cannot force a card.
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    ConfigManager(tmp_path).set_config_value("tool_approval_mode", "ask")
     app = OperatorApp(lambda: _factory(ScheduleFakeSession([_schedule("w1")])))
-    app._set_approve_all(False)
-    app._approvals_default_auto = False
     async with app.run_test(size=(150, 40)) as pilot:
         await _boot(pilot, app)
         await _open(pilot, app)

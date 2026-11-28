@@ -46,6 +46,147 @@ def manager(tmp_path: Path) -> ConfigManager:
     return ConfigManager(tmp_path)
 
 
+def test_fresh_approval_default_is_local_not_an_unattended_opt_in(tmp_path: Path) -> None:
+    from local_operator.session_factory import (
+        local_tool_approval_is_auto,
+        saved_tool_approval_is_auto,
+    )
+
+    root = tmp_path / "first-run"
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None and setting.default == "auto"
+    assert local_tool_approval_is_auto(root) and not saved_tool_approval_is_auto(root)
+    assert not root.exists(), "the read-only probes must not initialize a root"
+
+    manager = ConfigManager(root)
+    assert settings_io.read_setting(manager, setting) == "auto"
+    assert settings_io.is_default(manager, setting)
+    assert manager.tool_approval_decision("local-fixture")[0]
+    assert not (root / "config.yml").exists()
+
+    manager.set_config_value("conversation_length", 12)
+    assert "tool_approval_mode" not in yaml.safe_load((root / "config.yml").read_text())["values"]
+    assert local_tool_approval_is_auto(root) and not saved_tool_approval_is_auto(root)
+    assert ConfigManager(root).tool_approval_decision("local-fixture")[0]
+    saved_only = ConfigManager(root, require_saved_approval=True)
+    assert not saved_only.tool_approval_decision("local-fixture")[0]
+
+    settings_io.write_setting(manager, setting, "ask", notify=False)
+    assert settings_io.read_setting(manager, setting) == "ask"
+    assert not local_tool_approval_is_auto(root)
+    assert not ConfigManager(root).tool_approval_decision("local-fixture")[0]
+    settings_io.reset_setting(manager, setting, notify=False)
+    assert settings_io.read_setting(manager, setting) == "auto"
+    assert manager.tool_approval_decision("local-fixture")[0]
+    assert not saved_tool_approval_is_auto(root)
+
+    settings_io.write_setting(manager, setting, "auto", notify=False)
+    assert saved_tool_approval_is_auto(root)
+    saved_only.reload()
+    assert saved_only.tool_approval_decision("local-fixture")[0]
+
+
+@pytest.mark.parametrize(
+    ("document", "effective"),
+    [
+        ("", "ask"),
+        ("{}", "ask"),
+        ("values: {conversation_length: 12}", "ask"),
+        ("values: {tool_approval_mode: ask}", "ask"),
+        ("values: {tool_approval_mode: ' Auto '}", "auto"),
+        ("values: {tool_approval_mode: false}", "ask"),
+        ("values: {tool_approval_mode: typo}", "ask"),
+        ("values: [auto]", "ask"),
+        ("metadata: [invalid]\nvalues: {tool_approval_mode: auto}", "ask"),
+    ],
+)
+def test_existing_config_approval_matches_gate_and_resets_to_ask(
+    tmp_path: Path, document: str, effective: str
+) -> None:
+    from local_operator.session_factory import local_tool_approval_is_auto
+
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(document, encoding="utf-8")
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None
+    assert local_tool_approval_is_auto(tmp_path) == (effective == "auto")
+    manager = ConfigManager(tmp_path)
+    assert settings_io.setting_default(manager, setting) == "ask"
+    assert settings_io.read_setting(manager, setting) == effective
+    assert manager.tool_approval_decision("local-fixture")[0] == (effective == "auto")
+    if effective == "auto":
+        settings_io.reset_setting(manager, setting, notify=False)
+        assert settings_io.read_setting(manager, setting) == "ask"
+        assert not manager.tool_approval_decision("local-fixture")[0]
+        assert not ConfigManager(tmp_path).tool_approval_decision("local-fixture")[0]
+
+
+@pytest.mark.parametrize("values", ["", "values: {}\n", "values: null\n"])
+def test_an_unrelated_save_cannot_restore_a_truncated_approval_marker(
+    tmp_path: Path, values: str
+) -> None:
+    from local_operator.session_factory import local_tool_approval_is_auto
+
+    # A manager that started fresh must also see the current on-disk evidence,
+    # not resurrect the marker from its own pre-truncation snapshot.
+    stale = ConfigManager(tmp_path)
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(f"metadata: {{fresh_tool_approval_default: true}}\n{values}")
+    assert not local_tool_approval_is_auto(tmp_path)
+    assert ConfigManager(tmp_path).tool_approval_decision("local-fixture") == (False, False)
+    language = settings_io.resolve_key("language")
+    assert language is not None
+    settings_io.write_setting(stale, language, "en", notify=False)
+    assert "fresh_tool_approval_default" not in yaml.safe_load(config_file.read_text())["metadata"]
+    assert not local_tool_approval_is_auto(tmp_path)
+    assert ConfigManager(tmp_path).tool_approval_decision("local-fixture") == (False, False)
+
+
+def test_approval_setting_matches_local_gate_after_mesh_enrollment(tmp_path: Path) -> None:
+    from local_operator.network import store as network_store
+    from local_operator.network.types import NetworkRecord
+    from local_operator.session_factory import local_tool_approval_is_auto
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("conversation_length", 12)
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None and settings_io.read_setting(manager, setting) == "auto"
+    network_store.save(
+        NetworkRecord(network_id="n_0123456789abcdef0123456789abcdef", name="test"), root=tmp_path
+    )
+    assert settings_io.read_setting(manager, setting) == "ask"
+    assert settings_io.setting_default(manager, setting) == "ask"
+    assert not manager.tool_approval_decision("local-fixture")[0]
+    assert not local_tool_approval_is_auto(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("record_trust", "allows_auto"),
+    [
+        ("active", False),
+        ("untrusted", True),
+        ("disconnected", True),
+        ("unknown", False),
+        ([], False),
+    ],
+)
+def test_implicit_approval_requires_known_inactive_enrollment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_trust: object, allows_auto: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.network import store as network_store
+
+    manager = ConfigManager(tmp_path)
+    records = network_store.networks_dir(tmp_path)
+    records.mkdir(parents=True)
+    (records / "synthetic.json").touch()
+    monkeypatch.setattr(
+        network_store, "load", lambda *_a, **_kw: SimpleNamespace(trust=record_trust)
+    )
+    assert manager.tool_approval_decision("local-fixture") == (allows_auto, True)
+
+
 def _consumer_defaults() -> dict[str, object]:
     """What each setting's REAL consumer falls back to when the key is absent.
 

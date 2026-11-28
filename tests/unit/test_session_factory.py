@@ -7673,32 +7673,28 @@ async def test_the_projects_registry_reaches_the_session_and_its_tools(
 # ---------------------------------------------------------------------------
 
 
-def test_approval_mode_is_auto_reads_the_key_and_degrades_to_ask() -> None:
-    """The one reader behind the headless gate's config arm.
+def test_tool_approval_decision_keeps_mode_and_local_provenance_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.config import ConfigManager
+    from local_operator.session import approval_policy
 
-    ``auto`` (any case/whitespace) approves; ``ask``, a missing key and an
-    unreadable config all fall back to asking — the failure direction matters:
-    a broken config must never approve by accident.
-    """
-    from local_operator.session_factory import _approval_mode_is_auto
+    scopes = iter([True, False])
+    checks = []
 
-    class _Cfg:
-        def __init__(self, value: object) -> None:
-            self.value = value
+    def scope_check(root: Path, session_id: str) -> bool:
+        checks.append((root, session_id))
+        return next(scopes)
 
-        def get_config_value(self, key: str, default: object = None) -> object:
-            return default if self.value is None else self.value
-
-    assert _approval_mode_is_auto(_Cfg("auto")) is True
-    assert _approval_mode_is_auto(_Cfg(" Auto ")) is True
-    assert _approval_mode_is_auto(_Cfg("ask")) is False
-    assert _approval_mode_is_auto(_Cfg(None)) is False, "missing key means ask"
-
-    class _Boom:
-        def get_config_value(self, key: str, default: object = None) -> object:
-            raise RuntimeError("config unreadable")
-
-    assert _approval_mode_is_auto(_Boom()) is False, "an unreadable config must not approve"
+    monkeypatch.setattr(approval_policy, "may_inherit_local_auto", scope_check)
+    manager = ConfigManager(tmp_path)
+    assert manager.tool_approval_decision("local-fixture") == (True, True)
+    assert checks == [(tmp_path, "local-fixture")], "startup must sample scope once"
+    assert manager.tool_approval_decision("local-fixture") == (False, True)
+    manager.set_config_value("tool_approval_mode", " Auto ")
+    assert manager.tool_approval_decision("local-fixture") == (True, False)
+    manager.set_config_value("tool_approval_mode", "ask")
+    assert manager.tool_approval_decision("local-fixture") == (False, False)
 
 
 def test_saved_tool_approval_is_auto_answers_without_materialising_a_root(tmp_path: Path) -> None:
@@ -7708,7 +7704,7 @@ def test_saved_tool_approval_is_auto_answers_without_materialising_a_root(tmp_pa
     file answers False WITHOUT being constructed (constructing ``ConfigManager``
     creates ``config.yml`` — a mesh request-path check has no business writing, and
     a later test of "no saved mode" must not be the thing that creates one); the
-    key is read through ``_approval_mode_is_auto`` (so ``auto`` rounds-trips and a
+    key is read as an explicitly saved policy (so ``auto`` rounds-trips and a
     missing key means ask); a MALFORMED file ALSO answers False WITHOUT being
     constructed — and without the rename ``ConfigManager`` performs
     (``config.yml.bad.<stamp>``), because a create must not move the operator's
@@ -7777,9 +7773,9 @@ async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monke
     gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        gate = real(auto)
+        gate = real(auto, **kwargs)
         gates.append(gate)
         return gate
 
@@ -7801,11 +7797,9 @@ async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monke
 async def test_without_the_key_the_headless_gate_still_asks(
     tmp_config_dir: Path, monkeypatch
 ) -> None:
-    """The default preserves tonight's failure mode ON PURPOSE, loud and typed.
+    """A legacy config without the key preserves the loud and typed refusal.
 
-    No key (or ``ask``) keeps the gate denying non-tty callers with the CL-04
-    notice and the typed refusal — the semantics every existing headless user
-    has, and the reason the fix above is an OR rather than a new default.
+    The new-install default must not loosen the posture of a pre-existing file.
     """
     import local_operator.session_factory as sf
     from local_operator.agents import AgentRegistry
@@ -7818,9 +7812,9 @@ async def test_without_the_key_the_headless_gate_still_asks(
     gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        gate = real(auto)
+        gate = real(auto, **kwargs)
         gates.append(gate)
         return gate
 
@@ -7880,9 +7874,9 @@ async def test_a_resumed_conversations_approval_choice_reaches_the_headless_gate
     seen: list[bool] = []
     real = sf._make_request_approval
 
-    def spy(auto: bool):
+    def spy(auto: bool, **kwargs):
         seen.append(auto)
-        return real(auto)
+        return real(auto, **kwargs)
 
     monkeypatch.setattr(sf, "_make_request_approval", spy)
     session = await create_session(

@@ -28,6 +28,8 @@ from typing import Any
 import pytest
 from textual import events
 
+from local_operator.config import ConfigManager
+from local_operator.paths import config_dir
 from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
@@ -569,6 +571,8 @@ async def test_a_press_with_a_live_approval_moves_no_keyboard() -> None:
     AND the press still acts on the row it lands on (the cursor moves and the
     switch it would start still starts) — the refusal is the keyboard's alone.
     """
+    # A pending approval must already hold the keyboard before the row press.
+    ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)

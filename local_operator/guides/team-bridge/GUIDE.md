@@ -223,8 +223,9 @@ The chief of staff can then read the message and reply over the bridge (its
 thread).
 
 **One limit to tell the user about:** a reply or send is a write-tier tool call.
-Under the default approval mode (`tool_approval_mode: ask`), a headless chief of
-staff parks that call for a human approval. The approval is waiting in the
+In Ask mode, a headless chief of staff parks that call for a human approval.
+The Auto default for fresh local sessions does not opt a detached chief of
+staff into unattended operation. The approval is waiting in the
 session; nobody sees it until they open the session in the desktop app or the
 TUI (`lop --resume <session-id>`), or answer it from the phone. If the user
 wants replies to go out with nobody at the machine, that is their decision

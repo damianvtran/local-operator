@@ -10,7 +10,9 @@ import pytest
 from PIL import Image
 from textual.widgets.text_area import Selection
 
+from local_operator.config import ConfigManager
 from local_operator.harness.types import AskOption, AskQuestion, ImageContent
+from local_operator.paths import config_dir
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -67,6 +69,8 @@ async def test_navigation_stays_pending_until_committed_frame_is_usable():
 
 @pytest.mark.asyncio
 async def test_temporary_allow_all_does_not_follow_another_session():
+    # Ask distinguishes the second source's saved default from the first's latch.
+    ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     first, second = FakeSession(), FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test() as pilot:
@@ -221,6 +225,9 @@ async def test_hidden_stopped_callback_cannot_answer_selected_sources_gate(gate_
         def set_stopped_callback(self, callback):
             self.stopped_callback = callback
 
+    if gate_kind == "approval":
+        # B needs a pending approval for A's stopped callback to leave alone.
+        ConfigManager(config_dir()).set_config_value("tool_approval_mode", "ask")
     first, second = Watched(), FakeSession()
     app = OperatorApp(lambda: _factory(first))
     async with app.run_test() as pilot:

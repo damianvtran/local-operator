@@ -9122,7 +9122,7 @@ class OperatorApp(App[None]):
                 )
             )
         denied = source.turn.approvals_denied_epoch
-        auto = bool(source.draft.approve_all) and not (
+        auto = _draft_auto_applies(source) and not (
             denied is not None and source.turn.epoch <= denied
         )
         task = session.suspend_viewer_gates(auto_approve=auto, keep_answer=keep_answer)
@@ -9291,7 +9291,7 @@ class OperatorApp(App[None]):
             return self._ask_screen is None and self._approval is None
         if (
             gate.kind == "approval"
-            and bool(source.draft.approve_all)
+            and _draft_auto_applies(source)
             and not require_card
             # An account profile save is never auto-approved, so approve-all
             # does not discharge it: the card is still owed to a person. Nor
@@ -13830,6 +13830,16 @@ class OperatorApp(App[None]):
             session_id = str(getattr(state, "session_id", "") or "")
             if session_id:
                 self._last_known_states[session_id] = state
+        # An attached pane paints the owner's decision, not this viewer's
+        # machine default. This is a projection only: the attached card path
+        # still requires a person to reply to the owner.
+        owner_mode = getattr(state, "approval_mode", None)
+        if (
+            not self._interaction.display_only
+            and self._gate_is_owned_elsewhere()
+            and owner_mode in ("ask", "auto")
+        ):
+            self._set_approve_all(owner_mode == "auto", scope="keep")
         # Metadata can arrive without a new source row. The card-result hook
         # below retries against actual settled seats if this update won first.
         self._apply_peer_display_records(state)
@@ -31280,6 +31290,9 @@ class OperatorApp(App[None]):
             # Tightening is never refused, latched or not: the way back stays.
             on_set_session_ask=partial(self._set_session_ask_for_card, source),
             person_only=bridge_latched,
+            # An attached reply settles only this call. Leave mode changes to
+            # the separately routed settings rather than promising both with A.
+            allow_combined=not _is_viewer(source.session),
             notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
         # A gate on a PEER's session carries the hint that says where an allow
@@ -31428,7 +31441,7 @@ class OperatorApp(App[None]):
         if pending is None or getattr(pending, "kind", None) != "approval":
             return
         pending_latched = bool(getattr(pending, "bridge_latched", False))
-        if bool(source.draft.approve_all) and not requires_person(
+        if _draft_auto_applies(source) and not requires_person(
             str(getattr(pending, "title", "") or ""), bridge_latched=pending_latched
         ):
             return
@@ -31930,7 +31943,7 @@ class OperatorApp(App[None]):
 
         draft = source.draft
         return ApprovalGrant(
-            auto=bool(draft.approve_all),
+            auto=_draft_auto_applies(source),
             scope="global" if draft.approve_scope == "global" else "session",
         )
 
@@ -31963,14 +31976,9 @@ class OperatorApp(App[None]):
     def _set_approve_all(self, approve_all: bool, *, scope: str = "session") -> None:
         """THE writer of the auto-approve mode, band included.
 
-        One method because the band is an ASSERTION about the gate, and the two
-        were set from four places apiece with nothing tying them together. That
-        is not hypothetical tidiness: an owner's frame showed `! auto-approve`
-        beside two tool calls reporting `User denied approval`, and the first
-        hour of diagnosing it went on establishing whether the band was lying —
-        which the code could not answer, because nothing made it impossible.
-        Now the band cannot say anything the gate does not do, since the only
-        way to change either is to change both.
+        The band and the shown mode move together. For a local source that
+        mode also drives its gate. For an attached source it only mirrors the
+        owner; `_draft_auto_applies` never turns that display into a reply.
 
         The persisted default rides along for the same reason: `! auto-approve`
         and `! auto-approve always` are two different promises, and which one is
@@ -32089,7 +32097,7 @@ class OperatorApp(App[None]):
         default is a separate, deliberate ``/approvals default ask``, and a
         click on a status glyph must not rewrite ``config.yml``.
         """
-        self._cmd_approvals("ask", self._notice)
+        self._run_slash_command("/approvals ask")
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
         """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
@@ -32411,10 +32419,8 @@ class OperatorApp(App[None]):
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
 
-        The read-only half of the report above. ``None`` means "no watcher on
-        this process" (a test host, an embed) rather than "no value": the
-        caller falls back to its own cached default instead of inventing a
-        comparison against a file nobody is reading. Never constructs a
+        With no saved key (or no watcher), the caller uses its correctly
+        scoped boot default instead of inventing a file value. Never constructs a
         ``ConfigManager`` — see :meth:`_report_approvals` for why a report path
         must not.
         """
@@ -32530,13 +32536,10 @@ class OperatorApp(App[None]):
         warning by the policy module, and that warning is surfaced rather than
         swallowed, because a silent downgrade to prompting is still a change.
 
-        An attached session's gate belongs to its owner's process, so the record
-        is still READ here but it only feeds the card's provenance — moving
-        ``_approve_all`` here would make the band claim a mode this app does not
-        control. The sidecar lives beside the transcript on THIS machine, so an
-        attached local session can show "session override"; a remote mesh
-        session has no local directory, ``read_override`` answers "no record",
-        and the card keeps the global default rather than inventing one.
+        An attached session's gate belongs to its owner. Until its live
+        snapshot arrives, do not paint Auto from the viewer's machine default;
+        only an actual conversation record can supply a saved fallback. The
+        live snapshot wins over that record (e.g. for a run pinned by a flag).
 
         ``first_adoption`` is False when the source already had an in-memory
         ``draft.approve_all`` (a temporary `A` latch), and then the mode is NOT
@@ -32545,8 +32548,12 @@ class OperatorApp(App[None]):
         off. The record is still read for ``_explicit_approvals_mode`` so the
         card's provenance line names the conversation's saved choice.
         """
-        attached = self._gate_is_owned_elsewhere()
+        # Adoption runs before `_bind_viewer`, so `_session` still names the
+        # outgoing pane (or nothing on boot). Read ownership from the incoming one.
+        attached = not getattr(session, "owns_runtime", True)
         self._explicit_approvals_mode = None
+        if attached:
+            self._set_approve_all(False, scope="global")
         source = self._interactions.get(id(session))
         if source is None:
             source = SessionInteraction(session)
@@ -32573,7 +32580,7 @@ class OperatorApp(App[None]):
         # Provenance follows the record on EVERY adoption, even when an
         # in-memory latch keeps the gate itself where it is.
         self._explicit_approvals_mode = override
-        if not attached and first_adoption:
+        if attached or first_adoption:
             self._set_approve_all(override == "auto")
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
@@ -44644,7 +44651,14 @@ class OperatorApp(App[None]):
         being printed.
         """
         values = getattr(change, "values", {})
-        mode = str(values.get("tool_approval_mode", "")).strip().lower()
+        if "tool_approval_mode" in values:
+            mode = str(values["tool_approval_mode"]).strip().lower()
+        else:
+            # A reset removed the raw key. Resolve the local default for the
+            # TUI, then let the normal attribution checks decide what can apply.
+            from local_operator.session_factory import local_tool_approval_is_auto
+
+            mode = mode_word(local_tool_approval_is_auto())
         if mode not in ("auto", "ask"):
             # A typo on disk is not "ask" by accident: the watcher only
             # delivers parseable files, so the safe answer is to keep the mode
@@ -45389,6 +45403,20 @@ class OperatorApp(App[None]):
         text = str(outcome.get("text", "") or "")
         style = str(outcome.get("style", "info") or "info")
         data = outcome.get("data") or {}
+        if (
+            command == "/approvals"
+            and data.get("ok") is True
+            and data.get("approval_mode") == "ask"
+        ):
+            # Mirror the owner's confirmed Ask in the chip and next card, and
+            # clear the viewer's Allow All without settling any parked card.
+            if data.get("approval_provenance") == "session":
+                self._explicit_approvals_mode = "ask"
+            elif data.get("approval_provenance") == "global":
+                self._explicit_approvals_mode = None
+                self._approvals_default_auto = False
+            self._allow_approvals_again()
+            self._set_approve_all(False)
         if kind == "noop":
             # The invoker hosts the interactive surface itself (bare /model's
             # picker is opened up-front); nothing arrives to print.
@@ -66907,6 +66935,13 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
     sixteen places to say the same thing.
     """
     return session is not None and not session.owns_runtime
+
+
+def _draft_auto_applies(source: SessionInteraction) -> bool:
+    # An attached draft mirrors the owner's mode for display, not as authority
+    # to answer a pending request. Only a card gesture replies to the owner;
+    # a local gate can still use its own draft, including an Allow All latch.
+    return not _is_viewer(source.session) and bool(source.draft.approve_all)
 
 
 def _canonical_frontend(session: Any) -> bool:
