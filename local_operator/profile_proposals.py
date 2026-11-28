@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import time
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
@@ -342,6 +343,100 @@ def _iter_raw(root: Path) -> Iterable[dict[str, Any]]:
         if data is not None and data.get("id") == path.stem:
             rows.append(data)
     return rows
+
+
+def _transaction_id(proposal_id: str, after_commitment: str) -> str:
+    # Edit-then-accept writes a different image, which must have its own journal.
+    return proposal_id + "-" + after_commitment.split(":")[1][:16]
+
+
+def instruction_receipt_generation(root: Path) -> tuple[int, int, int, int] | None:
+    """Cheap invalidation only: proposal state is published by atomic replacement.
+
+    The file's parent changes even on in-place profile edits that do not touch
+    the agents registry root. Only the receipt reader can prove authorization.
+    """
+    try:
+        info = proposals_dir(root).lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+
+def approved_instruction_preimages(root: Path, current: dict[str, Any]) -> Iterable[str]:
+    """Read direct, human-approved local instruction edges ending at this image.
+
+    Do not use ``get``/``list_proposals`` here: those can import legacy records.
+    The proposal supplies the images and attribution; the completed transaction
+    independently ties both commitments to that decision on this device. This
+    is evidence for continuation, never permission to write or replay a profile.
+    """
+    proposals = proposals_dir(root)
+    transactions = root / "profile-transactions"
+    if proposals.is_symlink() or transactions.is_symlink():
+        return
+    current_token = commitment(current)
+    for path in proposals.glob("pp_*.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        row = _read(path)
+        if (
+            row is None
+            or row.get("state") != STATE_ACCEPTED
+            or row.get("kind") != "agent"
+            or row.get("operation") != "update"
+            or row.get("target_id") != current["id"]
+            or row.get("name") != current["name"]
+            or row.get("fields") != ["instructions"]
+            or row.get("after_commitment") != current_token
+            or row.get("after") != current
+        ):
+            continue
+        actor, applied, before = row.get("decided_by"), row.get("applied"), row.get("before")
+        if not isinstance(actor, str) or not (
+            actor == "desktop" or (actor.startswith("conversation:") and actor != "conversation:")
+        ):
+            continue  # An autonomous agent acceptance is not an operator decision.
+        if (
+            not isinstance(applied, dict)
+            or applied.get("rebased") is not False
+            or applied.get("after_commitment") != current_token
+            or not isinstance(before, dict)
+        ):
+            continue
+        instructions = before.get("instructions")
+        if (
+            not isinstance(instructions, str)
+            or instructions == current["instructions"]
+            or before != {**current, "instructions": instructions}
+        ):
+            continue
+        before_token = commitment(before)
+        proposal_id = row.get("id")
+        if (
+            not isinstance(proposal_id, str)
+            or row.get("base_commitment") != before_token
+            or proposal_id != path.stem
+        ):
+            continue
+        try:
+            _path(root, proposal_id)  # Validate the id before composing a journal path.
+        except ProposalError:
+            continue
+        journal = transactions / f"{_transaction_id(proposal_id, current_token)}.json"
+        if journal.is_symlink() or not journal.is_file():
+            continue
+        completed = _read(journal)
+        if (
+            completed is not None
+            and completed.get("state") == "complete"
+            and completed.get("before") == before_token
+            and completed.get("after") == current_token
+            and completed.get("binding") == {"proposal_id": proposal_id, "actor": actor}
+        ):
+            yield instructions
 
 
 def _fold(root: Path, record: dict[str, Any], now: float) -> dict[str, Any]:
@@ -886,9 +981,7 @@ def apply(
             if image is not None:
                 backup["id"], backup["dir"] = _backup(root, record, image, actor)
 
-        # One journal per (proposal, written image): an edit-then-accept writes
-        # a different image than the proposal and must not collide with it.
-        transaction_id = proposal_id + "-" + commitment(after).split(":")[1][:16]
+        transaction_id = _transaction_id(proposal_id, commitment(after))
         binding = {"proposal_id": proposal_id, "actor": actor}
         # Prepared and executed under the SAME lock hold: the authority for this
         # write is the caller's consent decision (desktop bearer or the session

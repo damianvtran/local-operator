@@ -4690,10 +4690,15 @@ class ServingSessionHandle(SessionHandle):
 
         # Retain the old read-only refusal (and its precedence) for anything
         # that could close, hand over or queue instead of starting a local turn.
-        # Only defer the check for a pending move this owner could run now;
-        # the actual recovery call is below the early-return gates.
+        # Only defer it for a held bound attachment this owner could run now.
+        # The recovery below the early-return gates rechecks the actual proof.
+        # Mobile's local relay is stamped non-local for account-write consent;
+        # the authenticated input surface distinguishes it from a mesh peer.
         recover_bound_team = False
-        if getattr(self._session, "_pending_moved_team", None) is not None:
+        if getattr(self._session, "_pending_moved_team", None) is not None or (
+            (mesh_origin is None or input_surface == "mobile")
+            and getattr(self._session, "_pending_local_instructions", None) is not None
+        ):
             turn_lock = getattr(self._session, "_turn_lock", None)
             recover_bound_team = not (
                 self._disposing
