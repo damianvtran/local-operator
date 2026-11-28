@@ -205,6 +205,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "ask_dismiss closed-set operator token (cold + dial arms), never rendered",
     ),
+    # The Guard relay twin's consent card (L2d, ``mobile/guard_relay.consent_card``): the
+    # ``str()`` normalises the queued prompt's reason TOKEN (``new_org`` | ``widened`` | ...,
+    # the closed set ``guard.consent`` writes on THIS device) into the ``GuardConsentCard``
+    # wire field. It is NOT a mesh peer's relay reason, so ``peer_reason_words`` would be the
+    # wrong vocabulary and would corrupt the very token the phone keys its copy on ("widened"
+    # picks the "Keep current" / "Share the new items" buttons). The phone says it in words
+    # (as the desktop's ``guard_view._REASON`` does); the host sends only the token.
+    ("local_operator/mobile/guard_relay.py", "consent_card", "reason"): (
+        1,
+        "the local guard prompt's closed reason token on the card's wire field, never rendered raw",
+    ),
     ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
         1,
         "ask_dismiss closed-set operator token forwarded to the session, never rendered",
