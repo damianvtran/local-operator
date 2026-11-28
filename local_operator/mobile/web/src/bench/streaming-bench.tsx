@@ -219,6 +219,11 @@ async function run() {
 	// first visible text: first frame whose shown length covers the first chunk.
 	const firstIdx = frameShown.findIndex((n) => n >= Math.max(1, rendered[0] - 2));
 	const firstVisible = firstIdx >= 0 ? frameT[firstIdx] : NaN;
+	// first CHARACTER on screen, which is what the reader perceives as "it started".
+	// (`firstChunkMs` above waits for the whole first lump, so a paced reveal that
+	// shows the first word at once and the rest over the next ticks reads later.)
+	const anyIdx = frameShown.findIndex((n) => n >= 1);
+	const anyVisible = anyIdx >= 0 ? frameT[anyIdx] : NaN;
 
 	// reveal steadiness: characters newly visible per frame while text is arriving
 	const perFrame: number[] = [];
@@ -265,7 +270,8 @@ async function run() {
 			commits: slice.length, perSec: r1(slice.length / (streamMs / 1000)), totalMs: r1(sum(slice)),
 			p50: r1(pct(slice, 50)), p95: r1(pct(slice, 95)), max: r1(Math.max(0, ...slice)),
 		},
-		firstTextMs: r1(firstVisible - firstEmit),
+		firstTextMs: r1(anyVisible - firstEmit),
+		firstChunkMs: r1(firstVisible - firstEmit),
 		reveal: {
 			steps: perFrame.length, charsPerStepP50: pct(perFrame, 50), charsPerStepP95: pct(perFrame, 95),
 			charsPerStepMax: Math.max(0, ...perFrame), stepsOver40Chars: perFrame.filter((d) => d > 40).length,
