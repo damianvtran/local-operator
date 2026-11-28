@@ -1683,6 +1683,27 @@
         "effort": null,
         "delegate": true,
         "class": null
+      },
+      {
+        "sha": "03e1d301df826a86525f5d2da76a7b0f919d3769",
+        "version": "1.6.18",
+        "instructions_sha256": "c7361ee247b50487aede6b69c472b0be996edd3820e6c5b0aee3d40edddd2546",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
       }
     ],
     "qa-tester": [
