@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 import local_operator.tools.builtin as builtin
-from local_operator.harness.types import BrowserSurface, ToolContext
+from local_operator.harness.types import BrowserSurface, ToolContext, ToolResult
 
 #: Enough of a PNG to satisfy the magic-byte guard without shipping a fixture.
 FAKE_PNG = builtin.PNG_MAGIC + b"\x00" * 64
@@ -2477,6 +2477,68 @@ def test_a_malformed_locator_is_not_blamed_on_the_host() -> None:
     assert problem is not None and problem.is_error
     assert "unterminated" in problem.text
     assert "predates accessibility locators" not in problem.text
+
+
+@pytest.mark.parametrize(
+    ("host", "pin", "receipt", "cleared"),
+    [
+        ("extension", "bridge:9:nonce", {"surface_retired": True}, True),
+        ("extension", "bridge:9:nonce", {"surface_retired": False}, False),
+        ("extension", "bridge:9:nonce", {"surface_retired": "true"}, False),
+        ("extension", "bridge:9:nonce", {}, False),
+        ("ui", "ui:9:nonce", {"surface_retired": True}, False),
+    ],
+)
+def test_attachment_refusal_only_clears_confirmed_extension_pin(
+    monkeypatch: pytest.MonkeyPatch, host: str, pin: str, receipt: dict[str, object], cleared: bool
+) -> None:
+    from local_operator.browser_bridge.backend import BridgeError
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    calls: list[tuple[str, str]] = []
+
+    class Host:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+        async def call(self, action: str, params: dict[str, Any]) -> None:
+            calls.append((action, params["tab"]))
+            raise BridgeError(
+                ErrorCode.INTERNAL,
+                "fixture refusal",
+                {"undrivable_tab": "different_extension", **receipt},
+            )
+
+    _bridge_only(monkeypatch)
+    selected = Host(host)
+    monkeypatch.setattr(builtin, "_client_for", lambda _: selected)
+    context = _secret_ctx(surface_id=pin)
+
+    # The guarded tool promises an Awaitable; asyncio.run requires a coroutine.
+    async def click() -> ToolResult:
+        return await builtin.execute_browser(
+            "t1", {"action": "click", "selector": 'label="Fixture"'}, None, None, context
+        )
+
+    result = asyncio.run(click())
+
+    assert result.is_error
+    assert calls == [("click", pin)], result.text
+    assert (result.details or {}).get("error_code") == "internal"
+    assert ((result.details or {}).get("surface_retired") is True) == cleared
+    assert context.browser is not None
+    assert context.browser.surface_id == ("" if cleared else pin)
+    assert ((result.details or {}).get("attach_refused") is True) == (host == "extension")
+    assert ("Chrome may still have the tab open. Use 'open'" in result.text) == cleared
+    if host == "extension":
+        assert "Chrome refused debugger attachment" in result.text
+        if not cleared:
+            assert "If it is no longer listed as yours, use 'open'" in result.text
+            assert "If it is still listed as yours, stop" in result.text
+        assert "predates accessibility locators" not in result.text
+        assert pin not in result.text
+    else:
+        assert "Chrome refused debugger attachment" not in result.text
 
 
 def test_an_old_host_treating_a_locator_as_css_is_explained(monkeypatch) -> None:

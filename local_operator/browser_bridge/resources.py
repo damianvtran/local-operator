@@ -1447,7 +1447,12 @@ class BrowserResource:
         return {"state": self.record["state"], "tab": surface, "ownership_version": 0}
 
     def remember(
-        self, surface_id: str, *, state: str | None = None, host: str | None = None
+        self,
+        surface_id: str,
+        *,
+        state: str | None = None,
+        host: str | None = None,
+        retired_pin: str = "",
     ) -> None:
         """Record the surface AND, on the first successful open, its host.
 
@@ -1491,6 +1496,13 @@ class BrowserResource:
             # `tab_closed` at teardown, which `close_stranded` settles quietly —
             # cheaper than ever guessing a live tab is dead.
             self._strand(str(self.record.get("surface_id", "")), surface_id)
+        if retired_pin and not surface_id and self.record.get("surface_id") == retired_pin:
+            # These private refs belong to the one owned page (choosing another
+            # page spends them). Retirement denies further use of its handle;
+            # it does not prove Chrome closed the tab. Spend the reopen refs,
+            # not the asks, in the SAME atomic write as dropping the pin. A
+            # saved empty pin with surviving refs could reopen on the next turn.
+            self.record.pop(HANDOFF_REFS_FIELD, None)
         self.record["surface_id"] = surface_id
         self._unstrand(surface_id)
         self.record["state"] = (

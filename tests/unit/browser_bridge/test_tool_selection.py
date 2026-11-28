@@ -2027,14 +2027,24 @@ async def test_held_tabs_preserves_actual_transport_failure(
     )
     call.assert_awaited_once_with("tabs", {})
     assert result.is_error
-    assert "synthetic" in result.text
     assert "cmux" not in result.text
     assert "Open a browser tab" not in result.text
     assert state.surface_id == capability
     if typed:
         assert result.details is not None
         assert result.details["error_code"] == "tab_closed"
-        assert "is gone" in result.text
+        if host == "bridge":
+            # Losing an extension handle does not establish that Chrome closed the tab.
+            assert "handle is no longer usable" in result.text
+            assert "may still be open" in result.text
+            assert capability not in result.text
+            assert "is gone" not in result.text
+            assert "closed" not in result.text
+        else:
+            assert "synthetic" in result.text
+            assert "is gone" in result.text
+    else:
+        assert "synthetic" in result.text
 
 
 @pytest.mark.asyncio

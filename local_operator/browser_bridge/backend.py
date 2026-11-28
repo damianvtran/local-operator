@@ -546,6 +546,15 @@ def _redact_message_urls(text: str) -> str:
     return _MESSAGE_URL.sub(_safe, text)
 
 
+def is_extension_attach_refusal(error: BridgeError, *, host: str) -> bool:
+    """Identify Chrome's typed refusal without trusting another host or the prose."""
+    return (
+        host == HOST_EXTENSION
+        and error.code == ErrorCode.INTERNAL
+        and error.data.get("undrivable_tab") == "different_extension"
+    )
+
+
 def format_error(
     error: BridgeError, *, action: str = "", surface: str = "", host: str = HOST_EXTENSION
 ) -> str:
@@ -613,6 +622,13 @@ def format_error(
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
+        if host == HOST_EXTENSION:
+            # This code also covers a pruned or stale capability, not just a
+            # physical tab removal. Do not infer one from the other.
+            return (
+                "This browser tab handle is no longer usable. The tab may still be open. "
+                "Use 'open' with a URL to get a new tab."
+            )
         return (
             f"browser tab {surface or '(unknown)'} is gone; dropped the handle. "
             "Use 'open' with a URL to get a new tab."
@@ -742,20 +758,21 @@ def format_error(
             f"{subject} stalled on {error.data['stalled']} and gave up on this "
             f"command. Retry; if it repeats, {remedy}."
         )
-    if error.code == ErrorCode.INTERNAL and error.data.get("undrivable_tab"):
-        # Chrome refuses to attach the debugger to another extension's page
-        # ("Cannot access a chrome-extension:// URL of different extension").
-        # The tab is alive but can never be driven, and the extension has
-        # already pruned the surface, so the session's only move is a new tab.
-        #
-        # No tab is named: the only handle available here is the session's own
-        # opaque `bridge:<tabId>:<nonce>` capability string, and interpolating
-        # it (or a literal `(unknown)` when there is none) puts a useless token
-        # in the middle of prose (design D6).
+    if is_extension_attach_refusal(error, host=host):
+        # The wire discriminator names Chrome's error family, not the page.
+        # Only a new worker that completed cleanup sends a positive receipt.
+        handle_status = (
+            "The extension retired the handle; Chrome may still have the tab open."
+            if error.data.get("surface_retired") is True
+            else (
+                "Do not retry the old handle. Use 'tabs' to check your owned tab. "
+                "If it is no longer listed as yours, use 'open' with a URL for a new tab. "
+                "If it is still listed as yours, stop and ask the user to close that tab."
+            )
+        )
         return (
-            "that tab cannot be driven: it is another extension's page, so Chrome refuses "
-            "the debugger attachment. The handle was dropped; use 'open' with a URL to get "
-            "a new tab."
+            "Chrome refused debugger attachment to this tab. The refusal does not identify "
+            f"the top-level page. {handle_status}"
         )
     if error.code == ErrorCode.INTERNAL and "timeout_s" in error.data:
         # The daemon's own budget expired with no typed answer from the

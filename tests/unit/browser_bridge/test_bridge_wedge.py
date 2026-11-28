@@ -1430,7 +1430,8 @@ async def test_a_daemon_side_timeout_names_a_remedy_not_a_raw_code() -> None:
         assert (result.details or {}).get("error_code") == "internal"
 
 
-def test_the_undrivable_tab_copy_names_no_opaque_handle() -> None:
+@pytest.mark.parametrize("receipt", [{}, {"surface_retired": False}, {"surface_retired": True}])
+def test_the_undrivable_tab_copy_names_no_opaque_handle(receipt: dict[str, bool]) -> None:
     """No `(unknown)` and no `bridge:<tab>:<nonce>` capability in the sentence.
 
     `format_error`'s only handle here is the session's own opaque capability
@@ -1439,15 +1440,25 @@ def test_the_undrivable_tab_copy_names_no_opaque_handle() -> None:
     """
     rendered = format_error(
         BridgeError(
-            ErrorCode.INTERNAL, "Chrome refused to debug this tab", {"undrivable_tab": "x"}
+            ErrorCode.INTERNAL,
+            "Chrome refused to debug this tab: it is another extension's page",
+            {"undrivable_tab": "different_extension", **receipt},
         ),
         action="read",
         surface="bridge:12:deadbeef",
     )
-    assert "cannot be driven" in rendered
+    assert "Chrome refused debugger attachment" in rendered
+    assert "does not identify the top-level page" in rendered
+    assert ("retired the handle" in rendered) == (receipt.get("surface_retired") is True)
+    assert "another extension's page" not in rendered
     assert "(unknown)" not in rendered
     assert "bridge:12:deadbeef" not in rendered
-    assert "'open' with a URL" in rendered
+    if receipt.get("surface_retired") is True:
+        assert "'open' with a URL" not in rendered  # The tool adds this after clearing its pin.
+    else:
+        assert "Do not retry the old handle" in rendered
+        assert "If it is no longer listed as yours, use 'open' with a URL" in rendered
+        assert "If it is still listed as yours, stop and ask the user to close that tab" in rendered
 
 
 # --- Audit round 1: A1 — the generation fence -------------------------------

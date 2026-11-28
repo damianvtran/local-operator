@@ -355,7 +355,7 @@ Session-leg-only methods (answered by the daemon itself, never relayed):
 |---|---|
 | `extension_disconnected` | Daemon up, no extension WS (browser closed, extension disabled). |
 | `not_paired` | Extension connected but failed the token check. |
-| `tab_closed` | Surface token names a tab that no longer exists. |
+| `tab_closed` | The surface token no longer resolves to a usable owned tab; it may be stale, retired, or name a tab Chrome closed or replaced. |
 | `nav_failed` | Navigation errored (DNS, net::ERR_*, HTTP-level abort). |
 | `nav_timeout` | Navigation started but never settled within the deadline. |
 | `element_not_found` | Selector/ref resolved to nothing (stale ref after nav included). |
@@ -383,7 +383,7 @@ never invents a code; it attaches a key:
 | code | `data` key | meaning |
 |---|---|---|
 | `internal` | `stalled` | One chrome/CDP call hit its own deadline and was abandoned (§5.4). Retryable. |
-| `internal` | `undrivable_tab` | Chrome refuses to debug the tab (e.g. it is another extension's page). The surface has been pruned; `open` a new tab. |
+| `internal` | `undrivable_tab` | Chrome refused ordinary debugger attachment. The legacy `different_extension` value classifies the refusal, not the visible page: Chrome also checks pending navigation and frames. `surface_retired: true` confirms extension cleanup of its handle, not tab closure; old workers or unconfirmed cleanup may omit it or report `false`. Do not reuse the old handle. The tool recommends opening a new tab only after clearing its corresponding local pin. |
 | `internal` | `tab_crashed` | The page died under us. |
 | `internal` | `timeout_s` | **Daemon-generated**: the command exhausted its budget. Nothing else sets this key, which is why it is the discriminator that stops a daemon-side timeout being reported as "update your extension". |
 | `internal` | `phase` | **Daemon-generated** on an `extension_unresponsive`: `gate` / `send` / `response` names where the link gave up, and `dropped` the state after the daemon severed it. |

@@ -408,14 +408,10 @@ test("E5 the attach deadline does not mask a real debugger conflict", async () =
   }
 });
 
-test("X1 an undrivable page is a typed, actionable failure AND prunes the surface", async () => {
-  // Live sighting from the reporter's browser (NOT reproduced in our own rig —
-  // Chrome 153 let a second extension's attach succeed alongside ours, so this
-  // path is untested there rather than refuted): Chrome refuses to debug
-  // another extension's page, and — unlike a failed `chrome.tabs.get` — the
-  // refusal used to leave the surface in the map, so every later command for
-  // it failed the same way, including a fresh `open`.
-  const { store } = installChrome({
+test("X1 attach refusal retires the handle without diagnosing the top-level page", async () => {
+  // The fixture's committed URL is HTTPS. The Chrome refusal alone says
+  // nothing about the top-level URL or whether the tab was removed.
+  const { store, log } = installChrome({
     overrides: {
       debugger: {
         attach: async () => {
@@ -433,10 +429,15 @@ test("X1 an undrivable page is a typed, actionable failure AND prunes the surfac
   );
   try {
     await assert.rejects(
-      cdp.loaded.attach(SURFACE_A.tabId),
-      (error) =>
-        error.code === "internal" && error.data.undrivable_tab === "different_extension",
+      cdp.loaded.cdp(SURFACE_A.tabId, "Runtime.evaluate", { expression: "1" }),
+      {
+        code: "internal",
+        message: "Chrome refused debugger attachment to this tab",
+        data: { undrivable_tab: "different_extension", surface_retired: true },
+      },
     );
+    assert.deepEqual(log.sendCommand, [], "no CDP command or ownership probe after refusal");
+    assert.equal((await chrome.tabs.get(SURFACE_A.tabId)).url, "https://example.test/");
     assert.deepEqual(
       Object.keys(store.surfaces ?? {}),
       [],

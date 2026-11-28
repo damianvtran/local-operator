@@ -27496,15 +27496,20 @@ def _bridge_failure_result(
     UI-only host, where the extension's remedy (reload the extension, restart
     the daemon) names processes the user does not have.
     """
-    from local_operator.browser_bridge.backend import BridgeError, format_error
+    from local_operator.browser_bridge.backend import (
+        BridgeError,
+        format_error,
+        is_extension_attach_refusal,
+    )
 
     if isinstance(exc, BridgeError):
-        problem = _error(
-            tool_call_id, "browser", format_error(exc, action=action, host=_copy_host(host))
-        )
-        # The same typed code `_bridge_call` carries, so callers can branch on
-        # `extension_unresponsive` rather than substring-matching prose.
+        copy_host = _copy_host(host)
+        problem = _error(tool_call_id, "browser", format_error(exc, action=action, host=copy_host))
+        # Match `_bridge_call`: a typed refusal must not enter the reopen floor
+        # even when the failure came from ownership setup instead of dispatch.
         problem.details = {"error_code": exc.code.value}
+        if is_extension_attach_refusal(exc, host=copy_host):
+            problem.details["attach_refused"] = True
         return problem
     return _error(tool_call_id, "browser", str(exc))
 
@@ -27640,6 +27645,7 @@ async def _bridge_call(
         BridgeError,
         BridgeUnreachable,
         format_error,
+        is_extension_attach_refusal,
     )
     from local_operator.browser_bridge.protocol import CAPABILITY_GATED_METHODS
 
@@ -27660,8 +27666,9 @@ async def _bridge_call(
         return await selected.call(action, params), None
     except BridgeError as exc:
         message = format_error(exc, action=action, surface=surface, host=host)
+        attach_refused = is_extension_attach_refusal(exc, host=host)
         kind = _locator_kind(str(params.get("selector") or ""))
-        if kind and exc.code.value == "internal":
+        if kind and exc.code.value == "internal" and not attach_refused:
             # A `role=…` selector that reaches CSS is either a MALFORMED locator
             # on a current host or a well-formed one on a host that predates
             # locators. Saying the second alone sent a caller with a typo to
@@ -27700,7 +27707,7 @@ async def _bridge_call(
                 if available
                 else " (none reported)"
             )
-        if action == "hover":
+        if action == "hover" and not attach_refused:
             # Older host copy suggests hit_test for the inner target, but that
             # tool only sees the iframe itself. Do not leave conflicting advice
             # ahead of the corrective hint.
@@ -27714,6 +27721,18 @@ async def _bridge_call(
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
         problem.details = {"error_code": exc.code.value}
+        if attach_refused:
+            problem.details["attach_refused"] = True
+        # Do not treat Chrome's error family alone as a retirement receipt. A
+        # legacy worker or a failed cleanup supplies no positive evidence, and
+        # an adoption/new allocation must not clear this session's other pin.
+        if (
+            attach_refused
+            and exc.data.get("surface_retired") is True
+            and surface
+            and params.get("tab") == surface
+        ):
+            problem.details["surface_retired"] = True
         # The host's own REASON travels too. Callers that must decide whether a
         # host still holds state — the recording approval above all — cannot do
         # it from the code alone (`busy` covers `record_active` and
@@ -31903,6 +31922,10 @@ async def _reopen_handoff_if_gone(
     resource = getattr(state, "resource", None)
     if action in _REOPEN_EXEMPT_ACTIONS or resource is None or getattr(state, "surface_id", ""):
         return result
+    # A refusal is not evidence of closure. Keep the typed error even if no
+    # pin was held; the retirement transaction separately spends any old refs.
+    if (result.details or {}).get("attach_refused") is True:
+        return result
     try:
         ref = resource.reopenable_handoff()
     except Exception:  # noqa: BLE001 - the floor must never break the action it serves
@@ -32449,8 +32472,12 @@ async def _execute_browser_owned(
             resource.allocate()
         failed_close = False
         observed_url: Any = None
+        pin_before_dispatch = state.surface_id
+        retired_pin = ""
         try:
             result = await _execute_browser(tool_call_id, args, signal, on_update, context)
+            if not state.surface_id and (result.details or {}).get("surface_retired") is True:
+                retired_pin = pin_before_dispatch
             failed_close = action == "close" and result.is_error and bool(state.surface_id)
             if not result.is_error:
                 # The page the tab last showed THIS session: an ask handoff is
@@ -32509,6 +32536,7 @@ async def _execute_browser_owned(
                     state.surface_id,
                     state="cleanup_pending" if failed_close else "allocating" if pending else None,
                     host=_host_of_surface(state.surface_id),
+                    retired_pin=retired_pin,
                 )
                 if observed_url or not state.surface_id:
                     resource.note_surface_origin(observed_url)
@@ -32861,6 +32889,35 @@ def _browser_secret_ref(
 
 
 async def _execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Route one command, then reconcile an explicit retirement of this pin."""
+    state = getattr(context, "browser", None)
+    pin = getattr(state, "surface_id", "")
+    result = await _dispatch_browser(tool_call_id, args, signal, on_update, context)
+    if (
+        state is not None
+        and _host_of_surface(pin) == HOST_BRIDGE_PREFIX
+        and state.surface_id == pin
+        and result.is_error
+        and (result.details or {}).get("surface_retired") is True
+    ):
+        # This runs inside the ownership lane, before it persists the pin. A
+        # physical closure has its own handling; never replay an attach refusal.
+        # Only now will an explicit `open` allocate rather than resume this pin.
+        state.surface_id = ""
+        for block in result.content:
+            if isinstance(block, TextContent):
+                block.text += " Use 'open' with a URL to get a new tab."
+                break
+    return result
+
+
+async def _dispatch_browser(
     tool_call_id: str,
     args: dict[str, Any],
     signal: AbortSignal | None = None,
