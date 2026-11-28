@@ -69,3 +69,5 @@ snapshot_report.html
 uv.lock
 scratch/
 bench/
+# The relay streaming benchmark harness is source, not scratch output.
+!src/bench/
