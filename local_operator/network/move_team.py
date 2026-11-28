@@ -45,8 +45,18 @@ PLAIN_ROLE = "plain"
 _ABSENT_TEAM: dict[str, str] = {"id": "", "digest": "", "structure": ""}
 
 
+@dataclass(frozen=True)
+class PendingLocalInstructions:
+    """The exact local binding compared before its receipt became visible."""
+
+    team: str
+    binding: dict[str, Any]
+    generation: tuple[int, int, int, int] | None
+
+
 class TeamIdentityRefused(ValueError):
     code = CODE
+    pending_local_instructions: PendingLocalInstructions | None = None
 
     def __init__(self, name: str, authority: str = "") -> None:
         # The expected definition was not found under this name. This is also
@@ -896,28 +906,113 @@ def _compare_local_restore(
     expected: Any,
     snapshot: TeamAuthority,
     actual: dict[str, Any],
+    *,
+    pending: PendingLocalInstructions | None = None,
 ) -> None:
+    from local_operator.profile_scope import scope_dir_for
+
+    def eligible() -> bool:
+        return (
+            root is not None
+            and getattr(agents, "config_dir", None) == root
+            and getattr(agents, "scope_dir", None) in (None, scope_dir_for(directory))
+            and _local_instruction_continuation(root, directory, expected)
+        )
+
+    if pending is not None:
+        # Admission recovery is proof-only, not an ordinary restore. Even a
+        # reverted definition or an independently replaced binding must not
+        # cause this specific wait to grant or journal anything.
+        if (
+            root is None
+            or pending.team != actual["name"]
+            or pending.binding != expected
+            or not eligible()
+            or not _same_instruction_ceiling(expected, actual)
+        ):
+            raise TeamIdentityRefused(pending.team)
+        comparison = _compare_with_approved_instructions(
+            root, directory, expected, snapshot, actual
+        )
+        if comparison is actual:
+            raise TeamIdentityRefused(pending.team)
+        _compare(expected, comparison, local=True)
+        # Recheck the exact attachment and placement after reading definitions
+        # and receipts and before bind_runtime_authority journals the new row.
+        latest = _local_binding(directory)
+        if latest != pending.binding or not eligible():
+            raise TeamIdentityRefused(pending.team)
+        stored = _attachment(directory, latest)
+        if stored is None or stored.team != pending.team:
+            raise TeamIdentityRefused(pending.team)
+        return
+
     try:
         _compare(expected, actual, local=True)
         return
     except _DefinitionNotLoaded:
         raise  # Preserve the existing move/definition wait semantics.
-    except TeamIdentityRefused:
-        from local_operator.profile_scope import scope_dir_for
+    except TeamIdentityRefused as refusal:
+        from local_operator.profile_proposals import instruction_receipt_generation
 
-        if (
-            root is None
-            or getattr(agents, "config_dir", None) != root
-            or getattr(agents, "scope_dir", None) not in (None, scope_dir_for(directory))
-            or not _local_instruction_continuation(root, directory, expected)
-        ):
+        if root is None or not eligible() or not _same_instruction_ceiling(expected, actual):
             raise
+        # Sample BEFORE inspecting proof. An accepted row published during
+        # this failed comparison must still look new to the same owner later.
+        generation = instruction_receipt_generation(root)
         comparison = _compare_with_approved_instructions(
             root, directory, expected, snapshot, actual
         )
-        if comparison is actual:
+        try:
+            if comparison is actual:
+                raise refusal
+            _compare(expected, comparison, local=True)
+        except _DefinitionNotLoaded:
             raise
-        _compare(expected, comparison, local=True)
+        except TeamIdentityRefused as error:
+            error.pending_local_instructions = PendingLocalInstructions(
+                actual["name"], expected, generation
+            )
+            raise
+
+
+def _same_instruction_ceiling(expected: Any, actual: dict[str, Any]) -> bool:
+    """The exceptional comparison can prove instructions, not permission edits."""
+    if (
+        not isinstance(expected, dict)
+        or expected.get("id") != actual["id"]
+        or expected.get("name") != actual["name"]
+        or not isinstance(expected.get("delegation"), dict)
+        or not isinstance(expected["delegation"].get("roles"), dict)
+    ):
+        return False
+
+    def same_ceiling(old: Any, new: dict[str, Any]) -> bool:
+        # The ordinary ceiling accepts narrowing, even for the other roster
+        # roles; tool/delegation edits aren't part of a role digest.
+        return isinstance(old, dict) and all(
+            field in old and old[field] == new[field]
+            for field in (
+                "kind",
+                "id",
+                "name",
+                "pins",
+                "unrestricted_tools",
+                "may_delegate",
+                "readonly_shell",
+            )
+        )
+
+    manager = expected.get("manager")
+    old, new = expected["delegation"]["roles"], actual["delegation"]["roles"]
+    if not isinstance(manager, dict) or old.keys() != new.keys():
+        return False
+    entries = [(manager, actual["manager"])]
+    entries.extend((old[name], entry) for name, entry in new.items())
+    return all(same_ceiling(before, after) for before, after in entries) and any(
+        after["kind"] == "role" and before.get("digest") != after["digest"]
+        for before, after in entries
+    )
 
 
 def _compare_with_approved_instructions(
@@ -943,14 +1038,7 @@ def _compare_with_approved_instructions(
     from local_operator.profile_proposals import approved_instruction_preimages
     from local_operator.profile_scope import scope_agent_registry
 
-    if (
-        expected.get("id") != actual["id"]
-        or expected.get("name") != actual["name"]
-        or not isinstance(expected.get("delegation"), dict)
-        or not isinstance(expected["delegation"].get("roles"), dict)
-    ):
-        return actual
-
+    prior_roles = expected["delegation"]["roles"]
     registry = scoped = None
     preimages: dict[tuple[str, str], tuple[AgentProfile, tuple[str, ...]] | None] = {}
 
@@ -960,13 +1048,9 @@ def _compare_with_approved_instructions(
         nonlocal registry, scoped
         meta, profile, prompt = entry
         if (
-            not isinstance(old, dict)
-            or profile is None
-            or old.get("kind") != "role"
+            profile is None
             or meta["kind"] != "role"
-            or old.get("name") != meta["name"]
             or not meta["id"]
-            or old.get("id") != meta["id"]
             or old.get("digest") == meta["digest"]
         ):
             return meta
@@ -980,16 +1064,20 @@ def _compare_with_approved_instructions(
                     scoped = scope_agent_registry(fresh, directory)
                     scoped.require_complete_metadata()
                     registry = fresh
+                if scoped is None:
+                    return meta
                 # An account proposal never approves a session-scoped shadow,
                 # even if that shadow carries an identical name and UUID.
                 kind, live, _, _, resolved_id = resolve_profile_or_specialist_identity(
                     name, registry=scoped, strict=True
                 )
+                scoped_row = scoped.get_agent(role_id)
                 if (
                     kind == "role"
                     and live is not None
                     and resolved_id == role_id
-                    and scoped.scope_of(scoped.get_agent(role_id)) == "global"
+                    and scoped_row is not None
+                    and scoped.scope_of(scoped_row) == "global"
                 ):
                     current = read_agent_image(registry, role_id)
                     if (
@@ -1015,8 +1103,7 @@ def _compare_with_approved_instructions(
                 return {**meta, "digest": old["digest"]}
         return meta
 
-    manager = compare_entry(expected.get("manager"), snapshot.manager)
-    prior_roles = expected["delegation"]["roles"]
+    manager = compare_entry(expected["manager"], snapshot.manager)
     roles = {
         name: compare_entry(prior_roles.get(name), entry) for name, entry in snapshot.roles.items()
     }
@@ -1312,6 +1399,7 @@ def bind_runtime_authority(
     restoring: bool,
     readonly_shell: bool = False,
     pending_move: PendingMovedTeam | None = None,
+    pending_local_instructions: PendingLocalInstructions | None = None,
 ) -> TeamAuthority:
     from local_operator.harness.subagent import read_max_team_depth
 
@@ -1326,6 +1414,8 @@ def bind_runtime_authority(
         # fork and transit must only consume ceilings already written.
         expected, depth, confined = None, read_max_team_depth(root), False
     if pending_move is not None and (not restoring or expected != pending_move.binding):
+        raise TeamIdentityRefused(team.name)
+    if pending_local_instructions is not None and (not restoring or pending_move is not None):
         raise TeamIdentityRefused(team.name)
     try:
         snapshot = _snapshot(
@@ -1342,7 +1432,15 @@ def bind_runtime_authority(
             if pending_move is not None:
                 _compare(expected, record, local=True, exact_revision=True)
             else:
-                _compare_local_restore(root, directory, agents, expected, snapshot, record)
+                _compare_local_restore(
+                    root,
+                    directory,
+                    agents,
+                    expected,
+                    snapshot,
+                    record,
+                    pending=pending_local_instructions,
+                )
     except _DefinitionNotLoaded as missing:
         missing.binding = expected
         raise

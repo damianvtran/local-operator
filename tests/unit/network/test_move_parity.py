@@ -848,6 +848,9 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
         "role-pins",
         "role-delegation",
         "role-hosting",
+        "narrowed-before-proposal",
+        "other-role-narrowed-before-proposal",
+        "ordinary-narrowing",
         "roster-structure",
         "replaced-id",
         "scoped-shadow",
@@ -874,10 +877,25 @@ async def test_resumed_local_team_uses_approved_manager_instructions(
     _role(agents, "local-lead", "Original instructions.\n")
     role = agents.get_agent_by_name("local-lead")
     assert role is not None
-    team = TeamRegistry(root).create_team(
-        TeamEditFields(
-            name="local-team", manager="local-lead", members=[TeamMember(role="local-lead")]
+    members = [TeamMember(role=role.name)]
+    narrowing = change in {
+        "narrowed-before-proposal",
+        "other-role-narrowed-before-proposal",
+        "ordinary-narrowing",
+    }
+    narrowed = role
+    if change == "other-role-narrowed-before-proposal":
+        _role(agents, "other-member", "Other instructions.")
+        narrowed = agents.get_agent_by_name("other-member")
+        assert narrowed is not None
+        members.append(TeamMember(role=narrowed.name))
+    if narrowing:
+        agents.update_agent(
+            narrowed.id,
+            AgentEditFields.model_validate({"tags": ["role", "tools:read,grep", "delegate:yes"]}),
         )
+    team = TeamRegistry(root).create_team(
+        TeamEditFields(name="local-team", manager=role.name, members=members)
     )
     session, _ = _session_with_stored_attachment(root, scoped_profiles=True)
     session.attach_team(team)
@@ -895,13 +913,30 @@ async def test_resumed_local_team_uses_approved_manager_instructions(
         # A different, genuinely accepted edge still cannot prove the bound digest.
         agents.set_agent_system_prompt(role.id, old_text.rstrip("\n"))
     elif change == "recorded-effort-and-tier":
-        agents.update_agent(role.id, AgentEditFields(tags=["role", "effort:hi"]))
+        agents.update_agent(
+            role.id, AgentEditFields.model_validate({"tags": ["role", "effort:hi"]})
+        )
         TeamRegistry(root).update_team(
             team.id, TeamEditFields(members=[TeamMember(role=role.name, tier="hi")])
         )
+    if narrowing:
+        agents.update_agent(
+            narrowed.id, AgentEditFields.model_validate({"tags": ["role", "tools:read"]})
+        )
+        if change == "ordinary-narrowing":
+            reopened, stream = _session_with_stored_attachment(
+                root, team=team.name, scoped_profiles=True
+            )
+            await reopened.prompt("follow up after narrowing without changing instructions")
+            assert reopened.active_team_name == team.name and not reopened.attachment_restore_notice
+            assert old_text.strip() in "\n".join(stream.requests[0].system_blocks)
+            record = json.loads(binding.read_bytes())[move_team.KEY]["manager"]
+            assert record["pins"] == ["read"] and record["may_delegate"] is False
+            return
     if change == "unapproved":
         agents.set_agent_system_prompt(role.id, new_text)
     else:
+
         def file_edit(text: str, **extra: Any) -> dict[str, Any]:
             before = profile_approval.snapshot(root, "agent", role.id)
             assert before is not None
@@ -1012,6 +1047,194 @@ async def test_resumed_local_team_uses_approved_manager_instructions(
     prior = json.loads(before_preview)[move_team.KEY]
     assert record[move_team.ROLE_EFFORTS_KEY] == prior[move_team.ROLE_EFFORTS_KEY]
     assert record[move_team.MEMBER_TIERS_KEY] == prior[move_team.MEMBER_TIERS_KEY]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["approved", "autonomous", "changed-binding", "replica", "busy"])
+async def test_live_owner_retries_local_team_after_receipt_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    import asyncio
+    from contextlib import suppress
+    from threading import Event
+
+    import httpx
+
+    from local_operator import profile_approval, profile_proposals
+    from local_operator.agents import AgentRegistry
+    from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
+    from local_operator.mobile.daemon import (
+        MobileDaemon,
+        SessionEntry,
+        _dial,
+        build_app,
+    )
+    from local_operator.network import move_team
+    from local_operator.session.placement import MESH_STAMP_NAME
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    root = tmp_path / "receipt-race"
+    sid = "000000004667"
+    monkeypatch.setattr("local_operator.operator.trust._ANCHOR_ROOT_OVERRIDE", root / "anchors")
+    agents = AgentRegistry(root)
+    _role(agents, "local-lead", "Before receipt.")
+    role = agents.get_agent_by_name("local-lead")
+    assert role is not None
+    team = TeamRegistry(root).create_team(
+        TeamEditFields(name="local-team", manager=role.name, members=[TeamMember(role=role.name)])
+    )
+    initial, stream = _session_with_stored_attachment(root, scoped_profiles=True, session_id=sid)
+    initial.attach_team(team)
+    await initial.prompt("an earlier turn")
+    assert "Before receipt." in "\n".join(stream.requests[0].system_blocks)
+    await initial.dispose()
+    before = profile_approval.snapshot(root, "agent", role.id)
+    assert before is not None
+    proposal = profile_proposals.file(
+        root,
+        profile_kind="agent",
+        operation="update",
+        target_id=role.id,
+        name=role.name,
+        before=before,
+        after={**before, "instructions": "After receipt.\n"},
+        session_id=sid,
+    )
+    directory = root / "sessions" / sid
+    binding = directory / move_team.LOCAL_BINDING_NAME
+    prior = binding.read_bytes()
+    publish, at_publication = Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    write = profile_proposals._durable_json
+
+    def pause(path: Path, row: dict[str, Any]) -> None:
+        if path.stem == proposal["id"] and row.get("state") == profile_proposals.STATE_ACCEPTED:
+            loop.call_soon_threadsafe(at_publication.set)
+            assert publish.wait(10), "fixture never released accepted receipt"
+        write(path, row)
+
+    # Stop exactly at the production publish boundary, not after staging an
+    # imitation: both the new role and the completed journal are already real.
+    monkeypatch.setattr(profile_proposals, "_durable_json", pause)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    actor = f"agent:{sid}" if case == "autonomous" else "desktop"
+    accepting = asyncio.create_task(
+        asyncio.to_thread(profile_proposals.apply, root, proposal["id"], actor=actor)
+    )
+    try:
+        async with asyncio.timeout(10):
+            await at_publication.wait()
+            receipt = root / "profile-proposals" / f"{proposal['id']}.json"
+            (journal,) = (root / "profile-transactions").glob(f"{proposal['id']}-*.json")
+            assert json.loads(receipt.read_bytes())["state"] == "pending"
+            assert json.loads(journal.read_bytes())["state"] == "complete"
+            assert agents.get_agent_system_prompt(role.id) == "After receipt.\n"
+            owner, stream = _session_with_stored_attachment(
+                root, team=team.name, scoped_profiles=True, session_id=sid
+            )
+            assert owner._unresolved_team == team.name and owner.active_team is None
+            owner.set_conversation_name("Receipt race fixture", user_set=True)
+            handle = ServingSessionHandle(owner, loop, cwd=str(tmp_path))
+            server = RuntimeServer(handle, kind="daemon")
+            await server.start_in_process()
+            daemon = MobileDaemon(
+                port=0, password="synthetic-receipt-fixture", dial_registrants=False
+            )
+            entry = SessionEntry(server.record)
+            daemon.table.entries[server.record.pid] = entry
+            dial = asyncio.create_task(_dial(daemon, entry))
+            try:
+                await entry.ready.wait()
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=build_app(daemon)),
+                    base_url="http://fixture",
+                    cookies={COOKIE_NAME: sign_cookie("synthetic-receipt-fixture")},
+                ) as client:
+                    url = f"/api/sessions/{sid}/command"
+                    frame = {
+                        "op": "prompt",
+                        "command_id": "00000000-0000-4000-8000-000000004667",
+                        "input_mode": "typed",
+                        "text": "same owner follow-up",
+                    }
+
+                    async def refused(expected_binding: bytes) -> None:
+                        reply = await client.post(url, json=frame)
+                        print(case, "refused:", reply.status_code, reply.json())
+                        assert (
+                            reply.status_code == 422
+                            and reply.json()["code"] == "unresolved_attachment"
+                        )
+                        assert not stream.requests and owner.active_team is None
+                        assert not handle.has_admitted_command(frame["command_id"])
+                        assert binding.read_bytes() == expected_binding
+
+                    def unexpected_refresh() -> None:
+                        pytest.fail("unchanged receipt generation rescanned the registry")
+
+                    with monkeypatch.context() as unchanged:
+                        unchanged.setattr(owner.team_registry, "refresh", unexpected_refresh)
+                        await refused(prior)
+                        await refused(prior)
+                    publish.set()
+                    await accepting
+                    assert json.loads(receipt.read_bytes())["state"] == "accepted"
+                    if case == "changed-binding":
+                        row = json.loads(prior)
+                        row[move_team.KEY]["delegation"]["max_depth"] += 1
+                        binding.write_text(json.dumps(row))
+                    elif case == "replica":
+                        (directory / MESH_STAMP_NAME).write_text("{}")
+                    if case in {"autonomous", "changed-binding", "replica"}:
+                        unchanged_bytes = binding.read_bytes()
+                        await refused(unchanged_bytes)
+                        with monkeypatch.context() as unchanged:
+                            unchanged.setattr(owner.team_registry, "refresh", unexpected_refresh)
+                            await refused(unchanged_bytes)
+                        return
+                    if case == "busy":
+                        async with owner._turn_lock:
+                            await refused(prior)
+                    reply = await client.post(url, json=frame)
+                    print(case, "published:", reply.status_code, reply.json())
+                    assert reply.status_code == 200 and reply.json()["detail"] == "prompt admitted"
+                    assert handle._prompt_drain_task is not None
+                    await handle._prompt_drain_task
+                    assert len(stream.requests) == 1 and handle.has_admitted_command(
+                        frame["command_id"]
+                    )
+                    assert (
+                        owner.active_team_name == team.name and not owner.attachment_restore_notice
+                    )
+                    assert binding.read_bytes() != prior
+                    request = stream.requests[0]
+                    state = [
+                        m.model_dump_json()
+                        for m in request.messages
+                        if "[session-state]" in m.model_dump_json()
+                    ]
+                    assert any(
+                        "## Team" in text
+                        and "After receipt." in text
+                        and "Before receipt." not in text
+                        for text in state
+                    )
+                    assert "same owner follow-up" in request.model_dump_json()
+                    print(
+                        case,
+                        "provider_calls=1 exact_approved_team_state=true binding_advanced=true",
+                    )
+            finally:
+                dial.cancel()
+                with suppress(asyncio.CancelledError):
+                    await dial
+                await server.aclose()
+                await owner.dispose()
+    finally:
+        publish.set()
+        await accepting
 
 
 class TestReresolveRefreshesBothRegistries:

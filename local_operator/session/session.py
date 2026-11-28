@@ -405,7 +405,10 @@ if TYPE_CHECKING:
     # call sites below: ``cli.py``'s startup path is guarded by a test that
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
     # in the other direction too.
-    from local_operator.network.move_team import PendingMovedTeam
+    from local_operator.network.move_team import (
+        PendingLocalInstructions,
+        PendingMovedTeam,
+    )
 
     # Type-only: the contract itself is built by the host that installs it
     # (``exec_startup`` / ``sdk._build_session``), and the session holds the
@@ -5044,8 +5047,9 @@ class Session:
         #: clause; it never decides whether a brief is granted.
         self._unresolved_team_reason: str = ""
         self._pending_moved_team: PendingMovedTeam | None = None
-        self._pending_move_apply_seen: tuple[int, int, int, int] | None = None
-        self._pending_move_retry: tuple[tuple[int, int, int, int], float] | None = None
+        self._pending_local_instructions: PendingLocalInstructions | None = None
+        self._bound_team_generation_seen: tuple[int, int, int, int] | None = None
+        self._bound_team_retry: tuple[tuple[int, int, int, int], float] | None = None
         #: Monotonic time of the last re-resolve attempt for those names (see
         #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
         self._attachment_reresolved_at: float | None = None
@@ -9543,6 +9547,7 @@ class Session:
         *,
         _verified_bound: bool = False,
         _pending_move: PendingMovedTeam | None = None,
+        _pending_local_instructions: PendingLocalInstructions | None = None,
     ) -> str | None:
         """Bind this session as the manager of ``team``.
 
@@ -9590,6 +9595,7 @@ class Session:
                 restoring=_verified_bound,
                 readonly_shell=self._readonly_shell,
                 pending_move=_pending_move,
+                pending_local_instructions=_pending_local_instructions,
             )
             team = authority.team
             manager, profile, specialist_prompt = authority.manager
@@ -9919,14 +9925,15 @@ class Session:
         nothing about whether the stored team is still wanted.
         """
         if slot == "team":
-            if self._pending_moved_team is not None:
-                # A pending move is not a new draft eligible for first-turn
+            if self._pending_moved_team is not None or self._pending_local_instructions is not None:
+                # A pending bound restore is not a draft eligible for first-turn
                 # adoption. In particular, a best-effort detach write failing
                 # must not let the provider boundary re-adopt the stale sidecar.
                 self._attachment_adoption_attempted = True
             self._pending_moved_team = None
-            self._pending_move_apply_seen = None
-            self._pending_move_retry = None
+            self._pending_local_instructions = None
+            self._bound_team_generation_seen = None
+            self._bound_team_retry = None
             self._unresolved_team = ""
             self._unresolved_team_reason = ""
         else:
@@ -10162,6 +10169,10 @@ class Session:
                 if not was_authorized_locally(directory):
                     raise
                 self._unresolved_team = stored.team
+                local_wait = refusal.pending_local_instructions
+                if local_wait is not None and self._pending_local_instructions is None:
+                    self._pending_local_instructions = local_wait
+                    self._bound_team_generation_seen = local_wait.generation
                 self.attachment_restore_notice = _with_team_remedy(refusal)
                 return
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
@@ -10309,8 +10320,10 @@ class Session:
         self._restore_attachment()
 
     def _retry_bound_team_for_admission(self) -> None:
-        """Consume a completed local definitions apply, not a new authorization."""
-        pending = self._pending_moved_team
+        """Consume a new apply/receipt generation, not a new authorization."""
+        move = self._pending_moved_team
+        local = self._pending_local_instructions if move is None else None
+        pending = move or local
         teams = self.team_registry
         if (
             pending is None
@@ -10318,49 +10331,56 @@ class Session:
             or self._unresolved_team != pending.team
             or self.active_team is not None
             or self.active_agent
+            or (local is not None and self._unresolved_agent)
         ):
             return
         from local_operator.network.definitions import index_path
         from local_operator.network.move_team import TeamIdentityRefused, restore_bound
+        from local_operator.profile_proposals import instruction_receipt_generation
         from local_operator.session.errors import ProfileRegistryUnavailable
         from local_operator.types import TeamRegistryRecoveryError
 
-        try:
-            # Ordinary definitions apply atomically replaces the index AFTER
-            # writing its rows. A root-directory mtime misses in-place updates
-            # of an installed team/role. The token is only a scan throttle;
-            # the bound restore below independently proves identity/ceilings.
-            stat = index_path(teams.config_dir).stat()
-        except OSError:
-            return  # No readable apply signal; no registry scan or authority write.
-        applied = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
-        if applied == self._pending_move_apply_seen:
+        if local is not None:
+            applied = instruction_receipt_generation(teams.config_dir)
+        else:
+            try:
+                # Definitions apply atomically replaces the index AFTER writing
+                # rows. Root mtimes miss updates to an installed definition.
+                stat = index_path(teams.config_dir).stat()
+            except OSError:
+                return
+            applied = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
+        # These are scan throttles only; neither signal is a grant.
+        if applied is None or applied == self._bound_team_generation_seen:
             return
         now = time.monotonic()
-        retry = self._pending_move_retry
+        retry = self._bound_team_retry
         if retry is not None and retry[0] == applied:
             if now < retry[1]:
                 return
             # Spend the one delayed retry before refreshing: a second transient
             # failure must not leave this unchanged generation eligible again.
-            self._pending_move_apply_seen = applied
-            self._pending_move_retry = None
+            self._bound_team_generation_seen = applied
+            self._bound_team_retry = None
         else:
-            # A new apply gets an immediate attempt and, if it fails transiently,
-            # one later send can retry it at the existing attachment refresh floor.
-            self._pending_move_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
+            # A new generation gets an immediate attempt and, if it fails
+            # transiently, one later send at the existing attachment refresh floor.
+            self._bound_team_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
         try:
             teams.refresh()
             agents = self.agent_registry
             if agents is not None:
                 agents.refresh_now()
                 agents.require_complete_metadata()
-            team = restore_bound(
-                self._transcript.directory, pending.team, teams, pending_move=pending
-            )
+            team = restore_bound(self._transcript.directory, pending.team, teams, pending_move=move)
             self._restoring_attachment = True
             try:
-                self.attach_team(team, _verified_bound=True, _pending_move=pending)
+                self.attach_team(
+                    team,
+                    _verified_bound=True,
+                    _pending_move=move,
+                    _pending_local_instructions=local,
+                )
             finally:
                 self._restoring_attachment = False
         except ProfileRegistryUnavailable:
@@ -10373,7 +10393,7 @@ class Session:
             if not isinstance(error, transient) and not (
                 isinstance(error, TeamIdentityRefused) and isinstance(error.__cause__, transient)
             ):
-                self._pending_move_apply_seen = applied
+                self._bound_team_generation_seen = applied
             # Existing owner admission still returns AttachmentUnavailable. No
             # name-only fallback, grandfathering or sync request from this path.
             logger.debug("bound attachment still unavailable at admission", exc_info=True)

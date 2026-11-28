@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import time
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
@@ -349,6 +350,21 @@ def _transaction_id(proposal_id: str, after_commitment: str) -> str:
     return proposal_id + "-" + after_commitment.split(":")[1][:16]
 
 
+def instruction_receipt_generation(root: Path) -> tuple[int, int, int, int] | None:
+    """Cheap invalidation only: proposal state is published by atomic replacement.
+
+    The file's parent changes even on in-place profile edits that do not touch
+    the agents registry root. Only the receipt reader can prove authorization.
+    """
+    try:
+        info = proposals_dir(root).lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        return None
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+
 def approved_instruction_preimages(root: Path, current: dict[str, Any]) -> Iterable[str]:
     """Read direct, human-approved local instruction edges ending at this image.
 
@@ -399,7 +415,11 @@ def approved_instruction_preimages(root: Path, current: dict[str, Any]) -> Itera
             continue
         before_token = commitment(before)
         proposal_id = row.get("id")
-        if row.get("base_commitment") != before_token or proposal_id != path.stem:
+        if (
+            not isinstance(proposal_id, str)
+            or row.get("base_commitment") != before_token
+            or proposal_id != path.stem
+        ):
             continue
         try:
             _path(root, proposal_id)  # Validate the id before composing a journal path.
