@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
     ModelSpec,
+    StreamEndEvent,
     StreamEvent,
     StreamStartEvent,
     Usage,
@@ -4057,6 +4058,16 @@ class SessionStreamFn:
 
     USAGE_CHECK_TTL_S = 60.0
 
+    #: Where this call's context first departed from the last accepted prefix, or
+    #: "" (see ``_note_cache_prefix``). Declared on the CLASS as well as set in
+    #: ``__init__`` because ``_record_usage`` must answer for a stream fn built
+    #: without ``__init__`` (the recording cells construct one that way), and a
+    #: missing attribute there would break a turn over a diagnostic.
+    _cache_first_divergence: str = ""
+    #: True when THIS call's snapshot could not be taken. The accepted or absent
+    #: start decides whether the older baseline survives (``_note_cache_start``).
+    _cache_prefix_failed: bool = False
+
     # -- cache affinity retirement ------------------------------------------
     #: Consecutive warm turns with no prefix reuse before a host is retired.
     #: TWO, not one: a single miss is ordinary (a host restarts, an entry is
@@ -4212,6 +4223,18 @@ class SessionStreamFn:
         # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
         # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
+        #: The last ACCEPTED request's section digests for this chain, and the
+        #: one in flight. Only a diagnosed ``message_start`` commits a pending
+        #: snapshot (see ``_cache_first_divergence``): a failed attempt never
+        #: becomes the baseline the next turn is compared with, exactly as the
+        #: provider's own ``previous_message_id`` chain does not advance on one.
+        self._cache_prefix_last: Any = None
+        self._cache_prefix_pending: Any = None
+        #: Where this call's context first departed from the accepted prefix:
+        #: ``system[0]``, ``tools``, ``messages[42]:user_team_bridge_message``,
+        #: or "" when there is nothing to report (no comparison, or the prefix
+        #: is intact). Rides the ``[prompt cache break]`` line only.
+        self._cache_first_divergence = ""
         # A wire client is rebuilt per attempt; a local stream identity keeps
         # Google comparisons per conversation (not per inherited routing key).
         self._cache_diagnostics_chain = uuid.uuid4().hex
@@ -7865,6 +7888,7 @@ class SessionStreamFn:
                     "cache_diagnostics_chain": self._cache_diagnostics_chain,
                 }
             )
+            self._note_cache_prefix(request)
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
         current_credential_id = (
@@ -7935,6 +7959,15 @@ class SessionStreamFn:
                 self._cache_diagnostics_credential_id = self._auth_store.session_credential_id(
                     request.model.provider, self._session_id
                 )
+            if request.cache_diagnostics and isinstance(event, StreamStartEvent):
+                self._note_cache_start(event)
+            elif request.cache_diagnostics and isinstance(event, StreamEndEvent):
+                # Google diagnoses on the END: its start carries no id and no
+                # comparison (providers/clients.py), and the local prefix
+                # verdict is only known once usageMetadata has arrived. A
+                # diagnosed end is therefore this provider's acceptance
+                # signal, exactly as a diagnosed start is Anthropic's.
+                self._note_cache_end(event)
             if (
                 request.cache_diagnostics
                 and usage is not None
@@ -8402,6 +8435,7 @@ class SessionStreamFn:
                 output_deltas=output_deltas,
                 cache_miss_type=cache_miss_type,
                 cache_missed_tokens=cache_missed_tokens,
+                cache_first_divergence=self._cache_first_divergence,
                 served_model=served_model,
                 message_count=message_count,
                 prompt_hash=prompt_hash,
@@ -8440,6 +8474,7 @@ class SessionStreamFn:
         output_deltas: int = 0,
         cache_miss_type: str = "",
         cache_missed_tokens: int = 0,
+        cache_first_divergence: str = "",
         usage_estimated: bool = False,
         served_model: str = "",
         message_count: int = 0,
@@ -8459,7 +8494,11 @@ class SessionStreamFn:
         mistake it for a provider receipt.
         """
         self._log_cache_break(
-            usage, cache_miss_type, cache_missed_tokens, provider=request.model.provider
+            usage,
+            cache_miss_type,
+            cache_missed_tokens,
+            provider=request.model.provider,
+            first_divergence=cache_first_divergence,
         )
         try:
             import time as _time
@@ -8612,8 +8651,107 @@ class SessionStreamFn:
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
 
+    def _note_cache_start(self, event: Any) -> None:
+        """Commit the in-flight prefix snapshot when a start means ACCEPTANCE.
+
+        THE CONDITION IS THE DIAGNOSIS, NOT ``response_id``. Google's stream
+        carries no native response id (see ``StreamStartEvent``), so an earlier
+        cut that gated this on one left every Google chain uncommitted: each
+        break then read ``first_divergence=-`` because there was never a
+        baseline (QA round 2 reproduced it against a warm Google cache).
+
+        ``cache_miss_type is None`` means the request was not diagnosed at all —
+        a helper turn, the latch off, or a fallback served without the key — and
+        then nothing is committed: the provider stored no fingerprint for it, so
+        it cannot be the previous request the next turn is compared against.
+        """
+        if getattr(event, "cache_miss_type", None) is None:
+            return
+        self._commit_cache_prefix()
+
+    def _commit_cache_prefix(self) -> None:
+        """Settle the in-flight snapshot against an ACCEPTED request."""
+        if self._cache_prefix_failed:
+            # This request WAS accepted, and its own snapshot is missing: the
+            # baseline it would have replaced now describes a non-adjacent
+            # request. Drop it so the next comparison answers "-" (no
+            # comparison), which is the only true statement left.
+            self._cache_prefix_last = None
+            self._cache_prefix_failed = False
+        elif self._cache_prefix_pending is not None:
+            self._cache_prefix_last = self._cache_prefix_pending
+        self._cache_prefix_pending = None
+
+    def _note_cache_end(self, event: Any) -> None:
+        """Commit the prefix baseline from a DIAGNOSED end (Google's shape).
+
+        Google's ``StreamStartEvent`` carries neither a response id nor a
+        diagnosis — the local prefix verdict is computed from ``usageMetadata``
+        and rides the END event, which the client emits only after a successful
+        non-empty stream. Gating the commit on the start alone left every
+        Google chain uncommitted (QA round 3), the same failure the ``response_id``
+        gate caused on Anthropic-shaped providers in round 2.
+        """
+        if getattr(event, "cache_miss_type", None) is None:
+            return
+        self._commit_cache_prefix()
+
+    def _note_cache_prefix(self, request: ChatRequest) -> None:
+        """Compare THIS request's context with the last one the provider ACCEPTED.
+
+        WHY IT IS LOCAL. Anthropic names the SECTION that broke a cached prefix
+        (``system_changed``, ``messages_changed``) and charges for the rewrite,
+        but never says which block or which message moved. One label therefore
+        covers causes with nothing in common — a working directory that flipped,
+        a bridge card whose excerpt changed, a tools list that re-rendered — and
+        the fleet has already paid for two incidents that had to be diagnosed by
+        hand from transcripts. This answers the missing half at the one place
+        that holds both requests: the stream function, per chain.
+
+        COST AND SCOPE. The digests cover the whole context, so this runs only
+        for a conversation turn that carries ``cache_diagnostics`` — the same
+        gate as the provider-side comparison it explains. A helper call, an
+        aside or a retry never pays it.
+
+        BEST EFFORT, by contract: a snapshot that raises costs the diagnostic,
+        never the turn. Nothing here reads a message's text into the label (see
+        :func:`local_operator.analytics.message_kind`), and the snapshot itself
+        lives only in this object's memory.
+        """
+        self._cache_first_divergence = ""
+        self._cache_prefix_pending = None
+        self._cache_prefix_failed = False
+        if not getattr(request, "cache_diagnostics", False):
+            return
+        try:
+            from local_operator.analytics import (
+                first_prefix_divergence,
+                prefix_sections,
+            )
+
+            current = prefix_sections(request)
+            self._cache_first_divergence = first_prefix_divergence(self._cache_prefix_last, current)
+        except Exception:  # noqa: BLE001 — a diagnostic must never break a turn
+            logger.debug("cache prefix snapshot failed", exc_info=True)
+            # WHETHER THE OLD BASELINE SURVIVES DEPENDS ON THE ACCEPT (see
+            # ``_note_cache_start``): this request's own snapshot is lost, but
+            # the provider has not yet said whether it took the request. If it
+            # never does, the previous accepted request is still the previous
+            # one and the old baseline is the truth (review round 2, R2-3); if
+            # it does, that baseline describes a request that is no longer
+            # adjacent, so it is dropped there.
+            self._cache_prefix_failed = True
+            return
+        self._cache_prefix_pending = current
+
     def _log_cache_break(
-        self, usage: Usage, miss_type: str, missed_tokens: int, *, provider: str = ""
+        self,
+        usage: Usage,
+        miss_type: str,
+        missed_tokens: int,
+        *,
+        provider: str = "",
+        first_divergence: str = "",
     ) -> None:
         """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
 
@@ -8657,12 +8795,13 @@ class SessionStreamFn:
                     return
                 logger.info(
                     "[prompt cache break] session=%s type=%s missed_tokens=%d "
-                    "uncached=%d context=%d",
+                    "uncached=%d context=%d first_divergence=%s",
                     self._session_id or "-",
                     miss_type,
                     int(missed_tokens),
                     uncached,
                     context,
+                    first_divergence or "-",
                 )
                 return
             # Retain Anthropic's write-based threshold and log format verbatim.
@@ -8672,12 +8811,13 @@ class SessionStreamFn:
                 return
             logger.info(
                 "[prompt cache break] session=%s type=%s missed_tokens=%d "
-                "cache_write=%d context=%d",
+                "cache_write=%d context=%d first_divergence=%s",
                 self._session_id or "-",
                 miss_type,
                 int(missed_tokens),
                 written,
                 context,
+                first_divergence or "-",
             )
         except Exception:  # noqa: BLE001 — telemetry must never break a turn
             logger.debug("cache-break log failed", exc_info=True)

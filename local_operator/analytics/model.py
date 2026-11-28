@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NamedTuple
 
 logger = logging.getLogger("local_operator.analytics.model")
 
@@ -444,8 +444,278 @@ def request_fingerprint(request: Any) -> tuple[str, int]:
     )
 
 
-#: How many native replay items per message the fingerprint summarises.
-#:
+class PrefixSections(NamedTuple):
+    """One composed context as section digests, in the order a provider caches it.
+
+    ``kinds`` sits beside ``messages`` and never replaces it: a label is what a
+    human reads in a log line, a digest is what the comparison runs on. Both are
+    content-blind — a kind is the message's OWN role and harness name, never a
+    byte of what it says.
+    """
+
+    system: tuple[bytes, ...]
+    tools: bytes
+    messages: tuple[bytes, ...]
+    kinds: tuple[str, ...]
+
+
+#: One harness-shaped label: lowercase word characters, colon-separated, capped.
+#: A custom type is the harness's own vocabulary, but this label is written to a
+#: LOG, so it is normalised rather than trusted: nothing outside ``[a-z0-9_]``
+#: survives, and the result cannot carry punctuation a reader could mistake for
+#: a claim, or a length that makes a line unreadable.
+_KIND_SAFE = re.compile(r"[^a-z0-9_]+")
+_MAX_KIND_CHARS = 48
+
+
+def _prefix_digest(value: Any) -> bytes:
+    """Raw sha256 digest of the same canonical JSON the prompt hash uses.
+
+    Raw bytes, not hex: these are only ever compared for equality, so the
+    64-character form would double the memory of every kept snapshot.
+    """
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=_non_json_placeholder,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).digest()
+
+
+#: The roles ``Message.role`` allows. A value outside this set is not a role —
+#: it is data wearing the attribute name, and it becomes the neutral label.
+_KNOWN_ROLES = frozenset({"user", "assistant", "tool", "system"})
+
+#: Chunk used when hashing an attachment payload. The payload is already in
+#: memory (a base64 string or bytes) and hashing is O(n); the chunk keeps the
+#: TEMPORARY cost bounded to this many bytes instead of one encoded copy of the
+#: whole attachment on the event loop (review round 3 measured a 20 MB peak on a
+#: 10 MB image from JSON-encoding it).
+_MEDIA_CHUNK_BYTES = 1 << 20
+
+#: Wire-relevant metadata beside an attachment's bytes. The provider encodes
+#: these into the part it sends, so a part whose bytes match but whose MIME
+#: differs is a different request (``providers/clients.py`` image parts).
+#: ``bytes`` is the extracted size a provider's FALLBACK text names when a
+#: document cannot be inlined (``providers/documents.py::_reference_text``), so
+#: two documents with identical bytes otherwise-rendered are still different
+#: requests when that size moves.
+_MEDIA_WIRE_FIELDS = ("type", "mime_type", "filename", "bytes")
+
+
+def message_kind(message: Any) -> str:
+    """A short, content-blind label for one rendered message: ``role[_injected]``.
+
+    WHAT MAY NAME A MESSAGE, and nothing else may: the model's own `Literal`
+    role from :data:`_KNOWN_ROLES`, and — for a USER turn only — the renderer's
+    BOOLEAN marker that the row came from a host-authored injection
+    (``compaction.cutpoint.RENDERED_INJECTION_KEY``), accepted only as ``is
+    True``.
+
+    NOTHING FOUND IN DATA BECOMES A NAME, which took three review rounds to
+    settle and is now enforced structurally rather than by convention:
+
+    * ``provider_payload['details']['custom_type']`` — tool metadata on some
+      rows; a synthetic secret came out as ``tool_secretpassword123`` (round 1).
+    * ``CustomMessage.custom_type`` — an unrestricted ``str``, so "the harness
+      type owns it" was never "the value is trusted" (round 2).
+    * Any duck-typed ``role`` or marker an arbitrary object happens to carry —
+      ``SimpleNamespace(role="SecretPassword123")`` echoed the secret, and a
+      TOOL object wearing the injection marker read ``tool_injected`` (round 3).
+
+    A role outside the set is not a claim this label repeats, and the marker is
+    consulted only where the renderer actually sets it.
+    """
+    role = _text_or_empty(getattr(message, "role", "")).strip().lower()
+    if role not in _KNOWN_ROLES:
+        role = "message"
+    if role == "user" and _rendered_injection(message):
+        return "user_injected"
+    return role
+
+
+def _rendered_injection(message: Any) -> bool:
+    """Whether the renderer marked this row as a host-authored injection.
+
+    Read by KEY and accepted only as a strict ``True``: a payload carrying
+    anything else under the marker is not a claim this label will repeat.
+    """
+    payload = getattr(message, "provider_payload", None)
+    if not isinstance(payload, dict):
+        return False
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    return payload.get(RENDERED_INJECTION_KEY) is True
+
+
+def _payload_digest(payload: Any) -> bytes:
+    """Digest one attachment payload WITHOUT copying it whole.
+
+    ``bytes``/``bytearray``/``memoryview`` are hashed through a memoryview in
+    chunks, and a base64 ``str`` is encoded chunk by chunk, so the peak
+    temporary is one chunk rather than one encoded copy of the attachment. An
+    attachment on a 300k-token context is routine, and this runs on the event
+    loop.
+
+    ``surrogatepass`` because a payload is opaque data: a lone surrogate must
+    contribute to the digest, not raise into the caller and cost the whole
+    diagnostic. A non-buffer, non-string payload falls back to the canonical
+    JSON digest — the same collision-over-instability trade the prompt hash
+    makes.
+    """
+    if isinstance(payload, str):
+        digest = hashlib.sha256()
+        for offset in range(0, len(payload), _MEDIA_CHUNK_BYTES):
+            digest.update(
+                payload[offset : offset + _MEDIA_CHUNK_BYTES].encode("utf-8", "surrogatepass")
+            )
+        return digest.digest()
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        view = memoryview(payload)
+        digest = hashlib.sha256()
+        for offset in range(0, len(view), _MEDIA_CHUNK_BYTES):
+            digest.update(view[offset : offset + _MEDIA_CHUNK_BYTES])
+        return digest.digest()
+    return _prefix_digest(payload)
+
+
+def _media_digests(message: Any) -> list[str]:
+    """Hex digests of every NON-TEXT content part, metadata and payload together.
+
+    WHY THIS EXISTS AT ALL. ``_fingerprint_message`` covers a non-text part by
+    its KIND alone, which is the right trade for the prompt hash (a stored
+    column over data that can be large). This comparison answers "which message
+    first differed", and a kind-only answer blames a LATER message for an image
+    that changed earlier — reproduced twice in review (round 2 for the bytes,
+    round 3 for the MIME type).
+
+    WHAT IT COVERS: the part's type, its wire MIME and, for a document, its
+    filename — the metadata the provider serializer actually emits — plus a
+    digest of the payload. Provenance-only fields (an origin path, a composer
+    marker) are excluded for the same reason the wire excludes them: they are
+    not request context.
+
+    A part whose payload cannot be digested contributes its type name, so a
+    malformed attachment costs precision, never a turn.
+    """
+    digests: list[str] = []
+    for part in getattr(message, "content", None) or []:
+        if isinstance(getattr(part, "text", None), str):
+            continue
+        digest = hashlib.sha256()
+        for wire_field in _MEDIA_WIRE_FIELDS:
+            value = getattr(part, wire_field, None)
+            if isinstance(value, str):
+                digest.update(wire_field.encode("ascii"))
+                digest.update(b"=")
+                digest.update(value.encode("utf-8", "surrogatepass"))
+                digest.update(b"\0")
+            elif isinstance(value, int) and not isinstance(value, bool):
+                digest.update(wire_field.encode("ascii"))
+                digest.update(b"#")
+                digest.update(str(value).encode("ascii"))
+                digest.update(b"\0")
+        payload = getattr(part, "data", None)
+        if payload is None:
+            payload = getattr(part, "value", None)
+        try:
+            digest.update(_payload_digest(payload) if payload is not None else b"")
+        except Exception:  # noqa: BLE001 — a diagnostic must never break a turn
+            # Deterministic, content-blind: the type name is stable across two
+            # calls over the same undigestable part, which is what a comparison
+            # needs, and it reveals nothing about the payload.
+            digest.update(type(payload).__name__.encode("ascii"))
+        digests.append(digest.hexdigest())
+    return digests
+
+
+def _message_with_media(message: Any) -> Any:
+    """``_fingerprint_message``'s record plus the media digests beside it."""
+    return [_fingerprint_message(message), _media_digests(message)]
+
+
+def prefix_sections(request: Any) -> PrefixSections:
+    """``request`` as the sections a provider's prompt cache is keyed on.
+
+    DIAGNOSTIC ONLY, and only for requests that already opted into cache
+    diagnostics: it digests every message of a context that can exceed 300k
+    tokens, so a caller spends this once per conversation turn, never per helper
+    call or per retry.
+
+    The canonical parts are the prompt hash's own (``_fingerprint_message``), so
+    the two diagnostics cannot drift apart on what "the same message" means.
+    """
+    blocks = getattr(request, "system_blocks", None) or []
+    messages = getattr(request, "messages", None) or []
+    tools = getattr(request, "tools", None) or []
+    return PrefixSections(
+        system=tuple(
+            _prefix_digest(block if isinstance(block, str) else str(block)) for block in blocks
+        ),
+        tools=_prefix_digest(
+            [
+                [
+                    getattr(tool, "name", "") or "",
+                    getattr(tool, "description", "") or "",
+                    getattr(tool, "parameters", None) or {},
+                ]
+                for tool in tools
+            ]
+        ),
+        messages=tuple(_prefix_digest(_message_with_media(message)) for message in messages),
+        kinds=tuple(message_kind(message) for message in messages),
+    )
+
+
+def first_prefix_divergence(previous: PrefixSections | None, current: PrefixSections) -> str:
+    """Where ``current`` first departs from ``previous``, or ``""``.
+
+    THE ANSWER A CACHE-BREAK LINE CANNOT GET FROM THE PROVIDER. Anthropic names
+    the SECTION that broke a cached prefix (``system_changed``,
+    ``messages_changed``) and charges for the rewrite, but never says which
+    system block or which message moved. Without the index, an operator can only
+    guess between the causes that share a label, and two incidents on this fleet
+    were diagnosed by hand from transcripts for exactly that reason.
+
+    ``""`` means NO DIVERGENCE and also NO COMPARISON: a first request, a route
+    or credential change that started a fresh chain, and an ordinary appended
+    turn all answer the same way, because in all three the cached prefix is
+    intact. A message APPENDED at the tail is not a divergence and must not be
+    reported as one — the provider caches the longer prefix next time.
+
+    The label is ``system[i]``, ``tools``, or ``messages[i]:<kind>``; every part
+    is content-blind (see :func:`message_kind`).
+
+    WHAT IT SEES. Each message's digest is the prompt hash's canonical record
+    (text blocks, tool calls, part kinds, the bounded native-replay summary)
+    WITH the media payloads hashed beside it (:func:`_media_digests`). The
+    prompt hash itself still excludes media bytes — it is a stored column and
+    the trade there is different — so the two diagnostics answer different
+    questions by design; this one must not blame a later message for an image
+    that changed earlier. ``provider_payload`` beyond the native-replay summary
+    is still not covered, and a change that lives only there reads ``-``.
+    """
+    if previous is None:
+        return ""
+    for index in range(min(len(previous.system), len(current.system))):
+        if previous.system[index] != current.system[index]:
+            return f"system[{index}]"
+    if len(previous.system) != len(current.system):
+        return f"system[{min(len(previous.system), len(current.system))}]"
+    if previous.tools != current.tools:
+        return "tools"
+    for index in range(min(len(previous.messages), len(current.messages))):
+        if previous.messages[index] != current.messages[index]:
+            kind = current.kinds[index] if index < len(current.kinds) else "message"
+            return f"messages[{index}]:{kind}"
+    if len(current.messages) < len(previous.messages):
+        return f"messages[{len(current.messages)}]"
+    return ""
+
+
+#: How many native replay items per message the fingerprint summarises.#:
 #: The items are the provider's own response bytes and a long transcript can
 #: replay thousands of them, so the marker list is capped. The TRUE count is
 #: recorded beside the markers, which is what stops a truncated list from
