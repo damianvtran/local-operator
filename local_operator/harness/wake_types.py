@@ -199,8 +199,14 @@ class WakeSchedule(BaseModel):
     #: retires silently.
     cache_anchor_ms: int = 0
     #: ``compaction.keepalive.prefix_digest`` of the prefix at arm time; the
-    #: fire recomputes it and sends nothing when it differs.
+    #: fire recomputes it over its context's first ``prefix_message_count``
+    #: messages and sends nothing when it differs.
     prefix_digest: str = ""
+    #: How many context messages the arm hashed. Messages appended after them
+    #: (a quiet peer message) are the ping's uncached tail, not a changed
+    #: prefix. Additive under ``extra="forbid"``: an older build drops such a
+    #: row on load, which only costs that chain (the next turn end re-arms).
+    prefix_message_count: int = 0
 
     # ---- who WROTE ``message`` --------------------------------------------
     # ``message`` has two possible authors, and nothing else on this row says

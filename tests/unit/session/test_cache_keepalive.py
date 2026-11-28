@@ -316,7 +316,10 @@ async def test_turn_end_arms_one_row_and_replaces_it(tmp_path) -> None:
         assert first.hidden and first.kind == "cache_keepalive" and first.attempt == 0
         assert first.id == keepalive.row_id(first.cache_anchor_ms)
         assert first.next_due_at == first.cache_anchor_ms + 3_300_000
-        assert first.prefix_digest == await session._keepalive_prefix_digest()
+        assert (first.prefix_digest, first.prefix_message_count) == (
+            await session._keepalive_prefix_digest()
+        )
+        assert first.prefix_message_count == len(session._context.messages)
         await session.prompt("again")
         await _drain(session)
         (second,) = _keepalive_rows(session)
@@ -371,6 +374,128 @@ async def test_a_changed_prefix_sends_nothing(tmp_path) -> None:
         await session._run_cache_keepalive(row.model_copy(update={"prefix_digest": "stale"}))
         await _drain(session)
         assert len(wire.bodies) == 2
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relaunch", [False, True])
+async def test_a_peer_message_appended_after_the_arm_still_pings(tmp_path, relaunch: bool) -> None:
+    """The regression: a quiet peer message between arm and fire is uncached tail.
+
+    The chief of staff gets one every ~30 min without a turn; hashing the
+    arm-time LAST message id refused every overnight fire as ``prefix_changed``.
+    """
+    wire = Wire([*TURN, PING, NEXT])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        await session.receive_peer_message("status: all green", mode="mailbox")
+        assert len(session._context.messages) == row.prefix_message_count + 1
+        if relaunch:
+            await session.dispose()
+            session = _session(tmp_path, wire, {"goal": "g"})
+            (row,) = _keepalive_rows(session)
+            assert len(session._context.messages) == row.prefix_message_count + 1
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert len(wire.bodies) == 3, "the ping was sent"
+        assert wire.requests[2].purpose == "cache_keepalive"
+        (rearmed,) = _keepalive_rows(session)
+        assert rearmed.attempt == 1 and rearmed.id != row.id
+        # The re-arm hashes the context it pinged, peer message included.
+        assert rearmed.prefix_message_count == row.prefix_message_count + 1
+        await session.prompt("next")
+    finally:
+        await session.dispose()
+
+    last_turn, ping, following = wire.bodies[1], wire.bodies[2], wire.bodies[3]
+    k = len(last_turn["messages"])
+    assert _strip(ping, "tools") == _strip(following, "tools") == _strip(last_turn, "tools")
+    assert _strip(ping, "system") == _strip(following, "system") == _strip(last_turn, "system")
+    cached = _without_cache_control(last_turn["messages"])
+    assert _without_cache_control(ping["messages"][:k]) == cached
+    assert _without_cache_control(following["messages"][:k]) == cached
+    # The peer message IS the uncached tail the ping writes: it sits one past
+    # the last turn's final reply, so the ping's write covers it, and the
+    # following turn's body carries those same bytes — the reason that turn can
+    # read the ping's write back. The comparison has to run through the peer
+    # message's index (k + 1); stopping at the reply (k) proves only the span
+    # below it.
+    peer_index = next(
+        (
+            index
+            for index, message in enumerate(ping["messages"])
+            if "status: all green" in json.dumps(message)
+        ),
+        None,
+    )
+    assert peer_index is not None, "the ping body carries the peer message"
+    assert peer_index == k + 1, "the peer message is the first message after the cached span"
+    assert _without_cache_control(ping["messages"][: peer_index + 1]) == _without_cache_control(
+        following["messages"][: peer_index + 1]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rewrite", ["replace_head", "drop_middle", "truncate"])
+async def test_history_rewritten_inside_the_recorded_span_sends_nothing(
+    tmp_path, rewrite: str
+) -> None:
+    """Compaction (or anything) moving a message the arm hashed still refuses."""
+    wire = Wire([*TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        messages = list(session._context.messages)
+        assert len(messages) >= 3
+        if rewrite == "replace_head":
+            messages[0] = messages[0].model_copy(update={"id": "summary-epoch"})
+        elif rewrite == "drop_middle":
+            # Same length as the arm saw: a later message slid into the span.
+            del messages[1]
+            messages.append(messages[-1].model_copy(update={"id": "appended"}))
+        else:
+            del messages[-1]
+        session._context.messages = messages
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert len(wire.bodies) == 2, "no ping"
+        assert _keepalive_rows(session) == [], "the chain is cleared"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moved", ["system", "tools"])
+async def test_a_changed_system_or_tool_array_sends_nothing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, moved: str
+) -> None:
+    wire = Wire([*TURN])
+    session = _session(tmp_path, wire, {"goal": "g"})
+    try:
+        await session.prompt("go")
+        await _drain(session)
+        (row,) = _keepalive_rows(session)
+        if moved == "system":
+            real = session._read_only_system_blocks
+
+            async def moved_blocks() -> tuple[list[str], list[str]]:
+                desired, sent = await real()
+                return desired, ["a new epoch", *sent[1:]]
+
+            monkeypatch.setattr(session, "_read_only_system_blocks", moved_blocks)
+        else:
+            tools = [*session._side_channel_tools(), _bash().model_copy(update={"name": "read"})]
+            monkeypatch.setattr(session, "_side_channel_tools", lambda: tools)
+        await session._run_cache_keepalive(row)
+        await _drain(session)
+        assert len(wire.bodies) == 2, "no ping"
+        assert _keepalive_rows(session) == []
     finally:
         await session.dispose()
 
