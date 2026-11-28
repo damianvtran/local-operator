@@ -81,13 +81,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 
 from local_operator import supervisors
 from local_operator.atomic_files import atomic_write_text
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
 from local_operator.network import nat64, projection, redial, store, uplink, wire
+from local_operator.network import wstransport as ws
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.create_keys import CreateKeyIndex
@@ -1118,12 +1119,58 @@ def probe_candidates(
             states[outcome.endpoint] = ("done", outcome)
             results.put(outcome)
 
+    def claim(endpoint: str, sock: Any, started: float) -> None:
+        """Hand a CONNECTED socket to the collector, or close it if we lost.
+
+        One copy for every carrier: a WebSocket connection and a TCP socket are
+        claimed, stamped and (when the race was already won) closed the same way,
+        so a losing leg cannot leak on one carrier only.
+        """
+        latency = round((time.monotonic() - started) * 1000, 1)
+        with opened_lock:
+            if stop.is_set():
+                # The probe already has its winner. A connection landing now is not
+                # a second answer, it is a socket nobody will ever read.
+                _close_quietly(sock)
+                return
+            opened.append(sock)
+            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
+            states[endpoint] = ("done", outcome)
+            results.put(outcome)
+
+    def attempt_ws(endpoint: str, budget: float) -> None:
+        """One ``ws://``/``wss://`` candidate: the upgrade IS the connect.
+
+        No ``dial_silent`` evidence here: that gate (U4) exists for a literal TCP
+        connect whose SYN may have gone nowhere, and reporting silence for an
+        upgrade would claim evidence this path never gathers.
+        """
+        started = time.monotonic()
+        try:
+            sock = ws.dial_ws(endpoint, timeout=budget)
+        except ws.WebSocketEndpointError:
+            # A string that CLAIMS the scheme but does not parse (credentials, a
+            # bad port): the endpoint is wrong, not the far side.
+            finish(_AttemptOutcome(endpoint, None, DETAIL_BAD_ENDPOINT, 0.0))
+            return
+        except OSError as exc:
+            finish(
+                _AttemptOutcome(
+                    endpoint, None, f"{CONNECT_FAILED_PREFIX}{exc.__class__.__name__}", 0.0
+                )
+            )
+            return
+        claim(endpoint, sock, started)
+
     def attempt(endpoint: str) -> None:
         budget = connect_cap
         if deadline is not None:
             budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
         if budget <= 0:
             finish(_AttemptOutcome(endpoint, None, DETAIL_NOT_ATTEMPTED, 0.0))
+            return
+        if ws.carries_ws_scheme(endpoint):
+            attempt_ws(endpoint, budget)
             return
         address, _, port_text = endpoint.rpartition(":")
         try:
@@ -1227,17 +1274,7 @@ def probe_candidates(
                 )
             )
             return
-        latency = round((time.monotonic() - started) * 1000, 1)
-        with opened_lock:
-            if stop.is_set():
-                # The probe already has its winner. A connection landing now is not
-                # a second answer, it is a socket nobody will ever read.
-                _close_quietly(sock)
-                return
-            opened.append(sock)
-            outcome = _AttemptOutcome(endpoint, sock, DETAIL_OK, latency)
-            states[endpoint] = ("done", outcome)
-            results.put(outcome)
+        claim(endpoint, sock, started)
 
     threads = [
         threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
@@ -1374,7 +1411,13 @@ def _dial_candidates(member: MemberRecord) -> list[str]:
     return candidates
 
 
-def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0.0.0.0") -> bool:
+def _reaches_own_listener(
+    endpoint: str,
+    own_port: int,
+    listen_address: str = "0.0.0.0",
+    *,
+    ws_port: int | None = None,
+) -> bool:
     """Whether dialling ``endpoint`` would connect to THIS relay's own listener.
 
     THE SELF-RACE (2026-11-02, Mac ⇄ lop-remote-node-2). ``probe_candidates`` races
@@ -1399,12 +1442,36 @@ def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0
     ago can be ours after a Wi-Fi rejoin — that is exactly how the 2026-11-02 link
     broke. An unreadable table (``interface_for_address`` → ``None``) filters
     nothing: dropping a candidate on a guess could strand a reachable peer.
+
+    ``ws_port`` IS A SECOND LISTENER, NOT A SECOND OPINION (ENG-4225 L1a). This
+    relay may hold the raw TCP listener on one port and the opt-in WebSocket one on
+    another, and a ``ws://127.0.0.1:<own ws port>`` candidate reaches the second
+    while comparing against the first never matches. The caller passes the port the
+    WS listener ACTUALLY bound (``RelayServer._redial_candidates`` reads it back from
+    the server it started), so each scheme is measured against the listener it would
+    reach: a ws endpoint against the ws port, anything else against ``own_port``.
     """
     host, sep, port = str(endpoint or "").rpartition(":")
     loopback = _is_loopback_endpoint(endpoint)
+    own = int(own_port)
+    if ws.carries_ws_scheme(endpoint):
+        # A WEBSOCKET CANDIDATE IS COMPARED BY ITS host:port (ENG-4225 L1a): the
+        # URL spelling matches nothing in the interface table, so an
+        # un-normalised ``ws://127.0.0.1:9000`` would be dialled even when it
+        # points at this very host — the self-race this function exists to
+        # prevent. An address that does not parse filters nothing (the honest
+        # default), and its own dial reports ``bad_endpoint``.
+        try:
+            parsed = ws.parse_ws_endpoint(endpoint)
+        except ws.WebSocketEndpointError:
+            return False
+        host, sep, port = parsed.host, ":", str(parsed.port)
+        loopback = _is_loopback_endpoint(f"{host}:{port}")
+        if ws_port is not None:
+            own = int(ws_port)
     if not sep or not port.isdigit():
         return loopback and listen_address == "0.0.0.0"
-    if int(port) != own_port:
+    if int(port) != own:
         return False
     host = host.strip("[]").lower()
     if listen_address != "0.0.0.0":
@@ -1420,17 +1487,23 @@ def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0
 
 
 def _dialable_candidates(
-    member: MemberRecord, own_port: int, listen_address: str = "0.0.0.0"
+    member: MemberRecord,
+    own_port: int,
+    listen_address: str = "0.0.0.0",
+    *,
+    ws_port: int | None = None,
 ) -> list[str]:
     """``_dial_candidates`` minus every address that would reach this relay itself.
 
     The redial schedule, session/listing dial and doctor share this filter, so
     "which candidates are us" has one answer even for a poisoned stored hint.
+    ``ws_port`` is this relay's WebSocket listener when it has one; see
+    :func:`_reaches_own_listener`.
     """
     return [
         endpoint
         for endpoint in _dial_candidates(member)
-        if not _reaches_own_listener(endpoint, own_port, listen_address)
+        if not _reaches_own_listener(endpoint, own_port, listen_address, ws_port=ws_port)
     ]
 
 
@@ -6361,6 +6434,10 @@ class RelayServer:
         self._resume_clock_offset: float | None = None
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
+        #: The OPT-IN loopback WebSocket listener (ENG-4225 L1a, ``serve_ws``).
+        #: ``None`` until a caller asks for it, so an ordinary relay accepts on
+        #: exactly the raw-TCP surface it always did.
+        self._ws_server: ws.WebSocketAcceptServer | None = None
         self._control_key = wire.b64u(os.urandom(32))
         self._control_port = 0
         self._stop = threading.Event()
@@ -6572,6 +6649,52 @@ class RelayServer:
         # a second relay is not rewritten underneath it.
         self.settings = replace(self.settings, port=int(port))
         return str(host), int(port)
+
+    def serve_ws(self, *, host: str = "127.0.0.1", port: int = 0) -> tuple[str, int]:
+        """Accept inbound peer links over WebSocket on a LOOPBACK port.
+
+        WHY THIS EXISTS (ENG-4225 Slice 1, L1a). A pool member's pod publishes no
+        inbound address, so a peer can only reach it through the run-scoped tunnel
+        connector in front of it. That connector forwards HTTP/WS upgrades to
+        this device's loopback; this listener is where they land, and each
+        accepted WebSocket is handed to :meth:`_admit_inbound` — the SAME
+        admission and handshake path the raw-TCP accept loop uses, so framing,
+        crypto and the membership rules are untouched by the carrier.
+
+        ONE SHOT, LIKE ``start``. Calling it twice would publish two loopback
+        surfaces under one relay, and only the second would ever be stopped; the
+        honest answer to a second call is a refusal.
+
+        ``host`` must be loopback: an unauthenticated-until-handshake listener on
+        a public interface would be an inbound surface the operator never asked
+        for, and the deployment this exists for never needs one. That rule is
+        enforced by :class:`wstransport.WebSocketAcceptServer`, beside the
+        ``LOOPBACK_HOSTS`` it is about, so it holds for any caller of the server
+        and is not restated here.
+
+        NO CONFIG KEY AND NO CLI FLAG, deliberately: L1a is the transport layer,
+        and a user-visible switch would be a promise about a mode that does not
+        exist until the run image ships it (Slice 1 S1b).
+        """
+        if self._ws_server is not None:
+            raise RuntimeError(
+                "serve_ws() may only be called once per relay; this one is already "
+                f"listening on {self._ws_server.address[0]}:{self._ws_server.address[1]}"
+            )
+        server = ws.WebSocketAcceptServer(
+            lambda sock, addr: self._admit_inbound(sock, addr),
+            # THE SAME NUMBER THE TCP LISTENER HONOURS. ``_admit_inbound`` refuses
+            # past ``max_handshakes``, but only once a connection exists; the WS
+            # listener holds that many connections pre-upgrade so the carrier cannot
+            # buy more threads than the raw one is allowed to (see
+            # ``wstransport.WebSocketAcceptServer``).
+            max_connections=self.settings.max_handshakes,
+            host=host,
+            port=port,
+        )
+        server.start()
+        self._ws_server = server
+        return server.address
 
     def bind_control(self) -> tuple[str, int]:
         control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -6984,6 +7107,15 @@ class RelayServer:
             link.close("we-closed")
         store.unpublish_peer_record(os.getpid(), self.root)
         self.audit.flush()
+        # THE WEBSOCKET LISTENER GOES LAST (ENG-4225 L1a), after the goodbyes: the
+        # library's shutdown closes the connections it opened and JOINS their
+        # handler threads, and a handler outlives its connection only until the
+        # link it was handed to closes. Stopping it beside the raw listeners above
+        # would cut the bye settle AND leave those handlers waiting on a shutdown
+        # that cannot finish.
+        ws_server = self._ws_server
+        if ws_server is not None:
+            ws_server.stop()
 
     def _wake_accept_loop(self, sock: socket.socket) -> None:
         """Wake a thread parked in ``accept()`` so it can observe ``_stop``.
@@ -7841,7 +7973,12 @@ class RelayServer:
             host, port = listener.getsockname()[:2]
         else:
             host, port = self.settings.listen_address, int(self.settings.port or 0)
-        return _dialable_candidates(member, int(port), str(host))
+        # THE WS LISTENER IS A SECOND PORT, read from the server that BOUND it: with
+        # ``serve_ws(port=0)`` the kernel chose the number, and a filter comparing
+        # against a configured zero would filter nothing at all.
+        ws_server = getattr(self, "_ws_server", None)
+        ws_port = int(ws_server.address[1]) if ws_server is not None else None
+        return _dialable_candidates(member, int(port), str(host), ws_port=ws_port)
 
     @staticmethod
     def _member_push_enabled(link: PeerLink) -> bool:
@@ -8005,48 +8142,72 @@ class RelayServer:
                 if self._stop.is_set():
                     return
                 continue
-            if self._close_if_stopped(sock):
+            if not self._admit_inbound(sock, addr):
                 return
-            if not self._admission.is_set():
-                # A committed handoff has closed new admission: this arrival is
-                # refused with no protocol, exactly as a post-stop arrival is.
-                # Existing links are untouched — this is admission, not shutdown.
-                _close_quietly(sock)
-                continue
-            if len(self.links) >= self.settings.max_links:
-                sock.close()
-                continue
-            # THE PRE-AUTH BOUND, checked HERE because this is the last moment
-            # before the thread exists. ``max_links`` above counts LINKS, and a
-            # connection that has authenticated nothing has none, so a silent
-            # connection used to buy a thread and a descriptor for the whole
-            # handshake budget (see ``DEFAULT_MAX_HANDSHAKES``). Past the cap the
-            # socket is closed with no reply, exactly as a refused handshake is: an
-            # error frame here would be a probe oracle for a stranger who never
-            # authenticated.
-            if not self._handshake_slots.acquire(blocking=False):
-                self._note_handshake_cap(addr)
-                sock.close()
-                continue
+
+    def _admit_inbound(self, sock: Any, addr: Any) -> bool:
+        """Gate one arrival and start its handshake thread. False means stop accepting.
+
+        ONE ADMISSION POLICY, TWO CARRIERS (ENG-4225 L1a). The raw-TCP accept loop
+        and the loopback WebSocket listener both hand their arrivals here, so a
+        WebSocket connection meets exactly the same stop check, admission flag,
+        link cap and pre-auth handshake cap — a second copy of this gate beside
+        the WS listener would be a policy that drifts.
+
+        THIS GATE IS POST-ACCEPT, WHICH IS WHY THE WS CARRIER ALSO HAS ONE OF ITS
+        OWN. By the time a socket is here the carrier has already spent a thread on
+        it — for TCP the accept loop's, and for WebSocket the library's per-connection
+        handler thread plus its read buffer — so a stranger with no key could buy
+        threads faster than this function refuses them. ``WebSocketAcceptServer``
+        therefore holds its own pre-upgrade cap (HTTP 503 in ``process_request``,
+        sized by ``serve_ws`` from ``max_handshakes``) and passes only the connections
+        under it on to here. This gate remains the authority on MEMBERSHIP and on how
+        many handshakes run at once; that one is the authority on how many
+        connections the listener holds at all.
+        """
+        if self._close_if_stopped(sock):
+            return False
+        if not self._admission.is_set():
+            # A committed handoff has closed new admission: this arrival is
+            # refused with no protocol, exactly as a post-stop arrival is.
+            # Existing links are untouched — this is admission, not shutdown.
+            _close_quietly(sock)
+            return True
+        if len(self.links) >= self.settings.max_links:
+            _close_quietly(sock)
+            return True
+        # THE PRE-AUTH BOUND, checked HERE because this is the last moment
+        # before the thread exists. ``max_links`` above counts LINKS, and a
+        # connection that has authenticated nothing has none, so a silent
+        # connection used to buy a thread and a descriptor for the whole
+        # handshake budget (see ``DEFAULT_MAX_HANDSHAKES``). Past the cap the
+        # socket is closed with no reply, exactly as a refused handshake is: an
+        # error frame here would be a probe oracle for a stranger who never
+        # authenticated.
+        if not self._handshake_slots.acquire(blocking=False):
+            self._note_handshake_cap(addr)
+            _close_quietly(sock)
+            return True
+        with self._handshakes_lock:
+            self._handshakes_active += 1
+        try:
+            thread = threading.Thread(
+                target=self._handshake_inbound,
+                args=(sock, addr),
+                name="mesh-handshake",
+                daemon=True,
+            )
+            thread.start()
+        except BaseException:
+            # A thread that never started must not leave its slot or its
+            # active-handshake count held: either would stall a handoff that
+            # waits on reload_blocker() becoming empty.
             with self._handshakes_lock:
-                self._handshakes_active += 1
-            try:
-                thread = threading.Thread(
-                    target=self._handshake_inbound,
-                    args=(sock, addr),
-                    name="mesh-handshake",
-                    daemon=True,
-                )
-                thread.start()
-            except BaseException:
-                # A thread that never started must not leave its slot or its
-                # active-handshake count held: either would stall a handoff that
-                # waits on reload_blocker() becoming empty.
-                with self._handshakes_lock:
-                    self._handshakes_active -= 1
-                self._handshake_slots.release()
-                _close_quietly(sock)
-                raise
+                self._handshakes_active -= 1
+            self._handshake_slots.release()
+            _close_quietly(sock)
+            raise
+        return True
 
     def _note_handshake_cap(self, addr: Any) -> None:
         """Name a pre-auth cap drop in the LOCAL audit record, once per window.
@@ -8128,7 +8289,7 @@ class RelayServer:
         #: accept loop.
         handshake: Handshake | None = None
         try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            ws.tune_tcp(sock)
             reader = wire.FrameReader(sock)
             # Peek at the hello only far enough to learn which network and mode it
             # claims (a policy object cannot exist before that); every field is then
@@ -14997,8 +15158,25 @@ class RelayServer:
         state = store.require_secrets(network_id, self.root)
         if mode != "join":
             expected_device = _current_member_id(record, expected_device)
+        # THE CARRIER IS TYPED AS THE SOCKET IT STANDS IN FOR. A ``host:port``
+        # candidate yields a ``socket.socket``; a ``ws://``/``wss://`` one yields a
+        # ``wstransport.WebSocketPeerSocket``. Everything below — ``FrameReader``,
+        # ``Handshake``, ``PeerLink`` — only uses the socket API, and the adapter
+        # implements exactly that (which is why no framing or crypto changed), so
+        # one cast on the adapter's result states the contract once instead of
+        # widening four call signatures nothing else needs widened.
         if connected is not None:
             sock = connected
+        elif ws.carries_ws_scheme(host):
+            # A WebSocket carrier dials itself: there is no ``host:port`` to hand
+            # to a TCP connect, and the upgrade is the connect. Trust is still the
+            # handshake's call below.
+            try:
+                sock = cast(socket.socket, ws.dial_ws(host, timeout=budget))
+            except ws.WebSocketEndpointError:
+                return None, "bad_endpoint"
+            except OSError as exc:
+                return None, f"connect_failed:{exc.__class__.__name__}"
         else:
             address, _, port_text = host.rpartition(":")
             try:
@@ -15018,7 +15196,7 @@ class RelayServer:
         #: refuse, so the one case with nothing to ask must not be an ``UnboundLocal``.
         handshake: Handshake | None = None
         try:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            ws.tune_tcp(sock)
             handshake = Handshake.new(
                 role="dialer",
                 identity=self.identity,

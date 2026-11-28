@@ -299,7 +299,7 @@ deliver.
 |---|---|---|
 | Human present at admission | Yes, on both ends (A3, SAS) | No; the human acts once at grant mint (A8.1) |
 | Admission evidence | SAS match on both devices | pool grant + provider attestation |
-| Grants | whatever the operator gives it, up to `admin` (transport's vocabulary: `list`, `view`, `prompt`, `steer`, `stop`, `slash`, `delete`, `move`, `broker_credential`, `admin`, `trust`) | a subset, resolved at admission and stored on the row: `list`, `view`, `prompt`, `steer`, `stop`, `slash` for a member that runs sessions; **never** `admin`, `trust`, `broker_credential`, or `delete`/`move` without an explicit operator act (`mesh-session-mobility.md` §10 reaches the same verdict for `delete`) |
+| Grants | whatever the operator gives it, up to `admin` (transport's vocabulary: `list`, `view`, `prompt`, `steer`, `stop`, `slash`, `delete`, `move`, `broker_credential`, `admin`, `trust`) | a subset, resolved at admission and stored on the row: `list`, `view`, `prompt`, `steer`, `stop`, `slash` for a member that runs sessions, and `broker_credential`, which only lets it **ask** the owner's broker for a session-scoped grant (§6.2's borrowing) and never lets it serve one; **never** `admin`, `trust`, or `delete`/`move` without an explicit operator act (`mesh-session-mobility.md` §10 reaches the same verdict for `delete`) |
 | Credentials | may own credentials; the broker runs on it | **declares none, ever**, and holds only `grant_ttl_s`-bounded in-memory grants; `identity` is never served to it (`mesh-credentials.md` §6.1–6.3) |
 | Lifetime | until revoked | `expires_at` + idle policy; a drained member is expected to disappear |
 | Its own store | the operator's; a forensics source | disposable; the pod's own session store dies with it |
@@ -308,11 +308,35 @@ deliver.
 
 **Least authority, concretely.** A pool member's stored `capabilities` are
 `list`, `view`, `prompt`, `steer`, `stop`, `slash` — the set a device that runs
-sessions needs and no more. It may not list another member's sessions (`list`
-answers for the sessions placed on it and for nothing else, §6.2), may not
-archive, delete or move anything, may not mint invites, may not act as a broker for anyone, and may
-not rotate the network. If the member id is compromised, the blast radius is "the
-sessions that were placed there" — not the network.
+sessions needs and no more — plus, when its owner's broker is the model path,
+`broker_credential`. It may not list another member's sessions (`list` answers
+for the sessions placed on it and for nothing else, §6.2), may not archive,
+delete or move anything, may not mint invites, may not act as a broker for
+anyone, and may not rotate the network. If the member id is compromised, the
+blast radius is "the sessions that
+were placed there" — plus, at worst, whatever its owner's broker will grant a
+member of its own network within `grant_ttl_s` — not the network.
+
+**Amended for ENG-4225 Slice 1 (ratified; this row used to be wrong).** The
+`Grants` row above previously listed `broker_credential` unconditionally among the
+capabilities a pool member never holds. That made §6.2's borrowing
+**impossible**: `broker_credential` is the capability that lets a member dial its
+owner's broker at all, so a member barred from it can never request the
+session-scoped grant that §6.2 says it borrows. The sentence was doing two jobs
+at once and only one of them was true. Split, with each half kept:
+
+* **"A pool declares no credential of its own"** — true, unchanged, and it is
+the `Credentials` row above. Nothing is served FROM the member; nothing it holds
+is a credential an owner could be asked to trust.
+* **"A pool may not call the broker"** — false, and now removed. Holding
+`broker_credential` is the *request*, not the *authority*: it buys a
+session-scoped grant from the owner's broker, which decides per request under
+its own placement rules (`placement.py`), and it buys nothing at all from any
+other member's broker.
+
+What stays absolutely out of reach, and is why this is not a widening of the
+member: `admin`, `trust`, `delete` and `move` are still never held, and
+`broker_credential` still never makes the member a broker for anyone else.
 
 ### 3.6 What a session on the member sees when it drains
 
