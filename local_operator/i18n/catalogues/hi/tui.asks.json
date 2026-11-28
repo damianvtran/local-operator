@@ -9,5 +9,9 @@
   "tui.asks.dismiss.notice_answered_in_chat": "हटा दिया — बातचीत में जवाब दिया गया",
   "tui.asks.dismiss.notice_moot": "हटा दिया — अब ज़रूरत नहीं",
   "tui.asks.dismiss.notice_no_reply": "हटा दिया — कोई जवाब नहीं भेजा गया",
-  "tui.asks.dismiss.title": "यह सवाल हटाएँ"
+  "tui.asks.dismiss.title": "यह सवाल हटाएँ",
+  "tui.asks.list.copied_id": "{ask_id} कॉपी की गई",
+  "tui.asks.list.copy_id_hint": "y आईडी कॉपी करें",
+  "tui.asks.list.no_such_ask": "इस बातचीत में {ask_id} नाम का कोई सवाल नहीं है।",
+  "tui.asks.list.showing_all_settled": "सभी सवाल दिख रहे हैं: {ask_id} निपटाया जा चुका है।"
 }

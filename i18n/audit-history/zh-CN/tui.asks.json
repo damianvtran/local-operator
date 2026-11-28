@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.asks",
+  "history_sha256": "84a9f0dd0e1ea4d74ebf0d9997c8d8b54059a03e51731339feec7c1175370147",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.asks",
+      "source_sha256": "776091aae39bd9b30ced1830e915ab8b40b04461242a850b303715650d9a812c",
+      "context_sha256": "c73c4abe082a4a35aa05c7b38ef1ea0b9a9c11ac9d008e7ab3496539295e495d",
+      "target_sha256": "35a6a547882d040661a4bac88ee466632f4339c52b19b958d5d3633623572017",
+      "translator": {
+        "agent": "coding agent (translator role, lane feat/tui-ask-ids); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane tui-ask-ids); not the translator, did not author these keys",
+        "session": "865c4179f846",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "minor": 4,
+        "nit": 0,
+        "finding_detail": "0 blocker, 0 major, 4 minor, 0 nit (4 fixed, 0 deferred)",
+        "independent_from_translator": true,
+        "scope": "fresh audit of the 4 new key(s) of tui.asks (tui.asks.list.copy_id_hint, tui.asks.list.copied_id, tui.asks.list.no_such_ask, tui.asks.list.showing_all_settled); delta for the 11 earlier keys"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of zh-CN tui.asks against en source 776091aae39bd9b30ced1830e915ab8b40b04461242a850b303715650d9a812c and sidecar c73c4abe082a4a35aa05c7b38ef1ea0b9a9c11ac9d008e7ab3496539295e495d; target 35a6a547882d040661a4bac88ee466632f4339c52b19b958d5d3633623572017 recomputed from the file bytes after the audit edits. Delta: the diff against origin/main is purely additive (en and zh-CN each add exactly the new key(s); no earlier key value or sidecar entry changed), so the earlier keys' prior verdict stands, re-attested at the new hashes. New key(s): tui.asks.list.copy_id_hint, tui.asks.list.copied_id, tui.asks.list.no_such_ask, tui.asks.list.showing_all_settled. Method: read docs/I18N.md, glossary, the zh-CN style guide and each key's sidecar (role, tone, maxCells, placeholder note); compared with the shipped neighbours (tui.asks.dismiss.*, relay.asks.*, wire.ask_receipts.*, wire.slash.*, relay.asks.sheet.settled for the Settled vocabulary); rendered every key through local_operator.i18n.messages.render with sample ask ids after regeneration; checked ICU argument parity ({ask_id}), NFC, script purity, no manual bidi/zero-width controls, no English word inside the sentence, and rich.cells.cell_len width against maxCells. Findings: [minor] tui.asks.list.copy_id_hint: space between Chinese and Latin (guide: none; shipped 1260 vs 74) -> fixed: y复制ID (7); [minor] tui.asks.list.copied_id: space between 已复制 and the id -> fixed: 已复制{ask_id}; [minor] tui.asks.list.no_such_ask: space between 问题 and the id -> fixed: 本对话中没有问题{ask_id}。; [minor] tui.asks.list.showing_all_settled: spaces around the id; '已结束' departs from the Settled word (relay.asks.sheet.settled = 已处理) -> fixed: 显示全部问题：{ask_id}已处理。 (28/56). Edits by the auditor are to this locale's catalogue only (translator of record unchanged); English copy untouched. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

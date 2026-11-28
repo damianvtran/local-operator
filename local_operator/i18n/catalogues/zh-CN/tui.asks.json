@@ -9,5 +9,9 @@
   "tui.asks.dismiss.notice_answered_in_chat": "已忽略 — 已在聊天中回答",
   "tui.asks.dismiss.notice_moot": "已忽略 — 不再需要",
   "tui.asks.dismiss.notice_no_reply": "已忽略 — 未发送回复",
-  "tui.asks.dismiss.title": "忽略此问题"
+  "tui.asks.dismiss.title": "忽略此问题",
+  "tui.asks.list.copied_id": "已复制{ask_id}",
+  "tui.asks.list.copy_id_hint": "y复制ID",
+  "tui.asks.list.no_such_ask": "本对话中没有问题{ask_id}。",
+  "tui.asks.list.showing_all_settled": "显示全部问题：{ask_id}已处理。"
 }

@@ -5,6 +5,7 @@
   "wire.slash.analytics": "Thống kê tổng hợp mức tiêu thụ token trên mọi phiên",
   "wire.slash.approvals": "Xem hoặc đặt chế độ phê duyệt công cụ cho phiên này",
   "wire.slash.archive": "Ẩn khỏi danh sách, vẫn tiếp tục được bằng id",
+  "wire.slash.ask": "Hiện câu hỏi đó trong danh sách",
   "wire.slash.btw": "Hỏi câu bên lề, không lưu vào bản ghi (esc đóng)",
   "wire.slash.clear": "Xóa bản ghi (lịch sử vẫn nguyên vẹn)",
   "wire.slash.compact": "Nén ngữ cảnh ngay",
@@ -47,9 +48,9 @@
   "wire.slash.skills": "Liệt kê kỹ năng đã nạp",
   "wire.slash.stop": "Kết thúc phiên này/khác (tên/pid)/tất cả — /resume mở lại",
   "wire.slash.team": "Liệt kê nhóm, sơ đồ tổ chức, gửi yêu cầu cho manager",
+  "wire.slash.temporary": "Chuyển thành tạm thời hoặc giữ lại (on, off, status)",
   "wire.slash.theme": "Đổi chủ đề màu; mũi tên xem trước trực tiếp",
   "wire.slash.unarchive": "Hiện lại cuộc trò chuyện này trong danh sách",
   "wire.slash.update": "Cài bản mới nhất từ PyPI và khởi chạy lại",
-  "wire.slash.usage": "Xem hạn mức sử dụng của nhà cung cấp",
-  "wire.slash.temporary": "Chuyển thành tạm thời hoặc giữ lại (on, off, status)"
+  "wire.slash.usage": "Xem hạn mức sử dụng của nhà cung cấp"
 }

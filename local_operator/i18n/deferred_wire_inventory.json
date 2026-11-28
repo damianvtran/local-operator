@@ -229,7 +229,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 55
+        "slash_commands.py": 56
       }
     },
     "wire.slash.library": {

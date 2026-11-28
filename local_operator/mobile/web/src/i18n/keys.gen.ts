@@ -2424,6 +2424,7 @@ export type MessageParams = {
   "wire.slash.analytics": undefined;
   "wire.slash.approvals": undefined;
   "wire.slash.archive": undefined;
+  "wire.slash.ask": undefined;
   "wire.slash.btw": undefined;
   "wire.slash.clear": undefined;
   "wire.slash.compact": undefined;

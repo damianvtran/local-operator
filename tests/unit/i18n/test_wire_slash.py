@@ -98,6 +98,7 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     "clear": "Clear the transcript (history is untouched)",
     "copy": "Copy an agent message or code block",
     "links": "Open a link from this conversation in a browser",
+    "ask": "Show that question in the ask list",
     "new": "Start a new conversation",
     "reload": "Relaunch this conversation on the current install",
     "update": "Install the latest version from PyPI and relaunch",
@@ -176,7 +177,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # `/sound`, whose copy lives in tui.sound, `/transcript`, whose copy
     # lives in tui.transcript_display, and `/guard`, whose copy lives in
     # tui.guard.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 15 == 68
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 15 == 69
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,

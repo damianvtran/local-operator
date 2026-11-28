@@ -5,6 +5,7 @@
   "wire.slash.analytics": "跨所有会话的token用量汇总统计",
   "wire.slash.approvals": "查看或设置本会话的工具审批模式",
   "wire.slash.archive": "从列表中隐藏，仍可按id继续",
+  "wire.slash.ask": "在问题列表中显示该问题",
   "wire.slash.btw": "提个题外问题，不留记录（esc关闭）",
   "wire.slash.clear": "清空会话记录（历史不受影响）",
   "wire.slash.compact": "立即压缩上下文",
@@ -47,9 +48,9 @@
   "wire.slash.skills": "列出已加载的技能",
   "wire.slash.stop": "结束本会话、按名称/pid指定会话或全部；/resume可重开",
   "wire.slash.team": "列出团队、查看团队组织图，或向其负责人发送请求",
+  "wire.slash.temporary": "将此对话设为临时，或保留它（on、off、status）",
   "wire.slash.theme": "切换配色主题；方向键实时预览",
   "wire.slash.unarchive": "在列表中重新显示此对话",
   "wire.slash.update": "从PyPI安装最新版并重启",
-  "wire.slash.usage": "显示提供商用量配额",
-  "wire.slash.temporary": "将此对话设为临时，或保留它（on、off、status）"
+  "wire.slash.usage": "显示提供商用量配额"
 }

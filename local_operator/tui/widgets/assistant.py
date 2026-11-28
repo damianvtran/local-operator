@@ -42,9 +42,11 @@ from rich.markdown import Markdown
 from rich.style import Style
 from rich.text import Text
 from textual.content import Content
+from textual.reactive import Reactive
 from textual.selection import Selection
 
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.ask_ink import without_marks
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.markdown_theme import brand_markdown_theme
 from local_operator.tui.settings import settings_get
@@ -453,6 +455,23 @@ class AssistantBlock(TranscriptBlock):
 
     SPACING_KIND = "assistant"
 
+    #: NO TEXTUAL LINK OVERLAY on this block (design round 1, D-1). Textual
+    #: paints its own link style OVER any span carrying ``@click`` meta
+    #: (``textual/widget.py``'s ``_Styled``: ``style + link_style if "@click" in
+    #: style.meta``), which replaced the ink ``ask_ink.style_marks`` had just
+    #: set — the cited id and all three state marks painted body-coloured and
+    #: underlined, so the state colour was gone and an unresolved id looked no
+    #: different from a linked one.
+    #:
+    #: Off, and MEASURED rather than assumed: rich's own ``link=`` styles are
+    #: untouched by this flag (Textual applies its link style only to ``@click``
+    #: spans; URL spans keep the markdown theme's ink, the OSC-8 they already
+    #: carried and the transcript's own click handler), so the ONLY thing given
+    #: up is a hover recolour of the id and its mark — which, on, was a hover
+    #: that turned them body-coloured. The ``@click`` meta stays on every cell,
+    #: so the broker still runs the action.
+    auto_links: Reactive[bool] = Reactive(False)
+
     def __init__(self) -> None:
         super().__init__()
         self.add_class("assistant-block")
@@ -502,6 +521,13 @@ class AssistantBlock(TranscriptBlock):
         #: block with no rows has no frame to be faithful to, and answering
         #: from the setting is the only defined answer there.
         self._painted_rail_cols: int = -1
+        #: ``{ask_id: queue status}`` for the asks of the conversation this block
+        #: belongs to, as the APP knows them (``_sync_ask_surface`` is the one
+        #: writer). Read when the markdown source is decorated: an id cited in
+        #: prose becomes a link + a one-cell state mark only when it resolves
+        #: here (``tui/ask_ink.py``). Empty until the first ask sync — a block
+        #: painted before then is plain, which is the defined loading state.
+        self._ask_states: dict[str, str] = {}
         #: Is this block MID-TURN NARRATION — prose a model call streamed before
         #: it finalized into tool calls — rather than the answer that ends the
         #: turn? Set by the two surfaces that make that classification
@@ -857,13 +883,14 @@ class AssistantBlock(TranscriptBlock):
             return self._flat_whole(width)
         console = self._flat_console()
         if self._frozen_flat is None or self._frozen_width != width:
-            self._frozen_rendered = _markdown(self._frozen_text)
+            self._frozen_rendered = self._rendered(self._frozen_text)
             self._frozen_flat = flatten(self._frozen_rendered, width, console)
             self._frozen_width = width
         tail = self._full_text[len(self._frozen_text) :]
         rows = self._frozen_flat.copy()
         rows.append("\n")
-        rows.append_text(flatten(_markdown(tail), width, console))
+        rows.append_text(flatten(self._rendered(tail), width, console))
+        self._paint_ask_marks(rows)
         return rows
 
     def on_resize(self, event: object) -> None:
@@ -1050,7 +1077,104 @@ class AssistantBlock(TranscriptBlock):
         if not self._full_text:
             return Text("")
         lane = width if width is not None else self._flat_width()
-        return flatten(_markdown(self._full_text), lane, self._flat_console())
+        rows = flatten(self._rendered(self._full_text), lane, self._flat_console())
+        self._paint_ask_marks(rows)
+        return rows
+
+    def _rendered(self, source: str) -> Markdown:
+        """``source`` as markdown, with the render-time promotions applied.
+
+        ONE place, so the prefix and the live tail cannot be decorated
+        differently — the failure would be a cited id that turns into a link
+        only after the block settles.
+        """
+        from local_operator.tui.ask_ink import decorate_source
+
+        return _markdown(decorate_source(source, self._ask_states))
+
+    def _paint_ask_marks(self, rows: Text) -> None:
+        """Paint every decorated id in the link style and wire its click.
+
+        Runs on the FLATTENED rows rather than the source because the link ink
+        and the click target are paint, not markdown: the source only carries
+        the ``NBSP + mark`` the decoration inserted (§3).
+        """
+        from local_operator.tui.ask_ink import style_marks
+
+        style_marks(rows, action=self._ask_action)
+
+    @staticmethod
+    def _ask_action(ask_id: str) -> str | None:
+        """The Textual action that opens ``ask_id`` in the list, as click meta.
+
+        A plain string action, never a rich ``link=``: Textual would hand the
+        terminal an OSC-8 URL for any link style, and a ``lop-ask:`` scheme is
+        exactly what design §5.4 forbids offering to the desktop.
+
+        ``app.``-namespaced, MEASURED rather than assumed: an unnamespaced
+        action resolves against the clicked widget's own namespace chain, and
+        the app's handler is not on it — ``open_ask_id(...)`` from a transcript
+        block returns False and opens nothing (probed against textual 8.2.8).
+        """
+        return f"app.open_ask_id({ask_id!r})"
+
+    def set_ask_states(self, states: dict[str, str]) -> None:
+        """Take the app's ``{ask_id: status}`` map and repaint if it moved.
+
+        The mark is STATE AT PAINT TIME (§3): the same paragraph read before and
+        after an answer must show ``●`` turn into ``✓`` without the message
+        changing. The marks are baked into the flattened rows, so the caches
+        that hold them go — the same invalidation :meth:`retheme` performs —
+        and the message re-renders from source.
+
+        ONLY THE BLOCKS THAT CITE AN ID REPAINT (review minor). A state change
+        in a long conversation used to re-flatten every assistant block (0.47 s
+        on 300 blocks) to reproduce rows the block cannot possibly have drawn a
+        mark on. The id is matched as a plain substring: a superset of what the
+        decorator resolves, which is exactly what a SKIP pre-check needs — a
+        false positive costs one rebuild, a false negative would paint a stale
+        mark.
+        """
+        states = dict(states)
+        if states == self._ask_states:
+            return
+        before = self._ask_states
+        self._ask_states = states
+        if not self._full_text:
+            return
+        # BOTH MAPS, not just the new one (QA Q5): an id that LEFT the map —
+        # one ask withdrawn, the queue emptied, the flag turned off — is a
+        # block that may be carrying that id's stale mark. Testing only
+        # ``states`` meant the block that cited it was never repainted, and
+        # ``_sync_ask_surface`` promises the opposite ("never a stale mark over
+        # a queue that is gone").
+        if not any(ask_id in self._full_text for ask_id in (*before, *states)):
+            # Nothing this block can cite: the caches hold no mark, so there is
+            # nothing to invalidate and nothing to repaint.
+            return
+        self._frozen_rendered = None
+        self._frozen_flat = None
+        was_finalized = self._finalized
+        self._finalized = False
+        try:
+            rows = self._flat_whole() if was_finalized else self._flat_rows(self._flat_width())
+            self._apply_rows(rows)
+        finally:
+            self._finalized = was_finalized
+
+    def on_mount(self) -> None:
+        """Adopt the app's ask map as the block appears in a transcript.
+
+        A block built for a REPLAY is mounted after the last snapshot, so
+        waiting for the next one would leave every cited id in a resumed
+        conversation plain until an ask happened to change state.
+        """
+        super_on_mount = getattr(super(), "on_mount", None)
+        if super_on_mount is not None:
+            super_on_mount()
+        states = getattr(self.app, "_ask_mark_states", None)
+        if states:
+            self.set_ask_states(dict(states))
 
     def set_fold_muted(self, muted: bool) -> None:
         """Draw this message in the step's secondary ink (By response).
@@ -1288,7 +1412,7 @@ class AssistantBlock(TranscriptBlock):
         if not isinstance(visual, Content):
             return None
         if not self._full_text.strip():
-            return super().get_selection(selection)
+            return self._frame_selection(selection)
         rows = visual.plain.split("\n")
         # ONE COORDINATE CONVENTION, and everything below depends on it: the
         # alignment, the furniture measurement and every BLANKNESS test work in
@@ -1427,12 +1551,24 @@ class AssistantBlock(TranscriptBlock):
             # painted columns — so the clamp is the rail plus the construct's
             # own furniture, which is what keeps the gutter off the clipboard
             # when the reader's drag began on it.
+            # BARE rows, not painted ones (QA round 3, Q6). ``without_marks``
+            # asks what a cell IS, and on a railed row column 0 is the ``▎``,
+            # so its orphan branch — "the row opens with a mark" — read the rail
+            # and let a drag that began on a wrapped pair's mark carry the glyph
+            # (the shipped default has the rail on; the rail-off path only
+            # passed because the pair reassembles and ``strip_marks`` catches
+            # it). The rail is a fixed prefix, so subtracting it from the
+            # painted columns is exact and the surviving cells keep the
+            # offsets the drag used.
             glyphs = [
-                rows[index][
-                    max(start, rail_cols + self._furniture_width(bare, mapping, index)) : (
-                        None if end == -1 else end
-                    )
-                ]
+                without_marks(
+                    bare[index],
+                    start=max(start - rail_cols, self._furniture_width(bare, mapping, index)),
+                    # ``-1`` is the caller's end-of-row; any OTHER column inside
+                    # the rail is a zero-length take, not an end-of-row one.
+                    end=(-1 if end < 0 else max(0, end - rail_cols)),
+                    previous_row=(bare[index - 1] if index else None),
+                )
                 for index, (start, end) in content
             ]
             trimmed = [row.rstrip() for row in glyphs]
@@ -1497,7 +1633,7 @@ class AssistantBlock(TranscriptBlock):
                         copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
                         if copied:
                             return copied, "\n"
-                        return super().get_selection(selection)
+                        return self._frame_selection(selection)
                     separators = _copy_markdown.separators_without_source(fold_rows)
 
             joined = trimmed[0]
@@ -1518,8 +1654,24 @@ class AssistantBlock(TranscriptBlock):
         # the markdown path spans exactly the rows it has always spanned.
         copied = self._markdown_for_rows(mapping, selected[0][0], selected[-1][0])
         if not copied:
-            return super().get_selection(selection)
+            return self._frame_selection(selection)
         return copied, "\n"
+
+    def _frame_selection(self, selection: Selection) -> tuple[str, str] | None:
+        """The base FRAME copy, with the paint-only ask marks stripped.
+
+        The fallback for a selection this block cannot align back to its
+        source. A cited ask id is painted with a no-break space and a one-cell
+        state mark (`tui/ask_ink`), which are decoration: the clipboard still
+        gets the model's words, on this path as on the markdown one.
+        """
+        frame = super().get_selection(selection)
+        if frame is None:
+            return None
+        from local_operator.tui.ask_ink import strip_marks
+
+        body, separator = frame
+        return strip_marks(body), separator
 
     def _markdown_for_rows(self, mapping: list[int | None], first_row: int, last_row: int) -> str:
         """Markdown for ``first_row..last_row``, widened over UNPLACED edge rows.

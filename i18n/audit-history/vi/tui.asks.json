@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.asks",
+  "history_sha256": "5642b5b9f1d8c42717ef0c7ef896341b6adc514033d489c69b6cbd5eaa4c79fe",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.asks",
+      "source_sha256": "776091aae39bd9b30ced1830e915ab8b40b04461242a850b303715650d9a812c",
+      "context_sha256": "c73c4abe082a4a35aa05c7b38ef1ea0b9a9c11ac9d008e7ab3496539295e495d",
+      "target_sha256": "89f1bd296afdb6139c8036f02d31362b046b016a875ff904fed46f9029e0cda9",
+      "translator": {
+        "agent": "coding agent (translator role, lane feat/tui-ask-ids); session id not supplied in the audit brief, not independently verified",
+        "model": "radient/auto (as stated in the brief; underlying served model not disclosed)",
+        "fallback": "none (as stated in the brief; not independently verified)",
+        "date": "2026-11-23"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev task subagent, lane tui-ask-ids); not the translator, did not author these keys",
+        "session": "865c4179f846",
+        "model": "anthropic/claude-sonnet-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-23",
+        "result": "clean-with-findings",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "minor": 2,
+        "nit": 1,
+        "finding_detail": "0 blocker, 0 major, 2 minor, 1 nit (2 fixed, 1 deferred)",
+        "independent_from_translator": true,
+        "scope": "fresh audit of the 4 new key(s) of tui.asks (tui.asks.list.copy_id_hint, tui.asks.list.copied_id, tui.asks.list.no_such_ask, tui.asks.list.showing_all_settled); delta for the 11 earlier keys"
+      },
+      "status": "passed",
+      "note": "Independent audit 2026-11-23 of vi tui.asks against en source 776091aae39bd9b30ced1830e915ab8b40b04461242a850b303715650d9a812c and sidecar c73c4abe082a4a35aa05c7b38ef1ea0b9a9c11ac9d008e7ab3496539295e495d; target 89f1bd296afdb6139c8036f02d31362b046b016a875ff904fed46f9029e0cda9 recomputed from the file bytes after the audit edits. Delta: the diff against origin/main is purely additive (en and vi each add exactly the new key(s); no earlier key value or sidecar entry changed), so the earlier keys' prior verdict stands, re-attested at the new hashes. New key(s): tui.asks.list.copy_id_hint, tui.asks.list.copied_id, tui.asks.list.no_such_ask, tui.asks.list.showing_all_settled. Method: read docs/I18N.md, glossary, the vi style guide and each key's sidecar (role, tone, maxCells, placeholder note); compared with the shipped neighbours (tui.asks.dismiss.*, relay.asks.*, wire.ask_receipts.*, wire.slash.*, relay.asks.sheet.settled for the Settled vocabulary); rendered every key through local_operator.i18n.messages.render with sample ask ids after regeneration; checked ICU argument parity ({ask_id}), NFC, script purity, no manual bidi/zero-width controls, no English word inside the sentence, and rich.cells.cell_len width against maxCells. Findings: [minor] tui.asks.list.no_such_ask: width 50 vs maxCells 48 -> fixed: Cuộc trò chuyện này không có câu hỏi {ask_id}. (44); [minor] tui.asks.list.showing_all_settled: 'đã xong' departs from the Settled word (relay.asks.sheet.settled = Đã xử lý) -> fixed: Hiển thị tất cả câu hỏi: {ask_id} đã xử lý. (41/56); [nit] tui.asks.list.copy_id_hint: width 13 vs maxCells 12 (y sao chép id): one cell over; the shorter 'chép' departs from the shipped 'Sao chép' everywhere, so kept and left for the style guide to record as a width exception -> deferred: not edited. Edits by the auditor are to this locale's catalogue only (translator of record unchanged); English copy untouched. Evidence is this auditor's own command output in the lane session, not an external report."
+    }
+  ]
+}

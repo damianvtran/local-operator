@@ -67,6 +67,10 @@ ECHO_POLICY = {
     # landed there, or nothing at all when the user cancels — and both are
     # strictly more informative than echoing the typed word. `/approvals`' rule.
     "copy": False,
+    # Opens the ask list and lands on a row; the receipt is the highlighted
+    # row (or a sentence naming why there is none). Nothing here reaches the
+    # model, and the typed id is a selector rather than words it is told.
+    "ask": False,
     # The local read-only page is the receipt; no path reaches the model.
     "view": False,
     # Same shape as `/copy` above and the same rule: the receipt is the browser
@@ -228,6 +232,8 @@ ECHO_POLICY = {
 #: a new command must state whether its argument is a prompt.
 PROMPT_POLICY = {
     "mobile": False,
+    # A selector: the id names a row of the ask list, never words a model is told.
+    "ask": False,
     "guard": False,
     # Not a prompt: the argument is a peer's name (or `remote <peer>`), and the
     # trailing text of the remote form becomes the REMOTE session's first prompt —

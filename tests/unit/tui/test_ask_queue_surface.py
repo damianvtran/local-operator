@@ -2155,3 +2155,503 @@ async def test_the_ask_marker_paints_the_derived_ink_not_the_raw_accent(enabled)
         resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
         painted = resolved.get_truecolor()
         assert painted == Color.parse(derived).get_truecolor(), (painted, derived)
+
+
+# -- the ask id column (ask-id work, step 1: T-1) ----------------------------
+#
+# The agent's prose names an ask BY ID ("a-745e is withdrawn"), and the list —
+# the one surface where every queued ask is visible at once — carried no id, so
+# two rows beginning with the same words were indistinguishable (T-1). These
+# tests pin the column's POSITION, its give-way rule and its ink: the three
+# properties the design decided, none of which a still can prove.
+
+
+#: Two questions that begin with the same words: the fixture that makes the id
+#: column a claim about matching rather than decoration.
+_TWIN_QUESTIONS = (
+    "Ship the relay fix as 0.71.2 to us-east, or wait for the window?",
+    "Ship the relay fix tonight?",
+)
+
+
+async def test_the_id_column_is_a_fixed_six_cells_after_the_state_glyph():
+    """§3: six cells of id plus a two-cell gap, at the SAME position everywhere.
+
+    Painted through the real app so the width is the one the frame really gets
+    (the sidebar and the content padding are part of it), and asserted on the
+    cells rather than on a substring: "the id is somewhere in the line" is true
+    of the pre-fix list too, which printed it only when the question was missing.
+    """
+    from local_operator.tui.widgets.ask_queue import ASK_ID_CELLS
+
+    rows = [
+        _row("a-e53b", _TWIN_QUESTIONS[0]),
+        _row("a-9f20", "Rotate the relay token now?"),
+        _row("a-745e", _TWIN_QUESTIONS[1], status="withdrawn"),
+        _row("a-1c09", "Run the relay smoke first?", status="answered"),
+    ]
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows(rows))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        content = listing.content_size.width
+        painted = listing.render().plain.splitlines()[1:]
+        assert len(painted) == len(rows), painted
+        for line, row in zip(painted, listing.visible_rows):
+            assert cell_len(line) <= content, (line, content)
+            # Two marker cells, two state-glyph cells, then the id.
+            assert line[4 : 4 + ASK_ID_CELLS] == row.ask_id, (line, row.ask_id)
+            assert line[4 + ASK_ID_CELLS : 4 + ASK_ID_CELLS + 2] == "  ", line
+            # ...and the question starts in the column the id left it.
+            question = row.head_question or ""
+            assert line[4 + ASK_ID_CELLS + 2 :].lstrip().startswith(question[:12].rstrip("…")), (
+                line,
+                question,
+            )
+        # The two questions that begin alike are distinguishable by id alone.
+        assert painted[0][4:10] != painted[2][4:10]
+
+
+async def test_the_id_keeps_its_cells_and_the_question_gives_way():
+    """§3: never truncate the column, and the TAIL keeps its priority.
+
+    At 80 columns the question is what gets the ellipsis — the expiry word and
+    the id stay whole, which is the inverse of the pre-fix row where the id was
+    the first thing cut.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", _TWIN_QUESTIONS[0], expires_at=1_000_000 + 3_600_000),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()[1:]
+        assert all(cell_len(line) <= listing.content_size.width for line in painted)
+        first = painted[0]
+        assert first[4:10] == "a-e53b", first
+        assert "…" in first, first
+        # The tail survives the cut: the per-row urgency word is not the casualty.
+        assert "expir" in first, first
+
+
+async def test_a_narrow_list_collapses_the_id_column_on_every_row():
+    """Design round 1, D-2 / QA Q4: ONE decision per list, not per row.
+
+    The per-row rule left the column with holes — the row with the longest tail
+    lost its id while its neighbours kept theirs — and the reserved cells were
+    never handed back to the questions, so the floor the rule exists to protect
+    was not met by the rows that dropped their id. A list that cannot afford the
+    column on EVERY row gives it up on all of them, and the question takes the
+    eight cells back.
+    """
+    from local_operator.tui.widgets.ask_queue import ASK_ID_COLUMN, COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(52, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", _TWIN_QUESTIONS[0]),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                    _row("a-1c09", "Run the relay smoke first?", status="answered"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        assert listing.content_size.width - (4 + ASK_ID_COLUMN) < 40
+        painted = listing.render().plain.splitlines()
+        header, rows = painted[0], painted[1:]
+        # No row paints an id, and none of them reserves the column either: the
+        # question starts where the marker and glyph end.
+        for line in rows:
+            assert line[4:10] != "a-", line
+        # The cursor row's id is still ON SCREEN — in the header, ahead of the
+        # hints, which is the affordance the per-row rule lost.
+        assert f"{COLLAPSED_ID_CUE}a-e53b" in header, header
+
+
+async def test_the_cursor_id_outbids_the_counts_in_the_header():
+    """Review N-3 / design D-8: the collapsed column's id survives the ladder.
+
+    A collapsed id column makes the header the ONLY place the id appears, so
+    the header's chips yield to it rather than the other way round: counts
+    first, then the halves the reader is not on, keeping the ACTIVE chip — a
+    filtered view whose filter cannot be seen is a view that lies. Measured at
+    five widths; the floor in the spec is 60x20, and 44/46 are below it, so the
+    test only pins that they DEGRADE by dropping the counts first.
+    """
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    for size, want_counts, want_active_only in (
+        ((44, 20), False, False),
+        ((46, 20), False, False),
+        ((50, 20), True, False),
+        ((54, 20), True, False),
+        ((60, 20), False, False),
+    ):
+        app = _app(session)
+        async with app.run_test(size=size) as pilot:
+            await await_booted(app, pilot)
+            app._sync_ask_surface(
+                ask_rows(
+                    [
+                        _row("a-e53b", _TWIN_QUESTIONS[0]),
+                        _row("a-9f20", "Rotate the relay token now?"),
+                        _row("a-745e", "Ship the relay fix tonight?", status="withdrawn"),
+                        _row("a-1c09", "Run the relay smoke first?", status="answered"),
+                    ]
+                )
+            )
+            await _settle(pilot)
+            app._expand_asks()
+            await _settle(pilot)
+            listing = app.query_one(AskQueueList)
+            header = listing.render().plain.splitlines()[0]
+            if size[0] == 60:
+                # The column fits: no cue needed and none painted.
+                assert f"{COLLAPSED_ID_CUE}a-" not in header, (size, header)
+                continue
+            assert f"{COLLAPSED_ID_CUE}a-e53b" in header, (size, header)
+            if want_counts:
+                assert "Settled · 1" in header, (size, header)
+            else:
+                assert "Settled · " not in header, (size, header)
+            # The active chip is the one the header never gives up.
+            assert "All" in header, (size, header)
+
+
+async def test_the_lowest_rung_keeps_only_the_active_chip_and_the_cue():
+    """The third grade, pinned: below the floor only the ACTIVE chip survives.
+
+    At 36 cells the labels-only grade cannot fit, so the header drops the
+    halves the reader is not on and keeps the one that says which half this is
+    — a filtered view whose filter cannot be seen is a view that lies.
+    """
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(36, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship it?"),
+                    _row("a-9f20", "Rotate it?"),
+                    _row("a-745e", "Ship tonight?", status="withdrawn"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        header = listing.render().plain.splitlines()[0]
+        assert f"{COLLAPSED_ID_CUE}a-e53b" in header, header
+        assert "All" in header, header
+        assert "Pending" not in header, header
+        assert "Settled" not in header, header
+
+
+async def test_the_id_column_comes_back_when_every_row_can_afford_it():
+    """The other half of D-2: at 60 cols every id paints and the header does not."""
+    from local_operator.tui.widgets.ask_queue import COLLAPSED_ID_CUE
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(60, 20)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a-e53b", "Ship the relay fix as 0.71.2?"),
+                    _row("a-745e", "Ship the relay fix tonight?", status="withdrawn"),
+                    _row("a-9f20", "Rotate the relay token now?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()
+        assert painted[1][4:10] == "a-e53b", painted[1]
+        assert painted[2][4:10] == "a-745e", painted[2]
+        assert f"{COLLAPSED_ID_CUE}a-" not in painted[0], painted[0]
+
+
+async def test_the_id_paints_muted_and_never_dim_or_bold():
+    """§3's ink decision, on the panel's own ground.
+
+    `dim` is this repo's micro-label rung and on the list's `overlay` ground it
+    measures 3.43:1 dark / 2.72:1 light — under the 4.5 a legible field owes.
+    `muted` measures ~6.5/5.18. A still cannot carry the contrast, so the test
+    names the TOKEN that was painted, on the light ramp where dim and muted
+    differ.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app._apply_theme("light")
+        await _settle(pilot)
+        muted = theme_mod.semantic_color("muted")
+        dim = theme_mod.semantic_color("dim")
+        assert muted != dim
+        listing = app.query_one(AskQueueList)
+        text = listing.render()
+        # The row's id on the second painted line (the header is first).
+        second_line_start = text.plain.index("\n") + 1
+        id_at = second_line_start + 4
+        span = next((span for span in text.spans if span.start <= id_at < span.end), None)
+        assert span is not None, "the id is painted with no style at all"
+        assert not (isinstance(span.style, Style) and span.style.bold)
+        colour = span.style.color if isinstance(span.style, Style) else None
+        assert colour is not None
+        resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+        assert resolved.get_truecolor() == Color.parse(muted).get_truecolor(), (
+            resolved,
+            muted,
+        )
+        assert resolved.get_truecolor() != Color.parse(dim).get_truecolor()
+
+
+async def test_a_cjk_question_is_clipped_to_cells_beside_the_id():
+    """The column is CELLS, not characters: a CJK question is 2 cells a glyph."""
+    cjk = "哪個區域要部署？" * 6
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(ask_rows([_row("a-1c09", cjk), _row("a-9f20", "Rotate it?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()[1:]
+        assert painted[0][4:10] == "a-1c09", painted[0]
+        assert all(cell_len(line) <= listing.content_size.width for line in painted)
+        assert "…" in painted[0], painted[0]
+
+
+async def test_y_copies_the_cursor_rows_id_with_a_receipt(enabled):
+    """§5: `y` copies the id of the row under the cursor, and says so.
+
+    Driven from the keyboard through the real app: `y` is the file viewer's and
+    the projects page's copy key, and here the payload is the handle an agent's
+    prose names — the thing a reader pastes into a report.
+    """
+    from local_operator.i18n.keys import tui_asks as ask_keys
+    from local_operator.i18n.text import tr
+    from local_operator.tui.widgets.toast import Toast
+
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._clipboard = ""
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        # The cursor opens on the first ANSWERABLE row (U3) — a-e53b here.
+        current = listing.current()
+        assert current is not None
+        await pilot.press("down")
+        await _settle(pilot)
+        current = listing.current()
+        assert current is not None
+        expected = current.ask_id
+        await pilot.press("y")
+        await _settle(pilot)
+        assert app._clipboard == expected, (app._clipboard, expected)
+        receipt = tr("tui.asks")(ask_keys.list_copied_id(ask_id=expected))
+        assert str(app.query_one(Toast)._message) == receipt
+        # Copying is a read: it moves nothing and dismisses nothing.
+        current = listing.current()
+        assert current is not None and current.ask_id == expected
+        assert session.dismissed == [] and session.declined == []
+
+
+async def test_y_is_silent_while_the_dismiss_chooser_is_open(enabled):
+    """The chooser owns the keyboard: a copy under a card asking WHY would be a
+    gesture the user was never offered."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._clipboard = ""
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        await pilot.press("x")  # an OPEN ask asks its reason first
+        await _settle(pilot)
+        assert listing.choosing
+        await pilot.press("y")
+        await _settle(pilot)
+        assert app._clipboard == "", "y wrote the clipboard from under the chooser"
+        assert listing.choosing
+
+
+async def test_the_copy_hint_is_painted_before_the_exit_hint_and_dropped_first(enabled):
+    """§3: `y copy id` sits before `esc collapse` and is the FIRST to give way.
+
+    Two properties, one test, because they are the same decision read twice: the
+    header's paint order is the design's, and its sacrifice order is not — the
+    id is already on the row, so the hint that names it can be the one lost.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await await_booted(app, pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a-e53b", _TWIN_QUESTIONS[0]), _row("a-9f20", "Rotate it?")])
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        wide = listing.header_text(140)
+        assert "y copy id" in wide, wide
+        assert wide.index("y copy id") < wide.index("esc collapse"), wide
+        narrow = listing.header_text(70)
+        assert "y copy id" not in narrow, narrow
+        # Dropping it BUYS a hint — the exit key survives at a width where the
+        # full set cannot fit.
+        assert "esc collapse" in narrow or "enter answer" in narrow, narrow
+
+
+# -- the receipt row, after PR A's design round 1 (D-1, D-2, D-3) -------------
+
+
+def _receipt(**extra: Any) -> dict[str, Any]:
+    """One ask receipt as the runtime stores it, with the parts ``rows.py`` reads."""
+    details: dict[str, Any] = {
+        "ask_id": "a-1c09",
+        "status": "answered",
+        "text": "Answered — delivering",
+        "questions": [{"id": "q1", "question": "Run the relay smoke first?"}],
+        "answers": {"q1": ["Yes"]},
+    }
+    details.update(extra)
+    return details
+
+
+def test_a_pointer_on_a_receipt_never_re_cuts_its_name():
+    """D-1: the ⟨expand⟩ hint used to be subtracted BEFORE the fit.
+
+    It takes nine cells, so hovering a receipt trimmed a name that had been
+    fitted to the full line — the row changed its WORDS under the pointer. The
+    fit is now taken from the unhovered budget and the hint may only ride in the
+    padding that fit left over.
+    """
+    from local_operator.tui.widgets.tool_card import EXPAND_HINT
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(), kind="response")
+    resting = block._build_content(120).plain
+    block._hovered = True
+    hovered = block._build_content(120).plain
+    assert hovered.startswith(resting), (resting, hovered)
+    # 120 columns leave padding, so the affordance is still offered there.
+    assert EXPAND_HINT in hovered, hovered
+    # ...and the hint is the ONLY difference on the line.
+    assert hovered.replace(EXPAND_HINT, "").rstrip() == resting
+
+    # Where the summary fills the row, hover shows NO hint rather than re-cutting
+    # the name: the words win, the affordance yields.
+    narrow = AskResponseBlock(_receipt(), kind="response")
+    resting_narrow = narrow._build_content(80).plain
+    narrow._hovered = True
+    assert narrow._build_content(80).plain == resting_narrow
+    assert EXPAND_HINT not in resting_narrow
+
+
+def test_the_receipts_id_is_painted_muted_and_the_state_keeps_its_ink():
+    """D-3: the id is a HANDLE, and `dim` (4.18:1/3.46:1) is too faint for it."""
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(status="late"), kind="timeout")
+    text = block._build_content(120)
+    id_at = text.plain.index("a-1c09")
+    id_span = next(span for span in text.spans if span.start <= id_at < span.end)
+    assert isinstance(id_span.style, Style)
+    colour = id_span.style.color
+    assert colour is not None
+    resolved = colour if isinstance(colour, Color) else Color.parse(str(colour))
+    assert (
+        resolved.get_truecolor() == Color.parse(theme_mod.semantic_color("muted")).get_truecolor()
+    )
+    # The state phrase is the audit content and keeps the severity ink.
+    state_at = text.plain.index("Timed out")
+    state_span = next(span for span in text.spans if span.start <= state_at < span.end)
+    assert isinstance(state_span.style, Style)
+    state_colour = state_span.style.color
+    assert state_colour is not None
+    painted_state = (
+        state_colour if isinstance(state_colour, Color) else Color.parse(str(state_colour))
+    )
+    assert (
+        painted_state.get_truecolor()
+        == Color.parse(theme_mod.semantic_color("warning")).get_truecolor()
+    )
+
+
+def test_the_receipt_fit_cuts_the_state_only_when_the_row_cannot_hold_it():
+    """D-2: the docstring claimed the state is never cut; at a tiny budget it is.
+
+    What is true is narrower and worth pinning: no width that can carry
+    ``id — state`` loses any of it, and the name is what gives way before that.
+    """
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    block = AskResponseBlock(_receipt(), kind="response")
+    # A budget that holds the name gets the name.
+    wide = block._fit_summary("", 60)
+    assert "Run" in wide and "Answered, delivering" in wide
+    # A budget too small for the name drops it whole rather than stubbing it,
+    # and the state fits.
+    no_name = block._fit_summary("", 40)
+    assert '"' not in no_name, no_name
+    assert no_name == "a-1c09 — Answered, delivering"
+    # Below the id-and-state width there is nothing left to drop but the tail.
+    tiny = block._fit_summary("", 12)
+    assert tiny.endswith("…"), tiny
+    assert "Answered, delivering" not in tiny

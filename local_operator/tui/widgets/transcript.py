@@ -2682,7 +2682,6 @@ class WakeBlock(ExpandableActionBlock):
         """The single summary row — the ONE-LINE guarantee lives here."""
         from local_operator.tui.glyphs import display_name, tool_icon
         from local_operator.tui.widgets.tool_card import (
-            _SUMMARY_FLOOR,
             COLLAPSE_HINT,
             EXPAND_HINT,
             row_body_width,
@@ -2721,21 +2720,29 @@ class WakeBlock(ExpandableActionBlock):
         name = name + " " * max(0, name_col - cell_len(name))
         prefix_cells = 2 + name_col + 1
 
-        slot = ""
+        # THE FIT IS TAKEN FROM THE UNHOVERED BUDGET (design round 1, D-1). The
+        # hover affordance used to be subtracted BEFORE the fit, so pointing at a
+        # receipt re-cut its name: the `⟨expand⟩` hint costs nine cells, and a
+        # name that had been trimmed to the full line was trimmed to a different
+        # line the moment the pointer arrived. The summary is now fitted to the
+        # whole remaining width, and the hint rides in the PADDING that fit left
+        # over — so hover and focus change only the hint, never the words.
         remaining = max(0, width - prefix_cells)
-        if self._hovered or self._focused:
-            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
-            if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
-                slot = offer
-        slot_cells = cell_len(slot) + 1 if slot else 0
-        budget = max(0, remaining - slot_cells)
         # `_summary` is raw source plus provenance. Fit first, then project the
         # final line so truncation cannot orphan a bidi delimiter. No provenance
         # (`None`) means this identity is not catalogue copy: external tool and
         # model prose passes through untouched even under an Urdu preference.
-        summary = self._fit_summary(identity, budget)
+        summary = self._fit_summary(identity, remaining)
         if self._summary_source_locale is not None:
             summary = localized_display(summary, source_locale=self._summary_source_locale).plain
+        slot = ""
+        if self._hovered or self._focused:
+            offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+            # The hint needs its own cell and one cell of gap before it, and it
+            # may only take cells the summary did not use — never the
+            # `_SUMMARY_FLOOR` the row reserves for the words themselves.
+            if remaining - cell_len(summary) >= cell_len(offer) + 1 + 1:
+                slot = offer
 
         summary_style = Style(color=theme_mod.semantic_color(self._summary_ink()))
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -2746,7 +2753,7 @@ class WakeBlock(ExpandableActionBlock):
         # a neutral glyph.
         row.append(icon + " ", style=summary_style if self._summary_ink() != "dim" else dim)
         row.append(name + " ", style=muted)
-        row.append(summary, style=summary_style)
+        self._append_summary(row, summary, summary_style)
         if slot:
             used = cell_len(row.plain)
             pad = max(1, width - used - cell_len(slot))
@@ -2765,6 +2772,15 @@ class WakeBlock(ExpandableActionBlock):
         from local_operator.tui.widgets.tool_card import truncate_cells
 
         return truncate_cells(identity, budget)
+
+    def _append_summary(self, row: Text, summary: str, style: Style) -> None:
+        """Append the fitted summary to ``row`` in ``style``.
+
+        The emission seam for a row whose summary is not one ink: an ask receipt
+        paints its ID in ``muted`` (design round 1, D-3) while the state phrase
+        keeps the severity ink. Everything else paints the whole string.
+        """
+        row.append(summary, style=style)
 
     def _build_content(self, width: int) -> Text:
         """The card: the one-row summary, plus the delivered prompt expanded."""
@@ -7569,7 +7585,7 @@ class AskResponseBlock(WakeBlock):
         return identity, str(self._details.get("text") or "")
 
     def _fit_summary(self, identity: str, budget: int) -> str:
-        """Fit the receipt by shrinking the NAME; the STATE is never cut for it.
+        """Fit the receipt by shrinking the NAME; the STATE is not cut for it.
 
         The whole-sentence fit (``WakeBlock._fit_summary``) trims the tail, and
         on this row the tail IS the state — so at 80 columns a reader saw
@@ -7580,7 +7596,11 @@ class AskResponseBlock(WakeBlock):
         So the parts are composed here instead: id, then the name fitted to the
         room left at the END of the row, then the state whole. When the room is
         too small for the name to be words at all (:data:`ASK_NAME_MIN_CELLS`),
-        the name is dropped rather than stubbed. ``identity`` is not read — the
+        the name is dropped rather than stubbed — that fallback is ``id —
+        state``, and at a budget too small even for that the tail IS cut, by
+        ``truncate_cells`` at the row's own width. That is the row running out
+        of cells, not the fit preferring the name over the state: no width that
+        can carry ``id — state`` loses any of it. ``identity`` is not read — the
         parts carry the same words, and reading them is what lets the shrinking
         land on one field.
         """
@@ -7618,6 +7638,33 @@ class AskResponseBlock(WakeBlock):
         """
         _, severity = self._notice_fn()(self._details)
         return "warning" if severity == "warning" else super()._summary_ink()
+
+    def _append_summary(self, row: Text, summary: str, style: Style) -> None:
+        """The ID leads the body and it is painted `muted` (design round 1, D-3).
+
+        The receipt painted its whole line in the row's SEVERITY ink, which for
+        an info receipt is `dim` — 4.18:1 dark and 3.46:1 light. That is honest
+        for the state phrase (it is the same sentence as the ledger it reports),
+        but the id is a HANDLE: a reader who wants to match it against an agent's
+        prose or paste it into a report has to read it off this line, and `muted`
+        measures 7.93:1 dark / 6.58:1 light. One field, one ink — the state keeps
+        the ink its severity chose.
+
+        ``find`` rather than ``startswith``: on the RTL ramps `localized_display`
+        may prefix the line with an isolate, and the id still has to be found
+        behind it. A summary that does not carry the id at all (an older row
+        with no parts) paints whole, in the row's ink — the pre-fix behaviour.
+        """
+        ask_id, _name, _state, _ink = self._parts_fn()(self._details)
+        at = summary.find(ask_id) if ask_id else -1
+        if at < 0:
+            row.append(summary, style=style)
+            return
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        if at:
+            row.append(summary[:at], style=style)
+        row.append(ask_id, style=muted)
+        row.append(summary[at + len(ask_id) :], style=style)
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]
         """The summary row, plus the Q&A when the row is opened."""

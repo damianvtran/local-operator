@@ -1187,6 +1187,14 @@ _FRONTEND_LOCAL_SLASHES = {
     # list the runtime host's PR ledger while the user is looking at this
     # screen — `/import`'s wrong-machine answer, with nothing written.
     "review",
+    # `/ask` moves the ask list THIS terminal is drawing — it puts that list's
+    # cursor on a row, drops the fleet scope for this conversation's, switches
+    # the All filter, and paints the receipt beside it. There is no equivalent
+    # on the runtime: routed there it would move a cursor in a list nobody is
+    # looking at and answer with a notice on a screen that has no terminal
+    # under it. Same argument `/keys` and `/view` make — the surface is here,
+    # so the command is here.
+    "ask",
     # Reads and WRITES THIS process's live wake scheduler: the rows are the
     # ones this terminal's runtime armed, and `set_wake_schedules` re-arms them
     # here. Routed to a follower's runtime it would list and rewrite wakes on

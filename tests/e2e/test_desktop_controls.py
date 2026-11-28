@@ -244,6 +244,11 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # silently missing from the desktop.
             # /memory inspection is CLI/TUI-only; no desktop panel/adapter ships.
             assert withheld == {
+                # TUI-only by design: `/ask` reveals a row in the terminal's
+                # ask list and answers no desktop route. The desktop's ask
+                # panel and drawer are its own surfaces, so a slash destination
+                # here would be a second, adapter-less one.
+                "ask",
                 "highlights",
                 # Radient Guard consent is enforced by the `lop` backend and
                 # `/guard` is only the TUI's consent/status screen. The desktop

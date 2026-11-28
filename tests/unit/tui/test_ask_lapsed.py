@@ -118,8 +118,15 @@ async def test_a_lapsed_row_takes_view_and_dismiss_and_never_decline():
     posted.clear()
     listing.action_pick()
     assert [type(message).__name__ for message in posted] == ["Picked"]
-    # The header advertises only what the row honours.
-    assert listing.header_hints() == ("x dismiss", "enter view", "esc collapse")
+    # The header advertises only what the row honours. `y copy id` is not an
+    # action on the row's state, so it is live over a settled one too (design §3):
+    # the id is the handle an agent's prose names, and it is copyable either way.
+    assert listing.header_hints() == (
+        "x dismiss",
+        "enter view",
+        "y copy id",
+        "esc collapse",
+    )
 
 
 async def test_the_drawer_and_the_bar_stop_counting_lapsed_asks_as_moved_on():
@@ -458,10 +465,21 @@ async def test_the_header_hints_follow_the_row_under_the_cursor():
     rows = ask_rows([_row("a1", "Deploy now?"), _row("t1", "Old one?", status="timed_out")])
     listing = AskQueueList(rows)
     assert _current_id(listing) == "a1"
-    assert listing.header_hints() == ("enter answer", "d decline", "x dismiss", "esc collapse")
+    assert listing.header_hints() == (
+        "enter answer",
+        "d decline",
+        "x dismiss",
+        "y copy id",
+        "esc collapse",
+    )
     listing.action_move(1)
     assert _current_id(listing) == "t1"
-    assert listing.header_hints() == ("x dismiss", "enter view", "esc collapse")
+    assert listing.header_hints() == (
+        "x dismiss",
+        "enter view",
+        "y copy id",
+        "esc collapse",
+    )
 
 
 async def test_x_dismiss_is_acknowledged_at_once(enabled):

@@ -1,13 +1,1 @@
-{
-  "wire.slash.hub": {
-    "role": "command description line in /help and the completion picker",
-    "tone": "terse imperative",
-    "note": "Opens Hub links: per-link subscribe and auto-push policy. No ICU arguments; no placeholders. The key lands ahead of the /hub registry entry; non-en locales carry this en text until the delta translation."
-  },
-  "wire.slash.temporary": {
-    "role": "slash command description in a picker list",
-    "tone": "terse imperative like neighbours",
-    "maxCells": 55,
-    "note": "A temporary chat is left out of history and deleted after it sits idle. 'on, off, status' are the command's literal arguments; keep them verbatim."
-  }
-}
+{"wire.slash.hub":{"role":"command description line in /help and the completion picker","tone":"terse imperative","note":"Opens Hub links: per-link subscribe and auto-push policy. No ICU arguments; no placeholders. The key lands ahead of the /hub registry entry; non-en locales carry this en text until the delta translation."},"wire.slash.temporary":{"role":"slash command description in a picker list","tone":"terse imperative like neighbours","maxCells":55,"note":"A temporary chat is left out of history and deleted after it sits idle. 'on, off, status' are the command's literal arguments; keep them verbatim."},"wire.slash.ask":{"role":"slash command description, shown in /help and the command palette","tone":"imperative, plain; the verb first","maxCells":44,"note":"EN-only context sidecar. The description of `/ask <id>`: opens the ask list on the question with that id (or the list itself when no id is typed). 'that question' is the one whose id was typed — keep the demonstrative, not 'a question'. The list's own word for the surface should match the same locale's ask-list copy. No ICU arguments; the id is not part of the sentence (it is the command's argument)."}}
