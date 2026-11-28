@@ -918,6 +918,7 @@ class GuardConsentHost:
         signature: bool | None,
         source: str,
         expected_digest: str | None = None,
+        after_claim: Callable[[], None] | None = None,
     ) -> AcceptOutcome:
         """Grant exactly the queued row, iff the answer is ADMITTED.
 
@@ -942,6 +943,14 @@ class GuardConsentHost:
 
         The row is CLAIMED (``pending`` -> ``committing``) before anything is
         signed, so exactly one answer can send a grant for it.
+
+        ``after_claim`` is a re-check a surface that holds its OWN decision record runs once
+        the claim is won and before anything is signed (L2d security round 2, S-5). It exists
+        because that record can change between the surface's verification and this claim, and
+        the claim is what makes a deny elsewhere refuse (``require_deny_safe``): only a check
+        made AFTER the claim is ordered against a deny that passed before it. It raises
+        :class:`GuardConsentRefused` to refuse; the claim is then handed back and nothing is
+        sent. Any other error hands the claim back too (never a row stuck ``committing``).
         """
 
         from local_operator.harness.approval import admit_increasing
@@ -957,6 +966,12 @@ class GuardConsentHost:
             # sign it; the member is asked again once the scope is offerable.
             self._release(row)
             return AcceptOutcome("refused", "guard_scope_unavailable")
+        if after_claim is not None:
+            try:
+                after_claim()
+            except BaseException:
+                self._release(row)
+                raise
         return self._commit(row, source=source)
 
     def _claim(
@@ -1068,7 +1083,31 @@ class GuardConsentHost:
             signature=True,
             source=source,
             expected_digest=row.digest,
+            after_claim=lambda: self._require_card_not_denied(approval_id),
         )
+
+    def _require_card_not_denied(self, approval_id: str) -> None:
+        """Refuse a signed accept whose card was denied after ``verify_for_run`` read it.
+
+        S-5, the residual S-1 left on the desktop plane: ``verify_for_run`` reads the card
+        long before the claim, and a deny that lands in between sees the prompt still
+        ``pending`` (so ``require_deny_safe`` lets it through) and writes ``denied``; the claim
+        then succeeded and a grant was sent beside a "denied" card. Re-reading the card UNDER
+        ITS RECORD LOCK after the claim orders this against that deny: a deny that already
+        wrote is seen here, and one that has not yet checked the queue now sees ``committing``
+        and refuses. Either way the card and the consent cannot disagree.
+        """
+
+        from local_operator.network import approvals as A
+
+        with A._record_lock(approval_id, self._config_dir):
+            state = A._load_raw(approval_id, self._config_dir).get("state")
+        if state == A.STATE_DENIED:
+            raise GuardConsentRefused(
+                "approval_decision_conflict",
+                "this Guard request was declined while it was being answered; "
+                "nothing was shared",
+            )
 
     def _record_refusal(self, tenant: str, rev: int, source: str, code: str) -> None:
         if not self._store.exists():

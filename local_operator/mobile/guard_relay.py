@@ -350,12 +350,14 @@ def decline(root: Path, approval_id: str) -> dict[str, Any]:
     )
     if not _prompt_waiting(root, tenant, facts, approval_id):
         raise not_waiting
+    queue_declined = False
     try:
         host = GuardConsentHost(root, transport=None, mirror=False)
         row = host.prompt(tenant, int(facts["collection_rev"]))
         if row is None or row.approval_id != approval_id:
             raise not_waiting
         host.decline(tenant, row.collection_rev, surface="mobile")
+        queue_declined = True
     except GuardConsentRefused:
         # Lost the race: an accept claimed or settled the row between the read above and the
         # transaction (or another surface answered). Nothing was written; say so.
@@ -367,6 +369,13 @@ def decline(root: Path, approval_id: str) -> dict[str, Any]:
     try:
         approvals_plane.deny(root, approval_id)
     except MeshRefusal:
+        if not queue_declined:
+            # S-4 (L2d security round 2): the queue decline raised something untyped (an
+            # unreadable queue), so nothing proves the prompt row is ours. A refusal here may
+            # be the store's per-kind deny guard protecting an accept that already claimed the
+            # row, and answering ``denied`` would put "Don't share" beside a live consent.
+            # A refused deny is only the EXPECTED shape once the queue holds the decline.
+            raise not_waiting from None
         # The queue already holds the decline, which is what the member asked for. The card is
         # usually ``withdrawn`` by that very step (the queue settled it), so a refused deny
         # here is the expected shape, not a failure.

@@ -765,6 +765,94 @@ def test_decline_loses_to_an_accept_that_lands_inside_the_gap_and_never_says_den
     assert client.get(BASE).json()["orgs"][0]["state"] == "sharing"
 
 
+def test_decline_whose_queue_step_raises_untyped_after_an_accept_claimed_the_row_is_409_not_denied(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """S-4, by injection. The queue decline fails with an UNTYPED error (an unreadable queue)
+    at the moment an accept has already claimed and landed the row. The store's per-kind deny
+    guard then refuses the card deny, and the old code read that refusal as the expected
+    "queue already declined" shape and answered ``200 denied`` beside a live consent. A refused
+    deny is only expected once the queue decline SUCCEEDED, so this must now be a 409."""
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    client = _paired()
+    digests = _digests(client, row.approval_id)
+    injected: list[int] = []
+
+    def accept_then_fail(self: Any, *args: Any, **kwargs: Any) -> None:
+        injected.append(
+            _paired().post(f"{BASE}/consents/{row.approval_id}/accept", json=digests).status_code
+        )
+        raise RuntimeError("queue unreadable")
+
+    monkeypatch.setattr(C.GuardConsentHost, "decline", accept_then_fail)
+    response = client.post(f"{BASE}/consents/{row.approval_id}/decline")
+    assert injected == [200]  # the grant landed before the decline's queue step failed
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "approval_decision_conflict"
+    assert A.load_record(row.approval_id, root=root)["state"] != "denied"
+    assert host.consent(TENANT)["state"] == "live"  # type: ignore[index]
+    assert len(fixture_server.guard_requests()) == 1
+
+
+def test_decline_whose_queue_step_raises_untyped_but_nothing_claimed_still_denies(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """The other half of S-4: an unreadable queue with NO accept in flight keeps the old,
+    safe behaviour (the card deny stands), so the fix does not turn every queue hiccup into a
+    refused "Don't share"."""
+
+    _team(monkeypatch)
+    _host_, row = _queued(root, fixture_server)
+
+    def unreadable(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("queue unreadable")
+
+    monkeypatch.setattr(C.GuardConsentHost, "decline", unreadable)
+    response = _paired().post(f"{BASE}/consents/{row.approval_id}/decline")
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "denied"
+    assert A.load_record(row.approval_id, root=root)["state"] == "denied"
+    assert fixture_server.guard_requests() == []
+
+
+def test_a_deny_landing_between_the_cards_verification_and_the_claim_stops_the_grant(
+    root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
+) -> None:
+    """S-5, the 2 ms interleave, deterministic. ``verify_for_run`` has read the signed card
+    (approved); then a deny lands while the queue row is still ``pending`` -- exactly when the
+    store's per-kind guard lets it through -- and only then does the accept's claim win. The
+    old code sent the grant beside a card that says "denied". The post-claim re-read under the
+    record lock must refuse, hand the claim back and send nothing."""
+
+    from local_operator.server.utils import desktop_approvals as plane
+
+    _team(monkeypatch)
+    host, row = _queued(root, fixture_server)
+    client = _paired()
+    digests = _digests(client, row.approval_id)
+    real_claim = C.GuardConsentHost._claim  # noqa: SLF001
+    denied: list[str] = []
+
+    def deny_then_claim(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if not denied:
+            denied.append(plane.deny(root, row.approval_id)["state"])
+        return real_claim(self, *args, **kwargs)
+
+    monkeypatch.setattr(C.GuardConsentHost, "_claim", deny_then_claim)
+    response = client.post(f"{BASE}/consents/{row.approval_id}/accept", json=digests)
+    assert denied == ["denied"]  # the deny won the card before the claim
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "approval_decision_conflict"
+    assert fixture_server.guard_requests() == []  # nothing was sent
+    assert A.load_record(row.approval_id, root=root)["state"] == "denied"
+    assert host.consent(TENANT) is None and host.sticky(TENANT) is None
+    pending = host.prompt(TENANT, 1)
+    # The claim was handed back (never stranded ``committing``).
+    assert pending is not None and pending.state == C.PROMPT_PENDING
+
+
 def test_the_stores_deny_refuses_a_guard_card_whose_grant_is_in_flight_or_landed(
     root: Path, monkeypatch: pytest.MonkeyPatch, fixture_server: Any  # noqa: F811
 ) -> None:
