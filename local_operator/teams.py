@@ -676,9 +676,31 @@ class Team(BaseModel):
         parts.append(
             "Own routine bounded allocations within authorization; escalate genuine "
             "access/security/destructive/preferences/material scope only. One stable "
-            "session ID owner and durable receipt; status on material deltas. Collect "
+            "session ID owner and durable receipt; status on material deltas (open "
+            "operator gates always count). Collect "
             "initial review streams before one remediation commit. Read "
             "guide://delivery for preflight and convergence detail."
+        )
+        # Same rule as ``agent_seeds/manager.md`` (custom manager roles do not
+        # read the seed): a manager closed a turn "nothing needs you" while
+        # approvals that only the operator could give sat parked as "intentional
+        # holds" with no ask queued. A wake is not an ask, and a status that
+        # omits an open operator gate hides the one thing only the operator can
+        # unblock.
+        parts.append(
+            'Every end-of-turn status carries an "Operator-gated" section, '
+            "re-derived from the todo/project ledger that turn. File each blocked "
+            "item as: (i) operator, OPEN ask <id>; (ii) operator, NO ask -> `ask` "
+            "now if you hold `ask` (exact question, options, "
+            "recommendation, long timeout), else state it in your closing as an "
+            "open question for the operator (decision, recommendation); never "
+            "park it silently. One ask per gate: cite its id, never ask per wake "
+            "or status; (iii) external: "
+            "<party>, chase <when/how>; (iv) deliberately not started: <why>. Say "
+            '"nothing needs you" only when (i) and (ii) are both empty. Todo '
+            "`block` reasons start with `operator:`, `external:` or `deliberate:`. "
+            'A wake on an operator gate says "re-check; if still gated, ask or '
+            'cite the open ask", never "report quietly".'
         )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "

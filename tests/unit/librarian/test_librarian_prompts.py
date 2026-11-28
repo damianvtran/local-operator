@@ -29,7 +29,7 @@ def test_the_system_prompt_has_a_library_section() -> None:
     assert "global, long-term file catalog" in text
     assert "Canvas Files is session-local" in text
     assert "Produced and highlighted files enter it" in text
-    assert "prefer durable deliverables over scratch" in text
+    assert "prefer durable deliverables to scratch" in text
     assert "Use `library` for names, descriptions and tags" in text
     assert "the Librarian keeps the taxonomy" in text
 

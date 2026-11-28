@@ -87,7 +87,13 @@ def test_the_has_console_note_teaches_the_ask_handover() -> None:
     job back to the user. Mutation-verified: reverting the note to the old
     prohibition fails this cell on both halves (review round 1, M2)."""
     note = " ".join(render_template("system.md", {"has_console": True}).split())
-    assert "ask for the password as a secret question" in note
+    # The trimmed wording shares one `ask` verb across the command and the
+    # password ("ask with the exact command and its effect, and for the password
+    # as a secret question"); pin the sentence whole so the password half can't
+    # be dropped while the command half survives.
+    assert (
+        "`ask` with the exact command and its effect, and for the password as a " "secret question"
+    ) in note
     assert "then relay it with `input secret_ref=<key>`" in note
     assert "never attempt a password yourself" not in note
 

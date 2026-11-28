@@ -55,10 +55,21 @@ def _fields(**overrides):
 # duty for an exception worktree (+80 chars each, measured the same way:
 # reviewer 3655 -> 3735, qa-tester 2694 -> 2774); readers had left checkouts
 # behind and 33 in session pads because no reader surface said where or when.
+# Operator-gated reporting (2026-11-27): the manager seed gained the
+# "Operator-gated" status rule (+~760 chars: classification (i)-(iv), the
+# `nothing needs you` guard, block-reason prefixes, the wake wording) after a
+# manager closed turns with "Nothing needs you right now" while approvals only
+# the operator could give sat parked as "intentional holds" with no ask queued.
+# Measured with `len(body.split('---',2)[2].strip())`: manager 3726 -> 4485. The
+# rule is a reporting invariant, not explanation, so the budget moves with it
+# rather than the rule being trimmed to fit.
+# Review round 1 (MAJOR-1): the (ii) branch must also cover a manager that holds
+# no `ask` (server/exec/scheduler/subagent runs) and say one ask per gate
+# (+233 chars, same measurement: manager 4485 -> 4718), so 4500 -> 4750.
 BUDGETS = {
     "coder": 2800,
     "reviewer": 3740,
-    "manager": 3750,
+    "manager": 4750,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
