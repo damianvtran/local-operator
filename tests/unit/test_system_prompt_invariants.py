@@ -56,10 +56,11 @@ def test_settling_a_stale_ask_is_stated_in_the_queued_arm_only(queued: str) -> N
     assert "settle every ask the user's messages answered" in queued
     assert "(`moot`: they dropped or handed off the work the question was about" in queued
     assert "or you decided it under a timeout)" in queued
-    assert (
-        "When you report open asks, settle the ones the user's messages answered or made "
-        "irrelevant in that same turn"
-    ) in queued
+    # One sentence covers both moments (ending a turn, reporting open asks) —
+    # merged to pay for the operator-gated-items rule inside the start-context
+    # budget without dropping either trigger or the same-turn requirement.
+    assert "Before you end a turn or report open asks, settle every ask" in queued
+    assert "or you decided it under a timeout), in that same turn" in queued
     assert (
         "An ask the user has not addressed stays open, however old it is; if unsure, leave it open"
     ) in queued
@@ -76,7 +77,7 @@ def test_settling_a_stale_ask_is_stated_in_the_queued_arm_only(queued: str) -> N
     inline = _flat({"ask_queued": False, "ask_inline": True})
     for line in (
         "settle every ask the user's messages answered",
-        "settle the ones the user's messages answered",
+        "or report open asks, settle every ask",
         "however old it is",
         "An answer, even if they used their own words",
         "stays valid for a day",

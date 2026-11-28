@@ -534,7 +534,7 @@ def test_system_md_denies_the_ambiguity_escape_hatch_to_technical_forks() -> Non
     assert "the words of the request have two plausible readings" in text
     # And the leak is closed by name.
     assert "not that you have found several ways to build it" in text
-    assert "Two technical approaches is a choice you are equipped to make" in text
+    assert "Two technical approaches is your choice; take the reversible one" in text
     # The tie-breaker that keeps a close call from becoming a question anyway:
     # uncertainty is discharged into a reversible choice plus a note, which is
     # the behaviour the picker was being misused to get.
@@ -2339,7 +2339,7 @@ def test_wake_and_ask_clauses_render_only_with_their_tools() -> None:
         "system.md", {**base, "has_notify": True, "has_wake_monitor": False, "has_ask": False}
     )
     assert "arm a wake or monitor" not in bare
-    assert "Re-check each `block`ed item before finishing. A `block` that waits" in bare
+    assert "Re-check each `block`ed item before finishing. A `block` waiting" in bare
     assert "(ask notifies)" not in bare
     assert "never progress. Its title must say what happened" in bare
 
@@ -2408,28 +2408,27 @@ def test_system_md_requires_an_ask_for_a_block_that_waits_on_the_operator() -> N
     full = render_template(
         "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": True}
     )
-    assert "A `block` that waits on the operator must be named in your closing" in full
+    assert "A `block` waiting on the operator must be named in your closing" in full
     assert (
-        "covered by an open `ask` (ask now; one per gate, cite it after); "
-        "a wake is not a substitute." in full
+        "have an open `ask` (ask now; one per gate, cite after); a wake is no substitute." in full
     )
 
-    # Without a wake tool the "wake is not a substitute" clause has nothing to
+    # Without a wake tool the "wake is no substitute" clause has nothing to
     # contradict, and without `ask` the prompt must not tell the model to queue
     # one — it can still be told to name the wait in its closing.
     no_wake = render_template(
         "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": False}
     )
-    assert "covered by an open `ask` (ask now; one per gate, cite it after)." in no_wake
-    assert "wake is not a substitute" not in no_wake
+    assert "have an open `ask` (ask now; one per gate, cite after)." in no_wake
+    assert "wake is no substitute" not in no_wake
     no_ask = render_template(
         "system.md", {**base, "has_todo": True, "has_ask": False, "has_wake_monitor": False}
     )
-    assert "waits on the operator must be named in your closing." in no_ask
+    assert "waiting on the operator must be named in your closing." in no_ask
     assert "open `ask`" not in no_ask.split("Keep the todo list honest", 1)[1].split("\n\n", 1)[0]
 
     # The rule belongs to the todo paragraph: no todo tool, no `block`.
-    assert "waits on the operator" not in render_template(
+    assert "waiting on the operator" not in render_template(
         "system.md", {**base, "has_todo": False, "has_ask": True}
     )
 
