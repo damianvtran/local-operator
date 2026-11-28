@@ -311,6 +311,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "It is never an entry of a session directory, so nothing under this name "
         "belongs in the session copy set.",
     ),
+    "local_operator/network/pool_drain.py": (
+        2,
+        "``FLUSHED_DIRNAME`` ('pool-flushed') and ``FLUSHED_NAME`` ('flushed.json') name "
+        "this device's own drain bookkeeping under <config>/network/pool-flushed/<id>/, "
+        "never an entry of a session directory. The marker records what ANOTHER device "
+        "has pulled from this one, so travelling with the session would carry a peer's "
+        "claim about a copy this device is not the holder of.",
+    ),
     "local_operator/team_bridge/responders/pinned_credentials.py": (
         2,
         "``RESPONDER_ROLE_NAME`` ('radient-responder-readonly') is an IAM role name and "

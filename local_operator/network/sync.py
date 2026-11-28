@@ -1380,6 +1380,14 @@ def _member_stamps(
 #: agree on it; spelling it once is what ``whole_transcript_for`` is for.
 COPY_PURPOSE_MOVE = "move"
 
+#: The wire value a destination sends when it is a FLUSH (``mesh-compute-pool.md``
+#: §6.1, R22): the copy is brought to the source's frontier, the destination keeps its
+#: own copy, nothing is retired. It carries the SAFE REGION rather than the whole
+#: transcript (the source is still writing — see ``_safe_region``) like a replica, but
+#: it is NOT a replica holder: the destination OWNS the id (``home_device``), so the
+#: owner must not record it as a device to push cuts to (§6.5 rule 1).
+COPY_PURPOSE_FLUSH = "flush"
+
 
 def whole_transcript_for(purpose: str) -> bool:
     """Does a copy made for ``purpose`` carry the transcript WHOLE?
@@ -4737,13 +4745,18 @@ def _plan(server: "RelayServer", link: Any, frame: dict[str, Any]) -> dict[str, 
         )
     except SyncRefused as exc:
         raise _refusal(exc.code, exc.message) from exc
-    if str(frame.get("purpose") or "replica") == "move":
+    if str(frame.get("purpose") or "replica") in (COPY_PURPOSE_MOVE, COPY_PURPOSE_FLUSH):
         # A MOVE'S DESTINATION IS NOT A REPLICA HOLDER (review round 1, MINOR 1).
         # Recording it here made a REFUSED move rewrite the source's ``mesh.json``,
         # put the destination in ``replicas`` so the owner's watcher then pushed a
         # copy of the session to it indefinitely, and told the mesh that a device
         # which is about to OWN the id also holds a replica of it. The move records
         # its destination where that belongs: the handoff journal and the tombstone.
+        #
+        # A FLUSH IS IN THE SAME SET for the second half of that argument only: its
+        # destination is the session's ``home_device`` — the owner — so recording it
+        # as a holder would make the pool member push cuts to the device it is
+        # already flushing to, and would outlive the member that wrote the row.
         return plan
     # THIS REQUEST IS HOW THE OWNER LEARNS WHO HOLDS A REPLICA, and it is the only
     # way it can: the holder asks, so the stamp records it, so the watcher has

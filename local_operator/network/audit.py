@@ -207,6 +207,21 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # changed. A membership-class event: an incident review asking "how could
         # that device move a session here" is answered by exactly this record.
         "member_capabilities_changed",
+        # THE POOL'S PRE-SPINDOWN DRAIN (``mesh-compute-pool.md`` §3.4, §6.2; emitted
+        # by ``pool_drain``). A member that is about to power off is a membership fact
+        # and a data-loss fact at once: ``drain_started`` names the sessions the drain
+        # took on, ``pool_member_expired`` says the barrier completed, and
+        # ``drain_barrier_timeout`` is the ONLY durable record of what was still owed
+        # to a home that never answered — the pod is gone by the time anyone asks.
+        "drain_started",
+        "pool_member_expired",
+        "drain_barrier_timeout",
+        # The two session rows a drain writes on the HOME side: the copy arrived (with
+        # the reason, so a reader can tell a spin-down flush from a replica pull) and
+        # the placement it left behind. ``reason: "drain"`` is what makes a
+        # spin-down's rewrite auditable (§4 point 3).
+        "session_sync_completed",
+        "session_placement_changed",
         # Learning a membership change from a peer is a MEMBERSHIP event: it is how
         # a member admitted after this device joined becomes visible here at all
         # (Q-R2-1), so an incident review that could not see it would read a
@@ -585,6 +600,21 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "membership_learned": frozenset({"source", "added", "members", "members_digest"}),
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
+    # The pool member's lifecycle and the drain's outcome (``pool_drain``). Session
+    # ids, counts and the bound that was hit — never a byte count from a copy that
+    # did not finish, because a number a reader might sum is worse than no number.
+    # ``trigger`` is the design's closed set (idle|expiry|user|error) and ``cut``
+    # names the sessions whose in-flight turn the grace ended.
+    # ``lifecycle_written`` is the one non-observational field: ``False`` says the
+    # member row could not be moved to ``draining``, so placements were still being
+    # admitted while this drain ran (``pool_drain``, review round 1 MAJOR-3).
+    "drain_started": frozenset({"member", "sessions", "grace_s", "trigger", "lifecycle_written"}),
+    "pool_member_expired": frozenset({"member", "sessions", "cut"}),
+    "drain_barrier_timeout": frozenset({"member", "pending", "pending_count", "deadline_s", "cut"}),
+    "session_sync_completed": frozenset({"peer", "reason", "mode", "bytes", "placement"}),
+    "session_placement_changed": frozenset(
+        {"placement_before", "placement_after", "policy", "reason"}
+    ),
     "member_left": frozenset({"epoch"}),
     # ``recorded`` appears only as ``False``: the drop ran but the self-tombstone
     # could not be saved (relay ``_apply_verified_removal``, #4394 review R2-2).
@@ -1019,6 +1049,14 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "trust_changed",
         "member_removed",
         "member_admitted",
+        # A pool member's lifecycle is the record an incident reads to answer "which
+        # sessions were on the pod that powered off, and did the barrier complete".
+        # The pod does not survive to be asked, so these rows are on disk before the
+        # instance is reaped — and ``drain_barrier_timeout`` is the only account of a
+        # home that never acked.
+        "drain_started",
+        "pool_member_expired",
+        "drain_barrier_timeout",
         # A widened authority lost to a power cut would leave a device able to
         # move or delete sessions here with no record of who allowed it.
         "member_capabilities_changed",

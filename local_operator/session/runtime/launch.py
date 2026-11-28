@@ -1519,7 +1519,10 @@ async def engage_runtime(
     # The hand-off is off, the file is absent, and a thread hand-off to answer it
     # costs more than the answer: this is on the path of every engage, including
     # every message a user sends to a cold session.
-    from local_operator.session.placement import handoff_guard_refusal
+    from local_operator.session.placement import (
+        handoff_guard_refusal,
+        pool_guard_refusal,
+    )
 
     # RECOVERY FIRST, REFUSAL SECOND (review round 1, M-3). A journal entry left by
     # a relay that died is not a live handoff, and the guard cannot tell the two
@@ -1535,6 +1538,27 @@ async def engage_runtime(
     handed_off = handoff_guard_refusal(config_dir, session_id)
     if handed_off:
         raise RuntimeStartupError(handed_off)
+
+    # -----------------------------------------------------------------
+    # INV-1, GUARD 2: A POOL SESSION'S HOME COPY MUST NOT GET A RUNTIME WHILE ITS
+    # MEMBER IS ALIVE (``mesh-compute-pool.md`` §6.5 rule 2).
+    # -----------------------------------------------------------------
+    # The guard above refuses a MOVE in flight; this refuses a REMOTE OWNER that has
+    # not finished leaving. A pool ``flush`` holds no fence (§6.1), so the member
+    # keeps appending while home's copy catches up — engaging home's side during that
+    # window is the same two writers, one directory apart. It sits HERE for the same
+    # reason: this is the single arbitration point every engage path uses, so one
+    # guard covers the local viewer, the phone daemon, a wake and the relay's own
+    # ``net_session_engage``.
+    #
+    # THE COST ON THE ORDINARY PATH IS ONE ``stat``, and that is the whole budget: a
+    # session with no stamp (every install that never joined a mesh) answers at the
+    # first read, and the network store is only opened for a stamp that names a
+    # ``pool`` placement. The read is synchronous for the handoff guard's reason —
+    # a thread hand-off to answer a missing file costs more than the answer.
+    pool_held = pool_guard_refusal(config_dir, session_id)
+    if pool_held:
+        raise RuntimeStartupError(pool_held)
 
     # Spawn cwd is resolved only if a candidate actually has to be started.
     if not getattr(work, "command_id", ""):

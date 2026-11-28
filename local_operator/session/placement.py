@@ -127,6 +127,26 @@ class MeshStamp:
     #: ONLY field that decides INV-1's routing question (§1.2).
     home_device: str = ""
     placement: SessionPlacement = field(default_factory=SessionPlacement)
+    #: THE POOL MEMBER the runtime is placed on, when ``placement.mode`` is
+    #: ``pool`` (``mesh-compute-pool.md`` §4 A8, §6.5 rule 2). Empty otherwise.
+    #:
+    #: WHY IT IS BESIDE THE PLACEMENT AND NOT INSIDE IT. ``SessionPlacement`` is the
+    #: shape mobility §5.2 fixes and the CATALOGUE ROW publishes verbatim, so a field
+    #: there changes the published ``lop sessions --json`` row for every session on
+    #: every install. It also could not be ``home_device``: §4.2 point 2 is explicit
+    #: that home is never the member ("a home that can die is not a home"), so on a
+    #: pool-placed session no placement field names the device running it. The stamp
+    #: is the durable carrier for facts the record has no room for — ``origin`` and
+    #: ``replicas`` are the two beside it — and this is the third.
+    #:
+    #: WRITTEN BY THE POOL PRODUCER (the placement request, E2) and CLEARED by the
+    #: drain's rewrite to ``local`` (``network/pool_drain._rewrite_placement_local``),
+    #: which is what makes :func:`pool_guard_refusal` lift when the member is gone.
+    #: THE MEMBER'S OWN COPY CARRIES ITS OWN ID HERE: §4.2 point 2 makes home the
+    #: non-member end, so a stamp whose ``pool_member`` equals the device reading it
+    #: is the copy the member is running, and the guard allows that engage
+    #: (``_MemberState.is_self``) rather than locking a device out of its own session.
+    pool_member: str = ""
     origin: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     version: int = MESH_STAMP_VERSION
@@ -156,6 +176,7 @@ class MeshStamp:
             "network_id": self.network_id,
             "home_device": self.home_device,
             "placement": self.placement.to_json(),
+            "pool_member": self.pool_member,
             "origin": dict(self.origin),
             "created_at": self.created_at,
             "replicas": list(self.replicas),
@@ -206,6 +227,12 @@ class MeshStamp:
             network_id=str(data.get("network_id") or ""),
             home_device=home,
             placement=placement,
+            # A stamp from a build that predates the pool writes none, and had no
+            # pool producer — so the default is both lenient and true. Not parsed
+            # through a validator: a device id is an opaque name here, and this
+            # field is a pointer to a member row the STORE validates, never
+            # authority of its own.
+            pool_member=str(data.get("pool_member") or ""),
             origin=dict(origin) if isinstance(origin, dict) else {},
             created_at=float(data.get("created_at") or 0.0),
             version=_as_int(data.get("version")) or MESH_STAMP_VERSION,
@@ -498,6 +525,167 @@ def handoff_guard_refusal(config_dir: Path, session_id: str) -> str:
         )
     device = str(entry.get("to_name") or entry.get("to_device") or "another device")
     return f"This conversation is being handed to {device}."
+
+
+def pool_guard_refusal(config_dir: Path, session_id: str) -> str:
+    """The sentence that stops a POOL session's home copy being engaged, or ``""``.
+
+    THE SECOND ADOPTION RULE AT HOME (``mesh-compute-pool.md`` §6.5 rule 2), and it
+    exists because a ``flush`` holds NO FENCE (§6.1): a pool session's copy at home
+    is brought up to the member's frontier while the member keeps writing, so
+    engaging it locally while the member is still alive is exactly the two-writer
+    situation the fence exists to make impossible everywhere else. The handoff guard
+    above refuses a move in flight; this refuses a REMOTE OWNER that has not
+    finished leaving.
+
+    ``""`` ALLOWS — three cases:
+
+    * no stamp, or ``placement.mode != "pool"``, or a stamp that names no member: a
+      session no pool produced. This is every install that never joined a mesh, and
+      it costs one failed open (the sidecar is absent).
+    * THIS DEVICE IS THE MEMBER (``stamp.pool_member`` names us): §4.2 point 2 makes
+      home the non-member end, so the stamp this describes is the member's OWN copy
+      of the session it is running. Refusing there would lock the device out of the
+      conversation it is appending to — the guard is about a second writer, and the
+      member is the first one.
+    * the member's row is gone or ``expired``: it is a tombstone or a device this
+      install never admitted. Nothing is writing there any more, which is the entire
+      point of ``expired`` — ``/resume <id>`` must engage cleanly at home with the
+      same session id (§6.4's first guarantee).
+
+    What is left is refused UNCONDITIONALLY: any member row that still reads
+    ``active``, ``provisioning`` or ``draining``. A synced copy is NOT evidence that
+    the member stopped writing — the frontier a ``flush`` acks is the member's
+    position at that instant, and it appends after it (review round 1, MAJOR-1). The
+    two ways out are the two above: the drain rewriting home's stamp to ``local``
+    (§6.5 rule 4), or the member's row reaching ``expired``. The sentence names the
+    member and its lifecycle, because the operator's next move depends on that.
+
+    Empty string, never ``None``, for the reason :func:`handoff_guard_refusal`
+    states: the caller's test is truthiness and a ``None`` reads as "no refusal".
+    """
+    stamp = read_stamp(config_dir, session_id)
+    if stamp is None or stamp.placement.mode != "pool":
+        return ""
+    member = stamp.pool_member
+    if not member:
+        return ""
+    try:
+        state = _member_state(config_dir, stamp, member)
+    except _MembershipUnreadable as exc:
+        # FAIL CLOSED, the handoff guard's asymmetry: a refusal costs a sentence and
+        # `lop network show`; proceeding can put a second writer on a conversation
+        # that a live pod is still appending to.
+        return (
+            "Local Operator could not read this device's network records, so it cannot "
+            f"tell whether the pool member holding this conversation is still running ({exc}). "
+            "The conversation was not started. Repair or remove the file named above, "
+            "then try again."
+        )
+    if state.is_self or state.lifecycle in ("", "expired"):
+        return ""
+    return (
+        f"This conversation is running on pool member {member}, which is still {state.lifecycle}. "
+        "Starting it here would give the conversation two writers, because that member keeps "
+        "writing until it finishes draining. Wait for it to expire (every flush lands in this "
+        "copy first), then open the conversation again."
+    )
+
+
+class _MembershipUnreadable(Exception):
+    """The network store exists and cannot be read; the guard fails closed."""
+
+
+@dataclass(frozen=True)
+class _MemberState:
+    """What this device's own store says about the member a pool stamp names."""
+
+    #: The member row's ``lifecycle``, or ``""`` when there is no row.
+    lifecycle: str = ""
+    #: ``stamp.pool_member`` is THIS device, i.e. the copy the member is running.
+    is_self: bool = False
+
+
+def _member_state(config_dir: Path, stamp: MeshStamp, member: str) -> _MemberState:
+    """This device's view of the named member. Raises when it cannot be read.
+
+    READ FROM THIS DEVICE'S STORE, which is the only authority the guard has: a
+    peer's claim about its own lifecycle crosses the wire and is exactly what a
+    two-writer race would lie about. A member row is written by admission and by
+    revocation, both local events.
+
+    TWO FAILURES THAT LOOK ALIKE AND MUST NOT: a record that is ABSENT says this
+    device never joined the network (no row is possible, so allow); a record that is
+    THERE and cannot be parsed is the state in which this device least knows whether
+    a writer is live, and the second writer is the failure the guard exists for — so
+    it fails closed (review round 1, MAJOR-4). ``record_path`` is what tells the two
+    apart, because ``store.load`` maps both to ``FileNotFoundError``.
+    """
+    from local_operator.network import store
+    from local_operator.network.projection import self_device_id
+    from local_operator.network.types import MeshRefusal
+
+    network_id = stamp.placement.network_id or stamp.network_id
+    if network_id:
+        try:
+            # THE ID COMES FROM A STAMP, i.e. from bytes another device sent, and it
+            # becomes a path component in ``store.record_path``. An edited
+            # ``mesh.json`` naming ``../..`` would otherwise make this read outside
+            # ``<config>/network/networks/`` (review round 1, MINOR-3).
+            store.safe_component(network_id)
+        except MeshRefusal as exc:
+            raise _MembershipUnreadable(
+                f"the network id on this session's stamp ({network_id!r}) is not a safe "
+                f"storage name: {exc}"
+            ) from exc
+    try:
+        records = (
+            [store.load(network_id, config_dir)] if network_id else store.list_networks(config_dir)
+        )
+    except FileNotFoundError as exc:
+        record_file = store.record_path(network_id, config_dir) if network_id else None
+        if record_file is not None and record_file.exists():
+            raise _MembershipUnreadable(
+                f"the network record {record_file.name} exists but could not be parsed"
+            ) from exc
+        # A QUARANTINED RECORD IS THE SAME ANSWER AS A CORRUPT ONE (round 2, MINOR-2):
+        # ``store.list_networks`` moves an unparsable record to
+        # ``<id>.json.corrupt``, so the next read finds no ``record_path`` at all and
+        # would read "this device never joined" for a record it had and cannot read.
+        if record_file is not None:
+            quarantined = record_file.with_name(record_file.name + store.CORRUPT_SUFFIX)
+            if quarantined.exists():
+                raise _MembershipUnreadable(
+                    f"the network record {record_file.name} could not be parsed and was "
+                    f"set aside as {quarantined.name}"
+                ) from exc
+        return _MemberState()
+    except (OSError, ValueError, TypeError) as exc:
+        # A record that IS there and cannot be interpreted is the other answer, and the
+        # handoff guard's asymmetry applies: refusing costs a sentence, proceeding can
+        # spawn the second writer this whole module exists to prevent.
+        raise _MembershipUnreadable(str(exc)) from exc
+    for record in records:
+        row = record.member(member)
+        # THE RECORD'S ID WHEN IT HAS ONE, the identity file when it does not (a record
+        # written by an older build): ``self_device_id`` reads that identity without
+        # minting one, so a read path still creates nothing.
+        self_device = str(record.self_device_id or "") or self_device_id(config_dir)
+        if row is not None:
+            # THE ROW'S ID, NOT THE STAMP'S (round 2, MAJOR-1). ``record.member``
+            # resolves ``previous_ids``, so a stamp written before a key rotation names
+            # the id this device had THEN. Comparing that id with ``self_device`` is
+            # what refused a member its own copy, i.e. locked the one writer out of the
+            # conversation it is appending to; the row's ``device_id`` is the id this
+            # device answers to now.
+            return _MemberState(
+                lifecycle=str(row.lifecycle),
+                is_self=bool(self_device) and row.device_id == self_device,
+            )
+        if self_device == member:
+            # The member's own copy, with its row already pruned: still its own session.
+            return _MemberState(is_self=True)
+    return _MemberState()
 
 
 def _as_int(value: Any) -> int:

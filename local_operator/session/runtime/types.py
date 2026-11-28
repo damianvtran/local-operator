@@ -1217,6 +1217,30 @@ SIGNAL_DRAIN_CAUSE = "runtime-shutdown"
 #: being narrated as a stop.
 BUILD_DRAIN_OVERDUE_CAUSE = "runtime-overdue"
 
+#: The CAUSE token a POOL MEMBER's pre-spindown drain commits its sessions with
+#: (``mesh-compute-pool.md`` §3.6, ``network/pool_drain.py``). The member's relay
+#: signals each placed runtime with this reason and the runtime enters the ordinary
+#: drain ladder above — it is ONE MORE TRIGGER on that ladder, never a second one.
+#:
+#: WHY IT IS A TOKEN OF ITS OWN AND NOT ``SIGNAL_DRAIN_CAUSE``. The two share a
+#: shape — a signal arrives, the turn in flight finishes or is cut, a successor
+#: starts next time — which is why :func:`leaving_phrase_for_frame` resolves BOTH to
+#: :data:`LEAVING_ON_SIGNAL` rather than minting a fourth phrase: the four consumer
+#: tables (``tui.app._DRAIN_NOTICES``, ``tui.widgets.info_panel._LEAVING_SHORT``,
+#: ``session.errors._TRIGGER_FOR_LEAVING``, ``cli.LEAVING_COLUMN_WIDTH``) key on a
+#: phrase whose trigger is one of the two established ones, and a user-visible cause
+#: additionally needs a sentence translated into every supported language.
+#:
+#: So THIS token is what the drain COMMITS with on the wire, and the distinction
+#: survives durably in the drain's own audit rows (``drain_started``,
+#: ``pool_member_expired``, ``drain_barrier_timeout``), which name the member and the
+#: sessions. The turn journal records the cut under the token the runtime itself
+#: writes for a signalled cut — ``pool_drain._record_drain_cut`` says why.
+#:
+#: The bound in :data:`LEAVING_ON_SIGNAL` stays true because the pool's grace is set
+#: to the same ``SIGNAL_DRAIN_S`` (``pool_drain.DEFAULT_DRAIN_GRACE_S``).
+PRE_SPINDOWN_DRAIN_CAUSE = "pre_spindown"
+
 #: The ``reason`` a drain frame is announced with, as the producers write it, and
 #: neither literal is the one you would guess: ``process._commit_to_leaving``
 #: announces its ``label`` as the frame's ``reason`` (``announce(label, …)``),
@@ -1239,6 +1263,11 @@ BUILD_DRAIN_OVERDUE_CAUSE = "runtime-overdue"
 #:   too says a successor is coming.
 _SIGNAL_REASON_LABELS = ("shutdown-drain",)
 _BUILD_REASON_LABELS = ("stale-build", "retiring")
+#: A pool member's drain announces itself with the cause token itself, because the
+#: pool's producers are this branch's own (there is no released build that spells it
+#: differently). It resolves to the signal phrase: the viewer gets the existing
+#: leaving notice, with no mesh-specific error (``mesh-compute-pool.md`` §3.6).
+_PRE_SPINDOWN_REASON_LABELS = (PRE_SPINDOWN_DRAIN_CAUSE,)
 
 
 def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
@@ -1247,8 +1276,8 @@ def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
     FOR THE FRAMES THAT CARRY NO ``leaving`` PHRASE, and only for them. The
     phrase is the primary carrier and a runtime that writes it says exactly
     which trigger committed the drain; this answers the same question for the
-    runtimes that do not, which is one population with two members and neither
-    of them served correctly by the app's old fallback:
+    runtimes that do not, which is one population and never served correctly by
+    the app's old fallback:
 
     * a runtime older than this branch — a RELEASED build, whose only draining
       announce is the stale-build handover. Its build sentence is true, and this
@@ -1260,6 +1289,9 @@ def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
       false, and the record saying the opposite at the same moment (design round
       4, D9; agent review round 4, MAJOR-1). Their ``reason`` separates the two
       arms, so this returns the phrase that matches the trigger that committed.
+    * a pre-spindown drain — this branch's pool producer, announcing
+      ``reason: pre_spindown`` (``mesh-compute-pool.md`` §3.6). It takes the
+      signal phrase deliberately: see :data:`PRE_SPINDOWN_DRAIN_CAUSE`.
 
     Anything this cannot place returns ``""``, which the app paints with its
     neutral sentence: a trigger nobody has established must not inherit another
@@ -1269,7 +1301,7 @@ def leaving_phrase_for_frame(reason: str, to: str = "") -> str:
     own departure hands back (agent review round 5, MINOR-1).
     """
     words = (reason or "").strip()
-    if words.startswith(_SIGNAL_REASON_LABELS):
+    if words.startswith(_SIGNAL_REASON_LABELS) or words.startswith(_PRE_SPINDOWN_REASON_LABELS):
         return LEAVING_ON_SIGNAL
     if to or words.startswith(_BUILD_REASON_LABELS):
         # ``to`` is the second, independent corroboration: a build handover
