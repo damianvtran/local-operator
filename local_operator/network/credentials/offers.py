@@ -68,6 +68,7 @@ is imported inside the functions that need it.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -729,6 +730,54 @@ def owner_default_shares(items: list[dict[str, Any]]) -> list[str]:
     """The default decision: the full offered set (§3.3 — the default is what was
     offered, so a y/N-only flow behaves as "accept what was offered")."""
     return sorted(served_keys(items))
+
+
+def is_pool_excluded_key(key: str) -> bool:
+    """Whether ``key`` is DEVICE-scoped and so may never reach a pool member (§3.5).
+
+    ONE ADAPTER, TWO SPELLINGS, which is why this is not
+    :func:`local_operator.network.credentials.github.is_github_key`: the GitHub
+    adapter's own placement row is ``github``, and its installation key is the
+    ``lop secret`` store row ``secret:GITHUB_APP`` (``github.APP_SECRET_NAME``) —
+    an ordinary class-2 store secret by every other rule this package has, and
+    therefore enumerated, offered and grantable like any other. Widening
+    ``is_github_key`` to cover the secret instead would move the device-scope
+    decision that EVERY device member's grant relies on (``relay`` writes
+    ``scope="device"`` from it, and the broker refuses ``CODE_DEVICE_SCOPE`` from
+    it); the pool exclusion is a narrower question about one member kind, so it
+    gets its own name (QA round 1, Q1: only the first spelling was excluded, so a
+    pool invite could be shown — and then granted — the installation key).
+
+    The secret name is compared without regard to case. Store names are
+    operator-typed, and withholding is the closed direction: a pool member shown
+    one key too few is a receipt that says less, never a grant that reaches
+    further.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    text = str(key or "")
+    if github_mod.is_github_key(text):
+        return True
+    return text.upper() == f"SECRET:{github_mod.APP_SECRET_NAME}"
+
+
+def session_scoped_keys(keys: Iterable[str]) -> list[str]:
+    """``keys`` minus the ones a grant can only make DEVICE-bound — every GitHub key.
+
+    WHY THIS EXISTS AS ONE FUNCTION. A pool member borrows session-scoped model
+    credentials and may never hold a device-scoped one
+    (``mesh-compute-pool.md`` §3.5), and that decision is made at two write sites —
+    the relay's pairing admission (``relay._pool_offer_items`` /
+    ``relay._grant_pair_shares``) and onboarding's provisioning write
+    (``onboard.step_provision``). The rule itself lives in
+    :func:`is_pool_excluded_key` (both spellings of the adapter's credential) and
+    in the placement document's ``grant``; restating "not github" at each site is
+    how one of them ends up still offering a key the other refuses.
+
+    Order is preserved, so a caller can filter a list in place and keep the offer's
+    own ordering.
+    """
+    return [key for key in keys if not is_pool_excluded_key(key)]
 
 
 # ---------------------------------------------------------------------------

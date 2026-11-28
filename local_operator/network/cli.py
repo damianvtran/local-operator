@@ -271,6 +271,21 @@ def add_parser(
             "inviter to compare (a person on the inviting device must still confirm)"
         ),
     )
+    # A8.1: A POOL GRANT'S JOIN CARRIES THE PROVISIONING PLANE'S STATEMENT. The
+    # inviter admits on that statement INSTEAD of a confirmation card, so a pool
+    # joiner has no code to wait for — which is why this flag requires
+    # ``--automated``. A PATH rather than the statement itself: an argument lands in
+    # every transcript that later replays the command, the rule the invite token
+    # already follows.
+    join.add_argument(
+        "--attestation",
+        metavar="PATH",
+        default="",
+        help=(
+            "A pool grant's attestation: the file the provisioning plane wrote "
+            "(JSON with payload_b64, signature and key_id). Requires --automated"
+        ),
+    )
     # THE ONE-ATTEMPT DIAGNOSTIC (F4, drill 2026-10-04). ``--explain`` runs the
     # OFFLINE preflight — token, expiry, endpoints, and (when this device holds
     # the network) the token's tag against its own secret and its own membership
@@ -5531,6 +5546,15 @@ def _cmd_join(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    if str(getattr(args, "attestation", "") or "") and not bool(getattr(args, "automated", False)):
+        # THE INVITER SHOWS NO CARD TO A POOL GRANT, so a joiner waiting for one would
+        # sit until the invite expired. Requiring the automated seat keeps a
+        # mis-typed command from looking like a hang.
+        print(
+            "--attestation admits a pool member, which has no code to wait for; add " "--automated",
+            file=sys.stderr,
+        )
+        return 2
     if bool(getattr(args, "park", False)):
         # USAGE errors, not refusals (the guide's rc 2): each names a flag pair that
         # cannot mean one thing at the same time, and silently dropping one of the two
@@ -6298,6 +6322,53 @@ def _explain_refusal(
     )
 
 
+#: The three fields a provider's attestation statement is read into (A8.1).
+_ATTESTATION_FIELDS = ("payload_b64", "signature", "key_id")
+
+
+def _read_pool_attestation(path: str) -> dict[str, str]:
+    """The statement a pool grant's join carries, read from the file the provider wrote.
+
+    FAIL CLOSED, ALWAYS: a file that cannot be read, is not JSON, or is missing one
+    of the three fields is a refusal HERE. Omitting the block instead would reach the
+    inviter as "this joiner sent no attestation" — the same sentence an operator
+    gets for a forgotten flag — and would point the diagnosis at the wrong machine.
+
+    Only the three fields are copied: the plane's response may carry more (an
+    expiry, an account label), and everything this side does with it belongs to
+    ``remote_compute.attestation``, which reads the signed payload itself.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise MeshRefusal(
+            "attestation_unreadable",
+            f"the attestation file {path} could not be read ({exc.__class__.__name__})",
+        ) from exc
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MeshRefusal(
+            "attestation_malformed", f"the attestation file {path} is not JSON"
+        ) from exc
+    if not isinstance(body, dict):
+        raise MeshRefusal(
+            "attestation_malformed", f"the attestation file {path} is not a JSON object"
+        )
+    frame: dict[str, str] = {}
+    for name in _ATTESTATION_FIELDS:
+        value = body.get(name)
+        if not isinstance(value, str) or not value:
+            raise MeshRefusal(
+                "attestation_malformed",
+                f"the attestation file {path} has no non-empty {name!r}",
+            )
+        frame[name] = value
+    return frame
+
+
 def _join_one(
     *,
     host: str,
@@ -6411,6 +6482,13 @@ def _join_one(
             from local_operator.network.invite import OFFER_POLICY_KEY
 
             handshake.join_block[OFFER_POLICY_KEY] = policy
+        attestation_path = str(getattr(args, "attestation", "") or "")
+        if attestation_path:
+            # A8.1: the provisioning plane's statement for THIS device's key. The
+            # inviter admits on it instead of its confirmation card, so it rides the
+            # hello — and it is bound to this handshake, because the hello is part of
+            # the transcript the auth frame signs.
+            handshake.join_block["attestation"] = _read_pool_attestation(attestation_path)
         handshake.send_hello(sock)
         reader = wire.FrameReader(sock)
         attempt.stage = "challenge"

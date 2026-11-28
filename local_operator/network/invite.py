@@ -40,10 +40,14 @@ from local_operator.network.types import (
     CREDENTIAL_OFFER_POLICIES,
     CREDENTIAL_OFFERS_NONE,
     INVITE_ROLES,
+    MEMBER_KINDS,
+    POOL_MEMBER_ROLES,
     InviteRecord,
+    MemberKind,
     NetworkRecord,
     PairingRefusal,
     capabilities_for_role,
+    clamp_pool_capabilities,
 )
 from local_operator.network.wire import b64u, crockford, invite_key, invite_mac, unb64u
 
@@ -77,6 +81,13 @@ REASON_OFFER_POLICY = "invite_offer_policy_mismatch"
 OFFER_POLICY_KEY = "credential_offers"
 
 
+#: The ``join`` block / token payload key carrying the invite's member kind.
+#: OMITTED when it is the default (``device``), so an ordinary invitation's token
+#: bytes — and therefore every tag-over-bytes fixture — stay byte-identical to
+#: builds that predate the field, exactly as the credential-offer policy does.
+MEMBER_KIND_KEY = "member_kind"
+
+
 def new_invite_id() -> str:
     """A short Crockford base32 id: short because a human reads it in a listing."""
     return crockford(token_bytes(8))
@@ -101,6 +112,11 @@ class InviteEnvelope:
     device_id: str = ""
     v: int = INVITE_ENVELOPE_VERSION
     kind: str = INVITE_KIND
+    #: ``device`` (a human at both ends) or ``pool`` (the A8.1 grant: no human at
+    #: the joiner's end, so the inviter admits it on provider attestation instead of
+    #: its own confirmation card). Carried only when it is NOT the default, so a
+    #: device invite is unchanged on the wire.
+    member_kind: MemberKind = "device"
     #: ``""`` (default) or ``"none"`` — the JOINER's copy of the policy. It
     #: tells the joiner to fail closed on a non-empty share list and is echoed in
     #: the join block; it is NOT what the owner enforces (the saved record is).
@@ -116,6 +132,9 @@ class InviteEnvelope:
             # Only when set: a default token must not change by a byte (old
             # joiners, and every existing tag-over-bytes fixture).
             payload[OFFER_POLICY_KEY] = self.credential_offers
+        if self.member_kind != "device":
+            # Same rule, same reason — see MEMBER_KIND_KEY.
+            payload[MEMBER_KIND_KEY] = self.member_kind
         return payload
 
     def _base_payload(self) -> dict[str, Any]:
@@ -154,6 +173,7 @@ class InviteEnvelope:
             epoch=epoch,
             ttl_s=self.ttl_s,
             role=self.role,
+            member_kind=self.member_kind,
             capabilities=list(self.capabilities),
             hosts=list(self.hosts),
             device_id=self.device_id,
@@ -186,6 +206,7 @@ def mint(
     invite_id: str | None = None,
     now: float | None = None,
     credential_offers: str = "",
+    member_kind: MemberKind = "device",
 ) -> MintedInvite:
     """Mint one invite token for ``record``.
 
@@ -193,10 +214,39 @@ def mint(
     the role HERE and carried in the envelope and the record, so a later change to
     ``ROLE_CAPABILITIES`` cannot retroactively widen an invite that has already
     been handed to someone.
+
+    ``member_kind="pool"`` is the A8.1 grant (``mesh-compute-pool.md`` §3.2): the
+    joiner has no human at its end, so the relay admits it on provider attestation
+    instead of a confirmation card. Its capabilities are INTERSECTED with
+    :data:`local_operator.network.types.POOL_ALLOWED_CAPABILITIES` HERE for R-I11 —
+    a wider pool invite mints the narrow member it describes rather than a refusal
+    — and clamped AGAIN at admission, because the token's copy of the capability
+    list is untrusted input while the saved row is what the relay reads.
+
+    ``role="admin"`` is REFUSED for a pool member (code review round 1, MAJOR 1),
+    and that is the one widening the clamp must not absorb: ``admin`` is
+    membership authority — mint invites, remove devices, rotate the network — and
+    the operator who would hold it is precisely the person a pool member does not
+    have at its end. Narrowing an admin pool grant to a drive set would answer the
+    flag with a member whose stored ``role`` still reads ``admin`` to every reader
+    that consults the role (``lowest_id_admin``, ``owner._is_admin``), which is
+    why the refusal comes before the clamp rather than through it.
     """
     if role not in INVITE_ROLES:
         raise PairingRefusal(
             "bad_role", f"unknown invite role {role!r}; use one of {', '.join(INVITE_ROLES)}"
+        )
+    if member_kind not in MEMBER_KINDS:
+        raise PairingRefusal(
+            "bad_member_kind",
+            f"unknown invite member kind {member_kind!r}; use one of {', '.join(MEMBER_KINDS)}",
+        )
+    if member_kind == "pool" and role not in POOL_MEMBER_ROLES:
+        raise PairingRefusal(
+            "bad_role",
+            f"a pool member may only be minted as {' or '.join(POOL_MEMBER_ROLES)}: it has no "
+            "person at its end to hold membership authority, so an admin grant is refused "
+            "rather than narrowed",
         )
     if ttl_s <= 0:
         raise PairingRefusal("bad_ttl", "an invite must expire; give a positive lifetime")
@@ -206,6 +256,8 @@ def mint(
             f"unknown credential-offer policy {credential_offers!r}",
         )
     resolved = sorted(capabilities_under_policy(capabilities_for_role(role), credential_offers))
+    if member_kind == "pool":
+        resolved = clamp_pool_capabilities(resolved)
     envelope = InviteEnvelope(
         network_id=record.network_id,
         network_name=record.name,
@@ -224,6 +276,7 @@ def mint(
         # have.
         hosts=list(hosts or record.listen.get("advertised") or []),
         device_id=device_id,
+        member_kind=member_kind,
         credential_offers=credential_offers,
     )
     return MintedInvite(
@@ -334,6 +387,16 @@ def decode(token: str) -> InviteEnvelope:
             "that invite carries a credential-offer policy this build does not understand; "
             "update lop on this device",
         )
+    # AN UNKNOWN MEMBER KIND IS REFUSED TOO, for the same reason: reading it as
+    # ``device`` would turn a future kind this build does not implement into an
+    # ordinary invitation, which is the permissive direction.
+    member_kind = payload.get(MEMBER_KIND_KEY, "device")
+    if member_kind not in MEMBER_KINDS:
+        raise PairingRefusal(
+            REASON_INVALID,
+            "that invite names a member kind this build does not understand; "
+            "update lop on this device",
+        )
     return InviteEnvelope(
         network_id=str(payload["network_id"]),
         network_name=str(payload.get("network_name") or ""),
@@ -351,6 +414,7 @@ def decode(token: str) -> InviteEnvelope:
         v=int(payload.get("v") or INVITE_ENVELOPE_VERSION),
         kind=str(payload.get("kind") or INVITE_KIND),
         credential_offers=policy,
+        member_kind=member_kind,  # type: ignore[arg-type]
     )
 
 
