@@ -1,4 +1,4 @@
-"""``lop team-bridge holds [list]``: this machine's held agent messages, READ-ONLY.
+"""``lop team-bridge holds [list|expire|discard]``: this machine's held messages.
 
 WHY THIS EXISTS (operator report 2026-11-18). Twelve held messages sat on the
 operator's machine for up to ~18 days, visible only in the desktop app's Agent
@@ -23,10 +23,19 @@ signed-in bridge credential to reach the hub. No desktop bearer, no daemon, and
 the receiver may be stopped. When the hub cannot be reached the local rows still
 print, with the sender column saying why it is missing.
 
-IT CHANGES NO HOLD AND WRITES NOTHING TO THE BRIDGE STORE. No deliver, discard
-or admit verb exists here (those stay the desktop's bearer-gated routes,
-``desktop_team_bridge_holds.decide``), and there is no body cache: the excerpt is
-printed and forgotten. The one write it can cause is OUTSIDE the bridge store:
+IT CHANGES NO HOLD BODY. ``list`` writes nothing to the bridge store. The
+DISPOSAL verbs (``expire``, ``discard``) write exactly ONE
+contentless row per settled message — ``hold_terminals``, ids and closed codes
+only, no body, no sender, no label — because a hold that provably cannot be
+delivered had no exit from a terminal at all (operator report 2026-11-21,
+``bcmsg_5ac4…``: listed ``releasable: true``, nothing on screen to bind a
+button to, badge stuck for ever). They write NO ``owner_releases`` row, sign
+nothing, and call no hub: a signed release is a word over a BODY, and this path does
+not assume a body is loadable. ``deliver``, and ``discard`` of a row that
+CAN be delivered, stay the desktop's bearer-gated routes
+(``desktop_team_bridge_holds.decide``); nothing added here can admit or deliver
+anything, or dispose of a deliverable row. There is no body cache: the excerpt
+is printed and forgotten. The one write it can cause is OUTSIDE the bridge store:
 the hub call resolves the signed-in credential through the shared auth store,
 which may persist a refreshed token on a 401 exactly as any signed-in command
 does. A machine with no ``auth.db`` is answered ``sign_in_required`` without
@@ -419,10 +428,15 @@ def render(answer: dict[str, Any]) -> str:
 
 
 def main(args: argparse.Namespace) -> int:
-    """Print the holds list. Exit 0 when it was read, 1 when the store could not be."""
+    """Run the requested holds verb. Exit 0 when it ran, 1 when the store refused."""
 
     from local_operator.team_bridge.store import StoreRefused
 
+    command = getattr(args, "holds_command", None) or "list"
+    if command == "expire":
+        return _expire_command(args)
+    if command == "discard":
+        return _discard_command(args)
     try:
         answer = collect(_config_dir(), excerpt=bool(getattr(args, "excerpt", False)))
     except StoreRefused as refusal:
@@ -434,4 +448,87 @@ def main(args: argparse.Namespace) -> int:
         print(json.dumps(answer, ensure_ascii=False, indent=2))
     else:
         print(render(answer))
+    return 0
+
+
+def _write_store_and_owner(root: Path) -> tuple[Any, Any]:
+    """The store and the committed owner, or ``(store, None)`` when nobody is enrolled.
+
+    A WRITE verb opens the store the ordinary way (``Store`` construction plus
+    ``active_owner_readonly``), so the schema upgrade a real disposition needs
+    happens through the same ``_init`` every other mutation uses — no hand-edited
+    SQL anywhere, which is the point of shipping the verb.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(root)
+    return store, store.active_owner_readonly()
+
+
+def _no_owner() -> int:
+    print(  # i18n: ignore developer CLI output (see the module docstring)
+        "team-bridge holds: no agent-messages owner is enrolled on this machine"
+    )
+    return 1
+
+
+def _expire_command(_args: argparse.Namespace) -> int:
+    """``holds expire``: run the retention pass once and print what it disposed of."""
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.store import StoreRefused
+
+    root = _config_dir()
+    _store, owner = _write_store_and_owner(root)
+    if owner is None:
+        return _no_owner()
+    try:
+        disposed = holds.expire_undeliverable_holds(root, owner)
+    except StoreRefused as refusal:
+        print(  # i18n: ignore developer CLI output (see the module docstring)
+            f"team-bridge holds: the local bridge store refused the pass ({refusal.code})"
+        )
+        return 1
+    print(  # i18n: ignore developer CLI output (see the module docstring)
+        f"disposed of {disposed} undeliverable hold(s) past the expiry threshold"
+    )
+    return 0
+
+
+def _discard_command(args: argparse.Namespace) -> int:
+    """``holds discard``: one undeliverable message, with no proof."""
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+    from local_operator.team_bridge.store import StoreRefused
+
+    root = _config_dir()
+    _store, owner = _write_store_and_owner(root)
+    if owner is None:
+        return _no_owner()
+    message_id = str(getattr(args, "message", "") or "")
+    try:
+        answer = holds.discard_undeliverable_hold(root, owner, message_id=message_id)
+    except holds.HoldRefused as refusal:
+        # ONE code for every reason: a non-disposable row, a malformed id and a
+        # row that can still be delivered all read the same, exactly as the
+        # desktop route answers.
+        print(  # i18n: ignore developer CLI output (see the module docstring)
+            f"team-bridge holds: {message_id} cannot be disposed of ({refusal.code})"
+        )
+        return 1
+    except StoreRefused as refusal:
+        print(  # i18n: ignore developer CLI output (see the module docstring)
+            f"team-bridge holds: the local bridge store refused the write ({refusal.code})"
+        )
+        return 1
+    if answer.get("terminal") is None:
+        print(  # i18n: ignore developer CLI output (see the module docstring)
+            f"team-bridge holds: {message_id} is no longer held; nothing to dispose of"
+        )
+        return 0
+    word = "disposed of" if answer.get("disposed") else "already disposed of"
+    print(  # i18n: ignore developer CLI output (see the module docstring)
+        f"team-bridge holds: {message_id} {word} ({answer['terminal']['detail']})"
+    )
     return 0

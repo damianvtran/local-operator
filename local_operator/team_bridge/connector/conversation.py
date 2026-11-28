@@ -3123,6 +3123,8 @@ async def handle_conversation_available(
     try:
         store.claim(owner, message_id, designation, token, expiry=time.time() + CLAIM_TTL_S)
     except StoreRefused as failure:
+        if failure.code == "hold_terminal":
+            return {"action": "duplicate", "message_id": message_id, "code": failure.code}
         return {
             "action": "claimed_elsewhere",
             "message_id": message_id,

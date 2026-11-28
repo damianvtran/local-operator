@@ -423,6 +423,29 @@ def screening_hold_review_after_s(config_dir: Path | str) -> float | None:
     return float(minutes) * 60.0
 
 
+def held_expiry_days(config_dir: Path | str) -> int:
+    """Days a held message may sit undeliverable before it is disposed of; ``0`` = never.
+
+    Read exactly the way the sibling keys above are read: the typed helper in
+    ``team_bridge.settings`` owns the range and the ``bool`` refusal, a torn or
+    absent config document takes the SHIPPED default rather than raising, and
+    nothing here can make the pass unbounded. See
+    ``DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS`` for why 14 is the default and why
+    this is a read key with no ``/settings`` row.
+    """
+
+    from local_operator.config import read_config_values
+    from local_operator.team_bridge.settings import (
+        DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS,
+        TeamBridgeSettings,
+    )
+
+    values = read_config_values(Path(config_dir))
+    if values is None:
+        return DEFAULT_TEAM_BRIDGE_HELD_EXPIRY_DAYS
+    return TeamBridgeSettings.from_values(values).held_expiry_days
+
+
 def enabled_for(config_dir: Path | str, hold_code: str | None) -> bool:
     """Is the release path open for a decision/release of THIS hold code?
 

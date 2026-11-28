@@ -72,10 +72,13 @@ __all__ = [
     "state_db_path",
 ]
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # V7 changes durable key contents, not the table layout. V8 adds the
-# contentless BODY reservation table. Older structural upgrades still
-# validate/build the v6 floor before the atomic key migration.
+# contentless BODY reservation table; V9 adds the contentless TERMINAL hold
+# marker (``hold_terminals``, the one durable "this hold is finished" row, so a
+# hold whose payload can never be loaded again stops being served for ever).
+# Older structural upgrades still validate/build the v6 floor before the atomic
+# key migration.
 _LAYOUT_VERSION = 6
 
 #: Every table a stamped-V3 database must carry. A stamped store missing any
@@ -2395,6 +2398,56 @@ CREATE INDEX IF NOT EXISTS body_reservations_eligible
     ON body_reservations(state, designated_session);
 """
 
+#: The TERMINAL hold marker (v9): one row says this held message is finished.
+#:
+#: WHY A SECOND TABLE rather than a column on ``screening_holds``. That table is
+#: rewritten by every retry (the connector re-upserts on backoff) and its row is
+#: DELETED when a delivery finally hands off, so a marker stored there could be
+#: lost or resurrected by a retry that knows nothing about a disposition — and a
+#: hold whose payload can never be loaded again had NO exit at all: it stayed in
+#: ``list_holds`` and in the nav badge for ever (operator report 2026-11-21,
+#: ``bcmsg_5ac4…``: decision cleared, ``releasable: true``, nothing could settle
+#: it). This row outlives the hold row on purpose: it is the record that this
+#: message was disposed, and it is idempotent by PRIMARY KEY, so the retry loop
+#: can consult it without a second source of truth.
+#:
+#: The audit writer derives the IDs, closed codes, verdict and fixed evidence
+#: under lock. It has no caller-provided evidence or sender/body text slot.
+_HOLD_TERMINALS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS hold_terminals (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_id TEXT,
+    hold_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail TEXT,
+    word TEXT NOT NULL,
+    decided_at REAL NOT NULL,
+    notice_state TEXT NOT NULL,
+    screener_verdict TEXT,
+    evidence TEXT,
+    PRIMARY KEY (owner_key, message_id)
+);
+"""
+
+#: Every column a carrying store must have. A stamped store missing any is
+#: DAMAGED and refuses rather than being re-created empty.
+_HOLD_TERMINAL_COLUMNS = frozenset(
+    {
+        "owner_key",
+        "message_id",
+        "conversation_id",
+        "hold_code",
+        "reason",
+        "detail",
+        "word",
+        "decided_at",
+        "notice_state",
+        "screener_verdict",
+        "evidence",
+    }
+)
+
 #: Every column a carrying store must have. A stamped store missing any is
 #: DAMAGED and refuses rather than being re-created empty.
 _BODY_RESERVATION_COLUMNS = frozenset(
@@ -2780,6 +2833,7 @@ class Store:
                 raise StoreRefused("schema_unsupported", "unexpected ref migration source")
             self._migrate_conversation_ref_keys(conn)
             self._ensure_body_reservations(conn)
+            self._ensure_hold_terminals(conn)
             conn.execute(
                 "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -2912,6 +2966,71 @@ class Store:
         except sqlite3.Error as error:
             raise StoreRefused("state_unreadable", "body reservation DDL failed") from error
 
+    @staticmethod
+    def _validate_hold_terminals(conn: sqlite3.Connection) -> None:
+        """Refuse a marker table whose SHAPE cannot make a disposition idempotent.
+
+        Column names are not enough: the whole point of the table is that a
+        second write for the same message lands on the SAME row (``INSERT OR
+        IGNORE`` under the primary key), so a column-complete table keyed any
+        other way would open and stamp happily and then either duplicate a
+        disposition or refuse the second write with a raw ``ON CONFLICT`` error.
+        A narrower unique index (a single identity column) is refused for the
+        same reason :meth:`_validate_body_reservations` refuses one: it makes a
+        second legitimate row impossible.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)")}
+        if not _HOLD_TERMINAL_COLUMNS <= columns:
+            raise StoreRefused(
+                "schema_damaged",
+                f"hold_terminals lacks {sorted(_HOLD_TERMINAL_COLUMNS - columns)}",
+            )
+        pk_columns = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)") if row[5]}
+        if pk_columns != {"owner_key", "message_id"}:
+            raise StoreRefused(
+                "schema_damaged",
+                f"hold_terminals primary key is {sorted(pk_columns)}",
+            )
+        required = {"owner_key", "message_id"}
+        for index in conn.execute("PRAGMA index_list(hold_terminals)"):
+            # PRAGMA index_list rows are (seq, name, unique, origin, partial);
+            # the third slot is the uniqueness flag (see
+            # ``_validate_body_reservations``, where reading the wrong slot
+            # refused this store's own non-unique index).
+            if not index[2]:
+                continue
+            parts = {part[2] for part in conn.execute(f"PRAGMA index_info({index[1]})")}
+            if not required <= parts:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"hold_terminals unique index {index[1]} covers {sorted(parts)}, "
+                    "which cannot hold one row per message",
+                )
+
+    @staticmethod
+    def _ensure_hold_terminals(conn: sqlite3.Connection) -> None:
+        """Create the terminal marker additively, or validate a carrying one.
+
+        ``IF NOT EXISTS`` keeps a store that already carries it untouched; an
+        existing table is VALIDATED rather than silently accepted, because a
+        half-built table is damage, not an upgrade. No row of any other table is
+        read or written here, so every existing hold, decision, receipt and
+        enrollment row survives byte-for-byte.
+        """
+
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(hold_terminals)")}
+        if existing:
+            # Validate BEFORE any DDL, like the reservation table: a partial
+            # table is damage and must refuse as a typed error, not raise a raw
+            # sqlite3.OperationalError from the CREATE.
+            Store._validate_hold_terminals(conn)
+            return
+        try:
+            conn.executescript(_HOLD_TERMINALS_SCHEMA)
+        except sqlite3.Error as error:
+            raise StoreRefused("state_unreadable", "hold terminal DDL failed") from error
+
     def _init_layout(self, conn: sqlite3.Connection) -> None:
         """Validate BEFORE any DDL; refuse damage instead of repairing it.
 
@@ -2949,6 +3068,7 @@ class Store:
             except sqlite3.Error as error:
                 raise StoreRefused("state_unreadable", str(error)) from error
             conn.executescript(_BODY_RESERVATIONS_SCHEMA)
+            conn.executescript(_HOLD_TERMINALS_SCHEMA)
             conn.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -3073,7 +3193,7 @@ class Store:
             )
             return
 
-        if version in (str(_LAYOUT_VERSION), "7", str(SCHEMA_VERSION)):
+        if version in (str(_LAYOUT_VERSION), "7", "8", str(SCHEMA_VERSION)):
             # Stamped V5: VERIFY, never re-create. Missing tables or missing
             # binding/policy columns mean damage — refuse, no DDL at all.
             missing = (_V3_TABLES | _V4_ADDED) - pre_existing
@@ -3118,12 +3238,24 @@ class Store:
                 # Requiring v8 structure here made a genuine v6 store refuse as
                 # "damaged" before it could ever be migrated (B1).
                 return
-            if version == "7":
-                # V7 is fully verified above; the ONLY remaining step is
-                # the additive reservation table (IF NOT EXISTS, so a
-                # carrying store is untouched) plus the stamp, so a v7
-                # store that crashed mid-upgrade simply retries.
-                self._ensure_body_reservations(conn)
+            if version in ("7", "8"):
+                # V7 and V8 are fully verified above; the ONLY remaining step is
+                # the additive terminal marker (IF NOT EXISTS, so a carrying
+                # store is untouched) plus the stamp, so a store that crashed
+                # mid-upgrade simply retries. A v7 store additionally lacks the
+                # reservation table BY CONSTRUCTION and gets it here; a v8 store
+                # was promised it, so a v8 store missing it is DAMAGE — never a
+                # silent empty re-create (the fail-closed law).
+                if version == "7":
+                    self._ensure_body_reservations(conn)
+                elif "body_reservations" not in pre_existing:
+                    raise StoreRefused(
+                        "schema_damaged",
+                        f"stamped-{version} store missing body_reservations",
+                    )
+                if version == "8":
+                    self._validate_body_reservations(conn)
+                self._ensure_hold_terminals(conn)
                 conn.execute(
                     "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                     (str(SCHEMA_VERSION),),
@@ -3135,6 +3267,15 @@ class Store:
                     f"stamped-{version} store missing body_reservations",
                 )
             self._validate_body_reservations(conn)
+            # A stamped-CURRENT store promised the terminal marker too: it is
+            # required structure, refusable damage when absent, never created
+            # here (re-running DDL is not repair).
+            if "hold_terminals" not in pre_existing:
+                raise StoreRefused(
+                    "schema_damaged",
+                    f"stamped-{version} store missing hold_terminals",
+                )
+            self._validate_hold_terminals(conn)
             return
 
         raise StoreRefused(
@@ -3955,13 +4096,30 @@ class Store:
                 }
             except sqlite3.OperationalError:
                 settled = set()
+            # A TERMINAL disposition (``hold_terminals``, v9) is the second thing
+            # that must leave this count, and for a stronger reason than the two
+            # above: the hold was DISPOSED OF, so an aggregate "long hold" alert
+            # that keeps counting it would stand in the person's inbox for ever
+            # (the badge fix would have left the notification behind). Read here,
+            # in the same snapshot, keyed by bare id like every other exemption.
+            # Its own try so a store that predates the table keeps counting.
+            try:
+                terminals = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM hold_terminals WHERE owner_key = ?",
+                        (_owner_key(owner),),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                terminals = set()
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
-            if bare in noticed or bare in settled:
+            if bare in noticed or bare in settled or bare in terminals:
                 continue
             if not is_conversation_message_id(bare):
                 continue
@@ -4096,6 +4254,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             self._ensure_routed_session_column(conn)
             self._ensure_card_handoff_column(conn)
             self._ensure_wake_class_column(conn)
@@ -7331,6 +7490,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             self._ensure_receipt_rendered_template_column(conn)
             key = _owner_key(owner)
             policy = conn.execute(
@@ -9371,6 +9531,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             if turn is not None:
                 # ATOMIC final admission (R7/Q15-6): the turn/frame fence
                 # runs INSIDE this same write transaction, so a successor
@@ -9904,6 +10065,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             self._ensure_hold_failure_class_column(conn)
             self._ensure_hold_tier_column(conn)
             if not keep_existing:
@@ -10341,6 +10503,33 @@ class Store:
                     skipped = sorted({str(code) for code in skip_codes})
                     partition += f" AND hold_code NOT IN ({','.join('?' * len(skipped))})"
                     params.extend(skipped)
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hold_terminals'"
+                    ).fetchone()
+                    is not None
+                ):
+                    conn.create_function(
+                        "hold_bare_id", 1, screening_hold_message_id, deterministic=True
+                    )
+                    partition += (
+                        " AND NOT EXISTS (SELECT 1 FROM hold_terminals t "
+                        "WHERE t.owner_key = screening_holds.owner_key "
+                        "AND t.message_id = hold_bare_id(screening_holds.message_id))"
+                    )
+                # Apply terminal filtering before LIMIT so disposed aliases do
+                # not consume slots on every retry pass. Older stores lack v9.
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hold_terminals'"
+                ).fetchone():
+                    conn.create_function(
+                        "hold_bare_id", 1, screening_hold_message_id, deterministic=True
+                    )
+                    partition += (
+                        " AND NOT EXISTS (SELECT 1 FROM hold_terminals t"
+                        " WHERE t.owner_key = screening_holds.owner_key"
+                        " AND t.message_id = hold_bare_id(screening_holds.message_id))"
+                    )
                 rows = conn.execute(
                     f"SELECT message_id, hold_code, retry_at, created_at, {no_batch} AS no_batch "
                     "FROM screening_holds "
@@ -10442,6 +10631,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             if hold_code:
                 # A re-code to a DIFFERENT reason drops the old failure class:
                 # the class describes the provider failure that parked the
@@ -10628,6 +10818,7 @@ class Store:
             # on the lock, then reads the winner's committed row.
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             row = conn.execute(
                 "SELECT * FROM claims WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), message_id),
@@ -11156,6 +11347,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             self._ensure_work_scope_tables(conn)
             existing = conn.execute(
                 "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
@@ -11309,6 +11501,246 @@ class Store:
         )
         return int(rows[0]["n"]) if rows else 0
 
+    # -- terminal hold dispositions (the immortal-hold fix) -------------------
+    #
+    # ONE marker table says "this held message is finished", keyed by the BARE
+    # normalised message id (``screening_hold_message_id``'s answer, the same key
+    # every other per-message table uses). WHY BARE AND NOT THE COMPOSITE REF:
+    # a conversation hold is stored under its feed ref
+    # (``conversation:message=<seq>``) while decisions, receipts, releases and
+    # acknowledgements key by the bare ``bcmsg_…`` id, and ``_conversation_rows``
+    # collapses to bare before anything is served — so a marker keyed by the ref
+    # would miss the row it names as soon as the same message is re-stored under
+    # its other spelling. A writer holding a composite ref composes the bare id
+    # with :func:`screening_hold_message_id` rather than re-deriving the rule.
+    #
+    # TOLERATES A VANISHED HOLD ROW. ``screening_holds`` is not strictly
+    # append-only: the retry loop DELETEs a hold row once a delivery finally hands
+    # off and re-upserts it while retrying, so by the time a disposition is
+    # recorded the hold row may be gone. That is "nothing left to dispose", not
+    # an error: these methods never read ``screening_holds`` at all, so a
+    # disposition is written and read back exactly the same either way.
+
+    @staticmethod
+    def _terminal_row(conn: sqlite3.Connection, key: str, message_id: str) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT * FROM hold_terminals WHERE owner_key = ? AND message_id = ?",
+            (key, screening_hold_message_id(message_id)),
+        ).fetchone()
+
+    def _require_unterminated(
+        self, conn: sqlite3.Connection, owner: OwnerSnapshot, message_id: str
+    ) -> None:
+        if self._terminal_row(conn, _owner_key(owner), message_id) is not None:
+            raise StoreRefused("hold_terminal", "the held message was terminally discarded")
+
+    def _terminal_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        held_before: float | None = None,
+    ) -> tuple[Any, ...] | None:
+        from local_operator.team_bridge import hold_release as hr
+        from local_operator.team_bridge.types import (
+            CONVERSATION_ID_PATTERN,
+            is_conversation_message_id,
+            parse_conversation_ref_value,
+        )
+
+        if not is_conversation_message_id(message_id) or not math.isfinite(now):
+            return None
+        key = _owner_key(owner)
+        conn.create_function("hold_bare_id", 1, screening_hold_message_id, deterministic=True)
+        match = "owner_key = ? AND hold_bare_id(message_id) = ?"
+        args = (key, message_id)
+        if (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='work_scope_decisions'"
+            ).fetchone()
+            is None
+        ):
+            return None
+        # Legacy decisions may lack the optional verdict/provenance columns.
+        # Read only the metadata needed to bind the decision and its window.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(work_scope_decisions)")}
+        verdict_column = "screener_verdict" if "screener_verdict" in columns else "NULL"
+        preferred_column = "screener_preferred" if "screener_preferred" in columns else "0"
+        decision = conn.execute(
+            "SELECT conversation_id, hold_code, creator_generation, eligible, created_at, "
+            "body_sha256, envelope_digest, screener_provider, screener_model, template_sha256, "
+            f"policy_epoch, {verdict_column} AS screener_verdict, "
+            f"{preferred_column} AS screener_preferred "
+            "FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+            args,
+        ).fetchone()
+        if decision is None:
+            return None
+        d = dict(decision)
+        code, conversation = d["hold_code"], d["conversation_id"]
+        verdict = d.get("screener_verdict") or ""
+        if (
+            code not in hr.RELEASABLE_HOLD_CODES
+            or not isinstance(conversation, str)
+            or re.fullmatch(CONVERSATION_ID_PATTERN, conversation) is None
+            or d["creator_generation"] != owner.enrollment_generation
+            or d["eligible"] != 1
+            or not hr.trusted_decision(d)
+            or verdict not in {"hold", "bounce", ""}
+            or not all(
+                isinstance(d[field], str) and _HEX64.fullmatch(d[field])
+                for field in ("body_sha256", "envelope_digest")
+            )
+        ):
+            return None
+        created = d["created_at"]
+        if not isinstance(created, (int, float)) or not (0 < created < now - hr.DELIVER_WINDOW_S):
+            return None
+        rows = conn.execute(
+            f"SELECT * FROM screening_holds WHERE {match} ORDER BY message_id", args
+        ).fetchall()
+        if not rows:
+            return None
+        # The oldest alias is not authoritative over a newer retryable one.
+        # Every alias must still name the same conversation/review class.
+        for row in rows:
+            if row["hold_code"] != code:
+                return None
+            raw = row["message_id"]
+            if raw != message_id:
+                ref = parse_conversation_ref_value(raw.split("=", 1)[1])
+                if ref is None or ref.conversation_id != conversation:
+                    return None
+            held_at = row["created_at"]
+            if not isinstance(held_at, (int, float)) or not 0 < held_at <= now:
+                return None
+            if held_before is not None and held_at > held_before:
+                return None
+        # An expired lease can still be executing I/O. Keep even those held
+        # claims protected until they settle; do not mistake a TTL for proof.
+        for table, guard in (
+            ("claims", " AND state = 'held'"),
+            ("body_reservations", ""),
+            ("screening_receipts", " AND verdict IN ('allow', 'deliver')"),
+            ("owner_releases", ""),
+        ):
+            if conn.execute(f"SELECT 1 FROM {table} WHERE {match}{guard} LIMIT 1", args).fetchone():
+                return None
+        return (conversation, code, verdict, tuple(decision), tuple(map(tuple, rows)))
+
+    def hold_terminal_candidate(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        now: float,
+        held_before: float | None = None,
+    ) -> tuple[Any, ...] | None:
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            conn.execute("BEGIN")
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            return self._terminal_snapshot(
+                conn, owner, message_id, now=now, held_before=held_before
+            )
+
+    def record_hold_terminal(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        expected: tuple[Any, ...],
+        now: float,
+        held_before: float | None = None,
+    ) -> dict[str, Any] | None:
+        """CAS over the review/hold snapshot and the connector's live authority.
+
+        Audit fields are derived under the write lock, never supplied by the caller.
+        """
+        from local_operator.team_bridge.types import is_conversation_message_id
+
+        if not is_conversation_message_id(message_id) or not math.isfinite(now):
+            raise StoreRefused("invalid_terminal", "invalid terminal identity or time")
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            prior = self._terminal_row(conn, key, message_id)
+            if prior is not None:
+                return {**dict(prior), "already": True}
+            current = self._terminal_snapshot(
+                conn, owner, message_id, now=now, held_before=held_before
+            )
+            if current is None or current != expected:
+                return None
+            conversation, code, verdict, *_ = current
+            conn.execute(
+                "INSERT INTO hold_terminals (owner_key, message_id, conversation_id, "
+                "hold_code, reason, detail, word, decided_at, notice_state, screener_verdict, "
+                "evidence) VALUES (?, ?, ?, ?, 'discarded_undeliverable', "
+                "'deliver_window_passed', 'discard', ?, 'none', ?, ?)",
+                (
+                    key,
+                    message_id,
+                    conversation,
+                    code,
+                    now,
+                    verdict,
+                    '{"deliver_until_passed":true}',
+                ),
+            )
+            written = self._terminal_row(conn, key, message_id)
+            assert written is not None
+            return {**dict(written), "already": False}
+
+    def hold_terminal(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The terminal marker for one message, or ``None`` — cheap and body-free.
+
+        The read the delivery-repair path calls from its retry loop, so it is
+        READ-ONLY: it never creates, migrates or repairs the store
+        (:meth:`_connect_readonly`), and a store that predates this table answers
+        ``None`` instead of raising. Presence means terminal; the row's
+        ``reason``/``detail`` are closed codes a caller may log verbatim.
+        """
+
+        bare = screening_hold_message_id(str(message_id))
+        with self._connect_readonly() as conn:
+            if conn is None or self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            try:
+                row = conn.execute(
+                    "SELECT * FROM hold_terminals WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), bare),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None  # a store from before v9 has no marker table
+        return dict(row) if row is not None else None
+
+    def hold_terminals(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
+        """Every terminal marker for this owner, oldest first (read-only).
+
+        Ordered by ``decided_at`` so a caller printing dispositions gets a stable
+        order; an absent table reads empty rather than raising.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM hold_terminals WHERE owner_key = ? "
+                    "ORDER BY decided_at, message_id",
+                    (_owner_key(owner),),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
+        return [dict(row) for row in rows]
+
     def screening_hold_rows(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
         """Every hold row for the LIVE owner, read-only (the B4b holds list).
 
@@ -11406,6 +11838,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, str(row["message_id"]))
             self._ensure_work_scope_tables(conn)
             existing = self._existing_owner_release(conn, owner, row)
             if row.get("word") == "deliver":
@@ -11513,6 +11946,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, str(row["message_id"]))
             self._ensure_work_scope_tables(conn)
             existing = self._existing_owner_release(conn, owner, row)
             if existing is not None:
@@ -11815,6 +12249,7 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
+            self._require_unterminated(conn, owner, message_id)
             policy = conn.execute(
                 "SELECT epoch, revision FROM screening_policy WHERE owner_key = ?", (key,)
             ).fetchone()

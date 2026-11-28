@@ -60,6 +60,26 @@ def _key(endpoint_id: str) -> str:
     return f"team-bridge-long-hold:{endpoint_id}"
 
 
+def expire_holds_once(owner: Any, config_dir: Path, now: float | None = None) -> int:
+    """Run the age-gated terminal disposition pass; closed counts, never raises.
+
+    The alert already revisits old holds periodically. The store is the only
+    authority for terminal disposition: a missing decision, hold age or an
+    unavailable notification channel is not proof that delivery cannot resume.
+    """
+
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    try:
+        disposed = holds.expire_undeliverable_holds(config_dir, owner, now=now)
+    except Exception:  # noqa: BLE001 — chrome; retried on the next tick
+        logger.info("bridge: held expiry code=failed")
+        return 0
+    if disposed:
+        logger.info("bridge: held expiry code=ok disposed=%d", disposed)
+    return disposed
+
+
 def _threshold_minutes(config_dir: Path) -> int | None:
     """The threshold read fresh from disk, or ``None`` when the file cannot be read now.
 
@@ -121,6 +141,15 @@ def _run(owner: Any, config_dir: Path, now: float | None) -> str:
     store = Store(config_dir)
     session_id = store.designated_session_for_readonly(owner)
     notifications = NotificationStore(config_dir)
+    # THE AGE-BASED RETENTION BACKSTOP RUNS ON THIS TICK ON PURPOSE (see
+    # ``team_bridge.held_expiry_days``). This is the one periodic pass the
+    # connector already drives (every :data:`THROTTLE_S`) that reads hold AGE, and
+    # a disposed row has to leave the count this alert keeps, so the two belong to
+    # the same walk. It sits BEFORE every early return below so a threshold of
+    # ``0`` (alert off) or a missing inbox cannot also switch the backstop off,
+    # and it never changes this function's own closed outcome: retention is not
+    # the alert, and a failure there is one log line, not a failed alert.
+    expire_holds_once(owner, config_dir, now)
     t = tr("cli.team_bridge_alert")
 
     def clear_standing(shown_minutes: int, *, keep: str | None = None) -> bool:

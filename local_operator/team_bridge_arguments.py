@@ -124,6 +124,34 @@ def add_parser(
         # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
         help="Same as `holds`",
     )
+    # THE DISPOSAL VERBS (operator report 2026-11-21, ``bcmsg_5ac4…``). The
+    # READ-ONLY hold was the whole surface, and a hold whose payload could never
+    # be loaded again had no exit at all: the badge could not reach zero and no
+    # shipped command could clear it. These verbs are the shipped path for
+    # settling such a row WITHOUT the app attached. They deliberately do NOT
+    # replace ``deliver``/``discard`` in the app: a proof-bearing Discard is still
+    # the bearer-gated desktop route, because it signs a record the connector
+    # consumes. What is added here can only DISPOSE of a row that provably cannot
+    # be delivered: no release row, no signature, no hub call.
+    holds_actions.add_parser(
+        "expire",  # i18n: ignore CLI command name
+        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
+        help=(
+            "Dispose of holds older than team_bridge.held_expiry_days " "(the configured backstop)"
+        ),
+    )
+    holds_discard = holds_actions.add_parser(
+        "discard",  # i18n: ignore CLI command name
+        # i18n: ignore developer CLI help pending the CLI copy-extraction tranche
+        help="Dispose of holds that can never be delivered (no proof needed)",
+    )
+    holds_discard.add_argument(
+        "--message",
+        metavar="ID",
+        required=True,
+        # i18n: ignore developer CLI flag help (see the pragma above)
+        help="One held message, by its bcmsg_ message id",
+    )
     avatar = group_actions.add_parser(
         "avatar",  # i18n: ignore CLI command name
         # i18n: ignore developer CLI help pending the CLI copy-extraction tranche

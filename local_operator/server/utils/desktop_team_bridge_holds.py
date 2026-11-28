@@ -52,6 +52,11 @@ from local_operator.team_bridge.types import (
     parse_conversation_ref_value,
 )
 
+#: The most rows ONE expiry pass will dispose of, so a large backlog cannot stall
+#: a maintenance tick: the next tick continues where this one stopped, and the
+#: store's insert-or-ignore makes a repeated pass over the same row a no-op.
+EXPIRY_MAX_PER_PASS = 200
+
 #: Hold codes the person is told about as "the screener was unsure / could not
 #: answer"; anything else that is not releasable is "waiting" (infrastructure).
 _SCREENING_KIND = frozenset(
@@ -199,6 +204,11 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
     review_on = hr.review_enabled(config_dir)
     work_scope_on = hr.enabled(config_dir)
     decisions = {str(d["message_id"]): d for d in store.work_scope_decisions(owner)}
+    # The ONE terminal marker (``hold_terminals``): a row carrying one was already
+    # disposed of, so it is not held, not listed and NOT counted — that is the
+    # whole fix. Dropping it here (rather than per-surface) is what makes the
+    # badge, the desktop list and ``lop team-bridge holds`` agree by construction.
+    terminals = {str(t["message_id"]) for t in store.hold_terminals(owner)}
     items: list[dict[str, Any]] = []
     # Oldest hold first, the bare id breaking ties: two holds written in the
     # same instant must not swap places between refreshes (a list that reorders
@@ -207,6 +217,11 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         _conversation_rows(store, owner).items(),
         key=lambda kv: (kv[1]["created_at"], kv[0]),
     ):
+        if bare in terminals:
+            # Disposed of: see the marker read above. Never re-served, whatever
+            # the hold row still says — the retry loop may not have deleted it
+            # yet, or may re-upsert it while a later attempt is in flight.
+            continue
         code = row["hold_code"]
         decision = decisions.get(bare)
         eligible = bool(
@@ -251,6 +266,14 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             and conversation_id
             and str(decision.get("conversation_id") or "") == conversation_id
         )
+        undeliverable_reason = (
+            "deliver_window_passed"
+            if not can_deliver
+            and decision_bound
+            and store.hold_terminal_candidate(owner, bare, now=now)
+            else None
+        )
+        terminal_discard = bool(undeliverable_reason)
         items.append(
             {
                 "message_id": bare,
@@ -308,6 +331,16 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
                 ),
                 "deliver_until": _iso(deliver_until),
                 "decision": _decision_view(release),
+                # Additive, and the reason this change exists: True when Discard
+                # may be sent with NO proof (no ``body_sha256``, no
+                # ``hold_receipt``) because the row is provably undeliverable —
+                # see :meth:`Store.hold_terminal_candidate` for the rules. A renderer
+                # arms Discard on this flag; Deliver is never armed by it.
+                "terminal_discard": terminal_discard,
+                # The closed code behind it, or null. Never free text, and
+                # never derived from a failed body load, a 404 or a missing
+                # record: only from rows actually read.
+                "undeliverable_reason": undeliverable_reason,
             }
         )
     history = _hold_history(
@@ -616,6 +649,102 @@ def decide(
     except StoreRefused:
         pass
     return _receipt(row)
+
+
+# The wire contract uses the same bound as the existing expiry pass. IDs are
+# explicit; the mutation never enumerates newly eligible messages on retry.
+MAX_DISCARD_IDS = EXPIRY_MAX_PER_PASS
+
+
+def _dispose_one(
+    store: Store,
+    owner: Any,
+    message_id: str,
+    *,
+    now: float,
+    held_before: float | None = None,
+) -> dict[str, Any] | None:
+    existing = store.hold_terminal(owner, message_id)
+    if existing is not None:
+        return {**existing, "already": True}
+    expected = store.hold_terminal_candidate(owner, message_id, now=now, held_before=held_before)
+    if expected is None:
+        return None
+    return store.record_hold_terminal(
+        owner, message_id, expected=expected, now=now, held_before=held_before
+    )
+
+
+def discard_undeliverable_hold(
+    config_dir: Path,
+    owner: Any,
+    *,
+    message_id: str,
+    now: float | None = None,
+) -> dict[str, Any]:
+    store = Store(config_dir)
+    if not is_conversation_message_id(message_id):
+        raise HoldRefused(422, "invalid_request")
+    try:
+        terminal = _dispose_one(store, owner, message_id, now=time.time() if now is None else now)
+    except StoreRefused as refusal:
+        raise HoldRefused(409, "snapshot_stale") from refusal
+    if terminal is None:
+        if message_id in _conversation_rows(store, owner):
+            raise HoldRefused(409, "hold_not_releasable")
+        return {"message_id": message_id, "disposed": False, "already": True, "terminal": None}
+    return {
+        "message_id": message_id,
+        "disposed": not terminal["already"],
+        "already": terminal["already"],
+        "terminal": terminal,
+    }
+
+
+def discard_all_undeliverable(
+    config_dir: Path,
+    owner: Any,
+    *,
+    message_ids: list[str],
+    now: float | None = None,
+) -> dict[str, int]:
+    if not 1 <= len(message_ids) <= MAX_DISCARD_IDS or not all(
+        is_conversation_message_id(message_id) for message_id in message_ids
+    ):
+        raise HoldRefused(422, "invalid_request")
+    store = Store(config_dir)
+    stamp = time.time() if now is None else now
+    counts = {"discarded": 0, "already": 0, "skipped": 0}
+    try:
+        for message_id in dict.fromkeys(message_ids):
+            terminal = _dispose_one(store, owner, message_id, now=stamp)
+            outcome = (
+                "skipped" if terminal is None else "already" if terminal["already"] else "discarded"
+            )
+            counts[outcome] += 1
+    except StoreRefused as refusal:
+        raise HoldRefused(409, "snapshot_stale") from refusal
+    return counts
+
+
+def expire_undeliverable_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> int:
+    """Additional age threshold, never a source of terminal authority."""
+    expiry_days = hr.held_expiry_days(config_dir)
+    if expiry_days <= 0:
+        return 0
+    store = Store(config_dir)
+    stamp = time.time() if now is None else now
+    threshold = stamp - expiry_days * 86400.0
+    disposed = 0
+    for message_id, row in _conversation_rows(store, owner).items():
+        if disposed >= EXPIRY_MAX_PER_PASS:
+            break
+        if row["created_at"] > threshold:
+            continue
+        terminal = _dispose_one(store, owner, message_id, now=stamp, held_before=threshold)
+        if terminal is not None and not terminal["already"]:
+            disposed += 1
+    return disposed
 
 
 def _owner_key(owner: Any) -> str:
