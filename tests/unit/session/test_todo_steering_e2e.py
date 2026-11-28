@@ -22,7 +22,9 @@ never typed.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -31,15 +33,22 @@ import pytest
 from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.types import (
     AbortSignal,
+    AgentEndEvent,
+    AgentEvent,
+    AgentMessage,
     ChatRequest,
     CustomMessage,
+    Message,
     ModelSpec,
+    OutputValidationEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
     TextContent,
     ToolContext,
 )
+from local_operator.harness.wake_types import WakeSchedule
+from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
@@ -83,6 +92,8 @@ class SteeringStream:
             steer()
 
         async def gen():
+            if error := turn.get("error"):
+                raise RuntimeError(error)
             for event in turn.get("events", []):
                 yield event
 
@@ -326,6 +337,34 @@ async def test_blocking_an_item_earns_one_reconciliation_nudge(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_restored_blocker_reminder_only_renders_string_reasons(tmp_path) -> None:
+    session = make_session(tmp_path, SteeringStream([]))
+    # Restoration can load JSON that bypassed the todo tool's schema.
+    private = "synthetic-private-value"
+    builtin.restore_todos(
+        "e2e",
+        [
+            {
+                "name": "Deploy",
+                "items": [
+                    {"text": "migrate", "status": "blocked", "reason": {"token": private}},
+                    {"text": "publish", "status": "blocked", "reason": "waiting for approval"},
+                ],
+            }
+        ],
+    )
+    try:
+        (reminder,) = await session._todo_continuation()
+        assert isinstance(reminder, CustomMessage)
+        text = reminder.details["text"]
+        assert private not in text
+        assert "- migrate — blocked" in text.splitlines()
+        assert "- publish — blocked: waiting for approval" in text.splitlines()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> None:
     """THE over-fire repro, end to end: an accounted parked set must not be
     re-asserted on the next turn's first yield. Before the cross-turn latch,
@@ -372,7 +411,6 @@ async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> 
     session = make_session(tmp_path, stream)
 
     await session.prompt("deploy")
-    assert session._blocked_reminder_fingerprint == (("Todos", "get prod credentials", "blocked"),)
     await session.prompt("thanks — anything else?")
 
     # Turn 1: five requests (the reconciliation pass included); turn 2: ONE.
@@ -381,6 +419,667 @@ async def test_an_accounted_blocked_set_lets_a_turn_finish_quietly(tmp_path) -> 
     # fresh turn added none.
     assert len(reminders(session)) == 2
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_changed_blocker_reconciles_on_next_worked_turn(tmp_path) -> None:
+    def block(call_id: str, reason: str) -> dict[str, Any]:
+        return {
+            "events": todo_call(call_id, {"op": "block", "items": ["deploy"], "reason": reason})
+        }
+
+    answer = {"events": [StreamTextDelta(delta="At the current blocker.")]}
+    stream = SteeringStream(
+        [
+            block("c1", "database unavailable"),
+            answer,
+            block("c2", "database unavailable; rechecked"),
+            answer,
+            block("c3", "awaiting permission to schedule the migration"),
+            answer,
+            answer,
+            answer,
+        ]
+    )
+    builtin.TODO_STORE["e2e"] = [{"text": "deploy", "status": "pending"}]
+    session = make_session(tmp_path, stream)
+    try:
+        await session.prompt("Try the deployment")
+        assert len(stream.requests) == 4, "a reason rephrased during accounting cannot loop"
+        await session.prompt("Recheck the deployment")
+        assert len(stream.requests) == 7
+        assert "awaiting permission to schedule the migration" in reminders_in(stream, 6)[0]
+        await session.prompt("What else?")
+        assert len(stream.requests) == 8, "nothing re-arms an unchanged hold"
+    finally:
+        await session.dispose()
+
+
+def _quiet(call_id: str) -> dict[str, Any]:
+    return {
+        "events": [StreamToolCallDelta(index=0, id=call_id, name="no_reply", argument_delta="{}")]
+    }
+
+
+async def _peer_end(session, ends, expected_count, text="Synthetic peer check-in"):
+    await session.receive_peer_message(
+        text,
+        wake=True,
+        sender={"pid": 700042, "conversation_name": "synthetic"},
+    )
+    async with asyncio.timeout(5):
+        while len(ends) < expected_count or session._turn_lock.locked():
+            await asyncio.sleep(0.001)
+    return ends[-1]
+
+
+@pytest.mark.parametrize("quiet", [False, True], ids=["plain-stop", "no-reply"])
+@pytest.mark.asyncio
+async def test_unchanged_passive_stops_remind_once_without_public_outcome(tmp_path, quiet) -> None:
+    answer = {"events": [StreamTextDelta(delta="The gate is still pending.")]}
+    passive = [_quiet(f"q{i}") if quiet else answer for i in range(4)]
+    stream = SteeringStream([*passive, answer, answer])
+    session = make_session(tmp_path, stream)
+    # Pin this normally deferred built-in for a declared-tool control.
+    session.set_tool_deferral(pins={"no_reply"})
+    builtin.TODO_STORE["e2e"] = [{"text": "run the gate", "status": "pending"}]
+    ends: list[AgentEndEvent] = []
+    events: list[AgentEvent] = []
+
+    def observe(event: AgentEvent) -> None:
+        events.append(event)
+        if isinstance(event, AgentEndEvent):
+            ends.append(event)
+
+    session.subscribe(observe)
+    try:
+        for i, text in enumerate(
+            (
+                "Synthetic peer check-in. No authorized action; leave pending and use no_reply.",
+                "Synthetic peer check-in. No change and no update; use no_reply.",
+                "Synthetic peer check-in. Still nothing to report.",
+            ),
+            1,
+        ):
+            end = await _peer_end(session, ends, i, text)
+            assert end.quiet_accepted is quiet and not end.notify
+            assert not (end.error or end.cut_off or end.cut_off_cause or end.aborted)
+            assert session.frontend_state.last_turn_outcome == "completed"
+            assert not session.frontend_state.last_turn_cut_off
+            assert len(stream.requests) == i + 1
+        assert "no_reply" in [tool.name for tool in stream.requests[0].tools]
+        assert not reminders_in(stream, 0)
+        assert "run the gate" in reminders_in(stream, 1)[0]
+        assert not any(reminders_in(stream, i) for i in (2, 3))
+        assert [item["text"] for item in builtin.open_todos("e2e")] == ["run the gate"]
+
+        await session.prompt("Please continue running the gate")
+        assert len(stream.requests) == 6 and reminders_in(stream, 5)
+        end = ends[-1]
+        assert end.notify and not (end.error or end.cut_off or end.cut_off_cause or end.aborted)
+        assert [item["text"] for item in builtin.open_todos("e2e")] == ["run the gate"]
+        published = (tmp_path / "sess" / "transcript.jsonl").read_text()
+        public_events = "\n".join(event.model_dump_json() for event in events)
+        for private in ("todo_reminder", "<system-reminder>", "todo-incomplete", "Todo follow-up:"):
+            assert private not in published and private not in public_events
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_live_wake_keeps_quiet_but_reused_handle_does_not(tmp_path) -> None:
+    reason = "[wake:w1] Recheck whether the deployment queue drained"
+    stream = SteeringStream(
+        [
+            {"events": todo_call("c1", {"op": "block", "items": ["deploy"], "reason": reason})},
+            {"events": [StreamTextDelta(delta="Waiting on the queue.")]},
+            _quiet("q1"),
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    ends = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    now = int(time.time() * 1000)
+    wake = WakeSchedule(
+        id="w1",
+        message='For "deploy", recheck whether the deployment queue drained.',
+        next_due_at=now + 600_000,
+        created_at=now,
+    )
+    builtin.TODO_STORE["e2e"] = [{"text": "deploy", "status": "pending"}]
+    try:
+        await session.wake_scheduler.update([wake])
+        await session.prompt("Check on deployment")
+        assert len(stream.requests) == 2, "verified backing skips the model pass"
+        binding = builtin.blocked_todos("e2e")[0]["block_binding"]
+        assert binding.startswith(f"wake:w1:{now}:")
+        end = await _peer_end(session, ends, 2)
+        assert end.quiet_accepted and len(stream.requests) == 3
+        # Reuse the exact purpose as well as the id. Only the incarnation
+        # distinguishes this replacement from the receipt originally bound.
+        await session.wake_scheduler.update([wake.model_copy(update={"created_at": now + 1})])
+    finally:
+        await session.dispose()
+
+    # A cold restart must remember the old incarnation. The new w1 is real,
+    # armed and owner-local, but it is not the schedule this item was tied to.
+    builtin.TODO_STORE.clear()
+    stream = SteeringStream([_quiet("q2"), _quiet("q3"), _quiet("q4")])
+    restored = make_session(tmp_path, stream)
+    restored.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not stream.requests, "restoring the receipt must not start a turn or sweep"
+        assert restored.wake_scheduler.armed_schedules[0].created_at == now + 1
+        assert builtin.blocked_todos("e2e")[0]["block_binding"] == binding
+        end = await _peer_end(restored, ends, 3)
+        assert end.quiet_accepted and not end.cut_off_cause
+        assert len(stream.requests) == 2
+        assert "Recheck whether the deployment queue drained" in reminders_in(stream, 1)[0]
+        assert "[wake:w1]" not in reminders_in(stream, 1)[0]
+        end = await _peer_end(restored, ends, 4)
+        assert end.quiet_accepted and len(stream.requests) == 3
+        assert not reminders_in(stream, 2)
+    finally:
+        await restored.dispose()
+
+
+@pytest.mark.asyncio
+async def test_approval_refusal_does_not_retry_via_todo(tmp_path) -> None:
+    refused = []
+
+    async def deny(name, _summary):
+        refused.append(name)
+        return False
+
+    stream = SteeringStream(
+        [
+            {
+                "events": [
+                    StreamToolCallDelta(
+                        index=0, id="park", name="sessions", argument_delta='{"op":"park"}'
+                    )
+                ]
+            },
+            {"events": [StreamTextDelta(delta="The requested action was refused.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    session.set_approval_handler(deny)
+    session.refresh_tools(
+        [*session._tools, *create_tools(session._build_tool_context(), ["sessions"])]
+    )
+    builtin.TODO_STORE["e2e"] = [{"text": "park", "status": "pending"}]
+    try:
+        await session.prompt("Park the session")
+        assert refused == ["sessions"]
+        assert len(stream.requests) == 2 and not reminders_in(stream, 1)
+        assert len(builtin.open_todos("e2e")) == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_accepted_self_park_does_not_resume_pending(tmp_path, monkeypatch) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    park_receipts = []
+    monkeypatch.setattr(park_after_turn, "spawn", lambda *a: park_receipts.append(a) or 700043)
+    stream = SteeringStream(
+        [
+            {
+                "events": [
+                    StreamToolCallDelta(
+                        index=0, id="park", name="sessions", argument_delta='{"op":"park"}'
+                    )
+                ]
+            },
+            {"events": [StreamTextDelta(delta="Parking as requested.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    session.refresh_tools(
+        [*session._tools, *create_tools(session._build_tool_context(), ["sessions"])]
+    )
+    builtin.TODO_STORE["e2e"] = [{"text": "deploy", "status": "pending"}]
+    ends = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    try:
+        await session.prompt("Park this session and keep the todo pending.")
+        assert len(park_receipts) == 1
+        assert len(stream.requests) == 2 and not reminders_in(stream, 1)
+        assert len(ends) == 1 and not ends[0].cut_off_cause
+        assert len(builtin.open_todos("e2e")) == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_accounting_does_not_close_the_next_turn_check(tmp_path) -> None:
+    answer = {"events": [StreamTextDelta(delta="Still blocked.")]}
+    stream = SteeringStream([answer, {"error": "Synthetic provider error"}, answer, answer])
+    session = make_session(tmp_path, stream)
+    builtin.TODO_STORE["e2e"] = [
+        {"text": "deploy", "status": "blocked", "reason": "Waiting for the owner"}
+    ]
+    try:
+        await session.prompt("Check the deploy")
+        assert len(stream.requests) == 2 and reminders_in(stream, 1)
+        assert not session._todo_accounted
+        await session.prompt("Check again")
+        assert len(stream.requests) == 4 and reminders_in(stream, 3)
+        assert session._todo_accounted
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("relevant", [1, 2])
+@pytest.mark.asyncio
+async def test_phase_block_changes_every_open_row_but_only_binds_relevant_wakes(
+    tmp_path, relevant: int
+) -> None:
+    tasks = ["deploy schema", "verify schema"]
+    condition = "Await deployment approval"
+    reason = f"[wake:gate] {condition}"
+    plan = {"op": "init", "phases": [{"phase": "Release", "items": tasks}]}
+    stream = SteeringStream(
+        [
+            {"events": todo_call("phase", plan)},
+            {"events": todo_call("block", {"op": "block", "phase": "Release", "reason": reason})},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    now = int(time.time() * 1000)
+    purpose = f"{condition}: " + ", ".join(f'"{task}"' for task in tasks[:relevant])
+    try:
+        await session.wake_scheduler.update(
+            [WakeSchedule(id="gate", message=purpose, next_due_at=now + 60_000, created_at=now)]
+        )
+        await session.prompt("Park the whole Release phase")
+        assert [row["text"] for row in builtin.blocked_todos("e2e")] == tasks
+        assert all(row["reason"] == reason for row in builtin.blocked_todos("e2e"))
+        covered = [key[1] for key, block in session._todo_state()[1].items() if block[-1]]
+        assert covered == tasks[:relevant]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize(
+    ("tasks", "condition", "purpose", "expected_coverage"),
+    [
+        (
+            ["deploy schema", "deploy schema to staging"],
+            "Await deployment approval",
+            "Await deployment approval for deploy schema to staging only; "
+            "production is out of scope.",
+            [],
+        ),
+        (
+            ["deploy"],
+            "Await another team to deploy first",
+            "Infrastructure handoff: await another team to deploy first, "
+            "then archive the queue report.",
+            [],
+        ),
+        (
+            # Repeating even a quoted title inside the blocker cannot make it independent.
+            ["deploy", "deploy schema", "deploy schema to staging"],
+            'Await another team to "deploy" first',
+            "For “deploy schema to staging”, await another team to “deploy” first. "
+            "Reminder: await another team to “deploy” first.",
+            ["deploy schema to staging"],
+        ),
+        (
+            ['Review "Send code" copy', "Send code"],
+            "Await copy approval",
+            'For “Review "Send code" copy”, await copy approval.',
+            ['Review "Send code" copy'],
+        ),
+        (
+            ["Review “Send code” copy", "Send code"],
+            "Await copy approval",
+            'For "Review “Send code” copy", await copy approval.',
+            ["Review “Send code” copy"],
+        ),
+        (
+            ['Review "Send code" copy', "Send code"],
+            "Await copy approval",
+            r'For "Review \"Send code\" copy", await copy approval.',
+            ['Review "Send code" copy'],
+        ),
+        (
+            ["Check print layout"],
+            'Await the 3" sample',
+            'Await the 3" sample for "Check print layout".',
+            ["Check print layout"],
+        ),
+        (
+            ["Send code", 'Review "Send code" copy'],
+            "Await copy approval",
+            'Await copy approval for “Review "Send code" copy in French”.',
+            [],
+        ),
+        (
+            ["Archive", "Send code"],
+            "Await approval",
+            'For "Archive "[draft]" / "Send code" copy", await approval.',
+            [],
+        ),
+        (
+            ["Send code"],
+            'Await the 3" sample labelled "Send code"',
+            'Await the 3" sample labelled "Send code". Await the 3" sample labelled "Send code".',
+            [],
+        ),
+        (
+            ["Send code"],
+            'Await label "Send',
+            'Await label "Send code" on tray. Await label "Send.',
+            [],
+        ),
+    ],
+    ids=[
+        "unquoted-prefix",
+        "only-in-condition",
+        "exact-title-in-same-phase",
+        "literal-straight-quotes",
+        "literal-curly-quotes",
+        "escaped-same-delimiter",
+        "inch-mark-in-blocker",
+        "nested-and-longer-title",
+        "same-family-nesting-is-not-independent",
+        "inch-mark-and-embedded-title-in-blocker",
+        "title-cannot-start-in-blocker",
+    ],
+)
+@pytest.mark.asyncio
+async def test_phase_block_requires_independent_exact_task_title(
+    tmp_path, tasks, condition, purpose, expected_coverage
+) -> None:
+    reply = {"events": [StreamTextDelta(delta="Waiting on the handoff.")]}
+    stream = SteeringStream([])
+    session = make_session(tmp_path, stream)
+    try:
+        context = session._build_tool_context()
+        (wake_tool,) = create_tools(context, ["wake"])
+        created = await wake_tool.execute(
+            "create", {"op": "create", "message": purpose, "in": "10m"}, None, None, context
+        )
+        assert not created.is_error, created.text
+        (wake,) = session.wake_scheduler.armed_schedules
+        assert wake.message == purpose
+        reason = f"[wake:{wake.id}] {condition}"
+        stream.turns[:] = [
+            {
+                "events": todo_call(
+                    "init", {"op": "init", "phases": [{"phase": "Release", "items": tasks}]}
+                )
+            },
+            {"events": todo_call("block", {"op": "block", "phase": "Release", "reason": reason})},
+            reply,
+            reply,
+        ]
+        await session.prompt("Park the whole Release phase")
+        needs_check = len(expected_coverage) != len(tasks)
+        assert len(stream.requests) == (4 if needs_check else 3)
+        reminders = reminders_in(stream, len(stream.requests) - 1)
+        assert len(reminders) == int(needs_check), "only uncovered rows need a private check"
+        assert [row["text"] for row in builtin.blocked_todos("e2e")] == tasks
+        for task in tasks:
+            was_reminded = any(f"- {task} — blocked: {condition}" in text for text in reminders)
+            assert was_reminded == (task not in expected_coverage)
+        covered = [key[1] for key, block in session._todo_state()[1].items() if block[-1]]
+        assert covered == expected_coverage
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("scope", ["relevant", "unrelated", "split questions"])
+@pytest.mark.asyncio
+async def test_actionable_ask_keeps_harness_metadata_off_public_surfaces(
+    tmp_path, scope: str
+) -> None:
+    from local_operator.asks.render import mirror_card
+    from local_operator.paths import config_dir
+    from local_operator.tui.widgets.ask_queue import ask_rows
+
+    task = "deploy database migration"
+    condition = "Waiting for operator approval."
+    question = {
+        "relevant": f'{condition} May I proceed with "{task}"?',
+        "unrelated": "May I replenish the office coffee?",
+        "split questions": f'May I proceed with "{task}"?',
+    }[scope]
+    marker = "Todo follow-up:"
+    stream = SteeringStream(
+        [
+            {"events": todo_call("init", {"op": "init", "items": [task]})},
+            {"events": todo_call("park", {"op": "block", "items": [task], "reason": condition})},
+            {"events": [StreamTextDelta(delta="Still waiting.")]},
+            {},
+            {},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    async def ask_handler(*_args, **_kwargs):
+        raise AssertionError("queued Ask must not use the blocking transport")
+
+    session.set_ask_handler(ask_handler)
+
+    def ask_after_reminder():
+        # Replay the documented producer path on the old prompt; with no copy
+        # instruction the model sends only its authored question.
+        (reminder,) = reminders_in(stream, 3)
+        scope_line = next((line for line in reminder.splitlines() if line.startswith(marker)), "")
+        text = f"{question}\n{scope_line}" if scope == "relevant" and scope_line else question
+        texts = [text]
+        if scope == "split questions":
+            texts.append(f"No decision recorded: {condition} Should I keep waiting?")
+        payload = {
+            "questions": [
+                {
+                    "id": f"gate-{i}",
+                    "question": text,
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                }
+                for i, text in enumerate(texts)
+            ],
+            "timeout": 600,
+        }
+        stream.turns[3]["events"] = [
+            StreamToolCallDelta(index=0, id="ask-gate", name="ask"),
+            StreamToolCallDelta(index=0, argument_delta=json.dumps(payload)),
+        ]
+
+    def bind_ask():
+        (row,) = session.ask_queue().projection()
+        stream.turns[4]["events"] = todo_call(
+            "bind", {"op": "block", "items": [task], "reason": f"[ask:{row['ask_id']}] {condition}"}
+        )
+
+    stream.turns[3]["steer"] = ask_after_reminder
+    stream.turns[4]["steer"] = bind_ask
+    try:
+        await session.prompt("Check the deployment gate")
+        rows = session.ask_queue().projection()
+        (display,) = ask_rows(rows)
+        card = mirror_card(rows)
+        assert card is not None
+        journal = (config_dir() / "sessions" / "e2e" / "asks.jsonl").read_text()
+        assert (display.head_question, card["title"]) == (question, question)
+        (queued,) = [
+            event for line in journal.splitlines() if (event := json.loads(line)).get("questions")
+        ]
+        assert queued["questions"][0]["question"] == question
+        for private in (marker, "<system-reminder>", "todo_reminder"):
+            assert private not in journal
+            assert private not in json.dumps(rows)
+            assert private not in stream.turns[3]["events"][1].argument_delta
+        assert next(iter(session._todo_state()[1].values()))[-1] == (scope == "relevant")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("kind", ["ask", "monitor", "wake"])
+@pytest.mark.parametrize(
+    "scope", ["relevant", "unrelated", "weak condition", "wrong item", "partial item"]
+)
+@pytest.mark.asyncio
+async def test_only_actionable_followup_backs_a_block(tmp_path, kind: str, scope: str) -> None:
+    turn = {"events": [StreamTextDelta(delta="Waiting, not finished.")]}
+    stream = SteeringStream([])
+    session = make_session(tmp_path, stream)
+    now = int(time.time() * 1000)
+    task = "deploy schema"
+    condition = "Waiting on the deployment gate"
+    purpose = {
+        "relevant": 'For "DEPLOY   SCHEMA", keep waiting on the deployment gate.',
+        "unrelated": "Check office coffee signage.",
+        "weak condition": f'Check the gate for "{task}".',
+        "wrong item": f'For "run tests": {condition}.',
+        "partial item": f'For "re{task}": {condition}.',
+    }[scope]
+    withdraw: Callable[[], Any] | None = None
+    try:
+        if kind == "ask":
+
+            async def ask_handler(*_args, **_kwargs):
+                raise AssertionError("queued ask must not use the blocking transport")
+
+            session.set_ask_handler(ask_handler)
+            queue = session.ask_queue()
+            outcome = queue.enqueue([{"id": "go", "question": purpose}], 600)
+            assert outcome["ok"], outcome
+            handle = outcome["details"]["ask_id"]
+            assert (
+                session._live_todo_receipt(kind, handle, outcome["details"]["expires_at"]) is None
+            )
+
+            def withdraw_ask():
+                return queue.withdraw(handle, reason="moot")
+
+            withdraw = withdraw_ask
+        elif kind == "monitor":
+            handle = "m1"
+            session.monitor_scheduler.load(
+                [
+                    MonitorSpec(
+                        id=handle,
+                        name="Deployment gate",
+                        description=purpose,
+                        tool="todo",
+                        arguments={"op": "view"},
+                        every_ms=600_000,
+                        created_at=now,
+                    )
+                ]
+            )
+        else:
+            handle = "w1"
+            await session.wake_scheduler.update(
+                [
+                    WakeSchedule(
+                        id=handle, message=purpose, next_due_at=now + 600_000, created_at=now
+                    )
+                ]
+            )
+        assert session._live_todo_receipt(kind, handle, now) is not None
+        reason = f"[{kind}:{handle}] {condition}"
+        stream.turns[:] = [
+            {"events": todo_call("block", {"op": "block", "items": [task], "reason": reason})},
+            turn,
+            turn,
+            turn,
+            turn,
+        ]
+        builtin.TODO_STORE["e2e"] = [{"text": task, "status": "pending"}]
+        await session.prompt("Check on the deploy")
+        if scope != "relevant":
+            assert len(stream.requests) == 3 and condition in reminders_in(stream, 2)[0]
+            assert "block_binding" not in builtin.blocked_todos("e2e")[0]
+            assert reason not in reminders_in(stream, 2)[0]
+            return
+        assert len(stream.requests) == 2
+        assert builtin.blocked_todos("e2e")[0]["block_binding"].startswith(f"{kind}:")
+        # Withdraw without an answer notice or retire the producer. The
+        # previously proved condition cannot retain a dead receipt's coverage.
+        if withdraw is not None:
+            assert withdraw()["ok"]
+        elif kind == "monitor":
+            assert (await session.monitor_scheduler.cancel(handle))["cancelled"] == handle
+        else:
+            await session.wake_scheduler.update([])
+        await session.prompt("Check again")
+        assert len(stream.requests) == 4 and condition in reminders_in(stream, 3)[0]
+        await session.prompt("Unrelated prompt")
+        assert len(stream.requests) == 5 and not reminders_in(stream, 4)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("kind", ["monitor", "wake"])
+@pytest.mark.asyncio
+async def test_retained_but_dormant_or_expired_receipt_no_longer_covers(tmp_path, kind) -> None:
+    answer = {"events": [StreamTextDelta(delta="Still waiting.")]}
+    handle = "next"
+    condition = "Await the deployment gate"
+    purpose = f'For "deploy", {condition.lower()}.'
+    reason = f"[{kind}:{handle}] {condition}"
+    stream = SteeringStream(
+        [
+            {"events": todo_call("link", {"op": "block", "items": ["deploy"], "reason": reason})},
+            *([answer] * 4),
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    now = int(time.time() * 1000)
+    builtin.TODO_STORE["e2e"] = [{"text": "deploy", "status": "pending"}]
+    wake = WakeSchedule(id=handle, message=purpose, next_due_at=now + 600_000, created_at=now)
+    try:
+        if kind == "monitor":
+            session.monitor_scheduler.load(
+                [
+                    MonitorSpec(
+                        id=handle,
+                        name="Gate",
+                        description=purpose,
+                        tool="todo",
+                        arguments={"op": "view"},
+                        every_ms=600_000,
+                        created_at=now,
+                    )
+                ]
+            )
+        else:
+            await session.wake_scheduler.update([wake])
+        await session.prompt("Check the gate")
+        assert len(stream.requests) == 2 and not reminders_in(stream, 1)
+        binding = builtin.blocked_todos("e2e")[0]["block_binding"]
+
+        if kind == "monitor":
+            entry = session.monitor_scheduler._entries[handle]
+            entry.counters["next_due_at"] = None
+            assert session.monitor_scheduler.runtime(handle) is not None
+        else:
+            # A retained row with no check possible before expiry isn't live
+            # backing, even if it has yet to leave the scheduler's row list.
+            await session.wake_scheduler.update([wake.model_copy(update={"until_at": now + 1})])
+            assert session.wake_scheduler.armed_schedules[0].id == handle
+        assert session._live_todo_receipt(kind, handle, now + 1) is None
+        await session.prompt("Check again")
+        assert len(stream.requests) == 4 and condition in reminders_in(stream, 3)[0]
+        assert builtin.blocked_todos("e2e")[0]["block_binding"] == binding
+        await session.prompt("Nothing changed")
+        assert len(stream.requests) == 5 and not reminders_in(stream, 4)
+    finally:
+        await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -547,3 +1246,285 @@ async def test_a_fresh_user_turn_re_arms_the_guardrail(tmp_path) -> None:
     assert builtin.open_todos("e2e") == []
 
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unseen_blocker_rewrite_and_quiet_are_not_disposition(tmp_path) -> None:
+    answer = {"events": [StreamTextDelta(delta="Waiting for the database.")]}
+    rewrite = {
+        "events": todo_call(
+            "rewrite",
+            {
+                "op": "block",
+                "items": ["deploy"],
+                "reason": "Waiting on production approval",
+            },
+        )
+    }
+    stream = SteeringStream([answer, answer, rewrite, *(_quiet(f"q{i}") for i in range(6))])
+    session = make_session(tmp_path, stream)
+    builtin.TODO_STORE["e2e"] = [
+        {"text": "deploy", "status": "blocked", "reason": "Waiting for the database"}
+    ]
+    ends: list[AgentEndEvent] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    try:
+        await session.prompt("Check the database")
+        end = await _peer_end(session, ends, 2)
+        assert end.quiet_accepted and not end.cut_off_cause
+        assert "Waiting on production approval" in reminders_in(stream, 4)[0]
+        end = await _peer_end(session, ends, 3)
+        assert end.quiet_accepted and len(stream.requests) == 6
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_blocked_rows_use_the_exact_prior_condition_before_mutation(tmp_path):
+    first_reason = "[wake:w1] Await source"
+    second_reason = "[wake:w2] Await destination"
+    stream = SteeringStream(
+        [
+            {"events": [StreamTextDelta(delta="Neither deployment is ready.")]},
+            {
+                "events": todo_call(
+                    "bind-second", {"op": "block", "items": ["deploy"], "reason": second_reason}
+                )
+            },
+            {"events": [StreamTextDelta(delta="Waiting on the destination.")]},
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    now = int(time.time() * 1000)
+
+    def wake(handle: str, message: str) -> WakeSchedule:
+        return WakeSchedule(id=handle, message=message, next_due_at=now + 600_000, created_at=now)
+
+    async def block(reason: str, *items: str):
+        return await builtin.execute_todo(
+            "setup",
+            {"op": "block", "items": list(items or ("deploy",)), "reason": reason},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+
+    source = wake("w1", 'For "deploy", await source and await destination.')
+    destination = wake("w2", 'For "deploy", await destination.')
+    try:
+        builtin.TODO_STORE["e2e"] = [
+            {"text": "deploy", "status": "blocked", "reason": "Await source"},
+            {"text": "deploy", "status": "blocked", "reason": "Await destination"},
+        ]
+        await session.wake_scheduler.update([source])
+        assert not (await block(first_reason)).is_error
+        first, second = builtin.blocked_todos("e2e")
+        assert first["block_binding"].startswith("wake:w1:") and "block_binding" not in second
+        # Let the reminder show the exact blocker before its follow-up receipt is
+        # created; the model then repeats the documented block operation.
+        original = session._todo_continuation
+
+        async def arm_destination():
+            offer = await original()
+            if offer:
+                await session.wake_scheduler.update([source, destination])
+            return offer
+
+        session._todo_continuation = arm_destination
+        await session.prompt("Check both deployments")
+        (sent,) = reminders_in(stream, 1)
+        assert "deploy — blocked: Await destination" in sent and "Await source" not in sent
+        assert len(stream.requests) == 3
+        current_first, current_second = builtin.blocked_todos("e2e")
+        assert current_first == first and current_second["reason"] == second_reason
+        assert current_second["block_binding"].startswith("wake:w2:")
+
+        reused = destination.model_copy(update={"created_at": now + 1})
+        await session.wake_scheduler.update([source, reused])
+        for reason in (second_reason, "[wake:w1] Await both", "[wake:w4] Stale"):
+            assert (await block(reason)).is_error
+            assert builtin.blocked_todos("e2e") == [current_first, current_second]
+
+        # The phase can replace both reasons; a prior binding on the first row
+        # must not transfer to the second condition just because its wake names both.
+        phase_reason = "[wake:w1] Await destination"
+        result = await builtin.execute_todo(
+            "phase",
+            {"op": "block", "phase": "Todos", "reason": phase_reason},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+        assert not result.is_error
+        assert [block[-1] for block in session._todo_state()[1].values()] == [False, True]
+        assert all(row["reason"] == phase_reason for row in builtin.blocked_todos("e2e"))
+
+        # Both deploy rows now have the same condition. Reject an explicit
+        # duplicate selector without even partially mutating another named item.
+        await builtin.execute_todo(
+            "add", {"op": "add", "items": ["verify"]}, None, None, session._build_tool_context()
+        )
+        before = builtin.todo_snapshot("e2e")
+        assert (await block(phase_reason, "verify", "deploy")).is_error
+        assert builtin.todo_snapshot("e2e") == before
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reordered_pending_membership_does_not_reprompt(tmp_path) -> None:
+    items = [{"text": text, "status": "pending"} for text in ("alpha", "beta", "delta")]
+    answer = [StreamTextDelta(delta="Not finished.")]
+    stream = SteeringStream([{"events": answer}, {"events": answer, "steer": items.reverse}])
+    session = make_session(tmp_path, stream)
+    builtin.TODO_STORE["e2e"] = items
+    try:
+        await session.prompt("Try the gates")
+        assert len(stream.requests) == 2 and len(reminders_in(stream, 1)) == 1
+        assert session._last_turn_outcome == "completed"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_render_trims_only_the_expired_offer(tmp_path, monkeypatch) -> None:
+    answer = {"events": [StreamTextDelta(delta="Not finished.")]}
+    stream = SteeringStream([answer, answer])
+    session = make_session(tmp_path, stream)
+    pending = {"text": "deploy", "status": "pending"}
+    blocked = {"text": "backup", "status": "blocked", "reason": "Waiting for storage"}
+    builtin.TODO_STORE["e2e"] = [pending, blocked]
+    original = session._todo_continuation
+
+    async def settle_backup_after_offer() -> list[AgentMessage]:
+        reminders = await original()
+        if reminders:
+            blocked["status"] = "done"
+        return reminders
+
+    monkeypatch.setattr(session, "_todo_continuation", settle_backup_after_offer)
+    try:
+        await session.prompt("Try the deployment and backup")
+        assert len(stream.requests) == 2
+        (sent,) = reminders_in(stream, 1)
+        assert "deploy" in sent and "backup" not in sent
+        assert session._todo_pending_seen == {(("Todos", "deploy", 1),)}
+        assert not session._todo_accounted, "the trimmed offer did not carry the backup condition"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("reason", ["abort", "discard"])
+@pytest.mark.asyncio
+async def test_unsettled_held_end_does_not_commit_private_assessment(
+    tmp_path, monkeypatch, reason: str
+) -> None:
+    from local_operator.session import session as session_module
+
+    answer = {"events": [StreamTextDelta(delta="The deployment remains blocked.")]}
+    stream = SteeringStream([answer] * 4)
+    session = make_session(tmp_path, stream)
+    builtin.TODO_STORE["e2e"] = [
+        {"text": "deploy", "status": "blocked", "reason": "Waiting for owner approval"}
+    ]
+    original = session._maybe_compact
+
+    async def supersede_held_end() -> None:
+        if reason == "abort":
+            session.abort()
+        else:
+            session._continuation_queue.append(Message.user("synthetic required continuation"))
+
+    if reason == "discard":
+        monkeypatch.setattr(session_module, "_MAX_CONTINUATIONS", 0)
+    monkeypatch.setattr(session, "_maybe_compact", supersede_held_end)
+    try:
+        await session.prompt("Try the deployment")
+        assert len(stream.requests) == 2 and not session._todo_accounted
+        monkeypatch.setattr(session, "_maybe_compact", original)
+        await session.prompt("Check the hold again")
+        assert len(stream.requests) == 4 and reminders_in(stream, 3)
+        assert session._todo_accounted
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_quiet_after_approval_refusal_does_not_trigger_private_retry(tmp_path) -> None:
+    park = {
+        "events": [
+            StreamToolCallDelta(
+                index=0,
+                id="park",
+                name="sessions",
+                argument_delta='{"op":"park"}',
+            )
+        ]
+    }
+    stream = SteeringStream([park, _quiet("q")])
+    session = make_session(tmp_path, stream)
+    denied = []
+
+    async def deny(name, _summary):
+        denied.append(name)
+        return False
+
+    session.set_approval_handler(deny)
+    session.refresh_tools(
+        [*session._tools, *create_tools(session._build_tool_context(), ["sessions"])]
+    )
+    builtin.TODO_STORE["e2e"] = [{"text": "deploy", "status": "pending"}]
+    ends: list[AgentEndEvent] = []
+    session.subscribe(
+        lambda event: ends.append(event) if isinstance(event, AgentEndEvent) else None
+    )
+    try:
+        end = await _peer_end(session, ends, 1)
+        assert denied == ["sessions"] and len(stream.requests) == 2
+        assert not reminders_in(stream, 1)
+        assert not end.cut_off_cause and not session._todo_accounted_pending
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.parametrize("end_kind", ["normal", "abort", "discard"])
+@pytest.mark.parametrize("contract", [False, True])
+@pytest.mark.asyncio
+async def test_private_todo_check_preserves_print_contract(
+    tmp_path, capsys, monkeypatch, contract, end_kind
+) -> None:
+    from local_operator.headless_print import run_print_mode
+    from local_operator.output_contract import OutputContract
+    from local_operator.session import session as session_module
+
+    reply = 'The gate is pending.\n```json\n{"status":"pending"}\n```'
+    answer = {"events": [StreamTextDelta(delta=reply)]}
+    stream = SteeringStream([answer, answer])
+    session = make_session(tmp_path, stream)
+    builtin.TODO_STORE["e2e"] = [{"text": "run the gate", "status": "pending"}]
+    if contract:
+        session.set_output_contract(OutputContract(format="json"))
+    validation: list[OutputValidationEvent] = []
+    session.subscribe(
+        lambda event: validation.append(event) if isinstance(event, OutputValidationEvent) else None
+    )
+
+    async def post_loop() -> None:
+        if end_kind == "abort":
+            session.abort()
+        elif end_kind == "discard":
+            session._continuation_queue.append(Message.user("synthetic required continuation"))
+
+    monkeypatch.setattr(session_module, "_MAX_CONTINUATIONS", 0)
+    monkeypatch.setattr(session, "_maybe_compact", post_loop)
+    # Pristine Session reports 0 even when abort lands after the loop has
+    # produced its terminal event. Keep that separate print-host contract.
+    assert await run_print_mode(session, ["Run the gate"]) == 0
+    out, err = capsys.readouterr()
+    assert out == ('{"status":"pending"}\n' if contract else reply + "\n")
+    assert [event.ok for event in validation] == ([True] if contract else [])
+    assert "todo-incomplete" not in err and "<system-reminder>" not in out + err
+    assert len(stream.requests) == 2 and reminders_in(stream, 1)
+    assert bool(session._todo_accounted_pending) is (end_kind == "normal")

@@ -1,8 +1,10 @@
 {
+  "relay.approvals.card.always_ask": "始终询问",
+  "relay.approvals.card.guardrails_still_apply": "防护规则的拒绝和危险删除审查仍然有效。",
   "relay.approvals.card.notice_session_auto": "本会话现为auto",
   "relay.approvals.card.request_needs_answer": "此请求仍需你回复。",
-  "relay.approvals.card.set_auto_all": "为所有会话设置auto",
-  "relay.approvals.card.set_auto_session": "为本会话设置auto",
+  "relay.approvals.card.set_auto_all": "自动批准所有会话",
+  "relay.approvals.card.set_auto_session": "自动批准本会话",
   "relay.approvals.card.still_needs_answer": "此调用仍需你回复。",
   "relay.approvals.gate.body_scope.after": "改掉。",
   "relay.approvals.gate.body_scope.before": "前两个选项只改变",

@@ -74,6 +74,7 @@ from textual.geometry import Region, Size
 
 # Aliased: `Message` in this module is the harness's conversation message.
 from textual.message import Message as TextualMessage
+from textual.reactive import Reactive
 from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
@@ -452,6 +453,7 @@ from local_operator.tui.widgets.editor import (
     EditorCopied,
     EditorCopyStale,
     EditorDraftStarted,
+    EditorPageRequested,
     EditorPasteAttached,
     EditorPasteEmpty,
     EditorQuit,
@@ -1805,6 +1807,11 @@ TEMPORARY_BAND_TICK_S = 30.0
 #: that a sign-in completed in another window withdraws the card while the user
 #: is still looking at the app.
 TUNNEL_PARK_POLL_S = 5.0
+#: How often the band re-reads Radient Guard's local state. The prompt queue only
+#: changes at an admission point (sign-in, daemon start, the 6 h tick) or on an
+#: answer, so this bounds how late the badge appears, nothing else; it is a UX
+#: cadence, not a correctness bound.
+GUARD_POLL_S = 30.0
 
 #: How often the park watch looks while the SIDEBAR IS CLOSED (see
 #: `_watch_remote_parks`). Five seconds is the tunnel park's own cadence: the
@@ -4428,6 +4435,15 @@ class Band(Chrome):
     other's reasons.
     """
 
+    #: NO AUTO LINK STYLING (PR #4558 design D1). The band's `!` carries an
+    #: ``@click`` meta (the one-click way back to ``ask``), and Textual's
+    #: ``auto_links`` repaints any ``@click`` segment in ``$link-color`` —
+    #: measured turning the alarm's danger red (225,121,113) into link grey
+    #: (212,212,210), i.e. the one alarm in the band lost its ink the moment it
+    #: became actionable. The click itself rides the segment meta and is
+    #: unaffected; only the style override is switched off.
+    auto_links: Reactive[bool] = Reactive(False)
+
     class BoxChanged(TextualMessage):
         """The band's content box is a different size than it was."""
 
@@ -5237,7 +5253,8 @@ class OperatorApp(App[None]):
         # `down`, `pageup`, `pagedown` and `home`/`end` are TextArea cursor
         # bindings, `tab` never leaves the composer, `shift+tab` is effort
         # cycling (priority), and `ctrl+up`/`ctrl+down` page the todo overflow.
-        # So without a chord of its own, "scroll up to load" was mouse-only.
+        # Plain page keys now fall through from the editor at its draft
+        # boundaries; these chords still jump straight to either endpoint.
         #
         # `ctrl+home`/`ctrl+end` because TextArea binds NEITHER (audited
         # against textual 8.2.8: it binds `home,ctrl+a` and `end,ctrl+e` for
@@ -5426,6 +5443,10 @@ class OperatorApp(App[None]):
         #: card's is "has this park been announced?", the rung's is "is remote
         #: access off right now?" — and only the second must survive a dismissal.
         self._tunnel_parked = False
+        #: The Radient Guard badge the band carries ("" = none). Guard RFC v0.9
+        #: §5.2.3: a pending prompt is a one-line notice plus this badge, never a
+        #: card inside a turn (see `_poll_guard`).
+        self._guard_badge = ""
         #: `(device id, session id) -> parked kind` for parks on PEER devices
         #: this app has seen. The edge rule is `session.peer_rows.park_edges`:
         #: a key that appears, or whose kind changed, is a new episode; a key
@@ -13066,6 +13087,11 @@ class OperatorApp(App[None]):
         # for this, and the notice and the band rung are the only places the
         # terminal admits it.
         self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
+        # Radient Guard's passive indicator (RFC v0.9 slice L2b). Local reads
+        # only (the cached membership record, then the Guard SQLite files when
+        # they exist); a non-Team account returns at the first, memoised read.
+        self.set_interval(GUARD_POLL_S, self._poll_guard)
+        self.call_after_refresh(self._poll_guard)
         # ALWAYS ON, and deliberately NOT the sidebar's timer: that poll is
         # registered paused and pauses whenever the list is closed, which is the
         # app's DEFAULT state (`tui.sidebar_visible` = False) — hanging the park
@@ -22025,7 +22051,10 @@ class OperatorApp(App[None]):
         else:
             # "MEMBERS", never "roles" (R6): the count comes from member_count(),
             # which excludes the manager, and every sibling surface says members.
-            parts.append(f"{slots} {'member' if slots == 1 else 'members'}")
+            # Keyed with an ICU plural (not a hand-rolled `s`) so every locale
+            # picks its own plural arm; `shown` stays the raw count, matching
+            # `skills_led_by` beside it.
+            parts.append(_t(_x.skills_member_count(count=slots, shown=str(slots))))
         if registry is None:
             registry = self._team_registry()
         # Only a CONVERSATION row is marked: the account is the default a reader
@@ -31385,6 +31414,8 @@ class OperatorApp(App[None]):
             on_set_global_auto=(
                 None if bridge_latched else partial(self._set_global_auto_for_card, source)
             ),
+            # Tightening is never refused, latched or not: the way back stays.
+            on_set_session_ask=partial(self._set_session_ask_for_card, source),
             person_only=bridge_latched,
             notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
@@ -32061,7 +32092,7 @@ class OperatorApp(App[None]):
             # screen asserting something no longer true.
             self._append_block(
                 NoticeBlock(
-                    "tool approvals: auto — /approvals ask restores prompting",
+                    "tool approvals: auto — click ! auto or /approvals ask to restore prompting",
                     "warning",
                 )
             )
@@ -32186,6 +32217,16 @@ class OperatorApp(App[None]):
         # leaves the user looking at a question whose subject is gone.
         self._close_aside()
         self._clear_transcript()
+
+    def action_approvals_ask(self) -> None:
+        """Click on the band's `!`: switch this session back to asking.
+
+        Exactly ``/approvals ask`` — the same handler, the same receipt — so a
+        click and the typed command cannot drift. Session scope only: the saved
+        default is a separate, deliberate ``/approvals default ask``, and a
+        click on a status glyph must not rewrite ``config.yml``.
+        """
+        self._cmd_approvals("ask", self._notice)
 
     def _cmd_approvals(self, arg: str, notice: NoticeFn) -> None:
         """``/approvals [default] [ask|auto]`` — the mode, and how long it lasts.
@@ -32734,6 +32775,34 @@ class OperatorApp(App[None]):
             )
         return ApprovalSettingOutcome(kind="ok", mode="auto", provenance="session")
 
+    def _set_session_ask_for_card(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The card's `S` while this session is auto: back to asking (R1-M2).
+
+        The mirror of :meth:`_set_session_auto_for_card` — same record, same
+        routing to an owner elsewhere, and the card stays PARKED. No latch
+        check: tightening needs no authority and is never refused.
+        """
+        if self._gate_is_owned_elsewhere():
+            card = self._approval
+            if card is None:
+                return ApprovalSettingOutcome(kind="refused", mode="auto", provenance="session")
+            self.run_worker(
+                self._route_approvals_setting(card, "ask", "session"),
+                thread=False,
+                group="session",
+            )
+            return None
+        self._explicit_approvals_mode = "ask"
+        self._set_approve_all(False)
+        problem = self._persist_approval_override(source, "ask")
+        if problem:
+            return ApprovalSettingOutcome(
+                kind="applied-unsaved", mode="ask", provenance="session", reason=problem
+            )
+        return ApprovalSettingOutcome(kind="ok", mode="ask", provenance="session")
+
     def _set_global_auto_for_card(
         self, source: SessionInteraction
     ) -> ApprovalSettingOutcome | None:
@@ -32943,23 +33012,22 @@ class OperatorApp(App[None]):
         data = (outcome or {}).get("data") or {}
         ok = data.get("ok")
         saved = data.get("approval_saved_for_resume", True)
+        # The receipt's first words name the mode it switched TO; the `S`-as-ask
+        # route (R1-M2) expects "tool approvals: ask", not "...: auto".
+        said = "tool approvals: ask" if argument == "ask" else "tool approvals: auto"
         if ok is None:
             # Fallback for an owner built before the structured outcome. The
             # runtime's DEFAULT-write failure receipt also begins
             # "tool approvals: auto", which is exactly how a failed loosening
             # used to be painted as saved; the failure family names itself, so
             # its absence is part of the evidence, not decoration.
-            if text.startswith("tool approvals: auto") and "NOT saved for resume" in text:
+            if text.startswith(said) and "NOT saved for resume" in text:
                 # A session switch whose live half took and whose record did
                 # not. It is NOT a plain failure — the gate moved — so it gets
                 # the applied-and-unsaved sentence rather than "unchanged".
                 ok, saved = True, False
             else:
-                ok = (
-                    text.startswith("tool approvals: auto")
-                    and "NOT saved" not in text
-                    and "NOT applied" not in text
-                )
+                ok = text.startswith(said) and "NOT saved" not in text and "NOT applied" not in text
         if not ok:
             failure = "NOT saved" in text or "NOT applied" in text
             card.show_setting_outcome(
@@ -32972,7 +33040,7 @@ class OperatorApp(App[None]):
                 ),
             )
             return
-        mode = str(data.get("approval_mode") or "auto")
+        mode = str(data.get("approval_mode") or ("ask" if argument == "ask" else "auto"))
         provenance = str(
             data.get("approval_provenance") or ("session" if scope == "session" else "global")
         )
@@ -36391,6 +36459,8 @@ class OperatorApp(App[None]):
             # contents by identity to know which transcript blocks the user
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
+            from local_operator.session.session import stamp_tui_composer_steer
+
             steer_message = Message.user(sent, images)
             # The delivery mode: only `queue`/`both` ride the keyword, and only
             # when this session's handle takes it. `steer` keeps the legacy call
@@ -36435,6 +36505,7 @@ class OperatorApp(App[None]):
                     can_send_again=False,
                 )
                 return
+            stamp_tui_composer_steer(steer_message)
             if mode != "steer":
                 OperatorApp._steer_message_with_delivery(session, steer_message, mode)
             else:
@@ -41798,8 +41869,19 @@ class OperatorApp(App[None]):
                         aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
                         details[name.casefold()] = (
                             display_form(name, str(getattr(row, "label", "") or "")),
-                            (getattr(row, "description", "") or "").strip() or "no description",
-                            f"alias: {', '.join(aliases)}" if aliases else "",
+                            # Resolved to finished strings here, so the page
+                            # cannot re-translate them itself: `_apply_language`
+                            # re-runs this method and hands the rows back via
+                            # `SettingsView.set_teams` on a live switch. Aliases
+                            # are user-typed identifiers, so only the label is
+                            # copy — the joined names pass through untouched.
+                            (getattr(row, "description", "") or "").strip()
+                            or _t(_x.skills_team_no_description()),
+                            (
+                                _t(_x.skills_team_aliases(aliases=", ".join(aliases)))
+                                if aliases
+                                else ""
+                            ),
                         )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
@@ -41807,7 +41889,7 @@ class OperatorApp(App[None]):
                 display, summary, alias_fact = details.get(
                     team.name.casefold(), (team.name, team.description or "", "")
                 )
-                facts = team.detail or "team"
+                facts = team.detail or _t(_x.skills_team_fallback_facts())
                 if alias_fact:
                     facts = f"{facts} · {alias_fact}"
                 rows.append((display, facts, summary))
@@ -46246,6 +46328,8 @@ class OperatorApp(App[None]):
             self._cmd_logout(arg, notice)
         elif command == "/credential":
             self._cmd_credential(arg, notice)
+        elif command == "/guard":
+            self._cmd_guard()
         elif command == "/team":
             self._cmd_team(arg, notice, attachments)
         elif command == "/aida":
@@ -47409,6 +47493,15 @@ class OperatorApp(App[None]):
                 self._system_notice("usage: /model default <provider>/<model-id>", "warning")
                 return
         provider, sep, model_id = target.partition("/")
+        if _rehome and sep and not model_id:
+            from local_operator.model.defaults import (
+                OAUTH_SUGGESTED_MODELS,
+                default_model_for,
+            )
+            from local_operator.paths import config_dir
+
+            if provider in OAUTH_SUGGESTED_MODELS:
+                model_id = default_model_for(provider, config_dir=config_dir()) or ""
         if not sep or not model_id:
             self._system_notice(
                 "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
@@ -49359,9 +49452,17 @@ class OperatorApp(App[None]):
         # watcher path reaches here with no keypress to follow it. `_rows_key`
         # and `_paint_token` carry the active locale, so this repaint recomposes
         # the whole list in the new language rather than reusing the old strips.
+        #
+        # Team rows are the exception the locale-keyed caches cannot cover: the
+        # app resolves them to finished strings (member count, alias label, the
+        # "no description" fallback) when the page opens, so a repaint alone
+        # re-inks the OLD language (PR #4508 R1/Q1). Re-resolve them here and
+        # hand them over through the narrow setter, which repaints once and
+        # keeps cursor/pane/expansion state — `load` would also re-read the
+        # credential store and catalogues for rows that need no re-resolving.
         settings_view = self._settings_view
         if settings_view is not None:
-            settings_view._repaint()
+            settings_view.set_teams(self._settings_team_rows())
         # /info owns painted Statics, not render-time lookups. Repaint the
         # existing presentation through this shared command/config-watch hook:
         # re-opening it would lose its snapshot/scroll and re-run costly probes.
@@ -50255,6 +50356,19 @@ class OperatorApp(App[None]):
         performs. The visible page is the target, as in :meth:`action_transcript_home`.
         """
         self._reader_transcript_view().action_scroll_end()
+
+    def on_editor_page_requested(self, message: EditorPageRequested) -> None:
+        # Reuse the focused transcript's page path so scroll provenance
+        # releases tail-follow before a later stream update can move the reader.
+        if self.screen.focused is not message.editor:
+            return
+        view = self._reader_transcript_view()
+        if not view.allow_vertical_scroll:
+            return
+        if message.upward:
+            view.action_page_up()
+        else:
+            view.action_page_down()
 
     def _scroll_todos(self, *, down: bool) -> None:
         """Drive the todo panel's keyboard scroll, the one path both keys share.
@@ -57978,6 +58092,82 @@ class OperatorApp(App[None]):
         """
         return not (self._session is None and self._setup_state)
 
+    def _cmd_guard(self) -> None:
+        """``/guard`` — the Radient Guard screen (RFC v0.9 slice L2b).
+
+        A modal over the transcript, never part of a turn: the session keeps
+        running underneath, and nothing here sends to it. A non-Team account
+        gets the Team card, whose one network read (trial eligibility) runs on a
+        worker thread inside the screen.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.widgets.guard_view import (
+            GuardScreen,
+            load_trial_eligibility,
+        )
+
+        root = config_dir()
+
+        def _done(_result: str | None) -> None:
+            self._poll_guard()
+
+        self.push_screen(
+            GuardScreen(root, eligibility_loader=lambda: load_trial_eligibility(root)),
+            _done,
+        )
+
+    def _poll_guard(self) -> None:
+        """Keep the Guard badge and the once-a-day notice in step. Never raises.
+
+        The notice (§15.4' C6) is shown at most once per local day on this
+        surface (``guard.surface.should_show_notice``); the badge on every
+        attach for as long as a choice is waiting.
+        """
+        try:
+            from local_operator.guard import surface as guard_surface
+            from local_operator.guard.consent import GuardConsentHost
+            from local_operator.guard.reports import GuardReports
+            from local_operator.paths import config_dir
+            from local_operator.tui.widgets.guard_view import (
+                badge_text,
+                notice_text,
+                receipt_text,
+            )
+
+            root = config_dir()
+            if not guard_surface.guard_available(root):
+                self._assert_guard_badge("")
+                return
+            states = guard_surface.org_states(root)
+            known = {s.tenant for s in states}
+            drafts = [d for d in GuardReports(root).drafts() if d.tenant in known]
+            self._assert_guard_badge(badge_text(states, reports_waiting=len(drafts)))
+            # The C6 line announces an org turning Guard ON; a widening is said
+            # by the badge ("new items waiting") alone, never by this sentence.
+            waiting = [s for s in states if s.state == guard_surface.STATE_WAITING]
+            if waiting and guard_surface.should_show_notice(root, surface="tui"):
+                self._system_notice(notice_text(waiting[0]))
+            # §15.4' C3 grant receipts ("... Not you? Stop sharing in /guard"):
+            # each shown once, then marked, so a grant this person did not make
+            # (the same-user residual, RFC §5.7c) is surfaced on the next poll.
+            host = GuardConsentHost(root, transport=None, mirror=False)
+            for notice in host.notices(unshown_only=True):
+                text = receipt_text(notice)
+                if text is None:
+                    continue
+                self._system_notice(text)
+                host.mark_notice_shown(int(notice["id"]))
+        except Exception:  # noqa: BLE001 - a passive indicator never breaks the app
+            logger.debug("guard poll failed", exc_info=True)
+
+    def _assert_guard_badge(self, text: str) -> None:
+        if text == self._guard_badge:
+            return
+        self._guard_badge = text
+        status = self._status
+        if status is not None:
+            status.update(guard_badge=text)
+
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.
 
@@ -58971,6 +59161,7 @@ class OperatorApp(App[None]):
                 manager.get_config_value("hosting"),
                 manager.get_config_value("model_name"),
                 accessible=accessible,
+                config_dir=manager.config_dir,
             )
             # A plan with nothing to write can still have something to SAY: a
             # decision-only provider (TypeSafe's Jev) leaves the routing exactly
@@ -59063,6 +59254,14 @@ class OperatorApp(App[None]):
             )
             provider = str(manager.get_config_value("hosting", "") or "").strip().lower()
             model_id = str(manager.get_config_value("model_name", "") or "").strip()
+            if provider and not model_id:
+                from local_operator.model.defaults import (
+                    OAUTH_SUGGESTED_MODELS,
+                    default_model_for,
+                )
+
+                if provider in OAUTH_SUGGESTED_MODELS:
+                    model_id = default_model_for(provider, config_dir=manager.config_dir) or ""
         except Exception:  # noqa: BLE001 — a repair must never fail a completed login
             return self._deferred_close(from_pending, speak=True)
         if not is_first_provider_login(accessible, login_provider):
@@ -59105,7 +59304,19 @@ class OperatorApp(App[None]):
                 return None
             return rehome_deferred_notice(old_label)
         self._rehome_pending = None
-        self._run_slash_command(f"/model {provider}/{model_id}", _rehome=True)
+        from local_operator.model.defaults import RouteDefaultModel
+
+        # The receipt names a preview; the private slash dispatch must still
+        # carry omission. A concrete configured ID takes the ordinary pin path.
+        automatic = isinstance(model_id, RouteDefaultModel)
+        if automatic and _is_viewer(session):
+            # A local viewer's set-model RPC accepts literal IDs. Let the
+            # owner perform the same guarded repair as desktop and emit its
+            # own receipt only after the selection lands.
+            self.run_worker(session.rehome_to_auth_default(old_label, provider))
+            return None
+        target_id = "" if automatic else model_id
+        self._run_slash_command(f"/model {provider}/{target_id}", _rehome=True)
         return rehome_notice(old_label, f"{provider}/{model_id}")
 
     def _deferred_close(self, from_pending: bool, *, speak: bool) -> str | None:
@@ -64313,6 +64524,12 @@ class OperatorApp(App[None]):
         # path that retires a reasoning phase for a turn that reasoned and then
         # called a tool. Idempotent: a `reasoning_end` already retired it.
         self._retire_reasoning_block()
+        if message.retract_inline_ui and not message.text.strip():
+            block, self._streaming_block = self._streaming_block, None
+            if block is not None:
+                self._transcript_view().remove_block(block)
+            self._refresh_working_activity()
+            return
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the
@@ -66778,7 +66995,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 158
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 159
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -67914,6 +68131,21 @@ _SEARCH_STATE_TOKENS: dict[str, str] = {
     # describing the provider beside them (round-2 D2-3).
     "excluded": "muted",
     "needs setup": "muted",
+    # Codes added with the chain's leg split (`provider_state_code`): the two
+    # that spend take `warning` like `auto paid`; the rest stay `muted`.
+    "auto free, then key": "muted",
+    "auto native plan": "muted",
+    "auto native paid": "warning",
+    "auto radient": "warning",
+    # `warning`, not `muted`: out of credits is the one Radient state the user has
+    # to ACT on, and the dimmest ink made it the quietest row on screen (PR #4553
+    # design round 1, D5).
+    "radient refused": "warning",
+    # Listed twins take their auto twins' ink: `enabled, then key` matches
+    # `auto free, then key` (free first), `enabled (credits)` matches
+    # `auto radient` (design round 1, D1/D2).
+    "enabled, then key": "muted",
+    "enabled (credits)": "warning",
 }
 
 
@@ -67921,33 +68153,28 @@ def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
     """The `chain` row: every leg in try order, each marker in its own ink.
 
     The markers come from the provider module's single table
-    (``chain_leg_marker``), so the CLI prints exactly the ones this row paints, and
-    the ink comes from ``CHAIN_MARKER_TOKENS`` -- round 2 measured the same `(paid)`
+    (``chain_leg_entries``), so the CLI prints exactly the ones this row paints, and
+    the ink comes with each entry -- round 2 measured the same `(paid)`
     fact at plain dim here and amber on the provider row two lines below, which
     made the row that says a leg will spend the least emphatic one on screen
     (round-2 D2-3).
     """
-    from local_operator.web_search.providers import (
-        CHAIN_MARKER_TOKENS,
-        chain_leg_marker,
-    )
+    from local_operator.web_search.providers import chain_leg_entries
 
     dim = Style(color=theme_mod.semantic_color("dim"))
     row = Text()
-    legs = [status for status in statuses if status.enabled]
-    if not legs:
+    # LEGS, not providers: a keyed Tavily is walked twice (free, then its key in
+    # the API_KEY band), and the row shows the chain the search actually walks.
+    entries = chain_leg_entries(list(statuses))
+    if not entries:
         row.append(_t(_x.providers_none()), style=dim)
         return row
-    for index, status in enumerate(legs):
+    for index, (label, marker, token) in enumerate(entries):
         if index:
             row.append(" → ", style=dim)
-        row.append(status.label, style=dim)
-        marker = chain_leg_marker(status)
+        row.append(label, style=dim)
         if marker:
-            row.append(
-                f" {marker}",
-                style=Style(color=theme_mod.semantic_color(CHAIN_MARKER_TOKENS[marker])),
-            )
+            row.append(f" {marker}", style=Style(color=theme_mod.semantic_color(token)))
     return row
 
 
@@ -67962,11 +68189,16 @@ def _search_status_detail(status: "ProviderStatus") -> Text:
     """
     # Function-local like every other provider touch in this module: the app is the
     # TUI's entry point and the provider graph stays off its import path.
-    from local_operator.web_search.providers import provider_state_label
+    from local_operator.web_search.providers import (
+        provider_state_code,
+        provider_state_label,
+    )
 
-    state = provider_state_label(status)
+    # Ink by CODE: the newer state words are translated, so the word itself is
+    # not a stable table key.
+    token = _SEARCH_STATE_TOKENS[provider_state_code(status)]
     detail = Text()
-    detail.append(state, style=Style(color=theme_mod.semantic_color(_SEARCH_STATE_TOKENS[state])))
+    detail.append(provider_state_label(status), style=Style(color=theme_mod.semantic_color(token)))
     detail.append(" · ", style=Style(color=theme_mod.semantic_color("dim")))
     detail.append(status.detail, style=Style(color=theme_mod.semantic_color("dim")))
     return detail

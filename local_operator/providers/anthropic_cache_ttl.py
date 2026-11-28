@@ -102,9 +102,58 @@ _OVERAGE_SERVING = frozenset({"allowed", "allowed_warning"})
 #: (``cache_ttl_1h_min_context_tokens: 0`` turns every subscription 1h off).
 SUBAGENT_LONG_CALL_1H_THRESHOLD_S = 240.0
 
+#: An AUTOMATION main thread (``lop exec``, an SDK session) whose consecutive
+#: turn requests were ever this far apart, START to START, moves back to the
+#: ordinary main-thread TTL for the rest of the run.
+#:
+#: Why automation is 5m at all: the main thread's 1h exists for the IDLE gap at
+#: a turn's end (the user, a wake, a subagent). In the solo exec runs measured
+#: below, the next model call followed the previous tool results within
+#: seconds and the run ended at the turn's end, so the 2x write bought nothing.
+#: Team-led and ``--workstream`` runs DO idle inside the run (a manager waits
+#: on its subagents), so the entry points do not mark them.
+#: Measured (PR #4551 QA, t3_disc paired run, Bedrock Sonnet, ``/Users/Shared/
+#: lopqa-c4551-54ba2d/paid``): lop's r2 unit crossed 150k and wrote 59,231
+#: tokens at 1h on its last two calls, $0.098 of a $0.737 run; across all 56
+#: QA ledgers under ``/Users/Shared/lopqa-*`` (234 turn calls, 179
+#: consecutive pairs) the start-to-start gap had median 3.0 s and max 28 s.
+#:
+#: Why the call that ENDS a turn cannot be picked out instead: the TTL is fixed
+#: when the request is SENT and the write happens then; whether that call ends
+#: the turn (no tool calls) is known only from its response.
+#:
+#: Why START to START and why 240 s: the 5m entry is refreshed when a request
+#: starts, so a start-to-start gap over 300 s is exactly an expiry, whether the
+#: time went into a long stream or a long tool (a minutes-long bash, a subagent
+#: ``wait``). The first such gap pays one rewrite, as ``after_long_call`` does
+#: for subagents; gaps cluster (a manager run that waited once waits again), so
+#: the rest of the run returns to 1h. 240 s is the same headroom the subagent
+#: rule keeps below 300 s, and sits 8.6x above the largest gap measured above.
+AUTOMATION_LONG_GAP_1H_THRESHOLD_S = SUBAGENT_LONG_CALL_1H_THRESHOLD_S
+
+
+def mark_automation_session(session: object) -> None:
+    """Mark ``session``'s own stream as an automation run (exec, SDK); never raises.
+
+    The one helper both entry points call, so "which sessions are automation"
+    is decided at the two places that know it rather than inferred from a
+    missing viewer (a viewer-less interactive runtime still idles for the
+    user). ``getattr`` because test doubles and attached viewers carry no
+    ``SessionStreamFn``; such a session simply keeps the ordinary policy.
+    """
+    mark = getattr(getattr(session, "_stream_fn", None), "mark_automation", None)
+    if callable(mark):
+        mark()
+
 
 def cache_role(purpose: str, delegated: bool) -> CacheRole:
     """Classify a request for the TTL policy from facts the request carries."""
+    if purpose == "cache_keepalive":
+        # The keep-alive exists to refresh the MAIN thread's 1h entry, so its
+        # markers must be written at the turn's TTL: the auxiliary 5m would
+        # leave its own tail on the short cache, and it is unmeasured whether
+        # a 5m-marked read resets a 1h entry to a full hour.
+        return "main"
     if purpose != "turn":
         return "auxiliary"
     return "subagent" if delegated else "main"
@@ -119,6 +168,8 @@ def decide_cache_ttl(
     subagent_min_context_tokens: int,
     context_size: Callable[[], int],
     after_long_call: bool = False,
+    automation: bool = False,
+    after_long_gap: bool = False,
 ) -> str | None:
     """``"1h"`` or None (the 5m default) for one request.
 
@@ -140,8 +191,20 @@ def decide_cache_ttl(
     outweighs the 2x write (see the constant). Overage and API-key traffic keep
     the API-key rules below, so the overage fallback still lands on 5m under
     the size threshold; the main thread is already 1h on a subscription.
+
+    ``automation`` is ``ChatRequest.cache_automation``: this main thread is a
+    non-interactive run (``lop exec``, an SDK session) whose next call follows
+    its tool results within seconds and which ends at the turn's end. Such a
+    main thread uses 5m on every credential until ``after_long_gap``
+    (``ChatRequest.cache_after_long_gap``: two of its turn requests were ever
+    ``AUTOMATION_LONG_GAP_1H_THRESHOLD_S`` apart, start to start), then takes
+    the ordinary main-thread rules below. Subagents and auxiliary calls ignore
+    both flags. The result stays request-wide, so every marker in one body,
+    system head included, still carries one TTL.
     """
     if role == "auxiliary":
+        return None
+    if role == "main" and automation and not after_long_gap:
         return None
     if role == "main" and subscription and not overage:
         return "1h" if main_min_context_tokens > 0 else None

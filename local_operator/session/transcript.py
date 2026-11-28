@@ -42,8 +42,8 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping, Set
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence, TextIO
 
@@ -94,7 +94,7 @@ from local_operator.session.runtime.engagement import (  # noqa: F401
     TRANSCRIPT_FILENAME,
     durable_conversation_path,
 )
-from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE
 
 if TYPE_CHECKING:
@@ -108,6 +108,12 @@ ENTRY_MESSAGE = "message"
 #: ``details = {"untrusted": bool}``). Defined here, beside the journal, because
 #: a fork cut must treat it as prefix state (``fork_snapshot``).
 PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
+#: The conversation's latched inline-UI head row (``Session.
+#: _settle_inline_ui_head_latch``; ``details = {"text": str | None,
+#: "compaction_id": str | None}``). Defined here, beside the journal, for the
+#: same reason as :data:`PROFILE_TRUST_CUSTOM_TYPE`: a fork cut must drop the
+#: rows decided under compactions the child does not keep (``fork_snapshot``).
+INLINE_UI_HEAD_LATCH_CUSTOM_TYPE = "inline_ui_head_latch_v1"
 ENTRY_COMPACTION = "compaction"
 ENTRY_CUSTOM = "custom"
 
@@ -223,6 +229,7 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         CHANNEL_SPEND_CUSTOM_TYPE,
+        "auxiliary_usage_v1",
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
         # Idle / pre-wake compaction's anti-thrash receipts
@@ -477,8 +484,40 @@ SHRUNK_KEY = "context_shrunk_here"
 #: ``tests/unit/session/test_credential_binding.py`` pins two providers' rows
 #: across a real compaction, so this member cannot be added back without
 #: addressing the granularity above first.
+#:
+#: ``todo_snapshot`` and ``wake_schedules`` are the same failure mode at a larger
+#: scale (incident 2026-11-24, session ``1375449bf925``: an 820 MB journal held
+#: 4,425 ``todo_snapshot`` rows / 403 MB and 3,028 ``wake_schedules`` rows /
+#: 27 MB, every one but the newest superseded, and the runtime sat at ~1.19 GB
+#: RSS a minute after boot). Each row is a FULL snapshot, not a delta:
+#: ``Session._persist_todo_snapshot`` writes the whole list whenever its
+#: fingerprint changes, and ``Session._persist_wake_schedules`` writes the whole
+#: schedule set on every arm/cancel/fire. Every reader was audited as
+#: newest-wins: ``latest_custom`` / ``latest_custom_entry`` in ``Session``
+#: (todo restore, wake restore, the aida/librarian cadence ``previous`` row),
+#: ``read_latest_custom`` / ``read_latest_custom_entry`` in ``wakes.arm``,
+#: ``projects``, ``todo_panel``, ``serving``, ``harness.subagent``,
+#: ``mobile.tui_handle`` and the aida/librarian proactive passes,
+#: ``network.carry``'s ``latest_custom_details``, ``mobile.durable``'s tracked
+#: set (it iterates, but overwrites one dict slot per type), and
+#: ``workspace_rest._no_wake_schedule``, which walks the journal BACKWARD and
+#: returns at the first match. Nothing renders or diffs older snapshots
+#: (``open_frame`` and the desktop reducer drop both types unpainted). The fork
+#: guard in the wake restore compares only the NEWEST row's ``ts`` with the
+#: fork instant, which the fold never changes.
+#:
+#: Literals are inline for the leaf-module reason above; the owners are
+#: ``session.session.TODO_SNAPSHOT_CUSTOM_TYPE`` and
+#: ``harness.wake.WAKE_SCHEDULES_CUSTOM_TYPE``, and
+#: ``tests/unit/session/test_transcript_footprint.py`` pins both.
 _COLLAPSIBLE_CUSTOM_TYPES = frozenset(
-    {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
+    {
+        "subagent_roster",
+        SESSION_SPEND_CUSTOM_TYPE,
+        "frontend_state_checkpoint_v1",
+        "todo_snapshot",
+        "wake_schedules",
+    }
 )
 
 #: The prefix every :meth:`TranscriptEntry.to_json` CUSTOM row opens with, up to
@@ -500,7 +539,280 @@ _CUSTOM_ROW_PREFIX = re.compile(
 )
 
 
-def _superseded_collapsible_lines(handle: TextIO) -> tuple[frozenset[int], int]:
+#: The head every writer row opens with: its ``id`` and its ``type``. Read in the
+#: open scan WITHOUT parsing the row, so the loader can find the newest
+#: compaction and its anchor's line before it decides which rows stay resident
+#: (see :class:`_OpenLayout`). Same soundness rule as :data:`_CUSTOM_ROW_PREFIX`:
+#: a match IS such a row; a miss (foreign key order, an escaped id) only makes the
+#: loader fall back to the eager load, never drop a row.
+_ROW_HEAD = re.compile(r'\{"id":\s*"([^"\\]*)",\s*"ts":\s*[-+0-9.eE]+,\s*"type":\s*"([a-z_]+)"')
+
+
+class _OpenLayout:
+    """What the open scan learns about row positions, for the suffix-only load.
+
+    WHY (fleet swap pressure, 2026-11): a compaction bounds the model's context
+    but never bounded a runtime's boot memory, because the loader built a
+    resident :class:`TranscriptEntry` for every row. Large journals are only
+    0.2-6.6% post-compaction (measured: 79bddc262663 keeps 5.05 MB of 236.8 MB).
+    The loader can only drop a prefix row it has proved is before the cut, and it
+    cannot un-drop one, so the cut's LINE must be known before pass B starts.
+    That is this object: collected in the same streaming pass that already finds
+    superseded collapsible rows, transient (discarded once the cut is computed).
+
+    * ``first_line_of`` — id -> first physical line that carries it. First, not
+      last, because :func:`context_cut_index` resolves the anchor scanning
+      forward and takes the first parsed match.
+    * ``newest_compaction`` — (line, raw text) of the newest compaction row; only
+      that one row is parsed, to read its ``first_kept_entry_id``.
+    * ``first_unmatched`` — the first non-blank line the head regex missed. Such
+      a line could be the anchor's real first occurrence (or a compaction the
+      regex cannot see), so a cut past it is unsound and the load stays eager.
+    """
+
+    __slots__ = ("first_line_of", "newest_compaction", "first_unmatched")
+
+    def __init__(self) -> None:
+        self.first_line_of: dict[str, int] = {}
+        self.newest_compaction: tuple[int, str] | None = None
+        self.first_unmatched: int | None = None
+
+    def observe(self, number: int, line: str) -> None:
+        match = _ROW_HEAD.match(line)
+        if match is None:
+            if self.first_unmatched is None and line.strip():
+                self.first_unmatched = number
+            return
+        self.first_line_of.setdefault(match.group(1), number)
+        if match.group(2) == ENTRY_COMPACTION:
+            self.newest_compaction = (number, line)
+
+
+class _StalePrefix(OSError):
+    """The journal under a lazily-loaded prefix is not the file it was indexed in."""
+
+
+class _AnchorMoved(Exception):
+    """Pass B found the cut line does not hold the anchor row; reload eagerly."""
+
+
+#: Custom types whose PREFIX rows stay resident in full under the suffix-only
+#: load. Each is read by a boot- or turn-path consumer that folds or searches
+#: every row of its type (session_state fold, model restore, trust episode,
+#: credential binding per provider, supplements per job, channel spend, receipts,
+#: incident dedupe, hidden wake ids, attention origin) — rows that are few and
+#: small next to the message bodies the prefix drops. Collapsible types ride
+#: along: at most their newest copy survives the open fold, and
+#: ``selection_from_payloads`` reads ``frontend_state_checkpoint_v1`` in order.
+#: Taint/flag rows are kept by predicate, not by this list (see
+#: :meth:`_PrefixSink.observe`).
+_PREFIX_KEEP_CUSTOM_TYPES: frozenset[str] = frozenset(
+    {
+        "session_state",
+        PROFILE_TRUST_CUSTOM_TYPE,
+        "selected_model",
+        SESSION_BINDING_CUSTOM_TYPE,
+        SUPPLEMENT_CUSTOM_TYPE,
+        "session_channel_spend.v1",
+        "auxiliary_usage_v1",
+        "session_incident",
+        "wake_prompt",
+        "completion_attention",
+        "system_prefix",
+    }
+)
+
+#: ``provider_payload.details`` keys a prefix message SKELETON keeps: exactly the
+#: keys the full-history money readers (``search_spend_rows``,
+#: ``channel_backfill_rows``) and the profile-receipt dedupe read. A new money key
+#: added there must be added here; ``test_transcript_suffix_load`` pins the
+#: parity of every full projection between the lazy and the eager load.
+_SKELETON_DETAIL_KEYS: tuple[str, ...] = (
+    "search_cost",
+    "read_cost",
+    "provider",
+    "cost_usd",
+    "generation_id",
+    "model",
+    "cost_source",
+    "billing_basis",
+    "cost_provenance",
+    "receipt_id",
+    "status",
+    "lost_usage_rows",
+)
+
+#: Detail keys whose presence alone makes a message row a money/receipt row.
+_SKELETON_TRIGGER_DETAIL_KEYS = frozenset({"search_cost", "read_cost", "cost_usd", "receipt_id"})
+
+
+def _skeleton(entry: "TranscriptEntry") -> "TranscriptEntry | None":
+    """A prefix row reduced to what the full-history projections read, or None.
+
+    THE ONE REDUCTION (design brief §2.2): money is "not invalidated by
+    compaction" (:func:`all_usage_rows`), so the prefix's ``usage``, search/read
+    costs, image costs and lost-row flags must still reach the boot-time spend
+    rebuild after the prefix's message bodies are dropped. Only rows that carry
+    one of those become skeletons; everything else returns None and costs
+    nothing. ``id``/``ts``/``type`` are kept because ``channel_backfill_rows``
+    mints record ids and timestamps from them.
+    """
+    payload = entry.payload or {}
+    provider_payload = payload.get("provider_payload")
+    provider_payload = provider_payload if isinstance(provider_payload, dict) else {}
+    details = provider_payload.get("details")
+    details = details if isinstance(details, dict) else {}
+    lost = payload.get(LOST_USAGE_KEY) or provider_payload.get(LOST_USAGE_KEY)
+    usage = payload.get("usage") if entry.type == ENTRY_MESSAGE else None
+    money = entry.type == ENTRY_MESSAGE and any(
+        key in details for key in _SKELETON_TRIGGER_DETAIL_KEYS
+    )
+    if not (lost or isinstance(usage, dict) or money):
+        return None
+    kept: dict[str, Any] = {
+        key: payload[key]
+        for key in ("role", "kind", "custom_type", "tool_name", "tool_call_id", "usage")
+        if key in payload
+    }
+    if payload.get(LOST_USAGE_KEY):
+        kept[LOST_USAGE_KEY] = payload[LOST_USAGE_KEY]
+    small_provider: dict[str, Any] = {}
+    if provider_payload.get(LOST_USAGE_KEY):
+        small_provider[LOST_USAGE_KEY] = provider_payload[LOST_USAGE_KEY]
+    small_details = {key: details[key] for key in _SKELETON_DETAIL_KEYS if key in details}
+    if small_details:
+        small_provider["details"] = small_details
+    if small_provider:
+        kept["provider_payload"] = small_provider
+    return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=kept)
+
+
+class _PrefixSink:
+    """Everything the runtime still needs from rows it does NOT keep resident.
+
+    WHY: see :class:`_OpenLayout`. Rows before the newest compaction's anchor
+    are parsed once at open (pass B still feeds ``_index_entry``, so the
+    newest-row slots, ``_entry_ids`` and admitted command ids are exact over the
+    whole journal), then reduced into the fields below and dropped. Field by
+    field:
+
+    * ``offsets`` / ``lengths`` / ``ids`` — the row index: for each prefix row
+      the eager load would have kept (in order), its byte range in the CURRENT
+      file and its id. ``entries()`` reads the prefix back through it, and a
+      row whose bytes no longer parse to the recorded id means the index is
+      stale (I5), never a silent misread.
+    * ``positions`` — id -> index among prefix rows (last occurrence wins, the
+      ``index_of`` rule of the fork guard).
+    * ``compactions`` — prefix compaction rows reduced to id/ts/type and
+      ``first_kept_entry_id``: what the fork guard reads. The 680 KB
+      ``preserve_data`` blocks stay on disk.
+    * ``residue`` — the ordered projection rows: money skeletons
+      (:func:`_skeleton`), prune rows, keep-set customs
+      (:data:`_PREFIX_KEEP_CUSTOM_TYPES`), and taint/flag source rows in full.
+      ``history_projection()`` is ``residue + suffix``.
+    * ``has_*`` flags — whole-history booleans the session asks once at boot,
+      computed with the SAME predicates on the full parsed row.
+    * ``injection_ids`` — :func:`_journal_injection_ids` over the prefix: the
+      context replay resolves preserved-turn provenance against the WHOLE
+      journal, and those ids sit before the cut by definition.
+    * ``latest_*`` — the newest-row slots as of the prefix's end, so a
+      ``compact_file`` that re-indexes the suffix can re-seed them.
+    * ``prefix_end`` / ``identity`` — byte length of the prefix and the
+      ``(st_ino, st_dev)`` of the file it was indexed in (I5).
+    * ``skip_bytes`` — superseded collapsible rows left on disk INSIDE the
+      prefix (an unfolded open). ``compact_file`` copies the prefix verbatim,
+      so these are not bytes it can free.
+    """
+
+    def __init__(self) -> None:
+        from array import array
+
+        self.offsets = array("Q")
+        self.lengths = array("Q")
+        self.ids: list[str] = []
+        #: Entry time of each prefix row, parallel to ``ids`` (8 bytes/row).
+        #: WHY: a compaction's preserved user turns sit BEFORE its anchor, so
+        #: the display page hoists prefix rows and must stamp their true entry
+        #: time (:meth:`Transcript.entry_times_for`) without re-reading the
+        #: prefix. Kept as a compact array rather than ``TranscriptEntry`` rows
+        #: so the boot footprint stays the index's, not the journal's.
+        self.ts = array("d")
+        self.positions: dict[str, int] = {}
+        self.compactions: list[TranscriptEntry] = []
+        self.residue: list[TranscriptEntry] = []
+        #: Prefix-row index of each ``residue`` row, so ``recent_entries`` can
+        #: keep its "newest N rows of the journal" window exact.
+        self.residue_index: list[int] = []
+        self.injection_ids: set[str] = set()
+        self.has_message = False
+        self.has_assistant = False
+        self.has_non_bookkeeping = False
+        self.has_channel_activity = False
+        self.latest_by_type: dict[str, TranscriptEntry] = {}
+        self.latest_custom_entries: dict[str, TranscriptEntry] = {}
+        self.latest_user: TranscriptEntry | None = None
+        self.prefix_end = 0
+        self.identity: tuple[int, int] = (0, 0)
+        self.skip_bytes = 0
+        self.residue_bytes = 0
+        from local_operator.community.taint import entry_is_community_source
+        from local_operator.harness.bridge_egress import entry_is_taint_source
+
+        self._sources = (entry_is_taint_source, entry_is_community_source)
+
+    def observe(self, entry: TranscriptEntry, offset: int, length: int) -> None:
+        self.positions[entry.id] = len(self.ids)
+        self.ids.append(entry.id)
+        self.ts.append(float(entry.ts))
+        self.offsets.append(offset)
+        self.lengths.append(length)
+        payload = entry.payload or {}
+        custom_type = payload.get("custom_type")
+        if entry.type == ENTRY_MESSAGE:
+            self.has_message = True
+            if payload.get("role") == "assistant":
+                self.has_assistant = True
+            if payload.get("kind") == CUSTOM_KIND_CUSTOM and custom_type:
+                self.injection_ids.add(entry.id)
+        if not is_bookkeeping_entry(entry):
+            self.has_non_bookkeeping = True
+            if not custom_type:
+                self.has_channel_activity = True
+        if entry.type == ENTRY_COMPACTION:
+            first_kept = payload.get("first_kept_entry_id")
+            stub = TranscriptEntry(
+                id=entry.id,
+                ts=entry.ts,
+                type=entry.type,
+                payload={} if first_kept is None else {"first_kept_entry_id": first_kept},
+            )
+            self.compactions.append(stub)
+            # Also in the residue: the economic gate's backward walk reads the
+            # POSITION of each marker between usage rows (its yield window).
+            self.residue.append(stub)
+            self.residue_index.append(len(self.ids) - 1)
+            return
+        if (
+            entry.type == ENTRY_PRUNE
+            or (
+                custom_type in _PREFIX_KEEP_CUSTOM_TYPES or custom_type in _COLLAPSIBLE_CUSTOM_TYPES
+            )
+            and (entry.type == ENTRY_CUSTOM or payload.get("kind") == CUSTOM_KIND_CUSTOM)
+            or any(source(entry.type, payload) for source in self._sources)
+        ):
+            self.residue.append(entry)
+            self.residue_index.append(len(self.ids) - 1)
+            self.residue_bytes += length
+            return
+        skeleton = _skeleton(entry)
+        if skeleton is not None:
+            self.residue.append(skeleton)
+            self.residue_index.append(len(self.ids) - 1)
+
+
+def _superseded_collapsible_lines(
+    handle: TextIO, layout: _OpenLayout | None = None
+) -> tuple[frozenset[int], int]:
     """Line numbers (0-based, physical) of superseded collapsible rows, and their bytes.
 
     WHY THIS EXISTS (incident 2026-11-24, session ``96cf57e7acb7``): a 974 MB
@@ -541,6 +853,8 @@ def _superseded_collapsible_lines(handle: TextIO) -> tuple[frozenset[int], int]:
     superseded: set[int] = set()
     dead_bytes = 0
     for number, line in enumerate(handle):
+        if layout is not None:
+            layout.observe(number, line)
         match = _CUSTOM_ROW_PREFIX.match(line)
         if match is None:
             continue
@@ -589,16 +903,33 @@ class TranscriptEntry:
     type: str  # ENTRY_MESSAGE | ENTRY_COMPACTION | ENTRY_CUSTOM
     payload: dict[str, Any] = field(default_factory=dict)
 
+    # Envelope-only metadata: older journal readers ignore unknown envelope
+    # keys. The public payload is already prose, so even old journal and file
+    # readers cannot accidentally display component JSON.
+    inline_ui_source_version: int | None = None
+    inline_ui_source_blocks: tuple[tuple[int, str], ...] = ()
+
     def to_json(self) -> str:
-        return json.dumps(
-            {"id": self.id, "ts": self.ts, "type": self.type, "payload": self.payload},
-            separators=(",", ":"),
-        )
+        row: dict[str, Any] = {
+            "id": self.id,
+            "ts": self.ts,
+            "type": self.type,
+            "payload": self.payload,
+        }
+        if self.inline_ui_source_version is not None:
+            row["inline_ui_source_version"] = self.inline_ui_source_version
+            if self.inline_ui_source_blocks:
+                row["inline_ui_source_blocks"] = self.inline_ui_source_blocks
+        return json.dumps(row, separators=(",", ":"))
 
     @staticmethod
-    def from_json(line: str) -> "TranscriptEntry | None":
+    def from_json(line: str, *, warn_malformed: bool = True) -> "TranscriptEntry | None":
         """Parse one line; malformed lines are dropped individually (a corrupt
-        row must never destroy the whole replay)."""
+        row must never destroy the whole replay).
+
+        Speculative readers may inspect rows replay would never reach. They
+        suppress the payload-bearing warning without changing replay's parser.
+        """
         try:
             raw = json.loads(line)
             return TranscriptEntry(
@@ -606,10 +937,84 @@ class TranscriptEntry:
                 ts=float(raw.get("ts", 0.0)),
                 type=str(raw["type"]),
                 payload=dict(raw.get("payload", {})),
+                inline_ui_source_version=_parse_inline_ui_version(
+                    raw.get("inline_ui_source_version")
+                ),
+                inline_ui_source_blocks=_read_inline_ui_blocks(raw.get("inline_ui_source_blocks")),
             )
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("dropping malformed transcript line: %.120s", line)
+            if warn_malformed:
+                logger.warning("dropping malformed transcript line: %.120s", line)
             return None
+
+
+def _parse_inline_ui_version(value: object) -> int | None:
+    # Preserve positive future versions across journal rewrites without
+    # interpreting them; a malformed marker cannot make the row unreadable.
+    return value if type(value) is int and value > 0 else None
+
+
+def _read_inline_ui_blocks(value: object) -> tuple[tuple[int, str], ...]:
+    if not isinstance(value, list):
+        return ()
+    blocks: list[tuple[int, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, list)
+            or len(item) != 2
+            or type(item[0]) is not int
+            or not isinstance(item[1], str)
+            or item[0] < 0
+            or (blocks and item[0] <= blocks[-1][0])
+        ):
+            return ()
+        blocks.append((item[0], item[1]))
+    return tuple(blocks)
+
+
+def _message_entry(
+    id_: str, ts: float, type_: str, payload: dict[str, Any], message: Message | CustomMessage
+) -> TranscriptEntry:
+    entry = TranscriptEntry(id_, ts, type_, payload)
+    if not isinstance(message, Message) or message.role != "assistant":
+        return entry
+    if message._inline_ui_source_version != 1:
+        return entry
+    from local_operator.session.inline_ui_text import project_inline_ui
+    from local_operator.session.runtime.inline_ui_egress import (
+        is_text_block,
+        replace_text_content,
+    )
+
+    # Read the already privacy-filtered encoding; never recover text that the
+    # standard retained-message seam discarded. Preserve block order for replay.
+    blocks = tuple(
+        (i, block["text"])
+        for i, block in enumerate(payload.get("content", ()))
+        if is_text_block(block)
+    )
+    source = "".join(text for _, text in blocks)
+    text = project_inline_ui(source, streaming=False, source_version=1, capabilities=frozenset())[
+        "text"
+    ]
+    if text != source:
+        entry.inline_ui_source_version = 1
+        entry.inline_ui_source_blocks = blocks
+        replace_text_content(payload, text)
+    return entry
+
+
+def _replay_inline_ui_source(entry: TranscriptEntry, payload: dict[str, Any]) -> None:
+    if entry.inline_ui_source_version != 1 or not entry.inline_ui_source_blocks:
+        return
+    from local_operator.session.runtime.inline_ui_egress import is_text_block
+
+    content = [block for block in payload.get("content", []) if not is_text_block(block)]
+    for index, text in entry.inline_ui_source_blocks:
+        if index > len(content):
+            return  # Malformed optional source metadata cannot damage the prose row.
+        content.insert(index, {"type": "text", "text": text})
+    payload["content"] = content
 
 
 def encode_message_payload(
@@ -1759,6 +2164,7 @@ def read_custom_entries(
     max_rows: int | None = None,
     custom_messages: bool = False,
     min_ts: float | None = None,
+    strict: bool = False,
 ) -> list[TranscriptEntry]:
     """Every custom row of ``custom_type``, NEWEST first, without parsing the journal.
 
@@ -1798,7 +2204,8 @@ def read_custom_entries(
     which makes the cost proportional to the window the caller cares about,
     not to the journal's lifetime. A clock step backwards could hide a row
     written in that gap; callers pass a window, not an exact cut, so that is
-    the accepted trade.
+    the accepted trade. ``strict`` distinguishes an unreadable journal from an
+    empty result for consumers that must not mistake missing records for zero.
     """
     encoded = json.dumps(custom_type)
     if encoded != f'"{custom_type}"':
@@ -1806,12 +2213,16 @@ def read_custom_entries(
     if max_rows is not None and max_rows <= 0:
         return []
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = _resolved_transcript_path(directory)
+    path = _resolved_transcript_path(directory, read_only=strict)
     if path is None:
+        if strict:
+            raise FileNotFoundError("Cannot read the session journal")
         return []
     try:
         handle = path.open("rb")
     except OSError:
+        if strict:
+            raise
         return []
     entries: list[TranscriptEntry] = []
     seen_offsets: set[int] = set()
@@ -1840,6 +2251,8 @@ def read_custom_entries(
             while index != -1:
                 offset = read_start + index
                 located = _row_at_offset(handle, offset)
+                if located is None and strict:
+                    raise ValueError("Cannot decode a candidate session journal record")
                 if located is not None:
                     row_offset, entry = located
                     if row_offset not in seen_offsets and _matches(entry):
@@ -2133,6 +2546,8 @@ class ReplaySuffix:
     #: the bytes above this boundary (``replay_cache.build_cold_tail_metadata``).
     absence_covered_end: int = 0
     absence_needles: tuple[bytes, ...] = ()
+    #: Recovery is a met checkpoint, not a certificate of its absence.
+    recovered_checkpoint: bool = False
 
 
 #: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
@@ -2257,6 +2672,146 @@ def custom_type_proven_absent(
         return False
 
 
+def _cold_witness(handle: BinaryIO) -> tuple[int, int, int, int]:
+    stat = os.fstat(handle.fileno())
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES = 64 << 10
+
+
+def _rfind_checkpoint_spelling(window: bytes, needle: bytes, start: int, stop: int) -> int:
+    """Exact newest spelling, with forward substring search for the miss-heavy gaps."""
+    # CPython's forward bytes.find skips through long misses faster than
+    # bytes.rfind. Visit blocks newest-first, using reverse substring search
+    # only in the block known to contain a hit. The needle-width overlap
+    # catches split matches; indices avoid copying any of the journal bytes.
+    width = max(_COLD_CHECKPOINT_SEARCH_BLOCK_BYTES, 2 * len(needle))
+    while stop - start >= len(needle):
+        block_start = max(start, stop - width)
+        first = window.find(needle, block_start, stop)
+        if first >= 0:
+            return window.rfind(needle, first, stop)
+        if block_start == start:
+            break
+        stop = block_start + len(needle) - 1
+    return -1
+
+
+def _recover_cold_checkpoint(
+    handle: BinaryIO,
+    *,
+    low: int,
+    max_bytes: int,
+    name: str,
+    needles: tuple[bytes, ...],
+    spend: dict[str, Any] | None,
+    stats: dict[str, Any] | None,
+) -> tuple[int | None, tuple[dict[str, Any], int, int] | None]:
+    """The newest complete-row needle's file offset, plus recovery if rows prove it.
+
+    One byte window sees both writer spellings without per-chunk overlap or a
+    second read. As in the bounded tail walker, discard the fragment at a
+    non-BOF floor: it might be the end of an arbitrarily large older row.
+    """
+    started = time.monotonic() if stats is not None else 0.0
+    read = rows = candidates = 0
+    outcome = "unreadable"
+    try:
+        floor = max(0, low - max_bytes)
+        handle.seek(floor)
+        window = handle.read(low - floor)
+        read = len(window)
+        if read != low - floor or not window.endswith(b"\n"):
+            return None, None
+        # The trailing newline above guarantees a delimiter even if the
+        # entire window is the trailing fragment of a single oversized row.
+        complete = window.find(b"\n") + 1 if floor else 0
+        hits = [_rfind_checkpoint_spelling(window, needle, complete, read) for needle in needles]
+        newest = max(hits, default=-1)
+        if newest < 0:
+            outcome = "no_spelling"
+            return None, None
+
+        # A reused absence witness covers a prefix. Only the newest hit can
+        # rule out absence in the remaining suffix; use its absolute BYTE
+        # position, not the candidate's row start or a window-relative index.
+        hit_offset = floor + newest
+        if spend is not None and SessionSpend.from_details(spend) is None:
+            outcome = "invalid_spend"
+            return hit_offset, None
+
+        def parse(raw: bytes) -> TranscriptEntry:
+            nonlocal rows
+            rows += 1
+            entry = TranscriptEntry.from_json(raw.decode("utf-8"), warn_malformed=False)
+            if entry is None or not isinstance(entry.payload.get("provider_payload") or {}, dict):
+                raise ValueError  # Decline, including on rows eager may never reach.
+            return entry
+
+        def is_checkpoint(entry: TranscriptEntry) -> bool:
+            return entry.type == ENTRY_CUSTOM and entry.payload.get("custom_type") == name
+
+        # A spelling inside another row (e.g. nested details) buys no order
+        # walk. Check whole candidate rows newest-first and consume every hit
+        # on that line together. Keep each needle's position so a sparse or
+        # absent spelling doesn't rescan the same prefix for every candidate.
+        rejected: set[int] = set()
+        hit = newest
+        try:
+            while hit >= 0:
+                left = max(complete, window.rfind(b"\n", complete, hit) + 1)
+                right = window.index(b"\n", hit)
+                candidates += 1
+                candidate = parse(window[left:right])
+                if is_checkpoint(candidate):
+                    break
+                rejected.add(left)
+                for index, needle in enumerate(needles):
+                    if hits[index] >= left:
+                        hits[index] = _rfind_checkpoint_spelling(window, needle, complete, left)
+                hit = max(hits)
+            else:
+                outcome = "not_checkpoint"
+                return hit_offset, None
+
+            # Eager's ordinal counts every newer parsed row, including shrinks.
+            # Don't seed from this walk, and don't decode known non-matches or
+            # the candidate twice. An alternate writer can hide a newer actual
+            # checkpoint in the gap without either byte spelling: still let
+            # that row win, just as eager does.
+            order = 1
+            pos = read - 1
+            while pos > right:
+                start = window.rfind(b"\n", left, pos) + 1
+                if start not in rejected:
+                    raw = window[start:pos]
+                    if not raw.strip():
+                        pos = start - 1
+                        continue
+                    entry = parse(raw)
+                    if is_checkpoint(entry):
+                        candidate = entry
+                        break
+                order += 1
+                pos = start - 1
+            details = dict(candidate.payload.get("details", {}))
+        except (UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
+            # Damage could affect the ordinal (eager replaces bad UTF-8 and
+            # skips malformed JSON). Leave the canonical facts to that reader.
+            outcome = "malformed"
+            return hit_offset, None
+        outcome = "matched"
+        return hit_offset, (details, order, read)
+    finally:
+        if stats is not None:
+            stats["lookup_bytes"] = read
+            stats["lookup_rows"] = rows  # Actual continuation decode attempts, not the ordinal.
+            stats["lookup_candidates"] = candidates
+            stats["lookup_ms"] = round((time.monotonic() - started) * 1000, 3)
+            stats["lookup_outcome"] = outcome
+
+
 def read_cold_tail(
     directory: str | Path,
     *,
@@ -2265,6 +2820,8 @@ def read_cold_tail(
     max_rows: int = 256,
     max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
     known_absent: tuple[int, frozenset[bytes]] | None = None,
+    desktop_source: tuple[int, int, int, int] | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> ReplaySuffix | None:
     """Prove first-frame facts from a bounded plain-journal suffix, or decline.
 
@@ -2273,7 +2830,9 @@ def read_cold_tail(
     type, plus the usage seed) is either MET in the newest 4 MiB / 256 rows,
     or PROVEN ABSENT from every byte below them. Damaged or incomplete lines,
     archives and a shrink row met before a usage receipt keep the exact eager
-    path. A bound alone is never taken as proof of absence.
+    path. A bound alone is never taken as proof of absence. The exact desktop
+    open may additionally meet its required checkpoint in one preceding
+    tail-sized window, without widening the seed or opportunistic spend facts.
 
     WHY the absence proof (L7 design R1): legacy journals carry no checkpoint
     and no spend row at all. Requiring the tail to *meet* them sent every such
@@ -2380,9 +2939,15 @@ def read_cold_tail(
     # Lazy: usage_seed -> model_selection -> this module.
     from local_operator.session.usage_seed import parse_usage
 
+    # Only fixed reasons, never row content or exception strings, go to the
+    # caller's opt-in trace.
+    def decline(reason: str) -> None:
+        if stats is not None:
+            stats["decline_reason"] = reason
+
     path, codec = transcript_source(Path(directory))
     if codec is not None:
-        return None
+        return decline("archive")
     spellings = {name: _custom_type_spellings(name) for name in checkpoint_types}
     checkpoints: dict[str, dict[str, Any]] = {}
     order: dict[str, int] = {}
@@ -2407,7 +2972,7 @@ def read_cold_tail(
                 # A complete JSON object without its terminating newline can
                 # still be an interrupted append. Let eager replay decide it.
                 if first and (not lines or lines[0] != b""):
-                    return None
+                    return decline("torn_tail")
                 for index, raw in enumerate(lines):
                     # The first chunk's leading b"" is the zero bytes after
                     # the final newline, not a row.
@@ -2420,10 +2985,10 @@ def read_cold_tail(
                         break
                     entry = TranscriptEntry.from_json(raw.decode("utf-8"))
                     if entry is None:
-                        return None
+                        return decline("malformed_tail")
                     provider = entry.payload.get("provider_payload") or {}
                     if not isinstance(provider, dict):
-                        return None
+                        return decline("malformed_tail")
                     # Conservatism, not the seed's boundary (see docstring):
                     # every shrink spelling usages_since_newest_shrink honours.
                     if (
@@ -2432,7 +2997,7 @@ def read_cold_tail(
                         or (entry.type == ENTRY_MESSAGE and provider.get("pruned"))
                     ):
                         if not have_seed:
-                            return None
+                            return decline("shrink_before_seed")
                         stopped = True
                         break
                     parsed.append(entry)
@@ -2473,32 +3038,86 @@ def read_cold_tail(
             # the walker ran out (byte bound, or BOF with ``low == 0``).
             bytes_read = end - low
             if low >= end:
-                return None
+                return decline("empty_tail")
             # What is still unproven. A usage receipt that the tail met but
             # could not parse is not proven absent: eager would look further
             # back for a parseable one. So this declines (design row 15).
             if have_usage and not have_seed:
-                return None
+                return decline("no_usable_seed")
             missing = [name for name in checkpoint_types if name not in checkpoints]
             needles: list[bytes] = []
             for name in missing:
                 spelling = spellings[name]
                 if spelling is None:
-                    return None
+                    return decline("unsupported_spelling")
                 needles.extend(spelling)
             if not have_usage:
                 needles.extend(_USAGE_SPELLINGS)
             longest = max(len(n) for n in needles)
             scan_end = min(end, low + longest - 1)
-            # The cap stays on the RANGE the proof covers, not on the bytes this
-            # call reads, so a prior proof never changes which journals decline.
-            if scan_end > max_scan_bytes:
-                return None
-            scan_start = 0
-            if known_absent is not None and set(needles) <= known_absent[1]:
-                scan_start = max(0, min(known_absent[0], scan_end) - (longest - 1))
-            if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
-                return None
+
+            def absence_start(needed: list[bytes]) -> int:
+                if known_absent is not None and set(needed) <= known_absent[1]:
+                    return max(0, min(known_absent[0], scan_end) - (longest - 1))
+                return 0
+
+            scan_start = absence_start(needles)
+            recovery = None
+            name = checkpoint_types[0]
+            frontend_needles = spellings[name]
+            # Only the exact desktop caller supplies the witness. A seed met
+            # before any shrink lets this lookup cross shrinks for order without
+            # changing usage; spend must be valid in the tail or still pass its
+            # original absence proof, on the original range and cap. Don't
+            # pay for a lookup when the cap already rules that proof out.
+            if (
+                desktop_source is not None
+                and have_seed
+                and name in missing
+                and frontend_needles
+                and low
+                and (SESSION_SPEND_CUSTOM_TYPE in checkpoints or scan_end <= max_scan_bytes)
+            ):
+                hit, recovery = _recover_cold_checkpoint(
+                    handle,
+                    low=low,
+                    max_bytes=max_bytes,
+                    name=name,
+                    needles=frontend_needles,
+                    spend=checkpoints.get(SESSION_SPEND_CUSTOM_TYPE),
+                    stats=stats,
+                )
+                if recovery is not None:
+                    remaining = [needle for needle in needles if needle not in frontend_needles]
+                    if remaining:
+                        # The hit is not a reason to scan the whole prefix for
+                        # frontend needles first. Prove only the remaining fact.
+                        spend_start = absence_start(remaining)
+                        if scan_end > max_scan_bytes or not _spellings_absent(
+                            handle, spend_start, scan_end, tuple(remaining)
+                        ):
+                            return decline("spend_unproven")
+                    else:
+                        spend_start = scan_end
+                    if _cold_witness(handle) != desktop_source or end != desktop_source[1]:
+                        return decline("source_changed")
+                    checkpoints[name], extra_rows, lookup_bytes = recovery
+                    order[name] = len(parsed) + extra_rows
+                    bytes_read += lookup_bytes
+                    needles = remaining
+                    scan_start = spend_start
+                elif hit is not None and scan_start <= hit and scan_end <= max_scan_bytes:
+                    # This exact supported spelling is in the original scan's
+                    # range; that proof would decline too. If a prior proof
+                    # skips it, run the original path rather than guess.
+                    return decline("below_tail_presence")
+            if recovery is None:
+                # Unchanged legacy proof when the continuation has no hit or
+                # was not admitted. The cap bounds the proof RANGE, not I/O.
+                if scan_end > max_scan_bytes:
+                    return decline("absence_cap")
+                if not _spellings_absent(handle, scan_start, scan_end, tuple(needles)):
+                    return decline("below_tail_presence")
             return ReplaySuffix(
                 entries=tuple(reversed(parsed)),
                 through_present=True,
@@ -2509,11 +3128,12 @@ def read_cold_tail(
                 rows_read=len(parsed),
                 usage_proven_absent=not have_usage,
                 absence_scan_bytes=scan_end - scan_start,
-                absence_covered_end=low,
+                absence_covered_end=low if needles else 0,
                 absence_needles=tuple(needles),
+                recovered_checkpoint=recovery is not None,
             )
     except (OSError, UnicodeError, TypeError, ValueError):
-        return None
+        return decline("read_error")
 
 
 def read_replay_suffix(
@@ -2866,6 +3486,23 @@ class Transcript:
         #: threshold) or failed. Priced into :meth:`reclaimable_bytes`, and
         #: reason enough for :meth:`compact_file` to run, which zeroes it.
         self._load_collapsed_bytes = 0
+        #: The rows BEFORE the resident suffix, or ``None`` when every row is
+        #: resident (no compaction, a lockless/read-only open, an unresolvable
+        #: anchor). See :class:`_PrefixSink` and :meth:`entries`.
+        self._prefix: _PrefixSink | None = None
+        #: Id the row at the suffix cut must carry when the cut is the anchor
+        #: rather than the compaction row itself (set by ``_suffix_cut``,
+        #: checked in ``_load_rows``); ``None`` when there is nothing to check.
+        self._expected_cut_id: str | None = None
+        #: Whether the open fold rewrote the journal (offsets then index the
+        #: post-fold file, which no longer holds the skipped lines).
+        self._open_folded = False
+        #: How many times a caller paid a FULL re-read of the prefix from disk
+        #: (:meth:`entries` / :meth:`iter_entries` on a lazy transcript). The boot
+        #: tripwire: a real ``create_session(resume=...)`` must leave it at 0, and
+        #: a non-zero count in production names an unmigrated full-history reader
+        #: (each one is logged at INFO with its caller).
+        self.full_materialisations = 0
         if self.path.exists():
             # STREAM the file rather than ``read_text().splitlines()``. The eager
             # form materialises the whole journal twice before the first row is
@@ -2906,19 +3543,25 @@ class Transcript:
             # ``newline=""``: same line splitting as the default, endings left
             # untranslated so the fold copies bytes exactly (``json.loads``
             # ignores the trailing ``\r\n`` either way).
+            #
+            # SUFFIX-ONLY RESIDENCY (fleet swap pressure, 2026-11): an owning
+            # writer keeps resident only the rows from the newest compaction's
+            # anchor onward; older rows are parsed once here, reduced into
+            # :class:`_PrefixSink` and dropped. See :meth:`_load_rows`.
             with self.path.open(encoding="utf-8", newline="") as handle:
-                skip = self._collapse_superseded_on_open(handle)
-                for number, line in enumerate(handle):
-                    if number in skip:
-                        continue
-                    if line.strip():
-                        entry = TranscriptEntry.from_json(line)
-                        if entry is not None:
-                            self._entries.append(entry)
-                            self._index_entry(entry)
-                            command_id = _admitted_command_id(entry)
-                            if command_id is not None:
-                                self._admitted_command_ids.add(command_id)
+                layout = _OpenLayout() if self._may_load_lazily() else None
+                skip = self._collapse_superseded_on_open(handle, layout)
+                cut = self._suffix_cut(layout, skip)
+                try:
+                    self._load_rows(handle, skip, cut)
+                except _AnchorMoved:
+                    # The anchor line did not parse to the anchor id (a torn or
+                    # duplicated row the head regex could not tell apart). Rows
+                    # already dropped cannot be un-dropped, so start over eagerly:
+                    # the eager list is always correct.
+                    self._reset_loaded_state()
+                    handle.seek(0)
+                    self._load_rows(handle, skip, None)
 
     # -- lifetime -----------------------------------------------------------
 
@@ -3044,7 +3687,9 @@ class Transcript:
                 payload = {"kind": kind, **encode_message_payload(message, self._attachments)}
                 if producer_command_id is not None:
                     payload["producer_command_id"] = producer_command_id
-                rows.append(TranscriptEntry(message.id, time.time(), ENTRY_MESSAGE, payload))
+                rows.append(
+                    _message_entry(message.id, time.time(), ENTRY_MESSAGE, payload, message)
+                )
             if _file_captures is not None:
                 from local_operator.session.file_provenance import NATIVE_TYPES
 
@@ -3173,7 +3818,7 @@ class Transcript:
                     "kind": kind,
                     **encode_message_payload(message, self._attachments),
                 }
-                rows.append(TranscriptEntry(entry.id, entry.ts, entry.type, payload))
+                rows.append(_message_entry(entry.id, entry.ts, entry.type, payload, message))
             return rows
 
         return await self._commit(build)
@@ -3325,7 +3970,13 @@ class Transcript:
             # Continuations replace a queued result, not its call or identity.
             # Reuse the append-only overlay so forks/readers never see a second
             # orphan tool result or a half-rewritten conversation.
-            target = next(row for row in self._entries if row.id == target_entry_id)
+            target = next((row for row in self._entries if row.id == target_entry_id), None)
+            if target is None and self._prefix is not None:
+                position = self._prefix.positions.get(target_entry_id)
+                if position is not None:
+                    target = self._read_prefix_rows(position, position + 1)[0]
+            if target is None:
+                raise StopIteration
             if (
                 target.payload.get("role") != "tool"
                 or replacement.role != "tool"
@@ -3411,7 +4062,52 @@ class Transcript:
                 raise asyncio.CancelledError
             return rows
 
-    def _fork_governing_compaction(self, through_entry_id: str | None) -> TranscriptEntry | None:
+    def _suffix_replays_cut(self, through_id: str) -> bool:
+        """Whether replay cut at ``through_id`` reads only resident rows.
+
+        Not merely "the cut row is resident": replay slices at the cut FIRST,
+        so a cut between the anchor and the newest compaction row drops that
+        compaction, and the governing boundary becomes an older compaction (or
+        none: row 0) whose kept window lies in the dropped prefix. The suffix
+        answers only when the sliced resident rows still hold a compaction
+        whose cut resolves among them — exactly ``context_cut_index``'s rule.
+        """
+        index = next(
+            (i for i in range(len(self._entries) - 1, -1, -1) if self._entries[i].id == through_id),
+            None,
+        )
+        if index is None:
+            # Not resident: either in the prefix (needs it) or unknown (the full
+            # read raises the same "no longer retained" error eager does).
+            return False
+        sliced = self._entries[: index + 1]
+        compaction = next((row for row in reversed(sliced) if row.type == ENTRY_COMPACTION), None)
+        if compaction is None:
+            return False
+        first_kept = compaction.payload.get("first_kept_entry_id")
+        return first_kept is None or any(row.id == first_kept for row in sliced)
+
+    def _fork_rows(self, through_entry_id: str | None) -> list[TranscriptEntry]:
+        """The rows the fork rule is evaluated over (I8).
+
+        A cut in the resident suffix (or no cut) needs only the suffix: the
+        suffix starts at the newest anchor, so the governing compaction is the
+        newest one and every row the rule inspects after the cut is resident —
+        identical to the eager answer. A cut in the dropped prefix needs the
+        whole journal, read back once (counted; off-loop under the lock).
+        """
+        if (
+            self._prefix is not None
+            and through_entry_id is not None
+            and through_entry_id in self._prefix.positions
+            and not any(row.id == through_entry_id for row in self._entries)
+        ):
+            return self.entries()
+        return self._entries
+
+    def _fork_governing_compaction(
+        self, through_entry_id: str | None, rows: Sequence[TranscriptEntry] | None = None
+    ) -> TranscriptEntry | None:
         """The compaction whose summary a fork's child replays, if any.
 
         THE ONE PLACE THE CUT/COMPACTION RULE LIVES; ``fork_snapshot``'s
@@ -3426,12 +4122,14 @@ class Transcript:
         every anchor", which ``fork_snapshot`` refuses; ``None`` with no
         compactions means the conversation has none.
         """
-        compactions = [row for row in self._entries if row.type == ENTRY_COMPACTION]
+        if rows is None:
+            rows = self._fork_rows(through_entry_id)
+        compactions = [row for row in rows if row.type == ENTRY_COMPACTION]
         if not compactions:
             return None
         if through_entry_id is None:
             return compactions[-1]
-        index_of = {row.id: position for position, row in enumerate(self._entries)}
+        index_of = {row.id: position for position, row in enumerate(rows)}
         cut_index = index_of.get(through_entry_id)
         if cut_index is None:
             return None
@@ -3529,8 +4227,9 @@ class Transcript:
                 # conversation row after the cut point is excluded, together with
                 # the rows the cut itself dropped.
                 excluded = {item.id for item in history if item.id not in retained}
-                compactions = [row for row in self._entries if row.type == ENTRY_COMPACTION]
-                governing = self._fork_governing_compaction(through_entry_id)
+                rows = self._fork_rows(through_entry_id)
+                compactions = [row for row in rows if row.type == ENTRY_COMPACTION]
+                governing = self._fork_governing_compaction(through_entry_id, rows)
                 if compactions and governing is None:
                     # Only reachable WITH a cut point: no anchor is at-or-before
                     # it, so the child's whole history would be rows the parent
@@ -3557,6 +4256,27 @@ class Transcript:
                             continue
                         if later:
                             excluded.add(row.id)
+                    # THE HEAD-ROW LATCH IS COMPACTION STATE. On an Anthropic
+                    # thinking wire every signed thinking block is bound to ALL
+                    # content before it, including the latched head row at
+                    # ``messages[0]``; the latch is re-decided only at a
+                    # compaction that left no signed thinking. A row decided
+                    # under a marker this child drops describes history the
+                    # child does not replay: kept, it would outrank the row its
+                    # retained blocks were signed under, so every request
+                    # would rewrite their prefix (HTTP 400) and miss the
+                    # message cache. Drop those rows; ``latest_custom`` then
+                    # restores the newest surviving one, decided under the
+                    # governing marker or before it.
+                    dropped_markers = {row.id for row in compactions if row.id in excluded}
+                    excluded.update(
+                        row.id
+                        for row in self._entries
+                        if row.type == ENTRY_CUSTOM
+                        and row.payload.get("custom_type") == INLINE_UI_HEAD_LATCH_CUSTOM_TYPE
+                        and (row.payload.get("details") or {}).get("compaction_id")
+                        in dropped_markers
+                    )
                 if through_entry_id is not None:
                     # EPISODE FACTS ARE PREFIX STATE. A ``profile_trust`` row
                     # after the cut describes conversation the child does not
@@ -3566,12 +4286,12 @@ class Transcript:
                     # child rebuilds its episode from what it kept (newest
                     # retained record plus the retained rows after it).
                     last_kept = max(
-                        (i for i, row in enumerate(self._entries) if row.id in retained),
+                        (i for i, row in enumerate(rows) if row.id in retained),
                         default=-1,
                     )
                     excluded.update(
                         row.id
-                        for i, row in enumerate(self._entries)
+                        for i, row in enumerate(rows)
                         if i > last_kept
                         and row.type == ENTRY_CUSTOM
                         and row.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
@@ -3716,6 +4436,16 @@ class Transcript:
                     raise
                 else:
                     self._restore_mtime(previous_mtime)
+        if rebuild and self._prefix is not None:
+            # I4: the rebuild writes this object's RESIDENT rows, which under a
+            # lazily dropped prefix are only the suffix. Publishing them would
+            # be a truncated history under the session's own name; a failed
+            # append is recoverable, that is not. (The legitimate rebuild is a
+            # swept EMPTY directory, which never has a prefix.)
+            raise OSError(
+                f"{self.path}: journal vanished under a lazily-loaded prefix; "
+                "refusing to rebuild a truncated history"
+            )
         if rebuild:
             self.directory.mkdir(parents=True, exist_ok=True)
             self._created_at = ensure_session_created_at(
@@ -3775,7 +4505,9 @@ class Transcript:
                 exc_info=True,
             )
 
-    def _collapse_superseded_on_open(self, handle: TextIO) -> frozenset[int]:
+    def _collapse_superseded_on_open(
+        self, handle: TextIO, layout: _OpenLayout | None = None
+    ) -> frozenset[int]:
         """Find superseded collapsible rows before loading; fold them off disk when ours.
 
         Returns the loader's line numbers to skip. Two outcomes, both bounded:
@@ -3811,7 +4543,13 @@ class Transcript:
         (:meth:`_rewrite_without_lines`); any other open takes the lockless
         path and skips in memory.
         """
-        skip, dead_bytes = _superseded_collapsible_lines(handle)
+        # Two-argument form only when indexing: keeps the one-argument call
+        # shape existing tests patch for the eager/read-only path.
+        skip, dead_bytes = (
+            _superseded_collapsible_lines(handle)
+            if layout is None
+            else _superseded_collapsible_lines(handle, layout)
+        )
         handle.seek(0)
         if not skip:
             return frozenset()
@@ -3851,6 +4589,7 @@ class Transcript:
                     )
                     # The rows are off disk; the skip list still applies to the
                     # handle the caller loads from (the pre-fold inode).
+                    self._open_folded = True
                     return skip
         self._load_collapsed_bytes = dead_bytes
         return skip
@@ -3858,6 +4597,128 @@ class Transcript:
     def _sole_writer(self) -> bool:
         """Whether this object is the process's only holder of the writer lock (Q1)."""
         return compression.writer_holders(self.directory) == 1
+
+    #: Test/diagnostic switch: force the eager all-rows load. Class-level so a
+    #: test can build an eager twin of a lazy transcript on the same directory.
+    _force_eager: bool = False
+
+    def _may_load_lazily(self) -> bool:
+        """I6: only the process's sole lock-holding writer drops the prefix.
+
+        A read-only view and a lockless second writer load eagerly, as before:
+        the mobile viewer reads through the compression cache (whose file this
+        object's offsets would not describe), and a concurrent in-process reader
+        (the parent's peek of a running child) is never the sole writer — the
+        same reasoning as the open fold's Q1 rule.
+        """
+        return (
+            not self._force_eager
+            and not self._read_only
+            and self._writer_lock_held
+            and self._sole_writer()
+        )
+
+    def _suffix_cut(self, layout: _OpenLayout | None, skip: frozenset[int]) -> int | None:
+        """Physical line where the resident suffix starts, or None for eager.
+
+        The cut is the newest compaction's ANCHOR (``first_kept_entry_id``),
+        not the compaction row: the anchor sits 24-988 rows before its row on
+        the measured fleet, and every row from it on is what the context replay
+        reads. ``min(anchor, compaction)`` keeps the compaction row itself
+        resident either way. A compaction without an anchor keeps from its own
+        row (``context_cut_index`` replays from the row after it; the marker
+        still needs the row). Every doubt answers None, which is today's load:
+        an unparseable newest compaction, an anchor no matched line carries
+        (eager replay falls back to full history there, and so must this), a
+        line the head regex missed before the cut, or an anchor on a line the
+        open fold skips.
+        """
+        if layout is None or layout.newest_compaction is None:
+            return None
+        line, text = layout.newest_compaction
+        compaction = TranscriptEntry.from_json(text)
+        if compaction is None or compaction.type != ENTRY_COMPACTION:
+            return None
+        first_kept = compaction.payload.get("first_kept_entry_id")
+        if first_kept is None:
+            cut = line
+        else:
+            anchor = layout.first_line_of.get(str(first_kept))
+            if anchor is None:
+                return None
+            cut = min(anchor, line)
+        if layout.first_unmatched is not None and layout.first_unmatched < cut:
+            return None
+        if cut <= 0 or cut in skip:
+            return None
+        self._expected_cut_id = str(first_kept) if first_kept is not None and cut != line else None
+        return cut
+
+    def _load_rows(self, handle: TextIO, skip: frozenset[int], cut: int | None) -> None:
+        """Pass B: parse every row; keep resident only lines at or after ``cut``.
+
+        Prefix rows still go through ``_index_entry`` and the admitted-command
+        set, so the newest-row slots, ``has_entry`` and ``has_admitted_command``
+        are exact over the WHOLE journal; then :meth:`_PrefixSink.observe`
+        reduces them and they are dropped. Offsets are BYTE positions in the
+        file the prefix will be read back from: after an open fold that is the
+        new file, which no longer holds the skipped lines (I2).
+        """
+        sink = _PrefixSink() if cut is not None else None
+        position = 0
+        for number, line in enumerate(handle):
+            # ensure_ascii rows make characters equal bytes, but a foreign
+            # writer's row may not; offsets must be exact for the seek-back.
+            length = len(line.encode("utf-8")) if sink is not None else 0
+            if number in skip:
+                if sink is not None and not self._open_folded:
+                    position += length
+                    # ``cut is not None`` restates what ``sink`` already
+                    # implies, so the type checker can narrow ``cut``.
+                    if cut is not None and number < cut:
+                        sink.skip_bytes += length
+                continue
+            if sink is not None and number == cut:
+                sink.prefix_end = position
+                sink.latest_by_type = dict(self._latest_by_type)
+                sink.latest_custom_entries = dict(self._latest_custom_entries)
+                sink.latest_user = self._latest_user
+            if line.strip():
+                entry = TranscriptEntry.from_json(line)
+                if entry is not None:
+                    if sink is not None and number == cut:
+                        expected = self._expected_cut_id
+                        if expected is not None and entry.id != expected:
+                            raise _AnchorMoved
+                    self._index_entry(entry)
+                    command_id = _admitted_command_id(entry)
+                    if command_id is not None:
+                        self._admitted_command_ids.add(command_id)
+                    if sink is not None and cut is not None and number < cut:
+                        sink.observe(entry, position, length)
+                    else:
+                        self._entries.append(entry)
+                elif sink is not None and number == cut:
+                    raise _AnchorMoved
+            position += length
+        if sink is None:
+            return
+        stat = os.stat(self.path) if self._open_folded else os.fstat(handle.fileno())
+        sink.identity = (stat.st_ino, stat.st_dev)
+        self._prefix = sink
+        # Superseded rows left on disk inside the prefix are copied verbatim by
+        # ``compact_file``, so they are not bytes a fold can free.
+        self._load_collapsed_bytes = max(self._load_collapsed_bytes - sink.skip_bytes, 0)
+
+    def _reset_loaded_state(self) -> None:
+        self._entries = []
+        self._prefix = None
+        self._expected_cut_id = None
+        self._entry_ids.clear()
+        self._latest_by_type.clear()
+        self._latest_custom_entries.clear()
+        self._latest_user = None
+        self._admitted_command_ids.clear()
 
     def _rewrite_without_lines(self, source: TextIO, skip: frozenset[int]) -> bool:
         """Copy ``source`` minus ``skip`` to a temp file and replace the journal.
@@ -3972,9 +4833,190 @@ class Transcript:
 
     # -- replay -------------------------------------------------------------
 
-    def entries(self) -> list[TranscriptEntry]:
-        """All entries in append order (in-memory snapshot)."""
+    def live_entries(self) -> list[TranscriptEntry]:
+        """The RESIDENT rows: from the newest compaction's anchor onward.
+
+        What every boot and hot path reads. On a transcript without a lazily
+        dropped prefix (no compaction, a read-only or lockless open) it is every
+        row, exactly what :meth:`entries` returns. On a lazy one it is the
+        suffix the context replay reads, plus every append since the open. A
+        caller that needs older rows asks a dedicated method
+        (:meth:`history_projection`, :meth:`entry_ids`, :meth:`prefix_flag`) or
+        pays :meth:`entries`.
+        """
         return list(self._entries)
+
+    def entries(self) -> list[TranscriptEntry]:
+        """ALL entries in append order — the unchanged "every row" contract.
+
+        With a lazily dropped prefix the prefix is read back from disk through
+        the row index on every call (deliberately not cached: caching would put
+        the whole journal back in memory, which is the defect). Each such call
+        bumps :attr:`full_materialisations` and logs at INFO with its caller, so
+        an unmigrated full-history reader is visible rather than silently
+        re-paying the boot peak. Correct, just slower.
+        """
+        if self._prefix is None:
+            return list(self._entries)
+        self._note_materialisation()
+        return [*self._read_prefix_rows(0, len(self._prefix.ids)), *self._entries]
+
+    def iter_entries(self) -> Iterator[TranscriptEntry]:
+        """Every row in append order, streaming the prefix one row at a time.
+
+        For off-boot full-history readers that only walk forward (memory
+        recovery): the peak is one prefix row plus the resident suffix. Counts
+        as a materialisation for the tripwire, because it re-reads the prefix.
+        """
+        if self._prefix is None:
+            yield from list(self._entries)
+            return
+        self._note_materialisation()
+        yield from self._stream_prefix_rows(0, len(self._prefix.ids))
+        yield from list(self._entries)
+
+    def entry_ids(self) -> set[str]:
+        """Every durable row id, prefix included, with no re-read."""
+        return set(self._entry_ids)
+
+    def entry_times_for(self, ids: Iterable[str]) -> dict[str, float]:
+        """``{id: ts}`` for each of ``ids`` that is a journal row, prefix included.
+
+        The display page's id→time join (``history_window._entry_time_join``).
+        It must resolve prefix rows too: the context replay hoists a
+        compaction's preserved user turns onto the page, and those rows sit
+        before the anchor by definition, so a join over the resident suffix
+        alone left them unstamped (PR #4591 review R1). Served from the open
+        scan's ``ts`` array: no re-read, not counted as a materialisation.
+        Resident rows win over a prefix row of the same id (last occurrence,
+        the eager ``dict`` comprehension's rule).
+        """
+        wanted = set(ids)
+        wanted.discard("")
+        found: dict[str, float] = {}
+        prefix = self._prefix
+        if prefix is not None:
+            for entry_id in wanted:
+                index = prefix.positions.get(entry_id)
+                if index is not None:
+                    found[entry_id] = prefix.ts[index]
+        for entry in self._entries:
+            if entry.id in wanted:
+                found[entry.id] = entry.ts
+        return found
+
+    def history_projection(self) -> list[TranscriptEntry]:
+        """The prefix RESIDUE plus the resident rows, in append order.
+
+        The input of every whole-history *projection* (money, prunes, receipts,
+        keep-set customs, taint rows): each prefix row those readers can act on
+        survives here in full or as a :func:`_skeleton`, every other prefix row is
+        absent. Feeding this to the same module functions the eager path uses is
+        what makes their totals identical (pinned by the parity test). Not a
+        substitute for :meth:`entries` in a reader that needs message bodies.
+        """
+        if self._prefix is None:
+            return list(self._entries)
+        return [*self._prefix.residue, *self._entries]
+
+    @property
+    def has_prefix(self) -> bool:
+        """Whether rows before the resident suffix were dropped at open."""
+        return self._prefix is not None
+
+    @property
+    def prefix_rows(self) -> int:
+        """How many rows the open dropped from residency (0 when eager)."""
+        return len(self._prefix.ids) if self._prefix is not None else 0
+
+    def prefix_flag(self, name: str) -> bool:
+        """A whole-prefix boolean computed at open (False when eager: no prefix).
+
+        ``name`` is one of ``has_message``, ``has_assistant``,
+        ``has_non_bookkeeping``, ``has_channel_activity``. Callers OR it with
+        the same predicate over :meth:`live_entries`.
+        """
+        if self._prefix is None:
+            return False
+        return bool(getattr(self._prefix, name))
+
+    def _note_materialisation(self) -> None:
+        import inspect
+
+        self.full_materialisations += 1
+        frame = inspect.currentframe()
+        caller = "?"
+        try:
+            outer = frame.f_back.f_back if frame is not None and frame.f_back else None
+            if outer is not None:
+                caller = f"{outer.f_code.co_filename}:{outer.f_lineno} {outer.f_code.co_name}"
+        finally:
+            del frame
+        logger.info(
+            "transcript: full materialisation of %s from %s (%d prefix rows)",
+            self.directory,
+            caller,
+            len(self._prefix.ids) if self._prefix is not None else 0,
+        )
+
+    def _verify_prefix_source(self, handle: BinaryIO) -> None:
+        """I5: the open file must be the one the prefix was indexed in."""
+        assert self._prefix is not None
+        stat = os.fstat(handle.fileno())
+        if (stat.st_ino, stat.st_dev) != self._prefix.identity or stat.st_size < (
+            self._prefix.prefix_end
+        ):
+            raise _StalePrefix(f"{self.path}: journal replaced under a lazily-loaded prefix")
+
+    def _verify_prefix_read_source(self, handle: BinaryIO) -> None:
+        """I5 for a READ-BACK, tolerant of our own ``compact_file`` replace.
+
+        WHY (PR #4591 review R2): ``compact_file`` runs ``os.replace`` in a
+        worker thread and adopts the new inode only after it, while the event
+        loop keeps serving. An ``entries()`` landing in that window sees a new
+        inode whose prefix bytes are a verbatim copy, and a strict raise there
+        made ``_reconstruct_profile_trust`` fail closed and cache "tainted" for
+        the runtime's life. So an identity mismatch alone is not fatal here:
+        the file must still cover ``prefix_end``, and every row read is then
+        checked against its recorded id (:meth:`_stream_prefix_rows`), which is
+        what still refuses a foreign replace (T8). The COPY in
+        :meth:`_replace_file` stays strict: it writes, so it must be sure.
+        """
+        prefix = self._prefix
+        assert prefix is not None
+        stat = os.fstat(handle.fileno())
+        if (stat.st_ino, stat.st_dev) == prefix.identity and stat.st_size >= prefix.prefix_end:
+            return
+        if stat.st_size < prefix.prefix_end:
+            raise _StalePrefix(f"{self.path}: journal shorter than its lazily-loaded prefix")
+        logger.debug(
+            "transcript: %s changed inode under its prefix; verifying rows by id", self.path
+        )
+
+    def _stream_prefix_rows(self, lo: int, hi: int) -> Iterator[TranscriptEntry]:
+        """Prefix rows ``[lo, hi)`` read back by offset, verified by id.
+
+        Each row's bytes must parse to the id the index recorded; anything else
+        means the file changed under the index (a foreign replace, an archive
+        restore) and raises :class:`_StalePrefix` — never a silent misread.
+        """
+        prefix = self._prefix
+        assert prefix is not None
+        if lo >= hi:
+            return
+        with self.path.open("rb") as handle:
+            self._verify_prefix_read_source(handle)
+            handle.seek(prefix.offsets[lo])
+            for index in range(lo, hi):
+                handle.seek(prefix.offsets[index])
+                raw = handle.read(prefix.lengths[index])
+                entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                if entry is None or entry.id != prefix.ids[index]:
+                    raise _StalePrefix(f"{self.path}: prefix row {index} no longer matches")
+                yield entry
+
+    def _read_prefix_rows(self, lo: int, hi: int) -> list[TranscriptEntry]:
+        return list(self._stream_prefix_rows(lo, hi))
 
     def recent_entries(self, limit: int) -> list[TranscriptEntry]:
         """The newest ``limit`` entries in append order, without copying the rest.
@@ -3985,7 +5027,18 @@ class Transcript:
         """
         if limit <= 0:
             return []
-        return list(self._entries[-limit:])
+        if self._prefix is None or limit <= len(self._entries):
+            return list(self._entries[-limit:])
+        # The window reaches into the dropped prefix: hand back the residue rows
+        # inside it (usage skeletons and compaction stubs — what the only caller,
+        # the economic gate, reads), never a re-read of message bodies.
+        low = len(self._prefix.ids) + len(self._entries) - limit
+        older = [
+            row
+            for row, index in zip(self._prefix.residue, self._prefix.residue_index)
+            if index >= low
+        ]
+        return [*older, *self._entries]
 
     def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
         """Details of the newest custom entry of ``custom_type`` (backward
@@ -4026,7 +5079,7 @@ class Transcript:
         to the module function keeps that rule in one place, exactly as
         :meth:`usages_since_compaction` delegates the opposite one.
         """
-        return all_usage_rows(self._entries)
+        return all_usage_rows(self.history_projection())
 
     def lost_money_rows(self) -> bool:
         """Whether this journal POSITIVELY reports a dropped money row.
@@ -4035,7 +5088,7 @@ class Transcript:
         removing any money (see :func:`lost_money_rows`), so a marker is not a
         reason to claim ``≥``.
         """
-        return lost_money_rows(self._entries)
+        return lost_money_rows(self.history_projection())
 
     def search_spend_rows(self) -> list[dict[str, Any]]:
         """Every ``web_search`` cost this conversation recorded, oldest first.
@@ -4064,7 +5117,7 @@ class Transcript:
         for ``Usage``.
         """
         rows: list[dict[str, Any]] = []
-        for entry in self._entries:
+        for entry in self.history_projection():
             if entry.type != ENTRY_MESSAGE:
                 continue
             details = (entry.payload.get("provider_payload") or {}).get("details")
@@ -4115,7 +5168,7 @@ class Transcript:
         are dropped individually, so one bad line cannot hide the rest.
         """
         rows: list[dict[str, Any]] = []
-        for entry in self._entries:
+        for entry in self.history_projection():
             if entry.type != ENTRY_CUSTOM:
                 continue
             payload = entry.payload
@@ -4138,7 +5191,7 @@ class Transcript:
         journal deliberately has rows but no marker — recovered history is
         partial by definition, and the combiner degrades it.
         """
-        for entry in self._entries:
+        for entry in self.history_projection():
             if entry.type != ENTRY_CUSTOM:
                 continue
             payload = entry.payload
@@ -4183,7 +5236,7 @@ class Transcript:
           (QA round 1, Q6: ``$0.053   0 images`` was a fabricated zero).
         """
         rows: list[dict[str, Any]] = []
-        for entry in self._entries:
+        for entry in self.history_projection():
             if entry.type != ENTRY_MESSAGE:
                 continue
             details = (entry.payload.get("provider_payload") or {}).get("details")
@@ -4263,7 +5316,7 @@ class Transcript:
 
     def pending_prunes(self) -> dict[str, str | dict[str, Any]]:
         """Latest append-only result replacement for each original message id."""
-        return collect_prunes(self._entries)
+        return collect_prunes(self.history_projection())
 
     def build_llm_history(self, *, through_id: str | None = None) -> list[AgentMessage]:
         """Replay the transcript into LLM-visible messages.
@@ -4276,7 +5329,22 @@ class Transcript:
         pruned live context byte for byte rather than resurrecting the tool
         output compaction already decided was dead weight.
         """
-        return replay_entries(self._entries, self._attachments, through_id=through_id)
+        if self._prefix is None:
+            return replay_entries(self._entries, self._attachments, through_id=through_id)
+        if through_id is not None and not self._suffix_replays_cut(through_id):
+            # The cut's replay needs rows that are not resident: read them back
+            # (rare, off the boot path, counted).
+            return replay_entries(self.entries(), self._attachments, through_id=through_id)
+        # Context replay (or a cut inside the suffix) reads only rows from the
+        # anchor on, which is exactly the resident list; prunes and preserved-
+        # turn provenance that live in the prefix are passed alongside.
+        return replay_entries(
+            self._entries,
+            self._attachments,
+            through_id=through_id,
+            extra_injection_ids=self._prefix.injection_ids,
+            extra_prunes=collect_prunes(self._prefix.residue),
+        )
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -4319,7 +5387,7 @@ class Transcript:
         :meth:`compact_file` actually reclaims, so it must price every byte the
         fold really frees, the roster-bloat drop included.
         """
-        prunes = self.pending_prunes()
+        prunes = self._foldable_prunes()
         superseded = self._superseded_custom_indices()
         if not prunes and not superseded and not self._load_collapsed_bytes:
             return 0
@@ -4327,7 +5395,11 @@ class Transcript:
         total = self._load_collapsed_bytes
         boundary: TranscriptEntry | None = None
         newest_prune = max(
-            (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
+            (
+                index
+                for index, entry in enumerate(self._entries)
+                if entry.type == ENTRY_PRUNE and not self._keeps_prune_row(entry)
+            ),
             default=-1,
         )
         for index, entry in enumerate(self._entries):
@@ -4335,7 +5407,7 @@ class Transcript:
                 # Dropped whole, newline included, exactly as the fold writes it.
                 total += len(entry.to_json()) + 1
                 continue
-            if entry.type == ENTRY_PRUNE:
+            if entry.type == ENTRY_PRUNE and not self._keeps_prune_row(entry):
                 total += len(entry.to_json()) + 1
                 continue
             if entry.type == ENTRY_MESSAGE and entry.id in prunes:
@@ -4374,10 +5446,18 @@ class Transcript:
         for a few hundred bytes). Crash-safe: the new file is written beside
         the old one and moved over it with an atomic ``os.replace``, so an
         interrupted compaction leaves the original transcript intact.
+
+        SUFFIX-ONLY LOAD (``has_prefix``): the bytes before the newest
+        compaction's anchor are copied VERBATIM, never re-rendered, so a prune
+        row whose target is a PREFIX row is kept unfolded (the eager path folds
+        it). This is intentional: history is unchanged (the replay still
+        applies the kept prune), the prefix row index stays valid byte for byte,
+        and folding would mean re-reading and rewriting the very rows the lazy
+        open exists not to hold. Only prunes of resident rows are folded.
         """
         self._require_writable()
         async with self._lock:
-            prunes = self.pending_prunes()
+            prunes = self._foldable_prunes()
             superseded = self._superseded_custom_indices()
             if not prunes and not superseded and not self._load_collapsed_bytes:
                 return 0
@@ -4391,13 +5471,17 @@ class Transcript:
             # "current" — measured as three stale figures restored on a folded
             # transcript that correctly reported none before the fold.
             newest_prune = max(
-                (index for index, entry in enumerate(self._entries) if entry.type == ENTRY_PRUNE),
+                (
+                    index
+                    for index, entry in enumerate(self._entries)
+                    if entry.type == ENTRY_PRUNE and not self._keeps_prune_row(entry)
+                ),
                 default=-1,
             )
             folded: list[TranscriptEntry] = []
             boundary = -1
             for index, entry in enumerate(self._entries):
-                if entry.type == ENTRY_PRUNE:
+                if entry.type == ENTRY_PRUNE and not self._keeps_prune_row(entry):
                     continue
                 # Superseded roster/newest-wins customs are dropped whole: a
                 # newer copy of the same type survives, and nothing reads the
@@ -4425,13 +5509,27 @@ class Transcript:
             # the original intact exactly as before. The boundary mark is
             # applied ABOVE, so the worker serializes the marked list.
             payload, reclaimed = await asyncio.to_thread(self._render_folded, folded, before)
+            # I2: a lazily dropped prefix is NOT rendered from memory (it is not
+            # there); its bytes are copied through verbatim ahead of ``payload``,
+            # so they still count toward the new file's size.
+            prefix_end = self._prefix.prefix_end if self._prefix is not None else 0
+            reclaimed -= prefix_end
             if reclaimed < min_reclaim_bytes:
                 return 0
             # The replace is a filesystem side effect too. A cancellation
             # cannot release the ordering lock until it finishes and the new
             # in-memory index is published, or a later append may be erased
             # by the still-running replace worker.
-            worker = asyncio.create_task(asyncio.to_thread(self._replace_file, payload))
+            # The prefix argument only when there is a prefix: the eager call
+            # shape (one argument) is unchanged for patched replacements.
+            # Two typed calls rather than a ``(str, int)`` / ``(str,)`` tuple
+            # splat, which the type checker could only see as ``str | int``.
+            replace = (
+                asyncio.to_thread(self._replace_file, payload, prefix_end)
+                if prefix_end
+                else asyncio.to_thread(self._replace_file, payload)
+            )
+            worker = asyncio.create_task(replace)
             cancelled = False
             while True:
                 try:
@@ -4452,11 +5550,42 @@ class Transcript:
             self._latest_by_type.clear()
             self._latest_custom_entries.clear()
             self._latest_user = None
+            if self._prefix is not None:
+                # The prefix rows are still on disk and still indexed: re-seed
+                # the whole-journal indexes from the slots captured at the cut.
+                self._entry_ids.update(self._prefix.ids)
+                self._latest_by_type.update(self._prefix.latest_by_type)
+                self._latest_custom_entries.update(self._prefix.latest_custom_entries)
+                self._latest_user = self._prefix.latest_user
             for entry in folded:
                 self._index_entry(entry)
             if cancelled:
                 raise asyncio.CancelledError
             return reclaimed
+
+    def _foldable_prunes(self) -> dict[str, str | dict[str, Any]]:
+        """The prune map ``compact_file`` may fold into rows it rewrites.
+
+        Eager: every prune (unchanged). Lazy: only prunes whose target is a
+        RESIDENT row, because only resident rows are rewritten; a prefix row is
+        copied byte for byte, so its prune must stay journalled (I2).
+        """
+        if self._prefix is None:
+            return self.pending_prunes()
+        resident = {entry.id for entry in self._entries}
+        return {
+            target: notice
+            for target, notice in collect_prunes(self._entries).items()
+            if target in resident
+        }
+
+    def _keeps_prune_row(self, entry: TranscriptEntry) -> bool:
+        """Whether a resident prune row must survive a fold (its target is in the prefix)."""
+        return (
+            self._prefix is not None
+            and entry.type == ENTRY_PRUNE
+            and str(entry.payload.get("target")) in self._prefix.positions
+        )
 
     @staticmethod
     def _render_folded(folded: list[TranscriptEntry], before: int) -> tuple[str, int]:
@@ -4470,18 +5599,49 @@ class Transcript:
         payload = "".join(entry.to_json() + "\n" for entry in folded)
         return payload, before - len(payload.encode("utf-8"))
 
-    def _replace_file(self, payload: str) -> None:
+    def _replace_file(self, payload: str, prefix_end: int = 0) -> None:
         """Write the compacted transcript beside the old one and move it over.
 
         Worker-thread half of :meth:`compact_file`. Crash safety is the whole
         point of the temp-file dance: ``os.replace`` is atomic, so an
         interrupted compaction leaves the original transcript readable.
+
+        ``prefix_end`` > 0 (a lazily dropped prefix): bytes ``[0, prefix_end)``
+        of the CURRENT journal are copied first, verbatim and in chunks, so the
+        prefix is byte-identical at offset 0 and its row index stays valid (I2).
+        The source is verified to be the file the index describes (I5); after
+        the rename the index adopts the new inode, and the first suffix byte is
+        re-checked to start a row.
         """
         tmp = self.path.with_suffix(self.path.suffix + ".compact")
-        with tmp.open("w", encoding="utf-8") as handle:
-            _keep_private(handle.fileno())
-            handle.write(payload)
-        os.replace(tmp, self.path)
+        try:
+            with tmp.open("wb") as sink:
+                _keep_private(sink.fileno())
+                if prefix_end:
+                    with self.path.open("rb") as source:
+                        self._verify_prefix_source(source)
+                        remaining = prefix_end
+                        while remaining:
+                            chunk = source.read(min(remaining, 1 << 20))
+                            if not chunk:
+                                raise _StalePrefix(f"{self.path}: journal shorter than its prefix")
+                            sink.write(chunk)
+                            remaining -= len(chunk)
+                sink.write(payload.encode("utf-8"))
+                if prefix_end:
+                    sink.flush()
+                    os.fsync(sink.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        if prefix_end and self._prefix is not None:
+            stat = os.stat(self.path)
+            self._prefix.identity = (stat.st_ino, stat.st_dev)
+            with self.path.open("rb") as check:
+                check.seek(prefix_end)
+                if payload and not check.read(7) == b'{"id":"':
+                    raise _StalePrefix(f"{self.path}: suffix did not land at the prefix end")
 
     def flush(self) -> None:
         """Writes are flushed per append; provided for dispose() symmetry."""
@@ -4534,7 +5694,7 @@ def _shrink_marked(entry: TranscriptEntry) -> TranscriptEntry:
         return entry
     provider_payload[SHRUNK_KEY] = True
     payload["provider_payload"] = provider_payload
-    return TranscriptEntry(id=entry.id, ts=entry.ts, type=entry.type, payload=payload)
+    return replace(entry, payload=payload)
 
 
 def _journal_injection_ids(entries: Sequence[TranscriptEntry]) -> set[str]:
@@ -5350,8 +6510,16 @@ def replay_entries(
     *,
     through_id: str | None = None,
     mode: Literal["context", "audit"] = "context",
+    extra_injection_ids: Set[str] = frozenset(),
+    extra_prunes: Mapping[str, str | dict[str, Any]] | None = None,
 ) -> list[AgentMessage]:
     """The replay semantics behind :meth:`Transcript.build_llm_history`.
+
+    ``extra_injection_ids`` / ``extra_prunes`` carry what rows the caller did
+    NOT pass would have contributed (a suffix-only transcript's dropped prefix):
+    preserved user turns sit before the cut, so their provenance lives in those
+    rows, and a prune row is applied by target id wherever it sits. Both
+    default to nothing, which is the whole-file behaviour.
 
     A module function rather than a method so a caller that has read ONLY a
     suffix of the journal (:func:`read_replay_suffix`) replays it through the
@@ -5482,7 +6650,7 @@ def replay_entries(
             # a provenance lookup rather than a shape-based guess.
             preserved_turns = replay_preserved_turns(
                 compaction.payload,
-                injection_ids=_journal_injection_ids(entries),
+                injection_ids=_journal_injection_ids(entries) | set(extra_injection_ids),
             )
 
             for turn in preserved_turns:
@@ -5549,6 +6717,10 @@ def replay_entries(
         start = context_cut_index(entries)
 
     prunes = collect_prunes(entries)
+    if extra_prunes:
+        # Prefix prunes are older than every resident prune, and collect_prunes
+        # is last-wins in append order, so they go underneath.
+        prunes = {**extra_prunes, **prunes}
     kept: list[AgentMessage] = []
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
@@ -5619,6 +6791,58 @@ def replay_entries(
     return list(prefix) + kept
 
 
+def resident_entries(transcript: Any) -> list[TranscriptEntry]:
+    """The rows a boot/hot-path reader of RECENT history should walk.
+
+    :meth:`Transcript.live_entries` (the resident suffix) when the object has
+    it, else ``entries()`` — so host doubles and older embedders that only
+    implement ``entries()`` keep working. Use for readers whose answer lies at
+    or after the newest compaction's anchor (newest user row, current tool
+    call, the compaction marker itself).
+    """
+    method: Callable[[], Iterable[TranscriptEntry]] | None = getattr(
+        transcript, "live_entries", None
+    )
+    return list(method()) if callable(method) else list(transcript.entries())
+
+
+def entries_newest_first(transcript: Any) -> Iterator[TranscriptEntry]:
+    """Every row NEWEST first, reading the dropped prefix only if walked into.
+
+    For backward "find the newest X" walks that usually stop in the resident
+    suffix: the prefix is materialised (counted) only when the caller keeps
+    iterating past the suffix, which is exactly when eager would have needed it.
+    """
+    yield from reversed(resident_entries(transcript))
+    if getattr(transcript, "has_prefix", False) is True:
+        rows = transcript.entries()
+        yield from reversed(rows[: transcript.prefix_rows])
+
+
+def projection_entries(transcript: Any) -> list[TranscriptEntry]:
+    """The rows a WHOLE-HISTORY projection reader should walk.
+
+    :meth:`Transcript.history_projection` (prefix residue + suffix) when
+    available: every prefix row of a keep-set custom type, every prune, every
+    taint/flag source and a money skeleton of every money row — the inputs of
+    folds over custom rows, receipts, taint latches and spend. Falls back to
+    ``entries()`` for doubles. Not for readers needing message BODIES.
+    """
+    method: Callable[[], Iterable[TranscriptEntry]] | None = getattr(
+        transcript, "history_projection", None
+    )
+    return list(method()) if callable(method) else list(transcript.entries())
+
+
+def transcript_prefix_flag(transcript: Any, name: str) -> bool:
+    """:meth:`Transcript.prefix_flag` with a False default for doubles."""
+    method = getattr(transcript, "prefix_flag", None)
+    try:
+        return bool(method(name)) if callable(method) else False
+    except Exception:  # noqa: BLE001 - a flag probe never fails a caller
+        return False
+
+
 def _admitted_command_id(entry: TranscriptEntry) -> str | None:
     """Extract an explicitly marked producer identity from a transcript row.
 
@@ -5683,7 +6907,11 @@ def _entry_to_message(
         # and this is the transcript's one row decoder — replay and the by-id
         # readers all call it — so repairing here heals the row for every
         # consumer of the transcript, not one wire serializer at a time.
-        return _without_blank_user_text(Message.model_validate(payload))
+        _replay_inline_ui_source(entry, payload)
+        message = _without_blank_user_text(Message.model_validate(payload))
+        if isinstance(message, Message) and message.role == "assistant":
+            message._inline_ui_source_version = entry.inline_ui_source_version
+        return message
     except Exception:
         logger.warning("dropping unparseable transcript message entry %s", entry.id)
         return None

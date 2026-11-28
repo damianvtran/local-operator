@@ -89,8 +89,8 @@ async def test_both_destinations_render_at_the_authored_widths(
         pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
         card = await _card(pilot, app)
         text = "\n".join(_lines(card))
-        assert "Set auto for this session [S]" in text
-        assert "Set auto for all sessions [G]" in text
+        assert "Auto-approve this session [S]" in text
+        assert "Auto-approve all sessions [G]" in text
         assert "Approvals: Ask — global default." in text
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
@@ -128,7 +128,7 @@ async def test_the_compact_rail_keeps_all_three_answers_visible(
         rail = "\n".join(_lines(card))
         assert "❯ y.Allow" in rail
         assert "n.Deny" in rail
-        assert "A.Allow all" in rail
+        assert "A.Allow + auto-approve" in rail
         # No movement/enter hint competes for the row: the answer letters are
         # visible in the rail, which is the spec's reason for shedding it.
         assert "enter answer" not in rail
@@ -242,8 +242,8 @@ async def test_a_refused_destination_leaves_the_card_answerable(
         text = "\n".join(_lines(card))
         assert "This window cannot authorise auto." in text
         assert "Unchanged: Ask (global default)." in text
-        assert "Set auto for this session [S]" in text
-        assert "Set auto for all sessions [G]" in text
+        assert "Auto-approve this session [S]" in text
+        assert "Auto-approve all sessions [G]" in text
         assert app._explicit_approvals_mode is None
         assert _saved_override(config_dir) is None
 
@@ -615,7 +615,7 @@ async def test_the_dense_rail_paints_the_third_label_inside_the_card(config_dir:
 
     The guard tested the TERMINAL height while the measurable box was the
     screen's 14 rows, so the rail fell back to one line, painted 30 cells into
-    20, and ``A.Allow all`` clipped to a bare ``A`` that still answered while no
+    20, and ``A.Auto-approve`` clipped to a bare ``A`` that still answered while no
     Allow-all label was visible. Assert on the COMPOSITED frame, not on the
     renderer's string, because the clip happened at paint time (M2/Q2/D1).
     """
@@ -637,7 +637,10 @@ async def test_the_dense_rail_paints_the_third_label_inside_the_card(config_dir:
         rail = [row for row in painted if "y.Allow" in row]
         assert rail, painted
         assert any("n.Deny" in row for row in rail), rail
-        assert any("A.Allow all" in row for row in painted), painted
+        # The row is what must survive: at this 20-cell card the longer D4 label
+        # ("Allow + auto-approve") is clipped by the rail's own truncation, so
+        # the ink to look for is the part that fits — the key and the mode word.
+        assert any("A.Allow" in row and "auto" in row for row in painted), painted
         await pilot.press("n")
         await asyncio.wait_for(pending, 2)
 
@@ -838,7 +841,7 @@ def _answer_rows(app: OperatorApp, card: ApprovalPrompt) -> tuple[int, dict[str,
     positions: dict[str, int] = {}
     for offset, strip in enumerate(strips[region.y : region.y + region.height]):
         text = strip.text[region.x : region.x + region.width]
-        for needle in ("y. Allow", "n. Deny", "A. Allow all"):
+        for needle in ("y. Allow", "n. Deny", "A. Allow + auto-approve"):
             if needle in text:
                 positions[needle] = offset
     return card.size.height, positions
@@ -936,7 +939,7 @@ async def test_account_profile_card_keeps_diff_lines_and_cannot_enable_auto(conf
         )
         card = await _card(pilot, app)
         text = "\n".join(_lines(card))
-        assert "Allow all" not in text and "Set auto" not in text
+        assert "Auto-approve" not in text and "Set auto" not in text
         assert [option.label for option in card.question.options] == ["Allow", "Deny"]
         lines = card._question_lines(100, reveal=True)
         assert "-Be terse." in lines and "+Demand tests." in lines
@@ -1028,3 +1031,57 @@ def test_approve_all_does_not_skip_prearming_profile_card():
     source.session.owns_runtime = False
     OperatorApp._prearm_known_gate(cast(OperatorApp, app), cast(SessionInteraction, source))
     assert mounted == ["profile-card"]
+
+
+@pytest.mark.asyncio
+async def test_the_guardrail_note_survives_the_short_card(config_dir: Path) -> None:
+    """Design D2 (PR #4558 round 1): the note cannot live only in a description.
+
+    At 100x30 the card's allocator drops every consequence line to keep the
+    answer labels, so the sentence that says what still protects an auto
+    session used to vanish exactly where the card is tightest. It rides the
+    mode line now, which is never dropped.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        card = await _card(pilot, app)
+        await pilot.pause()
+        text = "\n".join(_lines(card))
+        assert "Guardrail refusals and dangerous-delete review still apply." in text, text
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)
+
+
+@pytest.mark.asyncio
+async def test_the_s_handle_becomes_the_way_back_once_the_session_is_auto(
+    config_dir: Path,
+) -> None:
+    """Review R1-M2: a card parked across an `S` press must offer the reverse.
+
+    The card outlives the switch, so `[S] Auto-approve this session` would be a
+    no-op where the reader needs `Always ask`. Pressing it then TIGHTENS, and
+    the request stays parked (a setting never answers).
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: rm -rf ./build"))
+        card = await _card(pilot, app)
+        assert "Auto-approve this session [S]" in "\n".join(_lines(card))
+        await pilot.press("S")
+        await pilot.pause()
+        await pilot.pause()
+        assert app._approve_all is True, "the S press did not latch this session"
+        text = "\n".join(_lines(card))
+        assert "Always ask this session [S]" in text, text
+        await pilot.press("S")
+        await pilot.pause()
+        await pilot.pause()
+        assert app._approve_all is False, "S in auto did not switch this session back"
+        assert not pending.done(), "a setting gesture answered the parked request"
+        await pilot.press("n")
+        await asyncio.wait_for(pending, 2)

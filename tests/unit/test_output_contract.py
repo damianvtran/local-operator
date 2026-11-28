@@ -447,7 +447,32 @@ def test_system_block_for_json_without_schema() -> None:
     block = OutputContract(format="json").system_block()
     assert block.startswith("Output contract: the final response for this session is enforced.")
     assert "- Format: json." in block
-    assert "a fenced ```json block is also accepted" in block
+    # Compact and unfenced: the answer is output tokens and is cache-written
+    # into the next turn, so indentation is pure cost; fences are no longer
+    # advertised because advertising them invited the verbose shape.
+    assert (
+        "exactly one JSON value, compact (no indentation, line breaks or code fence), "
+        "and nothing else"
+    ) in block
+    assert "fenced ```json block is also accepted" not in block
+
+
+def test_json_shape_asks_compact_but_the_decoder_still_takes_fenced_and_pretty() -> None:
+    """The instruction tightened, the decoder deliberately did not: a model that
+    ignores "compact, no fence" pays tokens, never a retry. One spelling feeds the
+    announcement and the retry message (review R-5), so both carry it."""
+    contract = OutputContract(
+        format="json",
+        schema={"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
+    )
+    assert "compact (no indentation" in contract.instructions()
+    value = {"x": 1}
+    compact = json.dumps(value, separators=(",", ":"))
+    pretty = json.dumps(value, indent=2)
+    for text in (compact, pretty, f"```json\n{pretty}\n```", f"```\n{compact}\n```"):
+        assert contract.check(text).ok, text
+    # YAML/TOML keep their fence clause: they have no compact form to ask for.
+    assert "a fenced ```yaml block is also accepted" in OutputContract(format="yaml").system_block()
 
 
 def test_system_block_embeds_the_whole_schema() -> None:

@@ -27,6 +27,15 @@ metadata overrides, desktop-app support, and server-specific limitations.
 | LM Studio, Ollama, vLLM, llama.cpp | User-operated server; optional token |
 | OpenAI-compatible | Explicit server URL; optional token; MLX/LocalAI/proxy escape hatch |
 
+Google AI Studio defaults to **Gemini 4 Neon** (`gemini-4-neon`), which the
+[Gemini API serves on paid tiers only](https://aistudio.google.com/docs/models/gemini-4-neon#pricing).
+If your project uses the free tier, select
+[**Gemini 3.8 Flash**](https://aistudio.google.com/docs/models/gemini-3.8-flash#pricing)
+(`gemini-3.8-flash`) in the model picker instead. Vertex AI is a separate provider: Cloud sign-in
+can use Neon in supported locations, while Express Mode API keys default to
+**Gemini 2.5 Flash** (`gemini-2.5-flash`), since
+[Express Mode does not list Neon](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/express-mode/overview#models).
+
 ```bash
 lop login              # list login-capable providers
 lop login openai       # OAuth flow; for OpenAI/Anthropic/Z.AI/Qwen, repeat to add a second account

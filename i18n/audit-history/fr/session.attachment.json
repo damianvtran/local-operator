@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "session.attachment",
+  "history_sha256": "829766e6a22a00991120731ab0cb19061c65518bda6f9d24cc35bb5963877cd0",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "5f7997ebfa1ad05ea3153f4386b2aa0bc7afc119f6cfc00319508d61b9351935",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #1; session a29a2e0a6911)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #1 of 2 (safety copy; a second independent audit follows — this row is not final sign-off). Read all 5 keys against en + context sidecar. Verified in bytes: key set/order, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format controls; NFC. Safety meaning preserved: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). MINOR reason_unavailable: 'ni sa définition ni son habilitation … ne sont disponibles' asserts both are missing; en/context mean either one — propose 'sa définition ou son habilitation enregistrée n’est pas disponible sur cet appareil.' NIT: 'habilitation' is new for 'authority' (existing fr: 'autorisation'/'Autorité de l’opérateur'); acceptable for a security record. U+202F before : and ; verified.",
+      "head": "a404fc67087ce5c59f3f42cb6cc3878913a2b46e",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "session.attachment",
+      "source_sha256": "f40c600122d54736d2724bad8a4b33e7f54b5e239af49c8510a26c67d1ea43cd",
+      "target_sha256": "9aceba792b84830677ba6bf40ce9a7b6f073da0bd1e9c3fc200c4200576ac09b",
+      "translator": {
+        "agent": "translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (independent audit #2; session e93c9320acbc)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit #2 of 2 (second independent audit for safety copy; formed own verdict before reading audit #1's notes). Read all 5 keys against en + context sidecar, glossary §2 and the locale style guide. Verified in bytes: key parity, placeholders {team}/{reason}/{agent}, slash commands /team {team}, /agent {agent}, /team <name>, /agent <name>, /team clear, /agent clear verbatim; no bidi/format (Cf) controls. Safety meaning unambiguous: only the operator re-attaches; the assistant is told not to attach it itself. reason_* begin lower-case, end with the locale full stop and splice grammatically at {reason}. No blocker/major. No rendered frame, no native-speaker review, no overflow check (long warning prose, no fixed-width label). CHANGED fr catalogue in this audit: reason_unavailable 'ni sa définition ni son habilitation enregistrée ne sont disponibles…' (asserted both missing) -> 'sa définition ou son habilitation enregistrée n’est pas disponible sur cet appareil.' (either one, matching en/context); resolves audit #1's open MINOR. NIT kept: 'habilitation' for 'authority' has no glossary row; acceptable for a security record. vous register; U+202F before : and ; verified.",
+      "head": "4fca7ff2e281ff8f6454ca8b861948aa34cdc126",
+      "context_sha256": "86b6624d0d71ed4d34b9bae0fee62b52043bf05ba8d14dd98369dd66a6bc2759",
+      "keys_reviewed": [
+        "session.attachment.team_unrestored",
+        "session.attachment.reason_authority",
+        "session.attachment.reason_unavailable",
+        "session.attachment.agent_unrestored",
+        "session.attachment.refusal"
+      ]
+    }
+  ]
+}

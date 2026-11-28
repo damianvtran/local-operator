@@ -4639,7 +4639,9 @@ def test_the_projection_carries_the_pin_badge_for_a_fallen_back_child() -> None:
     fold.set_subagent_details(comms)
 
     rows = {row.job_id: row for row in fold.projection.subagents}
-    assert rows["pinned"].model_label == ("anthropic/claude-sonnet-5-5 → DeepSeek Flash ⚠ fallback")
+    assert rows["pinned"].model_label == (
+        "anthropic/claude-sonnet-5-5 → DeepSeek V4.1 Flash ⚠ fallback"
+    )
     assert rows["pinned"].model_fallback is True
     assert rows["plain"].model_label == "test/model"
     # The boolean the phone's roster row paints its fallback line from: the

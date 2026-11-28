@@ -764,6 +764,28 @@ async def test_cwd_waits_for_idle_without_a_budget_then_applies(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_idle_update_allows_waiting_intent_but_fences_its_next_attempt(tmp_path) -> None:
+    _session(tmp_path)
+    driver = FakeDriver({"cwd": [Outcome("waiting_idle", "runtime_busy", "working")]})
+    driver.gate = asyncio.Event()
+    stopping = False
+    applier = _applier(tmp_path, driver, FrozenClock(), update_stopping=lambda: stopping)
+    try:
+        await _submit(applier, "cwd", "/new", "r")
+        await _until(lambda: bool(driver.calls))
+        assert applier.idle_update_busy()
+        driver.gate.set()
+        await _until(lambda: not applier.idle_update_busy())
+        stopping = True
+        applier._sessions[SID].wake.set()
+        await _settle(applier)
+        assert len(driver.calls) == 1
+        assert applier.store.load(SID)["slots"]["cwd"]["state"] == "waiting_idle"
+    finally:
+        await applier.close()
+
+
+@pytest.mark.asyncio
 async def test_cwd_blocked_by_another_viewer_fails_after_120_s(tmp_path) -> None:
     _session(tmp_path)
     driver = FakeDriver()

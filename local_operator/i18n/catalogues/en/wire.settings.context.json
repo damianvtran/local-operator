@@ -187,6 +187,76 @@
     "tone": "plain",
     "note": "Section heading for the machine-wide queue that limits how many heavy builds/tests run at once (one at a time on machines with 16 GB or less, up to four on larger ones). 'Heavy job' = a build, type check or test run that uses a lot of memory."
   },
+  "wire.settings.mcp_result_normalization.choice.off.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Results are passed to the agent exactly as the tool returned them."
+  },
+  "wire.settings.mcp_result_normalization.choice.off.label": {
+    "maxCells": 12,
+    "role": "Enum choice label",
+    "tone": "concise",
+    "note": "The 'off' choice: normalization disabled. Use this locale's established word for 'off' in settings."
+  },
+  "wire.settings.mcp_result_normalization.choice.prose_links.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Default mode: link URLs are kept only when the link sits inside a running sentence (a long prose line); navigation and image links are removed."
+  },
+  "wire.settings.mcp_result_normalization.choice.prose_links.label": {
+    "role": "Enum choice label, a config value",
+    "tone": "literal",
+    "note": "The literal config value 'prose-links'. Do not translate; keep it byte-identical."
+  },
+  "wire.settings.mcp_result_normalization.choice.strip_links.description": {
+    "maxCells": 48,
+    "role": "Enum choice description",
+    "tone": "concise",
+    "note": "Every link becomes its visible text; all link URLs are removed."
+  },
+  "wire.settings.mcp_result_normalization.choice.strip_links.label": {
+    "role": "Enum choice label, a config value",
+    "tone": "literal",
+    "note": "The literal config value 'strip-links'. Do not translate; keep it byte-identical."
+  },
+  "wire.settings.mcp_result_normalization.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Claims to preserve: (1) only markup is removed (images, navigation links, citation markers), never the page's text; (2) it applies to results of MCP tools; (3) Off sends results byte-for-byte unchanged. 'Off' refers to the 'off' choice of this same row; use this locale's established word for it. The row shows help in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments, no numbers."
+  },
+  "wire.settings.mcp_result_normalization.label": {
+    "maxCells": 29,
+    "role": "Settings row label (enum)",
+    "tone": "concise, neutral",
+    "note": "Setting that removes markup (images, navigation links, citation markers, link URLs) from text returned by MCP tools before the AI agent reads it, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
+  "wire.settings.mcp_result_text_rendering.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Help for an on/off toggle. Claims to preserve: (1) MCP search results and fetched web pages are given to the AI agent as plain text rather than JSON; (2) no field or value is lost (only the JSON syntax goes); (3) when the toggle is off the results stay JSON. 'MCP' is a protocol name and 'JSON' a format name: keep both. 'Off' is the toggle's off state; use this locale's established word for it. Shown in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments, no numbers."
+  },
+  "wire.settings.mcp_result_text_rendering.label": {
+    "maxCells": 29,
+    "role": "Settings row label (toggle)",
+    "tone": "concise, neutral",
+    "note": "On/off setting that renders MCP search results and fetched pages as plain text instead of JSON for the AI agent, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
+  "wire.settings.mcp_search_snippet_chars.help": {
+    "maxCells": 188,
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "Help for a number setting. Claims to preserve: (1) it caps how many characters of each result snippet (the short summary text under a search hit) an MCP search tool returns are kept; (2) titles and URLs are never shortened; (3) 0 keeps snippets whole (no limit). 'MCP' is a protocol name: keep it. Shown in a two-row band 74 cells wide at 80 columns and 94 at 100 columns. No ICU arguments."
+  },
+  "wire.settings.mcp_search_snippet_chars.label": {
+    "maxCells": 29,
+    "role": "Settings row label (integer)",
+    "tone": "concise, neutral",
+    "note": "Setting that limits the length of each search-result snippet returned by MCP search tools, to save tokens. 'MCP' is a protocol name: keep it. Keep within 29 cells: the settings label column is 30 cells. No ICU arguments."
+  },
   "wire.settings.network_credentials_github_repositories.help": {
     "role": "settings help for the GitHub repository list",
     "tone": "plain, precise about authorization",
@@ -569,5 +639,17 @@
     "tone": "terse",
     "width": "short section header",
     "note": "The section for what a local update does with older install generations on THIS device; not the mesh roll (that is 'Mesh updates')."
+  },
+  "wire.settings.web_search_claude_subscription_search.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "maxCells": 29,
+    "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). The cost word (paid) must survive: this toggle is where the user opts in to spending Claude extra usage on search (PR #4569 design D1). Claude is a brand name."
+  },
+  "wire.settings.web_search_claude_subscription_search.help": {
+    "role": "settings row help line",
+    "tone": "plain",
+    "maxCells": 80,
+    "note": "Lead with the cost: each search is billed to Claude extra usage at the API price, and the leg is tried after Radient. Must fit 80 columns unclipped (design D1). Claude/Radient/API stay Latin."
   }
 }

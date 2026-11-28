@@ -144,7 +144,7 @@ def test_a_fallback_edge_marks_the_pinned_job_and_keeps_the_pin() -> None:
     assert job.requested_model_label == PIN
     assert job.model_label == EFFECTIVE
     assert model_fallback_badge(job.requested_model_label, job.model_label) == (
-        f"{PIN} → DeepSeek Flash ⚠ fallback"
+        f"{PIN} → DeepSeek V4.1 Flash ⚠ fallback"
     )
 
 
@@ -223,7 +223,7 @@ def test_the_notice_carries_the_four_facts() -> None:
     assert "(designer)" in text  # its role, spelled as the role clause
     # The two models in the product's own vocabulary (UX U3), joined as an
     # `A → B` pair — the same relation spelling the band's badge uses (D4).
-    assert "Claude Sonnet 5.5 → DeepSeek Flash" in text.replace("\u00a0", " ")
+    assert "Claude Sonnet 5.5 → DeepSeek V4.1 Flash" in text.replace("\u00a0", " ")
     # And the pair is ONE wrap token: `wrap_cells` splits on ASCII spaces
     # only, so it can never be broken between requested and effective.
     from local_operator.tui.widgets.transcript import wrap_cells
@@ -232,7 +232,8 @@ def test_the_notice_carries_the_four_facts() -> None:
     for width in (110, 74, 60):
         rows = wrap_cells(text, width)
         assert any(
-            "Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash" in row for row in rows
+            "Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0V4.1\u00a0Flash" in row
+            for row in rows
         ), (width, rows)
     assert "anthropic" in text and "rate limit" in text  # the refusing cause
     # The toast glance names the child and the target rather than slicing prose.
@@ -273,7 +274,8 @@ def test_the_notice_builder_states_the_role_only_when_recorded() -> None:
 
     text = _pinned_fallback_notice("a", "", PIN, EFFECTIVE, "cause")
     assert text == (
-        "subagent 'a' pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash — cause."
+        "subagent 'a' pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0"
+        "DeepSeek\u00a0V4.1\u00a0Flash — cause."
     )
 
 
@@ -320,7 +322,7 @@ def test_the_pin_label_survives_the_roster_round_trip() -> None:
 def test_the_badge_renders_only_while_the_pin_is_off() -> None:
     """One rule, three spellings: the full pair, the effective half only when
     the row cannot hold the pair, and nothing at all while the pin serves."""
-    assert model_fallback_badge(PIN, EFFECTIVE) == f"{PIN} → DeepSeek Flash ⚠ fallback"
+    assert model_fallback_badge(PIN, EFFECTIVE) == f"{PIN} → DeepSeek V4.1 Flash ⚠ fallback"
     # Serving the pin, no pin, or nothing to compare: no badge.
     assert model_fallback_badge(PIN, PIN) == ""
     assert model_fallback_badge(None, EFFECTIVE) == ""
@@ -370,13 +372,13 @@ def test_the_band_paints_the_badge_for_a_pinned_child_off_its_model() -> None:
     # Wide: the full pair, with the EFFECTIVE half resolved to its display
     # name (D5) while the requested half stays the pin's recorded selector.
     wide = status.render_text(150).plain
-    assert f"{PIN} → DeepSeek Flash ⚠ fallback" in wide, wide
+    assert f"{PIN} → DeepSeek V4.1 Flash ⚠ fallback" in wide, wide
 
-    # A 80-column terminal's band (75-76 cells): the pair sheds to the marker
-    # plus the effective half's short display form, and EVERYTHING the base
-    # row carried at this width survives.
+    # At 76 cells, the full versioned name no longer fits the effective
+    # half. The existing compact rung uses the ID while preserving worktree
+    # and context, rather than hiding either to fit the longer label.
     narrow = status.render_text(76).plain
-    assert "⚠ DeepSeek Flash" in narrow, narrow
+    assert "⚠ deepseek-flash" in narrow, narrow
     assert "→" not in narrow, narrow
     assert "⌂ wt" in narrow, narrow
     assert "27.5%/160k" in narrow, narrow
@@ -384,7 +386,7 @@ def test_the_band_paints_the_badge_for_a_pinned_child_off_its_model() -> None:
     # Below the ladder the irreducible rung carries the same marker under the
     # child's name — the design round's proposed shape.
     tiny = status.render_text(30).plain
-    assert "⚠ DeepSeek Flash" in tiny, tiny
+    assert "⚠ deepseek-flash" in tiny, tiny
     assert "round1-des" in tiny, tiny
 
     # The ⚠ takes the app's `warning` semantic as an ADDITIVE cue (D3): the
@@ -661,8 +663,9 @@ async def test_a_dropped_level_is_named_by_the_notice_and_the_receipt(
     assert ", effort xhigh → model default" in notice.text
     # Both relations in one sentence, in one order: what it ran on, then what it
     # ran AT, then the cause.
-    assert "pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash, effort xhigh" in (
-        notice.text
+    assert (
+        "pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0V4.1\u00a0Flash, effort xhigh"
+        in (notice.text)
     )
 
     text = Session._job_result_message("designer1", "the findings", job).details["text"]
@@ -696,7 +699,7 @@ def test_a_hop_that_keeps_the_level_adds_no_effort_clause() -> None:
 
     [notice] = [e for e in emitted if isinstance(e, NoticeEvent)]
     assert "effort" not in notice.text
-    assert "DeepSeek\u00a0Flash — provider failure." in notice.text
+    assert "DeepSeek\u00a0V4.1\u00a0Flash — provider failure." in notice.text
     assert job.model_fallback_effort == "xhigh"
 
     text = Session._job_result_message("designer1", "x", job).details["text"]

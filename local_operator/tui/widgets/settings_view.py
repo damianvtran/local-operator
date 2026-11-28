@@ -636,7 +636,18 @@ def _paint_team_facts_lines(
 #: trades the band's blank top row for a second line of help and may GROW the
 #: band to :data:`_DETAIL_WRAP_MAX_ROWS` rows (taken from the list), so a
 #: sentence needing more than that still falls to the marked cut.
-_WRAPPED_HELP_KEYS: frozenset[str] = frozenset({"update.keep_generations"})
+#: ``session.runtime_memory.*`` (UX round 1 on #4519, U4): the limit's
+#: guarantee is its LAST clause ("a value below 1024, or 0, is ignored and the
+#: default applies" — what keeps a units typo from becoming a fleet kill), and
+#: the switch's is too ("the TUI window you are working in is never ended");
+#: the one-row band cut both at 100 and 150 columns.
+_WRAPPED_HELP_KEYS: frozenset[str] = frozenset(
+    {
+        "update.keep_generations",
+        "session.runtime_memory.enabled",
+        "session.runtime_memory.limit_mb",
+    }
+)
 
 #: Most rows the detail band may grow to for a :data:`_WRAPPED_HELP_KEYS` row.
 #: QA round 2, Q1 (PR #4135): two rows were not enough — the fr keep help (196
@@ -1649,6 +1660,23 @@ class SettingsView(Vertical):
         self._providers = list(provider_states) if provider_states is not None else list(providers)
         self._provider_catalogue = list(provider_catalogue)
         self._model_catalogue = list(model_catalogue)
+        self._repaint()
+
+    def set_teams(self, teams: Sequence[tuple[str, str, str]]) -> None:
+        """Replace ONLY the team rows and repaint.
+
+        Why a narrow setter rather than calling :meth:`load` again: team rows
+        are handed over already resolved to display strings (member count,
+        alias label, "no description" fallback), so a live language switch
+        must re-hand them or the Teams pane keeps the old language (PR #4508
+        R1/Q1). ``load`` would also replace agents, provider state and both
+        catalogues, which means re-resolving the credential store and model
+        catalogue on every language change for rows that do not need it —
+        agent facts are rendered at paint time, so they already follow the
+        locale. Cursor, pane and expansion state are untouched; ``_repaint``
+        clamps the selection exactly as it does for any other rebuild.
+        """
+        self._teams = list(teams)
         self._repaint()
 
     # -- rows ---------------------------------------------------------------

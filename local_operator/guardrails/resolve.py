@@ -1273,6 +1273,20 @@ class Target:
     #: (``A=<p> cmd``) or an ``env`` operand (``env A=<p> cmd``): that NAME.
     #: Told to the judge, never a ranking input (PR #3906 round 1, case C).
     assigned: str | None = None
+    #: A ``write`` (or ``bulk``) touch that lands a whole TREE under ``path``
+    #: (recursive ``cp``/``rsync``, ``ditto``, ``tar -x``/``unzip``, a git
+    #: work-tree write). ``classify._bulk_reason`` ranks one whose destination
+    #: is the state root, or an ancestor it could land a state root's children
+    #: through, CRITICAL (PR #4383 review S-12): such a copy can plant
+    #: ``team_bridge/responders.yaml`` or ``guardrails/`` without either name
+    #: ever appearing in the command.
+    bulk: bool = False
+    #: For a ``bulk`` touch: the names that land DIRECTLY in ``path``
+    #: (``rsync -a ~/x/team_bridge D`` → ``("team_bridge",)``), or ``None`` when
+    #: they cannot be known from the command (a trailing-slash/contents copy,
+    #: ``ditto``, an archive, a checkout, ``--parents``/``--relative`` with an
+    #: unknowable first component, or a destination that will BE the copy).
+    bulk_names: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -2093,6 +2107,21 @@ _GIT_CLONE_VALUE_FLAGS = frozenset(
 _GIT_WORKTREE_ADD_VALUE_FLAGS = frozenset({"-b", "-B", "--reason", "--orphan"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: ``find`` tests allowed before ``-print0`` in a ``find | xargs rm`` pipe
+#: (``_add_found_stdin``): each takes one value and only narrows the walk.
+_FIND_PIPE_VALUED = frozenset(
+    {"-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth"}
+)
+#: Value-less words allowed there: pruning and boolean structure only.
+_FIND_PIPE_BARE = frozenset(
+    {"-prune", "-o", "-or", "-a", "-and", "!", "-not", "(", ")", "\\(", "\\)", "-empty"}
+)
+#: ``xargs`` options allowed in that pipe: NUL input and skip-if-empty only.
+_XARGS_PIPE_FLAGS = frozenset({"-0", "--null", "-r", "--no-run-if-empty"})
+#: ``rm`` flags allowed there: they change confirmation/recursion, never targets.
+_RM_PIPE_FLAGS = frozenset(
+    {"-r", "-R", "-f", "-rf", "-fr", "-Rf", "-fR", "--recursive", "--force", "-d", "-v"}
+)
 #: find predicates that select a SUBSET of the walk (R6).
 _FIND_SELECTING = frozenset(
     {
@@ -3766,7 +3795,12 @@ def _case_header_end(text: str) -> int | None:
     scan(rest, spans=spans)
     at = 0
     for lo, hi in spans:
-        if rest[lo:hi] not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+        word = rest[lo:hi]
+        if word not in _DEFINITION_LEAD_WORDS | {"{", "("}:
+            break
+        # ``-p`` leads only as ``time -p``; a bare ``-p`` is a command name,
+        # so ``-p case x in`` is no header (#4646 R3-B1).
+        if word == "-p" and (at == 0 or rest[slice(*spans[at - 1])] != "time"):
             break
         at += 1
     head = spans[at : at + 3]
@@ -3776,6 +3810,62 @@ def _case_header_end(text: str) -> int | None:
     if rest[a:b] == "case" and rest[e:f] == "in" and rest[c:d] not in {"(", ")"}:
         return len(text) - len(rest) + f
     return None
+
+
+def _case_pattern_positions(pieces: list[tuple[str, bool, str]]) -> list[bool]:
+    """Which pieces stand where bash accepts only a ``case`` pattern (or ``esac``).
+
+    That is the piece right after a bare ``case WORD in`` header, or after an
+    arm's ``;;`` while a case is open. ``;&``/``;;&`` are not distinguished
+    by the legacy lexer, so arms after them are NOT marked: they stay
+    dynamic words, judged (fail closed). See :func:`_case_pattern_head`.
+    """
+    marks = [False] * len(pieces)
+    open_cases = 0
+    after_header = False
+    for index, (text, _piped, op) in enumerate(pieces):
+        stripped = text.strip()
+        if after_header or (open_cases and index and pieces[index - 1][2] == ";;"):
+            marks[index] = True
+        after_header = False
+        if _CASE_END_RE.match(stripped):
+            open_cases = max(0, open_cases - 1)
+            continue
+        end = _case_header_end(stripped)
+        if end is not None:
+            open_cases += 1
+            after_header = not stripped[end:].strip()
+    return marks
+
+
+def _case_pattern_head(text: str) -> bool:
+    """Does this segment open with a ``case`` arm's pattern (``"x/$y"*)``)?
+
+    WHY (field case, PR #4475's agent, guards 0.112.5-0.113.17): the legacy
+    segmentation (``case_arms=False``, kept so a re-segmented arm can never
+    LOWER a rank) leaves an arm's closing ``)`` as the token right after its
+    pattern. A pattern holding an expansion then looked like a command word
+    only known at run time; inside a function body that "reached" every
+    defined function, the one being walked included, and a plain
+    PR-comment helper was refused as "shell function … recurses".
+
+    Bash cannot run a word followed by a BARE ``)``: outside a case arm that
+    is a syntax error, so nothing executes from it. Only that token shape
+    counts (the scanner keeps a quoted ``")"`` inside its word, and a
+    ``$(…)`` closes inside its own span), so every other dynamic word still
+    reaches the functions, failing closed. The arm's body is walked by the
+    ``case_arms=True`` pass, where a real dynamic word in it still reaches.
+    """
+    spans: list[tuple[int, int]] = []
+    scan(text, spans=spans)
+    tokens = [text[lo:hi] for lo, hi in spans]
+    # Only ``{`` is skipped: ``{ WORD )`` is a syntax error. A leading ``(``
+    # is NOT skipped (#4646 R1-B1): ``( "$cmd" )`` is a subshell that runs
+    # ``$cmd``, and reads exactly like the ``(pat)`` arm form. That form
+    # therefore stays a judged false positive, the safe side.
+    while tokens and tokens[0] == "{":
+        tokens = tokens[1:]
+    return len(tokens) >= 2 and tokens[0] != ")" and tokens[1] == ")"
 
 
 def _case_pattern(text: str) -> tuple[str, str] | None:
@@ -4293,6 +4383,12 @@ class _Walker:
             prior = definitions.get(at)
             opened = opened or (prior.nested if prior is not None else _may_nest(piece_text))
             nest_at.append(opened)
+        # #4646 R2-B1: a piece is in case-PATTERN position only right after
+        # a bare ``case … in`` header or an arm's ``;;`` while inside a case.
+        # Bash allows nothing but a pattern (or ``esac``) there, so a dynamic
+        # word in that position is never run. Anywhere else (``( true;
+        # "$cmd" )`` splits into a ``"$cmd" )`` piece) it is a command.
+        pattern_position = _case_pattern_positions(pieces)
         for index, (text, _flag, op) in enumerate(pieces):
             if op == "case-arm":
                 # Patterns may expand substitutions, but their literal words
@@ -4379,12 +4475,24 @@ class _Walker:
             if isolated:
                 snap = self._save()
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
                 self._restore(snap)
             else:
                 self._segment(
-                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                    text,
+                    depth,
+                    heredocs,
+                    stdin_piped=piped,
+                    pipeline=pipeline,
+                    feed=feed,
+                    case_position=pattern_position[index],
                 )
             produced = heredocs + _herestring_texts(text)
             upstream_bodies = upstream_bodies + produced
@@ -4427,7 +4535,14 @@ class _Walker:
             return
         self.functions_version += 1
 
-    def _function_call(self, raw_words: list[_RawWord], words: list[Expanded], depth: int) -> bool:
+    def _function_call(
+        self,
+        raw_words: list[_RawWord],
+        words: list[Expanded],
+        depth: int,
+        *,
+        case_pattern: bool = False,
+    ) -> bool:
         """Walk a called function's body here; ``True`` when the segment WAS a call.
 
         Also notes ``export -f`` and walks every body for calls it cannot pin
@@ -4453,7 +4568,7 @@ class _Walker:
         if name is not None and name in self.functions:
             self._call_candidates(name, depth)
             return True
-        self._opaque_function_call(raw_words, head, depth)
+        self._opaque_function_call(raw_words, head, depth, case_pattern=case_pattern)
         return False
 
     def _alias_targets(self, head: list[Expanded]) -> list[str]:
@@ -4598,7 +4713,12 @@ class _Walker:
                 self._call_candidates(name, depth)
 
     def _opaque_function_call(
-        self, raw_words: list[_RawWord], head: list[Expanded], depth: int
+        self,
+        raw_words: list[_RawWord],
+        head: list[Expanded],
+        depth: int,
+        *,
+        case_pattern: bool = False,
     ) -> None:
         """Walk every body when this segment could call one the walker can't name."""
         name = head[0].text if head and not head[0].opaque else ""
@@ -4630,8 +4750,12 @@ class _Walker:
             ),
             None,
         )
-        dynamic = command is not None and (
-            command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts)
+        # ``case_pattern`` (:func:`_case_pattern_head`): the "command word" is
+        # a case arm's pattern, which bash never runs.
+        dynamic = (
+            not case_pattern
+            and command is not None
+            and (command.broken or any(p.kind in ("pbare", "pdq", "sub") for p in command.parts))
         )
         why: str | None = None
         if dynamic:
@@ -4806,7 +4930,11 @@ class _Walker:
         stdin_piped: bool = False,
         pipeline: str = "",
         feed: _Feed | None = None,
+        case_position: bool = False,
     ) -> None:
+        # Both the POSITION (``_case_pattern_positions``) and the shape: read
+        # before ``_strip_grouping``, which drops the arm's bare ``)``.
+        case_pattern = case_position and _case_pattern_head(text)
         text = _strip_grouping(text)
         if not text:
             return
@@ -4879,7 +5007,9 @@ class _Walker:
             if self.functions:
                 self._opaque_function_call(raw_words, words, depth)
             return
-        if self.functions is not None and self._function_call(raw_words, words, depth):
+        if self.functions is not None and self._function_call(
+            raw_words, words, depth, case_pattern=case_pattern
+        ):
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
@@ -4990,7 +5120,13 @@ class _Walker:
         # An inline assignment of a pager/git variable can run a program even
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
-        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned)
+        readonly = read_only_argv(name, [w.text for w in args], assigned=assigned) or (
+            # Needs the EXPANDED words (glob/opaque facts) and the cwd, which
+            # ``read_only_argv``'s string argv cannot carry (field case 0.113.2).
+            name == "sqlite3"
+            and not raw_assigns
+            and _sqlite_read_only(args, st.cwd)
+        )
         # A move, link, arbitrary interpreter, or unmodelled writer can replace
         # the fresh directory or its parent. Never carry containment past it.
         # mkdir only creates directories; mktemp's substitution is walked in a
@@ -5105,7 +5241,9 @@ class _Walker:
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
-            if stdin_fed:
+            if stdin_fed and not self._add_found_stdin(
+                name, feed, unpeeled, operands, _flags, redirects
+            ):
                 self._add_stdin(name)
             for w in operands:
                 self._add(w, "delete", name)
@@ -5163,8 +5301,14 @@ class _Walker:
             # ``sqlite3 FILE [SQL]`` writes FILE whatever the SQL says; the
             # guard's ledger is a sqlite file (R1-MAJOR-1).
             operands, _ = _operands(args, _SQLITE_VALUE_FLAGS)
-            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive).
-            if operands and not any(w.text == "-readonly" for w in args):
+            # ``-readonly`` opens the file read-only (R3-MAJOR-2 false positive);
+            # so does a proven read (``_sqlite_read_only``): an existing file
+            # opened only to SELECT from is not written.
+            if (
+                operands
+                and not any(w.text == "-readonly" for w in args)
+                and not _sqlite_read_only(args, self.state.cwd)
+            ):
                 self._add(operands[0], "append", name)
             return
         if name in ("sed", "gsed") and _in_place_edit(name, args):
@@ -6298,12 +6442,34 @@ class _Walker:
         surface = _write_surface(name, args, st.home)
         if name in ("ln", "gln"):
             self._link_targets(args)
+        if name in ("cp", "gcp") and _has_flag(args, _CP_FLAGS, "l", ("--link",)):
+            # ``cp -l``/``--link``/``-al`` makes a HARDLINK, exactly like ``ln
+            # SRC DST``: the source inode gains a second, agent-writable name,
+            # so the source is touched the way ``_link_targets`` touches an
+            # ``ln`` source (PR #4383 review S-11). The responder policy handed
+            # to it ranks CRITICAL in classify; other evidence keeps the
+            # ask-liftable HIGH of a path handed to a program.
+            for w in _copy_sources(args, _CP_FLAGS):
+                if w.text and not w.vanished:
+                    self.result.touched.append(_target(w, "touch", name, st))
+        if name == "git":
+            # A tree-writing subcommand rewrites its whole work tree, which
+            # ``_git_writes`` names only through ``-C``/``--work-tree`` and as a
+            # plain write; the S-12 rule needs it as a bulk landing, cwd included.
+            for w in _git_work_trees(args):
+                if w.text and not w.vanished:
+                    tree = _target(w, "bulk", name, st)
+                    tree.bulk = True
+                    self.result.touched.append(tree)
         if surface is None:
             return set()
         dests, fully = surface
+        bulk, bulk_names = _bulk_landing(name, args, dests, st.cwd)
         for w in dests:
             if w.text and not w.vanished:
-                self.result.touched.append(_target(w, "write", name, st))
+                write = _target(w, "write", name, st)
+                write.bulk, write.bulk_names = bulk, bulk_names
+                self.result.touched.append(write)
                 if name == "curl" and not w.text.startswith("/dev/"):
                     # PR #4116 Q1: ``curl -o F`` truncates F exactly like
                     # ``> F``, but as a touch alone only session-state paths
@@ -7177,6 +7343,101 @@ class _Walker:
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
 
+    def _add_found_stdin(
+        self,
+        program: str,
+        feed: _Feed | None,
+        unpeeled: list[Expanded],
+        operands: list[Expanded],
+        flags: list[str],
+        redirects: list[tuple[str, _RawWord]],
+    ) -> bool:
+        """``find <roots> <tests> -print0 | xargs -0 rm -rf``: rank as find.
+
+        WHY (PR #4493, disk-reclamation field report 2026-11-23, session
+        ed88c11e4952): ``find . -name __pycache__ -type d -prune -print0 |
+        xargs -0 rm -rf`` inside a worktree was refused as an opaque delete of
+        the whole tree, while ``find . -name __pycache__ -exec rm -rf {} +``
+        already ranks LOW (S2-3). The two delete the same set ONLY when what
+        ``rm`` receives is exactly ``find``'s own NUL-separated path list.
+
+        So this is an ALLOWLIST on both stages (review SEC-R2-B1); anything
+        else returns ``False`` and the caller keeps the opaque stdin target:
+
+        * the delete stage is literally ``xargs [-0|--null] [-r] rm|unlink
+          [rm flags]`` with no operands of its own, no ``-I``/``-i``/``-a``
+          or any other xargs option, and no redirection (``< file``);
+        * the upstream stage is the IMMEDIATE previous one, a plain ``find``
+          (no grouping, no ``;``/``&&`` list) with at least one literal root,
+          then only :data:`_FIND_PIPE_VALUED` tests (each with its value)
+          and :data:`_FIND_PIPE_BARE` words, and exactly one ``-print0`` as
+          the last word. No ``-H/-L/-P``,
+          ``-printf``/``-fprint*``/``-ls``/``-exec``/``-delete``/
+          ``-files0-from``: each can make the printed text differ from the
+          walked paths;
+        * no heredoc/herestring feeds the pipe and no word is opaque.
+        """
+        if feed is None or not feed.stages or feed.bodies:
+            return False
+        if any(op.startswith("<") for op, _ in redirects):
+            return False
+        xargs_words = [w.text for w in unpeeled]
+        if not xargs_words or os.path.basename(xargs_words[0]) != "xargs":
+            return False
+        k = 1
+        while k < len(xargs_words) and xargs_words[k] in _XARGS_PIPE_FLAGS:
+            k += 1
+        if k >= len(xargs_words) or os.path.basename(xargs_words[k]) != program:
+            return False
+        if "-0" not in xargs_words[1:k] and "--null" not in xargs_words[1:k]:
+            return False
+        if operands or any(f not in _RM_PIPE_FLAGS for f in flags):
+            return False
+        # A grouped stage (``(printf …; find …) | xargs -0 rm``) runs other
+        # commands whose output reaches rm too (review SEC-R3-B1): only a bare
+        # ``find`` stage is find's list.
+        stage = feed.stages[-1].strip()
+        if _strip_grouping(stage) != stage:
+            return False
+        raw_words, stage_redirects = scan(stage)
+        if stage_redirects:
+            return False
+        st = self.state
+        words: list[Expanded] = []
+        for raw in raw_words:
+            words.extend(expand_all(raw, st.env, st.home))
+        if not words or any(w.opaque or w.substitutions for w in words):
+            return False
+        if os.path.basename(words[0].text) not in ("find", "gfind"):
+            return False
+        args = words[1:]
+        roots: list[Expanded] = []
+        i = 0
+        while i < len(args) and not (
+            args[i].text.startswith("-") or args[i].text in ("(", "!", "\\(")
+        ):
+            roots.append(args[i])
+            i += 1
+        texts = [w.text for w in args[i:]]
+        if not roots or not texts or texts[-1] != "-print0" or texts.count("-print0") != 1:
+            return False
+        j = 0
+        selected = False
+        while j < len(texts) - 1:
+            t = texts[j]
+            if t in _FIND_PIPE_VALUED:
+                if j + 1 >= len(texts) - 1:
+                    return False
+                selected = selected or t in _FIND_SELECTING
+                j += 2
+                continue
+            if t not in _FIND_PIPE_BARE:
+                return False
+            j += 1
+        for w in roots:
+            self._add(w, "delete", f"find | xargs {program}", selected=selected)
+        return True
+
     def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(
             Target(
@@ -7426,6 +7687,302 @@ def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
         elif w.text.startswith("-F") and len(w.text) > 2 and not w.text.startswith("--"):
             out.add(id(w))
     return out
+
+
+#: ``sqlite3`` switches that change only how results are PRINTED (or make the
+#: shell stricter: ``-safe``, ``-bail``, ``-nofollow``). Anything else —
+#: ``-init FILE`` (runs a script file), ``-vfs`` (an arbitrary VFS),
+#: ``-A``/``-append``/``-zip``/``-deserialize`` (archive and storage modes) or
+#: a switch this table has never heard of — keeps the call off the read-only
+#: route. Both spellings (``-x``/``--x``) are accepted by the shell.
+_SQLITE_PRINT_FLAGS = frozenset(
+    {
+        "-readonly",
+        "-safe",
+        "-batch",
+        "-bail",
+        "-echo",
+        "-nofollow",
+        "-header",
+        "-noheader",
+        "-column",
+        "-csv",
+        "-json",
+        "-line",
+        "-list",
+        "-box",
+        "-markdown",
+        "-table",
+        "-tabs",
+        "-html",
+        "-quote",
+        "-ascii",
+    }
+)
+#: Value-taking switches whose value is printed text (``-cmd`` is handled on
+#: its own: its value is a command and gets the statement check).
+_SQLITE_PRINT_VALUE_FLAGS = frozenset({"-separator", "-newline", "-nullvalue"})
+#: Dot-commands that only print or set display state. Deliberately absent:
+#: ``.output``/``.once``/``.excel``/``.log``/``.trace`` (write a file),
+#: ``.shell``/``.system`` (run a program), ``.save``/``.backup``/``.clone``/
+#: ``.archive``/``.ar``/``.import``/``.recover`` (write a database or files),
+#: ``.open`` (reopens read-write), ``.read``/``.load``/``.cd`` (unknowable).
+_SQLITE_READ_DOT_COMMANDS = frozenset(
+    {
+        ".tables",
+        ".schema",
+        ".fullschema",
+        ".indexes",
+        ".indices",
+        ".databases",
+        ".dbinfo",
+        ".headers",
+        ".header",
+        ".mode",
+        ".show",
+        ".width",
+        ".nullvalue",
+        ".separator",
+        ".timer",
+        ".changes",
+        ".print",
+        ".help",
+    }
+)
+#: Words that write OUTSIDE the opened database even when it is read-only
+#: (measured on sqlite 3.54: ``sqlite3 -readonly db "select writefile('f','x')"``
+#: and ``"vacuum into 'f'"`` both create ``f``), or attach/extend the
+#: connection. Matched as whole words anywhere in the text — inside a string
+#: literal too, which costs a judge call, never a missed write.
+#:
+#: ``virtual`` closes a whole class (PR #4587 security round 1, M1): a TEMP
+#: virtual table is creatable on a read-only connection, and its module then
+#: writes wherever it likes — measured on sqlite 3.54: ``sqlite3 -readonly db
+#: "create virtual table temp.z using zipfile('a.zip'); insert into temp.z
+#: (name,data) values('f','x')"`` creates ``a.zip``. No read needs ``CREATE
+#: VIRTUAL TABLE``, and a module cannot be reached for writing without it in
+#: the same call (a persisted vtab, or the eponymous ``zipfile``, is refused
+#: by sqlite on a read-only open — measured), so refusing the word refuses
+#: the class whatever the module is named. ``zipfile`` is belt and braces:
+#: it also drops ``select … from zipfile('x.zip')`` reads, which costs a
+#: judge call, never a missed write.
+_SQLITE_ESCAPE_WORDS = frozenset(
+    {
+        "attach",
+        "vacuum",
+        "writefile",
+        "edit",
+        "load_extension",
+        "fts3_tokenizer",
+        "virtual",
+        "zipfile",
+    }
+)
+#: Words that write the database itself. Only consulted when the database is
+#: opened read-write; ``replace`` is also a scalar function, so ``replace()``
+#: in a SELECT leaves the read-only route (conservative on purpose).
+_SQLITE_WRITE_WORDS = frozenset(
+    {
+        "insert",
+        "update",
+        "delete",
+        "create",
+        "drop",
+        "alter",
+        "replace",
+        "reindex",
+        "analyze",
+        "detach",
+        "begin",
+        "commit",
+        "rollback",
+        "savepoint",
+        "release",
+    }
+)
+_SQLITE_READ_LEADS = ("select", "with", "explain", "values", "pragma")
+#: PRAGMAs that only report. ``_ARG`` ones take a table/index name in
+#: parentheses; the bare ones would SET a value given ``=x`` or ``(x)``
+#: (``journal_mode(wal)``), so for them any argument leaves the route.
+_SQLITE_PRAGMA_ARG = frozenset(
+    {
+        "table_info",
+        "table_xinfo",
+        "index_list",
+        "index_info",
+        "index_xinfo",
+        "foreign_key_list",
+        "foreign_key_check",
+        "integrity_check",
+        "quick_check",
+    }
+)
+_SQLITE_PRAGMA_BARE = _SQLITE_PRAGMA_ARG | frozenset(
+    {
+        "user_version",
+        "schema_version",
+        "application_id",
+        "page_count",
+        "page_size",
+        "freelist_count",
+        "encoding",
+        "journal_mode",
+        "database_list",
+        "table_list",
+        "compile_options",
+        "function_list",
+        "pragma_list",
+        "collation_list",
+        "module_list",
+    }
+)
+_SQLITE_PRAGMA_RE = re.compile(
+    r"^pragma\s+(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)\s*(\(\s*[\w\"'.]+\s*\))?\s*$"
+)
+_SQL_WORD_RE = re.compile(r"[a-z_][a-z0-9_]*")
+
+
+def _sqlite_text_read_only(text: str, *, db_read_only: bool) -> bool:
+    """Can this one ``sqlite3`` command argument (SQL or a dot-command) write?
+
+    A dot-command must be one line from :data:`_SQLITE_READ_DOT_COMMANDS`.
+    SQL never carries an escape word; on a read-write open every
+    ``;``-separated statement must also LEAD with a read keyword and hold no
+    write word, and a PRAGMA must be a reporting one. Splitting on ``;``
+    ignores quoting, and a leading comment fails the lead check: both only
+    ever push a call off the read-only route.
+    """
+    if text.startswith("."):
+        if "\n" in text or "\r" in text or ";" in text:
+            return False
+        return text.split(None, 1)[0].casefold() in _SQLITE_READ_DOT_COMMANDS
+    words = set(_SQL_WORD_RE.findall(text.casefold()))
+    if words & _SQLITE_ESCAPE_WORDS:
+        return False
+    if db_read_only:
+        return True
+    if words & _SQLITE_WRITE_WORDS:
+        return False
+    statements = [s.strip().casefold() for s in text.split(";") if s.strip()]
+    if not statements:
+        return False
+    for stmt in statements:
+        lead = _SQL_WORD_RE.match(stmt)
+        if lead is None or lead.group(0) not in _SQLITE_READ_LEADS:
+            return False
+        if lead.group(0) == "pragma":
+            m = _SQLITE_PRAGMA_RE.match(stmt)
+            if m is None:
+                return False
+            allowed = _SQLITE_PRAGMA_ARG if m.group(2) else _SQLITE_PRAGMA_BARE
+            if m.group(1) not in allowed:
+                return False
+    return True
+
+
+def _sqlite_read_only(args: list[Expanded], cwd: str | None) -> bool:
+    """Is this ``sqlite3`` call provably unable to write anything?
+
+    WHY (field case, 0.113.2 Team Bridge lane): a read-only query on
+    ``~/.local-operator/team_bridge/state.sqlite3`` was refused CRITICAL as a
+    delete — via the backstop's cwd/``?``-glob mention of the responder
+    policy's directory — and ``sqlite3 <ledger> "select …"`` was refused as a
+    planted write. A read cannot delete. Passing this proof makes the call
+    read-only exactly like ``cat`` (no write targets, no backstop); its
+    redirections are still ranked separately, as for every program.
+
+    The parse is deliberately conservative — unknown means "not read-only",
+    which keeps today's ranking, never a LOW:
+
+    * every switch is a print-only one (``-cmd`` values get the statement
+      check); ``--`` and every word after the database must be literal;
+    * exactly one literal database operand (no glob, no opaque or empty
+      expansion) and at least one command argument — with none, sqlite3
+      reads commands from stdin, which this cannot see;
+    * the database is opened read-only (``-readonly`` or a ``file:`` URI with
+      ``mode=ro``) — then only escapes that write ELSEWHERE are refused —
+      or every command is a read statement (``SELECT``/``WITH``/``EXPLAIN``/
+      reporting ``PRAGMA``) or print-only dot-command;
+    * a read-write (or ``immutable=1``) open must name an EXISTING regular
+      file: sqlite3 creates a missing one (measured: ``sqlite3 new.db
+      "select 1"`` and ``file:new.db?immutable=1`` leave an empty file),
+      which could plant an empty evidence mark.
+
+    Not covered, by design: ``~/.sqliterc``, which the shell runs at start
+    (the same trust ``git status`` places in repo config).
+    """
+    db: Expanded | None = None
+    commands: list[str] = []
+    read_only_flag = False
+    k = 0
+    ended = False
+    while k < len(args):
+        w = args[k]
+        if w.opaque or w.empty or w.pattern is not None or w.vanished:
+            return False
+        t = w.text
+        if not ended and t == "--":
+            ended = True
+        elif not ended and t.startswith("-"):
+            flag = t[1:] if t.startswith("--") else t
+            if flag in ("-cmd", *_SQLITE_PRINT_VALUE_FLAGS):
+                if k + 1 >= len(args):
+                    return False
+                value = args[k + 1]
+                if value.opaque or value.empty or value.vanished:
+                    return False
+                if flag == "-cmd":
+                    commands.append(value.text)
+                k += 1
+            elif flag in _SQLITE_PRINT_FLAGS:
+                read_only_flag = read_only_flag or flag == "-readonly"
+            else:
+                return False
+        elif db is None:
+            db = w
+        else:
+            commands.append(t)
+        k += 1
+    if db is None or not commands:
+        return False
+    uri_read_only = False
+    must_exist = not read_only_flag
+    path = db.text
+    if path.startswith("file:"):
+        from urllib.parse import parse_qs, unquote
+
+        # A ``#`` ends the URI for sqlite wherever it appears, so in
+        # ``file:db#?mode=ro`` the ``?mode=ro`` is fragment text and the open
+        # is read-write (PR #4587 security round 1, B1: measured on sqlite
+        # 3.54, that spelling runs ``delete``/``drop``). Rather than mirror
+        # sqlite's split exactly, any fragment leaves the read-only route.
+        if "#" in path:
+            return False
+        body, _, query = path[5:].partition("?")
+        params = parse_qs(query, keep_blank_values=True)
+        if "vfs" in params or any(len(v) > 1 for v in params.values()):
+            return False
+        mode = params.get("mode", [""])[0]
+        uri_read_only = mode == "ro"
+        if mode not in ("", "ro"):
+            # ``rw``/``rwc``/``memory``: never the read-only route, whatever
+            # ``-readonly`` says (sqlite errors on the mix; unknown -> no).
+            return False
+        must_exist = not (read_only_flag or uri_read_only)
+        if body.startswith("//"):
+            authority, slash, rest = body[2:].partition("/")
+            if authority not in ("", "localhost") or not slash:
+                return False
+            body = "/" + rest
+        path = unquote(body)
+    if must_exist:
+        if not path or (not path.startswith("/") and cwd is None):
+            return False
+        full = path if path.startswith("/") else os.path.join(cwd or "", path)
+        if not os.path.isfile(full):
+            return False
+    db_read_only = read_only_flag or uri_read_only
+    return all(_sqlite_text_read_only(c, db_read_only=db_read_only) for c in commands)
 
 
 def _sed_read_only(argv: list[str]) -> bool:
@@ -7864,6 +8421,141 @@ def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
         return target_dir
     operands = _plain_operands(args, spec)
     return operands[-1:] if len(operands) >= 2 else []
+
+
+#: git subcommands that rewrite files of the work tree they run in (``-C``,
+#: ``--work-tree`` or the cwd). ``worktree``/``clone`` are creations
+#: (``_git_tree``); ``clean`` deletes (its own target).
+_GIT_TREE_WRITERS = frozenset(
+    {
+        "am",
+        "apply",
+        "bisect",
+        "checkout",
+        "checkout-index",
+        "cherry-pick",
+        "merge",
+        "pull",
+        "read-tree",
+        "rebase",
+        "reset",
+        "restore",
+        "revert",
+        "sparse-checkout",
+        "stash",
+        "submodule",
+        "switch",
+    }
+)
+
+
+def _copy_sources(args: list[Expanded], spec: _Flags) -> list[Expanded]:
+    """The SOURCE operands of a ``cp``/``rsync``-shaped call (``-t`` aware)."""
+    operands = _plain_operands(args, spec)
+    if "-t" in spec.values and _cluster_value(args, "t", "--target-directory"):
+        return operands
+    return operands[:-1] if len(operands) >= 2 else []
+
+
+def _has_flag(args: list[Expanded], spec: _Flags, letters: str, longs: tuple[str, ...]) -> bool:
+    _, flags = _operands(args, spec.values)
+    return any(f in longs or any(_short_has(f, c, spec) for c in letters) for f in flags)
+
+
+def _landing_name(src: Expanded) -> str | None:
+    """The one name a recursive copy of ``src`` lands directly in its destination,
+    or ``None`` when that is the source's CONTENTS (``x/``, ``x/.``: BSD ``cp -R``
+    and ``rsync`` copy contents) or cannot be read from the word."""
+    text = src.text
+    if src.opaque or src.pattern is not None or not text or text.endswith("/"):
+        return None
+    name = os.path.basename(text)
+    return None if name in ("", ".", "..") else name
+
+
+def _parents_name(src: Expanded) -> str | None:
+    """``cp --parents a/b D`` lands ``D/a/b``: the first component of the word."""
+    if src.opaque or src.pattern is not None:
+        return None
+    parts = [c for c in src.text.split("/") if c not in ("", ".")]
+    return parts[0] if parts and parts[0] != ".." else None
+
+
+def _bulk_landing(
+    name: str, args: list[Expanded], dests: list[Expanded], cwd: str | None
+) -> tuple[bool, tuple[str, ...] | None]:
+    """``(is_bulk, names)`` for a writer's destinations (``Target.bulk_names``).
+
+    WHY (PR #4383 security round 2, S-12). A recursive copy, sync or extract
+    INTO the state root lands ``team_bridge/responders.yaml`` (or ``guardrails/``)
+    without naming it: the classifier saw only ``~/.local-operator`` as the
+    destination, which is not itself evidence, so every one of these ranked LOW.
+    Here the resolver says what lands directly in the destination — the
+    sources' basenames when they are knowable, else ``None`` (unknown, which
+    ``classify._bulk_reason`` reads as "could be anything").
+    """
+    if name == "ditto" or name == "unzip":
+        return True, None  # ditto copies CONTENTS; an archive's names are its own
+    if name in ("tar", "gtar", "bsdtar"):
+        if args and args[0].text.isalpha():
+            args = [Expanded(text="-" + args[0].text, empty=args[0].empty), *args[1:]]
+        return _tar_mode(args) == "extract", None
+    if name == "rsync":
+        if _has_flag(args, _RSYNC_FLAGS, "R", ("--relative",)):
+            return True, None
+        sources = _copy_sources(args, _RSYNC_FLAGS)
+        names = [_landing_name(s) for s in sources]
+        if not names or any(n is None for n in names):
+            return True, None
+        return True, tuple(n for n in names if n)
+    if name in ("cp", "gcp"):
+        sources = _copy_sources(args, _CP_FLAGS)
+        if _has_flag(args, _CP_FLAGS, "", ("--parents",)):
+            names = [_parents_name(s) for s in sources]
+        elif _has_flag(args, _CP_FLAGS, "Rra", ("--recursive", "--archive")):
+            # ``cp -R src D`` with no directory at D makes D the copy itself:
+            # src's CONTENTS land in D.
+            for d in dests:
+                path, _ = _absolute(d.text, cwd) if d.text and not d.opaque else (None, False)
+                if path is None or not os.path.isdir(path):
+                    return True, None
+            names = [_landing_name(s) for s in sources]
+        else:
+            return False, None
+        if not names or any(n is None for n in names):
+            return True, None
+        return True, tuple(n for n in names if n)
+    return False, None
+
+
+def _git_work_trees(args: list[Expanded]) -> list[Expanded]:
+    """The work tree a tree-writing git subcommand rewrites (S-12): the
+    ``--work-tree`` value, else the ``-C`` directory, else the cwd. Empty for
+    any other subcommand."""
+    work_tree: list[Expanded] = []
+    chdirs: list[str] = []
+    rest = list(args)
+    while rest and rest[0].text.startswith("-"):
+        t = rest[0].text
+        if t == "-C" and len(rest) > 1:
+            chdirs.append(rest[1].text)
+            rest = rest[2:]
+            continue
+        if t == "--work-tree" and len(rest) > 1:
+            work_tree = [rest[1]]
+            rest = rest[2:]
+            continue
+        if t.startswith("--work-tree="):
+            work_tree = [Expanded(text=t.split("=", 1)[1], empty=rest[0].empty)]
+        rest = rest[2:] if t in ("-c", "--git-dir", "--namespace") else rest[1:]
+    if not rest or rest[0].text not in _GIT_TREE_WRITERS:
+        return []
+    if work_tree:
+        return work_tree
+    if chdirs:
+        # ``-C a -C b`` composes like successive chdirs.
+        return [Expanded(text=os.path.join(*chdirs))]
+    return [Expanded(text=".")]
 
 
 def _sed_script_text(args: list[Expanded]) -> str | None:

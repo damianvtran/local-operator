@@ -18,12 +18,12 @@ function Probe() {
 	const { projection, connected } = useProjection(SID);
 	useEffect(() => retainProjectionStream(SID), []);
 	return projection && <Transcript pid={SID} entries={projection.transcript} streaming={projection.streaming}
-		revealEpoch={projectionRevealEpoch(projection, connected)} />;
+		inlineUi={projection.inline_ui} revealEpoch={projectionRevealEpoch(projection, connected)} />;
 }
 
-async function frame(source: Stream, version: number, entries: TranscriptEntry[], streaming = true) {
+async function frame(source: Stream, version: number, entries: TranscriptEntry[], streaming = true, inline_ui?: unknown) {
 	await act(async () => {
-		source.emit("projection", { session_id: SID, pid: 42, version, streaming, transcript: entries });
+		source.emit("projection", { session_id: SID, pid: 42, version, streaming, transcript: entries, inline_ui });
 		await settleStream();
 	});
 }
@@ -94,6 +94,32 @@ it("reveals only live suffix and tool arrivals, preserving markup and settling c
 	expect(anchor("answer")?.textContent).toBe("Corrected right now. Final write.");
 	expect(effects).toHaveLength(3);
 	expect(effects[2].cancel).toHaveBeenCalledOnce();
+});
+
+it("keeps a negotiated widget mounted while only the following prose fades", async () => {
+	render(<Probe />);
+	await settleStream();
+	const source = Stream.instances[0];
+	const before = "**Ready** for the figures.\n\n";
+	const payload = { type: "table", title: "Exact counts", columns: ["Total"], rows: [["9007199254740993"]] };
+	const sidecar = (text: string) => ({ version: 1, messages: {
+		answer: { version: 1, text, widgets: [{ offset: before.length, payload }] },
+	} });
+	await frame(source, 1, [history, row("answer", before)]);
+	expect(anchor("answer")?.querySelector("table")).toBeNull();
+	const closed = `${before}Counts verified`;
+	await frame(source, 2, [history, row("answer", closed)], true, sidecar(closed));
+	const table = anchor("answer")?.querySelector("table");
+	expect(table?.textContent).toContain("9007199254740993");
+	expect(effects).toHaveLength(0);
+	const appended = `${closed} against the report.`;
+	await frame(source, 3, [history, row("answer", appended)], true, sidecar(appended));
+	expect(effects.map(effect => effect.text.trimStart())).toEqual(["against the report."]);
+	expect(anchor("answer")?.querySelector("table")).toBe(table);
+	expect(anchor("answer")?.querySelector("strong")?.textContent).toBe("Ready");
+	await frame(source, 4, [history, row("answer", appended, { final: true })], false, sidecar(appended));
+	expect(anchor("answer")?.querySelector("table")).toBe(table);
+	expect(anchor("answer")?.getAnimations({ subtree: true })).toHaveLength(0);
 });
 
 it("treats a clean SSE reconnect as a baseline and resumes only with the next live append", async () => {

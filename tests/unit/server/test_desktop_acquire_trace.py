@@ -74,15 +74,15 @@ async def test_injected_phases_are_distinct(rig, monkeypatch, phase):
 
     async def cold(*args, **kwargs):
         assert kwargs["deferred_history"] is True
-        # The cold summary must join this exact acquisition, not just another
-        # overlapping open of the same session.
-        assert kwargs["_trace_span"] == rig.rows[0]["acquire_id"]
+        # Exercise the same span handoff and summary writer as AttachedSession.cold.
+        summary = module.open_trace.ColdOpenTrace(bridge.session_id, kwargs["_trace_span"])
         if phase == "cold":
             clock.now += 1
         if phase == "loop":
             # Model synchronous loop blocking before its queued witness runs.
             clock.now += 1
             rig.callbacks[0]()
+        summary.finish("synthetic")
         return remote
 
     monkeypatch.setattr(module.asyncio, "to_thread", birth)
@@ -134,7 +134,9 @@ async def test_injected_phases_are_distinct(rig, monkeypatch, phase):
     assert end["lock_held_ms"] == end["facade_ms"]
     if phase == "loop":
         assert end["loop_queue_delay_ms"] == 1000
-    assert rig.rows[0]["acquire_id"] == end["acquire_id"]
+    [summary] = [row for row in rig.rows if row["stage"] == "cold.summary"]
+    assert rig.rows[0]["acquire_id"] == summary["span"] == end["acquire_id"]
+    assert "open_id" not in summary and "client_stream" not in summary
     assert rig.rows[0]["session"] == end["session"] == bridge.session_id
     assert all(handle.cancelled() for handle in rig.handles)
     monkeypatch.setattr(type(bridge), "dwelling", property(lambda self: True))

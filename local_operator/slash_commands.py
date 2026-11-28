@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence, TypedDict
 
 from local_operator.i18n import catalogues
 from local_operator.i18n.keys import (
+    tui_guard,
     tui_import,
     tui_review,
     tui_schedule,
@@ -2299,6 +2300,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # Keep the default no-argument picker behavior: the optional setup grammar
     # is parsed after submission, not offered as provider picker completions.
     SlashCommand("mobile", **_desc(wire_slash.mobile())),
+    # Radient Guard (RFC v0.9 slice L2b): the one TUI place a person answers the
+    # org's consent prompt, sends or discards an agent-drafted report, sees the
+    # passive indicator, stops sharing, or (non-Team) sees the Team card. A
+    # screen, not a receipt, so no echo and no argument. No
+    # `desktop_destination`: the desktop's entry is the approvals panel (U1).
+    SlashCommand("guard", **_desc(tui_guard.slash_description())),
     # THE SECOND "this machine's connectivity" command, and the reason it sits
     # beside `/mobile`. One grouped command with a declared vocabulary rather
     # than a word per verb: a mesh has several verbs that are variations of one

@@ -31,6 +31,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { chartPalette } from "./chart-palette.mjs";
 import { loadPalettes } from "./palette-source.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,11 +48,38 @@ if (palettes.length === 0) {
 	process.exit(1);
 }
 
+/**
+ * Roles DERIVED from a palette rather than authored in it (inline-chart spec
+ * §4 and §8 "Relay web"). They are not palette roles on purpose: no theme file
+ * and no contrast floor in contrast-contract.mjs owns them, the algorithm
+ * does, so a new palette gets them for free and cannot hand-pick seven hues
+ * that drift from the desktop and phone apps.
+ *
+ * - `chart-1…7`: categorical mark colours (`chart-palette.mjs`). Grounds are
+ *   the surfaces a mark or its tooltip swatch can sit on here: canvas (the
+ *   transcript), surface (the message paper) and elevated (the tooltip).
+ * - `hairline-strong`: the zero line and crosshair. The relay palettes have no
+ *   such role, so it is the spec's fallback, ink at 22% over transparent; a
+ *   translucent mix keeps it a line, never a slab, on any ground.
+ */
+const derivedRoles = (palette) => ({
+	...Object.fromEntries(
+		chartPalette({
+			grounds: [palette.canvas, palette.surface, palette.elevated],
+			accent: palette.accent,
+		}).map((hex, i) => [`--lo-chart-${i + 1}`, hex]),
+	),
+	"--lo-hairline-strong": "color-mix(in srgb, var(--lo-ink) 22%, transparent)",
+});
+const DERIVED_ROLES = Object.keys(derivedRoles(palettes[0].palette));
+
 const block = ({ id, palette }) => {
-	const lines = Object.entries(palette)
-		.filter(([role]) => role !== "mode")
-		.map(([role, value]) => `\t--lo-${kebab(role)}: ${value};`)
-		.join("\n");
+	const lines = [
+		...Object.entries(palette)
+			.filter(([role]) => role !== "mode")
+			.map(([role, value]) => `\t--lo-${kebab(role)}: ${value};`),
+		...Object.entries(derivedRoles(palette)).map(([name, value]) => `\t${name}: ${value};`),
+	].join("\n");
 	/* `color-scheme` makes the platform paint native scrollbars, form controls
 	   and the caret to match the palette. Without it a dark theme keeps a white
 	   scrollbar track, which is the single most visible "unthemed" artefact in
@@ -187,13 +215,16 @@ const scopedRoleBlock = () => {
 	   from a truncated block fails here too, since the missing pairs are missing
 	   from both sides. */
 	const harvested = new Set(pairs.map(([, , src]) => src));
-	const paletteRoles = new Set(
-		loadPalettes().flatMap(({ palette }) =>
+	const paletteRoles = new Set([
+		...loadPalettes().flatMap(({ palette }) =>
 			Object.keys(palette)
 				.filter((role) => role !== "mode")
 				.map((role) => `--lo-${kebab(role)}`),
 		),
-	);
+		// Derived roles are emitted per theme too, so they need the same
+		// scoped re-declaration and the same both-ways completeness check.
+		...DERIVED_ROLES,
+	]);
 	const missing = [...paletteRoles].filter((r) => !harvested.has(r));
 	if (missing.length > 0) {
 		throw new Error(

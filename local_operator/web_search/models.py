@@ -7,7 +7,7 @@ cannot drift into seven subtly different result formats.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,18 +20,29 @@ from pydantic import BaseModel, ConfigDict, Field
 # from here, and importing it for that dragged pydantic onto every CLI start.
 from local_operator.web_defaults import (  # noqa: F401 — re-export
     DEFAULT_WEB_SEARCH_CONFIG,
+    WEB_SEARCH_PROVIDER_IDS,
 )
 
 SearchProviderId = Literal[
     "duckduckgo",
     "tavily",
     "deepseek",
+    "radient",
     "perplexity",
     "brave",
     "exa",
     "parallel",
     "serpapi",
     "searxng",
+    "openai",
+    "anthropic",
+    "xai",
+    "alibaba",
+    "google",
+    "kimi",
+    "zai",
+    "mistral",
+    "openrouter",
 ]
 SearchStrategy = Literal["round_robin", "ordered"]
 #: Which automatic band a provider joins when it is NOT named in
@@ -39,21 +50,22 @@ SearchStrategy = Literal["round_robin", "ordered"]
 #: ``rotate`` is the load-balanced free pool, ``fallback`` a credential-free but
 #: best-effort tier that is never a first attempt, ``metered`` the tail whose
 #: legs can only serve WITH a credential (money or a model turn).
-ProviderTier = Literal["rotate", "fallback", "metered"]
+#:
+#: The bands a search walks, in this fixed order (``resolve_provider_bands``):
+#: FREE (``rotate``, then the best-effort ``fallback``) -> ``native`` (a model
+#: vendor's built-in search on a plan the user already pays for) -> ``radient``
+#: (Tavily billed to Radient credits) -> ``metered`` (the API_KEY band: dedicated
+#: search keys, then -- under the default ``NATIVE_MODEL_KEY_BAND`` -- native
+#: search through a pay-as-you-go model key). ``metered`` keeps its historical
+#: name so existing copy and tests that say "metered" still mean "API keys".
+ProviderTier = Literal["rotate", "fallback", "native", "radient", "metered"]
 
-PROVIDER_IDS: tuple[SearchProviderId, ...] = (
-    "duckduckgo",
-    "tavily",
-    "deepseek",
-    "perplexity",
-    "brave",
-    "exa",
-    # `parallel` sits beside `exa` because the pair is the same family --
-    # credential-free MCP endpoints -- and this tuple is the user-facing row
-    # order in `search list` and `/settings`.
-    "parallel",
-    "serpapi",
-    "searxng",
+#: The user-facing row order in `search list` and `/settings`. The values live in
+#: ``web_defaults.WEB_SEARCH_PROVIDER_IDS`` (import-cheap, so ``settings_io`` can
+#: build its ``/settings`` members from them without pulling pydantic in); this is
+#: the typed view. ``test_models`` pins it against ``SearchProviderId``.
+PROVIDER_IDS: tuple[SearchProviderId, ...] = cast(
+    "tuple[SearchProviderId, ...]", WEB_SEARCH_PROVIDER_IDS
 )
 
 
@@ -145,6 +157,23 @@ class SearchResponse(BaseModel):
     page_context_id: str | None = None
 
 
+class ChainLegStatus(BaseModel):
+    """One leg of a provider in the resolved chain, for the status surfaces.
+
+    A provider can contribute MORE than one leg: a stored Tavily key adds a keyed
+    leg in the API_KEY band while the keyless leg stays in the FREE band, so the
+    chain line has to be built from legs, not from providers.
+    """
+
+    mode: str
+    band: str
+    #: Index of this leg in the walked (non-rotated) chain.
+    position: int
+    #: ``free`` / ``best-effort`` / ``plan`` / ``paid`` / ``credits`` / ``setup``:
+    #: what the leg costs, which decides its chain marker.
+    cost_class: str = "free"
+
+
 class ProviderStatus(BaseModel):
     """Readiness row shared by ``search list`` and the TUI's ``/search`` view."""
 
@@ -167,6 +196,9 @@ class ProviderStatus(BaseModel):
     #: Effective auth mode on THIS install (``providers.provider_auth_mode``),
     #: "" when the provider cannot serve at all.
     mode: str = ""
+    #: This provider's legs in the resolved chain, in try order (empty when it is
+    #: not in the chain). ``tier`` is the band of the FIRST leg.
+    legs: list[ChainLegStatus] = Field(default_factory=list)
 
 
 class WebSearchSettings(BaseModel):
@@ -189,6 +221,10 @@ class WebSearchSettings(BaseModel):
     #: source carries a verbatim quote and a relevance score. Off by default:
     #: it is a second model turn (~4-11s measured) on top of the search.
     deepseek_evidence: bool = False
+    #: Let a Claude sign-in (Anthropic OAuth) serve native search. Off by default
+    #: (operator decision 2026-11-24): plan use from a third-party harness is drawn
+    #: from Claude extra usage, so it is opt-in and ordered as a paid leg.
+    claude_subscription_search: bool = False
     #: Offer the ``web_read`` tool, which answers questions from pages a previous
     #: search already retrieved instead of fetching them again. On by default
     #: because it costs nothing until it is used, and it degrades to an explicit

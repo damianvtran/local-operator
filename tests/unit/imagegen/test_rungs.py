@@ -1386,8 +1386,9 @@ async def test_fal_a_countless_edit_app_skips_a_multi_image_request() -> None:
 
 @pytest.mark.asyncio
 async def test_fal_an_unpinned_multi_source_edit_runs_the_multi_reference_default() -> None:
-    """D3/F4: N>1 with no pin resolves ``blackforestlabs/flux-3/edit-image``
-    (``image_urls``) — the declaration and the wire land together."""
+    """D3/F4: N>1 with no pin resolves the default GPT Image 2.6 editor
+    (``image_urls``) — the declaration and the wire land together, and the
+    requested size rides because that app's schema reads it."""
     recorder = _Recorder()
     submit = {"request_id": "req1", "status": "IN_QUEUE"}
     async with _client(_fal_handler(recorder, submit=submit)) as client:
@@ -1406,11 +1407,12 @@ async def test_fal_an_unpinned_multi_source_edit_runs_the_multi_reference_defaul
             base_url="https://queue.fal.test",
             client=client,
         )
-    assert recorder.paths()[0] == "/blackforestlabs/flux-3/edit-image"
+    assert recorder.paths()[0] == "/openai/gpt-image-2.6/sunburst/edit"
     body = recorder.bodies[0]
     assert body["image_urls"] == ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+    assert body["image_size"] == "square_hd"
     assert "image_url" not in body
-    assert result.model == "blackforestlabs/flux-3/edit-image"
+    assert result.model == "openai/gpt-image-2.6/sunburst/edit"
 
 
 @pytest.mark.asyncio
@@ -1437,14 +1439,14 @@ async def test_fal_a_pinned_single_reference_app_skips_a_multi_source_request() 
             )
     assert caught.value.reason_class == "unsupported"
     assert "accepts 1 reference(s); 2 requested" in str(caught.value)
-    assert "blackforestlabs/flux-3/edit-image" in str(caught.value), "the remedy is named"
+    assert "openai/gpt-image-2.6/sunburst/edit" in str(caught.value), "the remedy is named"
     assert recorder.requests == [], "skipped before the submit"
 
 
 @pytest.mark.asyncio
 async def test_fal_above_the_multi_reference_ceiling_skips() -> None:
     recorder = _Recorder()
-    sources = [f"data:image/png;base64,{i:02d}" for i in range(11)]
+    sources = [f"data:image/png;base64,{i:02d}" for i in range(17)]
     async with _client(_fal_handler(recorder, submit={"request_id": "r1"})) as client:
         with pytest.raises(image_rungs.RungSkipped) as caught:
             await image_rungs.run_fal(
@@ -1463,7 +1465,7 @@ async def test_fal_above_the_multi_reference_ceiling_skips() -> None:
                 client=client,
             )
     assert caught.value.reason_class == "unsupported"
-    assert "accepts 10 reference(s); 11 requested" in str(caught.value)
+    assert "accepts 16 reference(s); 17 requested" in str(caught.value)
     assert recorder.requests == []
 
 
@@ -1539,11 +1541,16 @@ async def test_openai_decodes_b64_items() -> None:
             base_url="https://oai.test/v1",
             client=client,
         )
-    assert result.model == "gpt-image-1"
+    assert result.model == "gpt-image-2.6-sunburst"
     assert result.assets[0].data == PNG_1X1
     assert result.assets[0].content_type == "image/png"
     sent = recorder.bodies[0]
-    assert sent == {"model": "gpt-image-1", "prompt": "a cat", "n": 1, "size": "1024x1024"}
+    assert sent == {
+        "model": "gpt-image-2.6-sunburst",
+        "prompt": "a cat",
+        "n": 1,
+        "size": "1024x1024",
+    }
 
 
 @pytest.mark.asyncio
@@ -1604,7 +1611,7 @@ async def test_an_openai_edit_posts_multipart_with_the_source_bytes() -> None:
     assert seen["content_type"].startswith("multipart/form-data")
     assert b'name="image[]"' in body, "the documented file-part spelling"
     assert PNG_1X1 in body, "the RAW bytes ride the part, not the base64 string"
-    assert b'name="model"' in body and b"gpt-image-1" in body
+    assert b'name="model"' in body and b"gpt-image-2.6-sunburst" in body
     assert b'name="prompt"' in body and b"make it night" in body
     assert b"1024x1024" in body
     assert result.assets[0].data == PNG_1X1
@@ -1903,3 +1910,111 @@ def _static_handler(response: httpx.Response):
         return response
 
     return handler
+
+
+# ---------------------------------------------------------------------------
+# Frontier defaults (2026-11-19): every rung's unpinned default is a frontier,
+# generate-AND-edit capable model. These pin the choice by name so a silent
+# regression to a mid-tier default (FLUX.1 dev, gpt-image-1, seedream-4.5,
+# the NB2.1 workhorse) fails here; the WHY is beside each constant.
+
+
+def test_every_rung_defaults_to_a_frontier_model() -> None:
+    from local_operator.imagegen import rungs_google, rungs_openrouter
+
+    assert image_rungs.FAL_DEFAULT_MODEL == "openai/gpt-image-2.6/sunburst/text-to-image"
+    assert image_rungs.FAL_EDIT_MODELS[image_rungs.FAL_DEFAULT_MODEL].app == (
+        "openai/gpt-image-2.6/sunburst/edit"
+    )
+    assert image_rungs.FAL_MULTI_EDIT_DEFAULT.app == "openai/gpt-image-2.6/sunburst/edit"
+    assert image_rungs.OPENAI_DEFAULT_IMAGE_MODEL == "gpt-image-2.6-sunburst"
+    assert rungs_google.GOOGLE_DEFAULT_IMAGE_MODEL == "gemini-3-pro-image"
+    assert rungs_openrouter.OPENROUTER_DEFAULT_IMAGE_MODEL == "openai/gpt-image-2.6-sunburst"
+
+
+@pytest.mark.parametrize(
+    ("pinned", "edit_app"),
+    [
+        ("openai/gpt-image-2.5/flare/text-to-image", "openai/gpt-image-2.5/flare/edit"),
+        ("openai/gpt-image-2.5/sunburst/edit", "openai/gpt-image-2.5/sunburst/edit"),
+        ("openai/gpt-image-2", "openai/gpt-image-2/edit"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_fal_a_pinned_gpt_image_app_edits_on_its_own_family_editor(
+    pinned: str, edit_app: str
+) -> None:
+    """A GPT Image pin derives its own ``/edit`` app (``image_urls`` + size +
+    count) instead of the flux-class ``/image-to-image`` append, which would
+    address an app that does not exist."""
+    recorder = _Recorder()
+    submit = {"request_id": "req1", "status": "IN_QUEUE"}
+    async with _client(_fal_handler(recorder, submit=submit)) as client:
+        await image_rungs.run_fal(
+            prompt="make it dusk",
+            key="fk",
+            num_images=2,
+            image_size="landscape_16_9",
+            seed=None,
+            strength=None,
+            source_urls=["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+            model=pinned,
+            handle=image_rungs.CancelHandle(),
+            emit=None,
+            pause=_no_pause,
+            base_url="https://queue.fal.test",
+            client=client,
+        )
+    assert recorder.paths()[0] == f"/{edit_app}"
+    body = recorder.bodies[0]
+    assert body["image_urls"] == ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+    assert body["image_size"] == "landscape_16_9"
+    assert body["num_images"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fal_drops_a_seed_the_gpt_image_schema_cannot_carry() -> None:
+    """The GPT Image apps document no seed; flux-class apps still get it."""
+    for model, expect_seed in (
+        (None, False),
+        ("blackforestlabs/flux-3/text-to-image", False),
+        ("fal-ai/flux/dev", True),
+    ):
+        recorder = _Recorder()
+        submit = {"request_id": "req1", "status": "IN_QUEUE"}
+        async with _client(_fal_handler(recorder, submit=submit)) as client:
+            await image_rungs.run_fal(
+                prompt="a cat",
+                key="fk",
+                num_images=1,
+                image_size="square_hd",
+                seed=7,
+                strength=None,
+                source_urls=None,
+                model=model,
+                handle=image_rungs.CancelHandle(),
+                emit=None,
+                pause=_no_pause,
+                base_url="https://queue.fal.test",
+                client=client,
+            )
+        assert ("seed" in recorder.bodies[0]) is expect_seed, model
+
+
+@pytest.mark.parametrize(
+    ("pinned", "app", "ceiling"),
+    [
+        ("fal-ai/nano-banana-pro", "fal-ai/nano-banana-pro/edit", 14),
+        ("blackforestlabs/flux-3/text-to-image", "blackforestlabs/flux-3/edit-image", 10),
+    ],
+)
+def test_fal_frontier_alternatives_edit_on_their_real_edit_apps(
+    pinned: str, app: str, ceiling: int
+) -> None:
+    """The guide's frontier alternatives must not fall to the flux-class
+    ``/image-to-image`` append (review round 1, R1-2)."""
+    route = image_rungs._fal_edit_route(pinned, source_count=2)
+    assert route.app == app
+    assert route.field == "image_urls"
+    assert route.max_sources == ceiling
+    assert route.sends_size is False, "both size by aspect_ratio, not image_size"

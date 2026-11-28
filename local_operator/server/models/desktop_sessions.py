@@ -65,11 +65,25 @@ class TemporaryInfo(BaseModel):
     hold: TemporaryHold | None
 
 
+class WorkspaceRestReceipt(BaseModel):
+    """Positive-only cold observation, not part of normal row/status merging."""
+
+    model_config = ConfigDict(extra="forbid")
+    version: Literal[1]
+    epoch: str
+    revision: str
+
+
 class SessionRow(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
     name: str
     mtime: float
+    # Omitted on legacy/default reads and whenever the targeted check cannot
+    # prove rest. An absent receipt in the current response vetoes cleanup.
+    workspace_rest: WorkspaceRestReceipt | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     #: The session's most recent assistant reply, condensed for a list row, or
     #: ``""`` when it has none yet.
     #:
@@ -895,6 +909,9 @@ class HistoryPage(BaseModel):
     journal_missing_ids: list[str] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # Absent for legacy viewers, never a condition of serving a prose page.
+    inline_ui: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
+
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool

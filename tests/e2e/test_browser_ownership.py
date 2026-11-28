@@ -20,7 +20,7 @@ import httpx
 import pytest
 
 from local_operator.browser_bridge import state
-from local_operator.browser_bridge.protocol import PROTO_VERSION
+from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
 from local_operator.harness.types import (
     ModelSpec,
     StreamEndEvent,
@@ -1056,3 +1056,632 @@ async def test_child_open_result_drops_top_level_left_open_reminder(
     finally:
         await child.dispose()
         await parent.dispose()
+
+
+# -- pending-ask handoff across a runtime retirement (session a64fec9430f3) --
+#
+# The incident's own shape through the real stack: Session -> the real `ask`
+# and `browser` tools -> authenticated HTTP -> the bundled extension's
+# ownership code. The agent opens a tab, asks the user to act in it
+# (`browser_handoff=true`) and ends its turn WITHOUT closing; the runtime is
+# then retired (an update, an idle exit), which runs the ordinary
+# `Session.dispose`. Before the hold that disposal closed the tab.
+
+
+async def _no_blocking_ask(_questions: Any) -> Any:
+    raise AssertionError("the queued ask path must not block")
+
+
+def _asking_session(root: Path) -> Session:
+    session = _session(root)
+    session.set_ask_handler(_no_blocking_ask)
+    return session
+
+
+async def _tool(session: Session, call_id: str, name: str, args: dict[str, Any]) -> Any:
+    from local_operator.tools.builtin import execute_ask
+
+    run = execute_ask if name == "ask" else execute_browser
+    return await run(call_id, args, None, None, session._build_tool_context())
+
+
+async def _open(session: Session, url: str = "https://example.test/") -> Any:
+    opened = await _tool(session, "synthetic-open", "browser", {"action": "open", "url": url})
+    assert not opened.is_error, opened.text
+    return opened
+
+
+async def _ask(session: Session, *, handoff: bool, qid: str = "signin") -> str:
+    asked = await _tool(
+        session,
+        f"synthetic-ask-{qid}",
+        "ask",
+        {
+            "questions": [
+                {
+                    "id": qid,
+                    "question": f"Sign in to the page I opened? ({qid})",
+                    "options": [{"label": "Signed in"}, {"label": "Skip"}],
+                }
+            ],
+            "browser_handoff": handoff,
+        },
+    )
+    assert not asked.is_error, asked.text
+    assert bool((asked.details or {}).get("browser_handoff")) is handoff
+    return str(asked.details["ask_id"])
+
+
+def _settle_ask(directory: Path, ask_id: str, kind: str = "answered") -> None:
+    from local_operator.asks import store
+
+    event: dict[str, Any] = {
+        "v": 1,
+        "kind": kind,
+        "ask_id": ask_id,
+        "at": store.now_ms(),
+        "tool_call_id": "call_synthetic",
+    }
+    if kind == "answered":
+        event["answers"] = {"signin": ["Signed in"]}
+        event["by"] = {"surface": "unverified"}
+    store.append_event(directory, event)
+
+
+@pytest.mark.asyncio
+async def test_handoff_tab_survives_retirement_and_releases_after_answer_on_successor(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session)
+        held_surface = session._browser.surface_id
+        ask_id = await _ask(session, handoff=True)
+    finally:
+        await session.dispose()  # the retirement: no close, no retain
+    assert _control(protocol_peer)["tabs"] == 1, "disposal closed the tab the ask points at"
+    _control(protocol_peer, restartWorker=True)
+
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+        assert successor._browser.surface_id == held_surface
+        assert successor._browser.resource.record["retention"] == f"pending ask {ask_id}"
+        # The answer lands AFTER the new runtime took over, mid-run.
+        _settle_ask(directory, ask_id)
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handoff_answered_while_no_runtime_runs_rebinds_the_same_tab(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """Session a64fec9430f3, 2026-11-26: the answer arrived while NO runtime ran.
+
+    The successor's first action must continue in the tab the human used
+    (same handle, no reopen), and its ordinary disposal still closes it.
+    """
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        held_surface = session._browser.surface_id
+        ask_id = await _ask(session, handoff=True)
+    finally:
+        await session.dispose()  # idle exit: no close, no retain
+    assert _control(protocol_peer)["tabs"] == 1
+    _settle_ask(directory, ask_id)  # answered before any runtime is back
+
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+        assert "reopened_handoff" not in (snap.details or {}), snap.text
+        assert successor._browser.surface_id == held_surface
+        assert _control(protocol_peer)["tabs"] == 1, "a second tab was opened"
+        # The hold is spent with its ask; the tab is an ordinary owned tab now.
+        assert not successor._browser.resource.record.get("retention")
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0, "ordinary cleanup must still close it"
+
+
+@pytest.mark.asyncio
+async def test_handoff_still_open_keeps_holding_across_a_second_retirement(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ask", ["none", "unrelated"])
+async def test_disposal_without_a_handoff_still_closes_the_tab(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, ask: str
+) -> None:
+    """Over-retention control: an active tab plus an unrelated (unbound)
+    open ask closes exactly as before."""
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        if ask == "unrelated":
+            await _ask(session, handoff=False, qid="preference")
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unrelated_asks_settlement_does_not_release_the_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session)
+        other = await _ask(session, handoff=False, qid="preference")
+        await _ask(session, handoff=True)
+        _settle_ask(directory, other)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handoff_for_origin_a_does_not_hold_the_tab_on_origin_b(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, "https://signin.example.test/login")
+        await _ask(session, handoff=True)
+        moved = await _tool(
+            session, "synthetic-goto", "browser", {"action": "goto", "url": "https://other.test/"}
+        )
+        assert not moved.is_error, moved.text
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_owner_close_wins_over_a_pending_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+        closed = await _tool(session, "synthetic-close", "browser", {"action": "close"})
+        assert not closed.is_error, closed.text
+        assert _control(protocol_peer)["tabs"] == 0
+        from local_operator.browser_bridge.resources import ASK_HANDOFFS_FIELD
+
+        assert not session._browser.resource.record.get("retention")
+        assert ASK_HANDOFFS_FIELD not in session._browser.resource.record
+        await _open(session, "https://next.example.test/")
+    finally:
+        await session.dispose()
+    # The ask is still open, but its binding died with the closed tab: the
+    # new, unbound tab closes at disposal.
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_another_session_cannot_reach_a_tab_held_for_a_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        held = session._browser.surface_id
+        await _ask(session, handoff=True)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+    other_dir = headless_tui_env / "sessions" / "synthetic-other"
+    lease = acquire_session_lease(other_dir)
+    other = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda _r, _s: _never_streams(_r, _s),
+        tools=[],
+        transcript=Transcript(other_dir),
+        system_blocks_provider=lambda: [],
+    )
+    other.add_dispose_hook(lease.release)
+    try:
+        # Adoption and a handed-tab close are the two verbs that take a handle;
+        # neither may reach a tab this session never owned.
+        adopted = await _tool(
+            other, "synthetic-foreign-adopt", "browser", {"action": "open", "tab": held}
+        )
+        assert adopted.is_error and "owner_refused" in adopted.text, adopted.text
+        closed = await _tool(
+            other, "synthetic-foreign-close", "browser", {"action": "close", "tab": held}
+        )
+        assert closed.is_error
+        assert _control(protocol_peer)["tabs"] == 1
+        await _tool(other, "synthetic-foreign-recover", "browser", {"action": "recover"})
+        assert other._browser.surface_id == ""
+    finally:
+        await other.dispose()
+    assert _control(protocol_peer)["tabs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_release_stays_released_through_disposal(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """QA Q2: after the owner's `release`, disposal must not re-add the hold."""
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session)
+        await _ask(session, handoff=True)
+        released = await _tool(session, "synthetic-release", "browser", {"action": "release"})
+        assert not released.is_error, released.text
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+# -- the reopen floor: no flag, the tab closes, the next run reopens it -------
+#
+# The incident's agent had `retain` and did not use it; a flag the model must
+# remember cannot be the only thing standing between a user and a lost
+# sign-in. These run WITHOUT `browser_handoff`.
+
+SIGNIN_URL = "https://signin.example.test/login?next=%2Fapps"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ask_state", ["open", "answered"])
+async def test_no_flag_tab_closes_then_next_run_reopens_the_same_url(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, ask_state: str
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        first_surface = session._browser.surface_id
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    # Ordinary cleanup, exactly as before: no flag, no hold, the tab is closed.
+    assert _control(protocol_peer)["tabs"] == 0
+    from local_operator.asks import store
+
+    queued = [
+        e
+        for e in store.read_events(session._browser.resource.directory)
+        if e.get("kind") == "queued" and e.get("ask_id") == ask_id
+    ]
+    # The ask's own row carries the origin and public tab label only: no path,
+    # query or fragment (review R2-1); the full URL stays device-local.
+    assert set(queued[0]["browser_ref"]) == {"origin", "surface"}
+    assert queued[0]["browser_ref"]["origin"] == "https://signin.example.test"
+    # The public tab label (`host:tab`), never the capability handle's nonce.
+    assert first_surface not in json.dumps(queued[0]["browser_ref"])
+    assert first_surface.startswith(queued[0]["browser_ref"]["surface"])
+
+    if ask_state == "answered":
+        # The answer arriving is the other trigger: the agent continues there.
+        _settle_ask(session._browser.resource.directory, ask_id)
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert not snap.is_error, snap.text
+        assert snap.details["reopened_handoff"] == ask_id
+        assert "Reopened handoff" in snap.text and "check what the page shows" in snap.text
+        assert "earlier runtime" not in snap.text and "Continue there" not in snap.text
+        assert snap.details.get("reopened_origin") == "https://signin.example.test"
+        # The exact recorded URL is what was reopened (private record only).
+        assert successor._browser.resource.record["surface_url"] == SIGNIN_URL
+        assert successor._browser.surface_id and successor._browser.surface_id != first_surface
+        assert _control(protocol_peer)["tabs"] == 1
+        # Spent: a second action does not reopen again.
+        again = await _tool(successor, "synthetic-snapshot-2", "browser", {"action": "snapshot"})
+        assert "reopened_handoff" not in (again.details or {})
+    finally:
+        await successor.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["withdrawn", "agent_moved_on"])
+async def test_no_reopen_for_a_withdrawn_ask_or_after_the_agent_chose_a_page(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, settle: str
+) -> None:
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        ask_id = await _ask(session, handoff=False)
+        if settle == "withdrawn":
+            _settle_ask(directory, ask_id, "withdrawn")
+        else:
+            await _tool(session, "synthetic-close", "browser", {"action": "close"})
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_another_session_never_reopens_this_sessions_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    other_dir = headless_tui_env / "sessions" / "synthetic-other"
+    lease = acquire_session_lease(other_dir)
+    other = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda _r, _s: _never_streams(_r, _s),
+        tools=[],
+        transcript=Transcript(other_dir),
+        system_blocks_provider=lambda: [],
+    )
+    other.add_dispose_hook(lease.release)
+    try:
+        snap = await _tool(other, "synthetic-foreign-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await other.dispose()
+
+
+class _RpcSpy:
+    """Records every bridge RPC method the session sends (no behaviour change)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from local_operator.browser_bridge import backend
+
+        self.methods: list[str] = []
+        original = backend.HostClient.call
+
+        async def call(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            self.methods.append(method)
+            return await original(client, method, params)
+
+        monkeypatch.setattr(backend.HostClient, "call", call)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first",
+    [
+        {"action": "click", "selector": "button[type=submit]"},
+        {"action": "type", "selector": "input", "text": "x"},
+        {"action": "press", "key": "Enter"},
+    ],
+)
+async def test_a_mutating_first_action_is_not_replayed_on_a_reopened_page(
+    protocol_peer: tuple[int, str],
+    headless_tui_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: dict[str, Any],
+) -> None:
+    """Review R2-2: on a consent prompt a replayed click would grant it."""
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    spy = _RpcSpy(monkeypatch)
+    successor = _asking_session(headless_tui_env)
+    try:
+        acted = await _tool(successor, "synthetic-act", "browser", first)
+        assert not acted.is_error, acted.text
+        assert acted.details["reopened_handoff"] == ask_id
+        assert acted.details["not_run"] == first["action"]
+        assert f"Your '{first['action']}' was NOT run" in acted.text
+        assert "snapshot the page first" in acted.text
+        assert "open" in spy.methods and first["action"] not in spy.methods, spy.methods
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_userinfo_never_reaches_the_ask_row_or_the_note(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """Review R2-1: `user:password@` survived into the origin."""
+    secret_url = (
+        "https://alice:hunter2pw@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, secret_url)
+        await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    row = (directory / "asks.jsonl").read_text()
+    for token in ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99"):
+        assert token not in row, token
+    assert '"origin":"https://signin.example.test:8443"' in row
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        for token in ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99"):
+            assert token not in snap.text, token
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_spends_the_reopen_reference(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+        await _tool(session, "synthetic-release", "browser", {"action": "release"})
+    finally:
+        await session.dispose()
+    successor = _asking_session(headless_tui_env)
+    try:
+        snap = await _tool(successor, "synthetic-snapshot", "browser", {"action": "snapshot"})
+        assert snap.is_error and "reopened_handoff" not in (snap.details or {})
+        assert _control(protocol_peer)["tabs"] == 0
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_blocked_action_after_reopen_carries_no_credential_bytes(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """QA Q7 / review M3-1: the blocked-action reply used to begin with the
+    ordinary open message, which printed the full recorded URL."""
+    tokens = ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99")
+    secret_url = (
+        "https://alice:" + tokens[1] + "@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, secret_url)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+    successor = _asking_session(headless_tui_env)
+    try:
+        acted = await _tool(
+            successor,
+            "synthetic-click",
+            "browser",
+            {"action": "click", "selector": "button[type=submit]"},
+        )
+        print("Q7-TEXT:", acted.text)
+        print("Q7-DETAILS:", json.dumps(acted.details, sort_keys=True))
+        blob = acted.text + json.dumps(acted.details)
+        for token in tokens:
+            assert token not in blob, token
+        assert acted.details["not_run"] == "click"
+        assert acted.details["reopened_handoff"] == ask_id
+        assert "https://signin.example.test:8443" in acted.text
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_release_clears_references_on_disk_even_when_the_rpc_fails(
+    protocol_peer: tuple[int, str], headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M3-2: the cleared references were only in memory until a later save."""
+    from local_operator.browser_bridge import backend
+    from local_operator.browser_bridge.resources import (
+        HANDOFF_REFS_FIELD,
+        RESOURCE_NAME,
+    )
+
+    session = _asking_session(headless_tui_env)
+    directory = session._browser.resource.directory
+    try:
+        await _open(session, SIGNIN_URL)
+        await _ask(session, handoff=False)
+        assert HANDOFF_REFS_FIELD in json.loads((directory / RESOURCE_NAME).read_text())
+        original = backend.HostClient.call
+
+        async def failing(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            if method == "owner_release":
+                raise backend.BridgeError(
+                    ErrorCode.EXTENSION_DISCONNECTED, "synthetic release failure"
+                )
+            return await original(client, method, params)
+
+        monkeypatch.setattr(backend.HostClient, "call", failing)
+        released = await _tool(session, "synthetic-release", "browser", {"action": "release"})
+        assert released.is_error, released.text
+        assert HANDOFF_REFS_FIELD not in json.loads((directory / RESOURCE_NAME).read_text())
+        monkeypatch.setattr(backend.HostClient, "call", original)
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["snapshot", "read"])
+async def test_replayed_read_after_reopen_carries_no_credential_bytes(
+    protocol_peer: tuple[int, str],
+    headless_tui_env: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    """Review M4-1: a REPLAYED read reported the page's live URL the ordinary
+    way, and right after a reopen that is the recorded, token-bearing URL."""
+    from local_operator.browser_bridge import backend
+
+    tokens = ("alice", "hunter" "2pw", "tok_ONE123", "JS9", "774411", "frag99")
+    secret_url = (
+        "https://alice:" + tokens[1] + "@signin.example.test:8443"
+        "/magic/tok_ONE123;jsessionid=JS9?code=774411#access_token=frag99"
+    )
+    session = _asking_session(headless_tui_env)
+    try:
+        await _open(session, secret_url)
+        ask_id = await _ask(session, handoff=False)
+    finally:
+        await session.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+    # The in-memory fixture reports no page URL; a real browser reports the
+    # live one, which right after the reopen IS the recorded secret URL. Add
+    # exactly that to the replayed action's real wire reply.
+    original = backend.HostClient.call
+
+    async def live_url(client: Any, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        result = await original(client, method, params)
+        if method == action and isinstance(result, dict):
+            result = {**result, "url": secret_url, "title": "Sign in"}
+        return result
+
+    monkeypatch.setattr(backend.HostClient, "call", live_url)
+    caplog.clear()
+    caplog.set_level("DEBUG")
+    successor = _asking_session(headless_tui_env)
+    try:
+        replayed = await _tool(successor, f"synthetic-{action}", "browser", {"action": action})
+        print(f"M4-{action}-TEXT:", replayed.text.replace("\n", " | "))
+        print(f"M4-{action}-DETAILS:", json.dumps(replayed.details, sort_keys=True))
+        assert not replayed.is_error, replayed.text
+        assert replayed.details["reopened_handoff"] == ask_id
+        assert "not_run" not in replayed.details  # it WAS replayed
+        assert replayed.details["reopened_origin"] == "https://signin.example.test:8443"
+        blob = replayed.text + json.dumps(replayed.details) + caplog.text
+        leaked = [token for token in tokens if token in blob]
+        print(f"M4-{action}-LEAKED:", leaked)
+        assert leaked == []
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await successor.dispose()

@@ -56,8 +56,12 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_network_send as _network_send
+from local_operator.i18n.keys import cli_network_sessions as _network_sessions
 from local_operator.i18n.keys import wire_github as _github_strings
 from local_operator.i18n.text import tr as _github_tr
+
+# Stdlib-only by contract (its docstring), so the CLI's import cost is unchanged.
+from local_operator.network.types import REMOTE_COLD_BOOT_BUDGET_S
 
 if TYPE_CHECKING:
     from local_operator.mobile.types import SessionRecord
@@ -559,6 +563,9 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # Internal metadata input used by the sessions tool. Unlike audit attribution,
+    # it is read only for create and never inherited by any newly launched runtime.
+    net_sessions.add_argument("--source-session", default="", help=argparse.SUPPRESS)
     # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
     # key the relay mints; this flag lets a retry of a create whose reply was LOST
     # send the key it was told, so the owner answers with the session it already
@@ -577,8 +584,39 @@ def add_parser(
     net_sessions.add_argument(
         "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
     )
+    # THE LISTING'S PAGING (operator report 2026-11-25: a node with 417 session
+    # dirs listed 223 and the rest were unreachable). Asked of an owner that
+    # advertises ``remote-catalog-page-v1``; the answer carries ``next_cursor``
+    # and ``total`` on each peer's block. ``--cursor`` is one device's position,
+    # so it needs ``--peer``.
+    net_sessions.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="listing: at most N rows per peer (1-100), paged with --cursor",
+    )
+    net_sessions.add_argument(
+        "--cursor",
+        default=None,
+        metavar="TOKEN",
+        help="listing with --peer: the next page, the token the previous page's footer names",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
+    # THE IDLE-ONLY STOP IS ITS OWN FLAG, never a mode of ``--stop``: ``--stop`` is
+    # the owner's full ladder (it may signal), and this one is the owner's atomic
+    # idle latch and nothing else. It is what the ``sessions`` tool drives for a
+    # session on a peer (``_cmd_stop_if_idle``).
+    net_sessions.add_argument(
+        "--stop-if-idle",
+        metavar="SESSION",
+        default="",
+        help=(
+            "end that session only if it is idle on its device; refused when it is "
+            "busy, and never sends a signal (needs --peer; the peer must support it)"
+        ),
+    )
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
     # verb rather than a new subcommand because they are the same question as
     # `--stop` ("do a thing to a conversation that lives elsewhere") and they take
@@ -708,7 +746,10 @@ def add_parser(
         "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
     )
     net_sessions.add_argument(
-        "--query", default=None, metavar="TEXT", help="with --peek: window and count for a search"
+        "--query",
+        default=None,
+        metavar="TEXT",
+        help="with --peek: window and count for a search; listing: search each peer's store",
     )
     net_sessions.add_argument(
         "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
@@ -7830,6 +7871,126 @@ _STOP_REMEDIES: dict[str, str] = {
 }
 
 
+#: The CLI's wait on its OWN relay for the idle-only stop. It must outlast that
+#: relay's hop to the owner (``relay.engage_hop_bound_s``, 60 s by default), which
+#: in turn outlasts the owner's ``control.DEFAULT_TIMEOUT_S`` wait for the idle
+#: exit; the same 120 s ``--engage`` uses for the same hop.
+STOP_IF_IDLE_TIMEOUT_S = 120.0
+
+#: The sentence for a LOCAL relay that predates the idle-only stop. Its record
+#: advertises the link capabilities of the build that is RUNNING, which can be
+#: older than this CLI after an update (the ``mobility.RELAY_RESTART_MESSAGE``
+#: case); such a relay does not know the ctl op, so nothing is asked of it.
+STOP_IF_IDLE_RELAY_RESTART = (
+    "this device's relay is older than this lop and cannot send an idle-only stop, "
+    "so nothing was sent and nothing was stopped; restart it with "
+    "`lop network restart`, then try again"
+)
+
+
+def _cmd_stop_if_idle(args: argparse.Namespace, *, peer: str, target: str) -> int:
+    """``--stop-if-idle``: ask the owner to end a session ONLY if it latches idle.
+
+    WHY A SEPARATE PATH FROM ``--stop``. ``--stop`` drives ``peer_session_stop``,
+    the owner's full ladder (signals included); an agent tool promising "idle-only,
+    no signal" may never send it. This drives ``peer_session_stop_idle`` and
+    NOTHING ELSE: no fallback to ``--stop``'s op on any refusal, error, timeout or
+    lost reply, and no retry (a second ask could stop a session that has since
+    become busy).
+
+    FAILS CLOSED BEFORE SENDING. Three refusals leave nothing sent anywhere: no
+    ``--peer``; this device's relay record does not advertise
+    ``wire.SESSION_STOP_IDLE_V1`` (a relay older than this CLI — the record
+    carries the running build's capabilities); and, inside that relay, a peer
+    link that did not negotiate it (``relay._ctl_peer_stop_idle``). An old relay
+    that answers ``unknown_local_op`` anyway gets the same restart sentence.
+
+    SENT BUT UNANSWERED IS ITS OWN CODE. ``report_unsent`` separates "never left
+    this device" (``relay_unavailable``) from "sent, no reply"
+    (``stop_idle_unconfirmed``): only the second can have stopped anything, and the
+    caller must be told it MAY have.
+    """
+    from local_operator.network import store, wire
+    from local_operator.network.types import ControlRequestUnsent, MeshRefusal
+
+    if not peer:
+        raise MeshRefusal(
+            "peer_required", "--stop-if-idle needs --peer: a session lives on one device"
+        )
+    record = store.find_own_relay()
+    if record is None:
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
+    if wire.SESSION_STOP_IDLE_V1 not in tuple(getattr(record, "capabilities", None) or ()):
+        raise MeshRefusal("relay_restart_required", STOP_IF_IDLE_RELAY_RESTART)
+    session_id = _translate_act_target(target, peer)
+    try:
+        detail = _relay_call(
+            "peer_session_stop_idle",
+            timeout=STOP_IF_IDLE_TIMEOUT_S,
+            allow_no_answer=True,
+            report_unsent=True,
+            peer=peer,
+            session_id=session_id,
+        )
+    except ControlRequestUnsent:
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message()) from None
+    except MeshRefusal as refusal:
+        if refusal.code in ("unknown_local_op", "not_implemented"):
+            raise MeshRefusal("relay_restart_required", STOP_IF_IDLE_RELAY_RESTART) from None
+        raise
+    if detail is None:
+        raise MeshRefusal(
+            "stop_idle_unconfirmed",
+            "the idle-only stop was sent but this device's relay did not answer, so "
+            "whether the owner acted is unknown; nothing was retried",
+        )
+    if detail.get("intent") != "stop_if_idle":
+        # A RECEIPT FROM THE WRONG OP IS NOT A RECEIPT: only the idle-only owner op
+        # echoes this intent, so anything else is a relay or owner this CLI cannot
+        # vouch for, and its outcome is not reported as this stop's.
+        raise MeshRefusal(
+            "stop_idle_unconfirmed",
+            "the answer did not come from the idle-only stop, so whether the owner "
+            "acted is unknown; nothing was retried",
+        )
+    outcome = str(_reported(detail, "outcome", verb="stop") or "")
+    return _emit(
+        args,
+        {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail},
+        [_stop_if_idle_line(detail)],
+    )
+
+
+def _stop_if_idle_line(detail: dict[str, Any]) -> str:
+    """The human line for an idle-only stop receipt, keyed on the owner's ``reason``.
+
+    The owner's own ``detail`` line for a refusal is one generic sentence for
+    busy, wake-due, old owner and unanswered, but their next steps are opposite
+    ("try again later" vs "retrying will not change that"), so the CLI picks the
+    same reason-keyed sentence the sessions tool shows (UX round 1 U5 / QA QF3).
+    Only the human line changes: ``--json`` keeps the owner's ``detail`` and
+    ``reason`` verbatim. Any other outcome, or an unknown reason, prints the
+    owner's line, which is also the degrade path when catalogues are missing.
+    """
+    from local_operator.i18n.keys import wire_sessions as _ws
+    from local_operator.i18n.text import tr
+    from local_operator.session.runtime import control
+
+    line = str(detail.get("detail") or "")
+    if str(detail.get("method") or detail.get("rung") or "") != "refused":
+        return line
+    build = {
+        control.REASON_BUSY: _ws.stop_refused_busy,
+        control.REASON_WAKE: _ws.stop_refused_wake,
+        control.REASON_OLD_OWNER: _ws.stop_refused_old_owner,
+        control.REASON_UNANSWERED: _ws.stop_refused_unanswered,
+    }.get(str(detail.get("reason") or ""))
+    if build is None:
+        return line
+    name = str(detail.get("name") or detail.get("session_id") or "")
+    return tr("wire.sessions")(build(name=name)) or line
+
+
 #: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
 #: peer answers in about a second (measured against a real pair), but the first
 #: act on a STORED session has to engage a runtime over there — a process launch
@@ -7840,8 +8001,10 @@ PILOT_BIND_TIMEOUT_S = 120.0
 #: Publication grace for a stored send after the peer ACKs engage. Use the
 #: existing local cold-start allowance (runtime.launch.DEFAULT_DEADLINE_S),
 #: inside, never on top of, the CLI's bind deadline. A warm or refused engage
-#: never gets this grace.
-PILOT_COLD_BOOT_BUDGET_S = 30.0
+#: never gets this grace. The number lives in ``network.types`` because the OWNER
+#: classifies its constructing rows (``starting`` → ``not_responding``) with the
+#: same budget, and a second literal is how the two ends would drift apart.
+PILOT_COLD_BOOT_BUDGET_S = REMOTE_COLD_BOOT_BUDGET_S
 
 #: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
 #: outer bound fires. The viewer is given the bind budget as an absolute deadline
@@ -8683,24 +8846,54 @@ async def _pilot_act(
             # The viewer gets THIS verb's budget as its deadline; without it the
             # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
             deadline = bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
-            if verb == "send" and not live:
+            # EVERY PILOT VERB, LIVE ROW OR STORED, takes #4470's publication
+            # grace — send, slash, steer and peek alike.
+            # #4470 limited it to stored rows, but a live row can be mid-restart
+            # too: the measured busy->idle case (Mac->node2) had the peer ACCEPT
+            # the engage while the restarted runtime had not republished its
+            # record yet, and the short bind loop then reported "could not start
+            # a runtime" for a session that was merely starting.
+            # A ``--slash`` on a STORED session needs it for a cold boot (#4470):
+            # the bind's short locate retry (``AttachedSession._bind_under_lock``)
+            # gave up before the boot published its record (measured 15.9-22.1 s,
+            # ``relay._warm_after_create``), so the operator's ``/team <name>``
+            # never reached the owner's attach path, the only cure for a team the
+            # GHSA-wmg2-rrrj-p599 gate refused (session 32deb1ecf45b).
+            # Live rows of the OTHER verbs were excluded until 2026-11-25, when a
+            # ``--slash`` on a LIVE, published session with a fresh heartbeat
+            # (pid 2407612 on lop-remote-node-2) failed at once with "could not
+            # start a runtime for this session" while the same command against
+            # 19 stored sessions succeeded. ``RemoteOwner.locate`` answers from
+            # the peer-facts op, which fanned out a FULL catalog listing (232
+            # rows took 11.56 s of a 12 s probe budget); one overrun yields no
+            # row, locate returns (None, None) and the bind raised on that ONE
+            # transient miss. The grace re-asks locate inside this deadline.
+            # Invariants kept: the grace only runs after a SUCCESSFUL engage (a
+            # refused engage raises before any locate, so a genuine refusal still
+            # returns its real code and sentence at once), it is clamped to this
+            # deadline and PILOT_COLD_BOOT_BUDGET_S, it only reads the published
+            # record, and it ends in the same "still starting ... NOT queued"
+            # refusal — no resend, queue or re-engage.
 
-                async def _wait_for_publication(
-                    locate: _RuntimeLocator, bind_deadline: float
-                ) -> SessionRecord:
-                    return await _pilot_wait_for_runtime_record(
-                        locate, bind_deadline, session_id, device
-                    )
-
-                bind = viewer.bind_runtime(
-                    deadline=deadline, wait_for_publication=_wait_for_publication
+            async def _wait_for_publication(
+                locate: _RuntimeLocator, bind_deadline: float
+            ) -> SessionRecord:
+                return await _pilot_wait_for_runtime_record(
+                    locate, bind_deadline, session_id, device
                 )
-            else:
-                bind = viewer.bind_runtime(deadline=deadline)
+
+            bind = viewer.bind_runtime(
+                deadline=deadline, wait_for_publication=_wait_for_publication
+            )
             await asyncio.wait_for(bind, timeout=PILOT_BIND_TIMEOUT_S)
         except ProjectionRefusal as exc:
-            if verb != "send":
-                raise
+            # EVERY VERB answers a refused engage as the peer's own code and
+            # sentence. #4470 converted only ``send`` and let the other verbs
+            # re-raise the bare ``ProjectionRefusal``, which nothing above
+            # ``_pilot_act`` catches — a refused live ``--slash``/``--steer``
+            # escaped ``main`` as a traceback instead of a refusal. Now that
+            # every verb takes the publication grace, the invariant "a refused
+            # engage returns its real error at once" has to hold for all of them.
             raise MeshRefusal(exc.code, exc.sentence) from exc
         except (TimeoutError, ConnectionError) as exc:
             # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
@@ -8854,10 +9047,6 @@ async def _pilot_mailbox_direct(
         remote_owner_for,
     )
     from local_operator.network.types import MeshRefusal
-    from local_operator.session.attached import (
-        _BIND_RETRY_ATTEMPTS,
-        _BIND_RETRY_INITIAL_S,
-    )
 
     peer_row = PeerRow(
         session_id=session_id,
@@ -8885,25 +9074,25 @@ async def _pilot_mailbox_direct(
         # a warm one answers the engage at once. The short locate retry is the
         # bind loop's own, by its constants rather than a copy of their values:
         # a runtime that has just been spawned publishes its record after the
-        # engage returns. Only a catalogued stored session is eligible for the
-        # longer publication wait; a warm row keeps its existing dial failure.
+        # engage returns, so a miss after an ACCEPTED engage takes #4470's
+        # publication grace (``_pilot_wait_for_runtime_record``) for a live row
+        # as well as a stored one. #4470 kept live rows on the short loop and its
+        # "could not start a runtime" dial failure, but the measured busy->idle
+        # restart (Mac->node2, 8.4 s) is a LIVE row whose runtime had not yet
+        # republished: the engage was accepted and the session was only starting.
+        # A refused engage still raises above and never reaches locate, so a
+        # genuinely failed runtime keeps its own reason. The one consequence:
+        # a warm row whose engage is ACCEPTED yet never publishes now answers
+        # "still starting ... NOT queued" after the (clamped) grace instead of
+        # #4470's immediate dial failure; both say nothing was delivered.
         try:
             await owner.engage(cwd="")
         except ProjectionRefusal as exc:
             raise MeshRefusal(exc.code, exc.sentence) from exc
-        delay = _BIND_RETRY_INITIAL_S
-        for attempt in range(_BIND_RETRY_ATTEMPTS):
-            record, _pid = await asyncio.to_thread(owner.locate)
-            if record is not None:
-                return record
-            if not str(getattr(row, "live_state", "") or ""):
-                return await _pilot_wait_for_runtime_record(
-                    owner.locate, bind_deadline, session_id, device
-                )
-            if attempt < _BIND_RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+        record, _pid = await asyncio.to_thread(owner.locate)
+        if record is not None:
+            return record
+        return await _pilot_wait_for_runtime_record(owner.locate, bind_deadline, session_id, device)
 
     try:
         record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
@@ -9544,14 +9733,23 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     EVERY VERB HERE ASKS AND WAITS: none of them has a local spelling of its own
     op (the session lives on another device and only this device's relay can ask
     it), so none of them may take ``allow_no_answer`` and none of them may read a
-    missing answer as a result (Q-R4-1). ``ok`` is a claim about a NAMED field the
-    peer reported — never about the absence of one.
+    missing answer as a result (Q-R4-1). The one exception is ``--stop-if-idle``
+    (``_cmd_stop_if_idle``): it takes ``allow_no_answer`` only to turn a missing
+    answer into ``stop_idle_unconfirmed``, never into an outcome. ``ok`` is a
+    claim about a NAMED field the peer reported — never about the absence of one.
     """
     from local_operator.network.types import MeshRefusal, unattended_fallback_notice
 
     peer = str(getattr(args, "peer", "") or "")
     session_id = str(getattr(args, "stop", "") or "")
     engage = str(getattr(args, "engage", "") or "")
+
+    # ``--stop-if-idle --force`` gets ITS OWN sentence, so it is decided before the
+    # generic ``--force`` check below, which would otherwise answer first with a
+    # sentence about ``--stop`` (QA round 1 QF1 / UX U6). Same rc 2, nothing sent.
+    if bool(getattr(args, "force", False)) and getattr(args, "stop_if_idle", ""):
+        print("--stop-if-idle never forces; --force applies to --stop only", file=sys.stderr)
+        return 2
 
     if bool(getattr(args, "force", False)) and not session_id:
         # A USAGE error, not a refusal (the guide's rc 2): ``--force`` means one
@@ -9577,6 +9775,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # (``session.peek.peek_validation_error``): one sentence for "over budget"
     # on every surface, and every such refusal is a usage error (rc 2).
     journal = _peek_journal_fields(args)
+    # WITHOUT ``--peek``, ``--query`` IS THE LISTING'S SEARCH (one flag, the
+    # same meaning — "find this" — in both reads), so it leaves the journal set
+    # here and rides the listing below with ``--limit``/``--cursor``.
+    listing_query = journal.pop("query", None) if not peek else None
     if journal and not peek:
         named_flags = ", ".join(f"--{name.replace('_', '-')}" for name in journal)
         print(f"{named_flags} applies to --peek only", file=sys.stderr)
@@ -9586,6 +9788,52 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         if refusal:
             print(refusal, file=sys.stderr)
             return 2
+
+    # THE LISTING FLAGS DESCRIBE A LISTING, so beside an act they would be
+    # accepted and then silently dropped — refused, as ``--steps`` is.
+    listing_flags = [
+        flag
+        for flag, value in (
+            ("--limit", getattr(args, "limit", None)),
+            ("--cursor", getattr(args, "cursor", None)),
+            ("--query", listing_query),
+        )
+        if value is not None
+    ]
+    acts = (
+        "create",
+        "engage",
+        "stop",
+        "stop_if_idle",
+        "archive",
+        "unarchive",
+        "delete",
+        "send",
+        "steer",
+        "slash",
+        "peek",
+    )
+    if listing_flags and any(getattr(args, name, None) for name in acts):
+        print(f"{', '.join(listing_flags)} applies to the listing only", file=sys.stderr)
+        return 2
+
+    # THE IDLE-ONLY STOP IS DECIDED ALONE, before every other act: beside any other
+    # act one of the two would be silently dropped, and beside ``--force`` it would
+    # promise an escalation it never sends (refused above). Both are usage errors
+    # (rc 2).
+    stop_if_idle = str(getattr(args, "stop_if_idle", "") or "")
+    if stop_if_idle:
+        clash = next(
+            (name for name in acts if name != "stop_if_idle" and getattr(args, name, None)), ""
+        )
+        if clash:
+            print(
+                f"--stop-if-idle is one act on one session; --{clash.replace('_', '-')} "
+                "would be another, so this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        return _cmd_stop_if_idle(args, peer=peer, target=stop_if_idle)
 
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
     # the only verbs here that open a VIEWER, and a command line that asked for
@@ -9855,7 +10103,16 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        # Shell/tool attribution is only a local metadata lookup for this verb.
+        # A standalone operator create has no source conversation to pin.
+        from local_operator.network.approvals import filing_session
         from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
+        explicit_source = getattr(args, "source_session", "")
+        source_session = (
+            filing_session(explicit_source) if explicit_source else _env_filing_session()
+        )
+        source_fields = {"source_session": source_session} if source_session else {}
 
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
@@ -9895,6 +10152,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # confirm-by-key window after a lost reply: a client that gave up
                 # first would lose the id the relay was about to confirm.
                 timeout=CREATE_CLIENT_BOUND_S,
+                **source_fields,
             )
 
         unattended_notice = ""
@@ -9932,7 +10190,28 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
-        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
+        create_unconfirmed = detail.get("create_unconfirmed") or detail.get("replayed")
+        status = skill_transfer_status(detail.get("skill_selection"))
+        if create_unconfirmed or status is None:
+            # An older relay may omit the receipt; a create-key replay confirms
+            # existence, not the original routing decision. Neither is evidence
+            # that the receiver selected locally or pinned a selection.
+            status = "unconfirmed"
+        detail["skill_selection"] = skill_transfer_receipt(status)
+        # WRAPPED AT A FIXED 80 COLUMNS, word-wise with the shared hanging indent:
+        # every line of this receipt must fit an 80-column terminal (D4 on #3547,
+        # pinned by ``test_the_still_running_receipt_fits_80_columns``), and this
+        # sentence is catalogue copy — 93-152 characters in en/es/fr — so no wording
+        # can hold that for every locale. Fixed width, not the terminal's, so a pipe
+        # reads the same rows the test pins; prose only, never a command line. The
+        # ``--json`` payload keeps the message whole.
+        lines.extend(_wrap_lines([detail["skill_selection"]["message"]], width=80))
+        if create_unconfirmed and not prompt:
             # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
             # owner confirmed the id by key, or this was a retry the owner matched
             # to the session it had already made. Either way the first turn's fate
@@ -10139,18 +10418,36 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             "peer_required",
             "name a device with --peer, or ask every device with --all-peers",
         )
+    page = _listing_page_fields(args, listing_query, peer)
+    if isinstance(page, int):
+        return page
     # The merge is a LISTING, so it is the one verb here whose success does not
     # rest on a single reported word: what it must not do is dress an unreachable
     # relay up as "no sessions" (Q-R4-1), which is why this call refuses instead
     # of falling through to an empty set. When the relay IS up, the peer block per
     # row is what labels an empty answer (``reachable`` + ``reason``).
-    payload = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    payload = _relay_answer(
+        "peer_session_rows",
+        timeout=_listing_timeout(),
+        **({**page, "peer": peer} if page else {}),
+    )
     # Bound to a narrow local first: `payload.get` is `Any | None`, and the two
     # comprehensions below iterate it as a mapping (`projection.RelayPeerCatalog`
     # takes the same precaution for the same reason).
     raw_facts = payload.get("peers")
     facts: dict[str, Any] = raw_facts if isinstance(raw_facts, dict) else {}
     remote = [row for row in (payload.get("sessions") or []) if isinstance(row, dict)]
+    relay_paged = bool(payload.get("paged"))
+    if page and not relay_paged:
+        # THIS DEVICE'S RELAY PREDATES THE PAGED READ: it ignored the fields
+        # and answered the whole federated listing (its own rows included).
+        # Without a cursor or query that is today's capped answer and may
+        # stand, labelled; with one, it is not the page or search asked for.
+        for block in facts.values():
+            if isinstance(block, dict) and block.get("reachable"):
+                block["paging"] = "unsupported"
+        if "cursor" in page or "query" in page:
+            remote = []
     matched: list[dict[str, Any]] = []
     if peer:
         wanted = peer.lower()
@@ -10175,6 +10472,12 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 "unknown_peer",
                 f"this device is not in a network with anything called {peer!r}",
             )
+        refused = matched[0].get("refused")
+        if isinstance(refused, str) and refused:
+            # THE OWNER ANSWERED AND REFUSED THIS ASK (a cursor it never minted,
+            # an over-long query): a refusal with its sentence and code, not an
+            # empty listing and not an unreachable device (QA round 1, Q1).
+            raise MeshRefusal(str(matched[0].get("refused_code") or "bad_frame"), refused)
         remote = [
             row
             for row in remote
@@ -10191,7 +10494,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     remote = [row_without_stored_claims(row) for row in remote]
     lines: list[str] = []
     cells: list[tuple[str, str, str, str]] = []
-    from local_operator.resume import session_state_words
+    from local_operator.resume import session_row_state_words
 
     for row in remote:
         block = row.get("peer") or {}
@@ -10214,7 +10517,9 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             (
                 str(row.get("session_id") or ""),
                 holder,
-                session_state_words(str(row.get("state") or "")) or "?",
+                # The ROW, not the token: a booting session is ``stored`` plus a
+                # ``boot_state`` claim (PR #4572 QA Q6), and only the row says so.
+                session_row_state_words(row) or "?",
                 str(row.get("conversation_name") or ""),
             )
         )
@@ -10254,6 +10559,51 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             f"{str(block.get('name') or device_id)}: unreachable "
             f"({peer_reason_words(str(block.get('reason') or ''))})"
         )
+    # THE NEXT PAGE, NAMED, and an owner too old to page named as such: a
+    # capped answer from an older build must never read as the whole store
+    # (``wire.REMOTE_CATALOG_PAGE_V1``).
+    unpaged: set[str] = set()
+    if page:
+        from local_operator.i18n.text import tr
+
+        if not relay_paged:
+            lines.append(tr("cli.network_sessions")(_network_sessions.relay_unpaged()))
+        for device_id, block in sorted(facts.items()):
+            if not isinstance(block, dict) or not block.get("reachable"):
+                continue
+            label = str(block.get("name") or device_id)
+            kind = "search" if "query" in page else "other"
+            if isinstance(block.get("refused"), str):
+                # Only an --all-peers ask reaches here (``--peer`` raised above),
+                # and the CLI pre-checks what that ask can carry; kept so an
+                # answered refusal never reads as a complete listing.
+                unpaged.add(str(device_id))
+                lines.append(f"{label}: refused ({block['refused']})")
+            elif block.get("paging") == "unsupported":
+                unpaged.add(str(device_id))
+                if not relay_paged:
+                    continue
+                lines.append(
+                    tr("cli.network_sessions")(
+                        _network_sessions.paging_unsupported(kind=kind, peer=label)
+                    )
+                )
+            elif isinstance(block.get("next_cursor"), str):
+                lines.append(
+                    tr("cli.network_sessions")(
+                        _network_sessions.next_page(
+                            kind=kind,
+                            peer=label,
+                            shown=sum(
+                                1
+                                for row in remote
+                                if (row.get("peer") or {}).get("device_id") == device_id
+                            ),
+                            total=int(block.get("total") or 0),
+                            command=_next_page_command(label, str(block["next_cursor"]), page),
+                        )
+                    )
+                )
     if not remote:
         # The sentence is narrowed to what was actually established. Reaching
         # here with every peer asked means the global one is true; with a peer
@@ -10261,17 +10611,68 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # device is missing from the answer.
         if peer:
             block = matched[0]
-            if block.get("reachable"):
+            if block.get("reachable") and str(block.get("device_id") or "") not in unpaged:
                 lines.insert(0, f"no sessions are held by {block.get('name') or peer} right now")
         elif unasked:
             lines.insert(0, "no sessions are held by the devices that answered")
         else:
             lines.insert(0, "no sessions are held by other devices right now")
-    return _emit(
-        args,
-        {"ok": True, "sessions": remote, "peers": payload.get("peers") or {}},
-        lines,
-    )
+    result: dict[str, Any] = {"ok": True, "sessions": remote, "peers": payload.get("peers") or {}}
+    if page:
+        # Machine half of the footer: ``False`` = this device's relay could not
+        # page or search, so no row set here is a page or a search result.
+        result["relay_paging"] = relay_paged
+    return _emit(args, result, lines)
+
+
+def _next_page_command(peer: str, cursor: str, page: Mapping[str, Any]) -> str:
+    """The footer's next page as ONE pasteable, shell-quoted command line.
+
+    It carries the asker's ``--limit`` and ``--query`` as well as the cursor:
+    the cursor is a position in the FILTERED list, so a pointer without the
+    query silently turned a search into an unfiltered listing on the next page,
+    and one without the limit changed the page size (design round 1, D1/D3 on
+    #4592). ``shlex.join`` so a peer name or query with spaces pastes intact.
+    """
+    import shlex
+
+    argv = ["lop", "network", "sessions", "--peer", peer, "--cursor", cursor]
+    if page.get("limit") is not None:
+        argv += ["--limit", str(page["limit"])]
+    if page.get("query") is not None:
+        argv += ["--query", str(page["query"])]
+    return shlex.join(argv)
+
+
+def _listing_page_fields(args: argparse.Namespace, query: Any, peer: str) -> dict[str, Any] | int:
+    """The listing's ``limit``/``cursor``/``query`` for the relay, or rc 2.
+
+    Bounds match the owner's (``relay.CATALOG_PAGE_MAX_LIMIT``), checked here
+    so a typo is a usage error before a hop; the owner still checks them,
+    because its frame comes off the wire.
+    """
+    limit = getattr(args, "limit", None)
+    cursor = getattr(args, "cursor", None)
+    relay_mod = _import_relay()
+    if limit is not None and not 1 <= limit <= relay_mod.CATALOG_PAGE_MAX_LIMIT:
+        print(f"--limit must be 1 to {relay_mod.CATALOG_PAGE_MAX_LIMIT}", file=sys.stderr)
+        return 2
+    if cursor is not None and not peer:
+        print("--cursor needs --peer: a cursor is one device's position", file=sys.stderr)
+        return 2
+    max_token = relay_mod.CATALOG_PAGE_MAX_TOKEN
+    if query is not None and len(str(query)) > max_token:
+        # Before the hop, as for --limit: the owner would refuse it anyway.
+        print(f"--query must be at most {max_token} characters", file=sys.stderr)
+        return 2
+    page: dict[str, Any] = {}
+    if limit is not None:
+        page["limit"] = limit
+    if cursor is not None:
+        page["cursor"] = str(cursor)
+    if query is not None:
+        page["query"] = str(query)
+    return page
 
 
 def _status_membership_lines(row: dict[str, Any]) -> list[str]:

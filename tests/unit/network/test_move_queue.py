@@ -375,3 +375,185 @@ def test_the_drop_roles_flag_is_durable_on_the_record(tmp_path: Path) -> None:
         other, SID, to_device="d_b", to_name="dev-b", request_id="rq", requested_by="d_a"
     )
     assert plain["drop_session_roles"] is False
+
+
+def test_a_queued_retry_decides_from_its_own_attempt_not_a_remembered_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 4, R4-1: a fresh queued request computes its own outcome.
+
+    The queue watch used to read the session's recorded refusal without asking
+    WHICH attempt recorded it, so a second request inherited the first attempt's
+    ``team_definitions_pending`` — a failure nobody computed for it — and folded a
+    terminal ``failed`` even while its own copy was going to commit. The decision
+    must be per attempt, from the state at that attempt.
+
+    Attempt 1 is genuinely refused by the destination, through the real
+    ``_source_refused`` handler (so the sentence crosses as it does on the wire).
+    The team is then reconciled on the destination and attempt 2 receives NO
+    refusal; its copy commits a beat later (the tombstone is written from a timer,
+    because the refusal used to answer before any commit could land). Before the
+    fix the second record reads ``failed``/``team_definitions_pending``; after it
+    reads ``resumed``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network import mobility, projection
+
+    # Stub server/link: only the attributes the move path reads. ``Any`` says so
+    # to the type checker instead of pretending to be a RelayServer/PeerLink.
+    server: Any = SimpleNamespace(root=tmp_path)
+    link: Any = SimpleNamespace(device_id="d_b")
+    monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda *_a: ("d_b", "dev-b"))
+    monkeypatch.setattr(mobility, "_link_for_move", lambda *_a: SimpleNamespace(device_id="d_b"))
+    monkeypatch.setattr(mobility, "reconcile", lambda *_a, **_k: [])
+
+    invites: list[dict[str, Any]] = []
+    refuse = {"on": True}
+    timers: list[threading.Timer] = []
+
+    def ask(self: Any, frame: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        if frame.get("phase") != "invite":
+            return {"result": "recorded"}
+        invites.append(dict(frame))
+        if refuse["on"]:
+            # The destination's refusal, over the REAL handler: it echoes the
+            # invite's attempt back, which is what scopes the sentence.
+            mobility._source_refused(  # noqa: SLF001
+                server,
+                link,
+                {
+                    "session_id": SID,
+                    "code": "team_definitions_pending",
+                    "message": "lopdev: team definition is not available yet",
+                    "attempt": frame.get("attempt"),
+                },
+            )
+        else:
+            # The commit lands AFTER the invite, as it does on a real move: the
+            # refusal this test is about used to answer inside that window.
+            timer = threading.Timer(
+                0.6,
+                projection.write_tombstone,
+                args=(SID,),
+                kwargs={"device_id": "d_b", "config_dir": tmp_path},
+            )
+            timers.append(timer)
+            timer.start()
+        return {"result": "accepted", "phase": "prepared"}
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+
+    try:
+        record, _created = mq.enqueue(
+            tmp_path, SID, to_device="d_b", to_name="dev-b", request_id="rq1", requested_by="d_a"
+        )
+        assert record["phase"] == mq.QUEUE_PHASE_QUEUED
+        mq.transition(tmp_path, SID, mq.QUEUE_PHASE_COPYING, writer="relay")
+        assert mq.drive(server, SID) == mq.QUEUE_PHASE_FAILED
+        failed = mq.read_record(tmp_path, SID) or {}
+        assert failed["phase"] == mq.QUEUE_PHASE_FAILED, failed
+        assert failed["code"] == "team_definitions_pending", failed
+        print("queued attempt 1:", failed["phase"], failed["code"])
+
+        # The reconciliation lands on the DESTINATION; this device records nothing.
+        refuse["on"] = False
+        mq.enqueue(
+            tmp_path, SID, to_device="d_b", to_name="dev-b", request_id="rq2", requested_by="d_a"
+        )
+        mq.transition(tmp_path, SID, mq.QUEUE_PHASE_COPYING, writer="relay")
+        assert mq.drive(server, SID) == mq.QUEUE_PHASE_RESUMED
+        resumed = mq.read_record(tmp_path, SID) or {}
+        assert resumed["phase"] == mq.QUEUE_PHASE_RESUMED, resumed
+        print("queued attempt 2:", resumed["phase"], "invites:", len(invites))
+        # Two attempts, two DISTINCT tokens: the second invite is its own attempt,
+        # which is what makes the refusal it did not receive unreadable to it.
+        assert len(invites) == 2, invites
+        assert invites[0]["attempt"] != invites[1]["attempt"], invites
+    finally:
+        for timer in timers:
+            timer.cancel()
+
+
+class TestAttemptAttribution:
+    """R5-1: no attempt inherits another attempt's outcome.
+
+    The move decision is computed PER ATTEMPT, so both things that can end a wait
+    must name the attempt they answer: a refusal echoes the invite's token, and the
+    destination's completion echoes it too. An answer that cannot name an attempt (a
+    peer from before the token existed) is recorded honestly but never credited to a
+    tokenized wait — that wait then falls through to the durable tombstone instead of
+    reporting somebody else's outcome.
+    """
+
+    def test_a_refusal_that_cannot_name_its_attempt_never_ends_a_later_wait(self) -> None:
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        first = progress.begin_attempt(SID)
+        # Uncorrelated: no token came back with it, and it must not be stamped with
+        # the attempt that happens to be running.
+        progress.note_refusal(SID, code="busy", message="one at a time", from_device="dev-b")
+        assert progress.refusal(SID, from_device="dev-b", attempt=first) is None
+        # A surface holding no attempt still reads the sentence that arrived.
+        assert progress.refusal(SID, from_device="dev-b") == ("busy", "one at a time")
+
+        second = progress.begin_attempt(SID)
+        progress.note_refusal(SID, code="busy", message="still busy", from_device="dev-b")
+        assert progress.refusal(SID, from_device="dev-b", attempt=second) is None
+
+        # Attributed: it answers exactly the attempt whose token it echoes ...
+        progress.note_refusal(
+            SID, code="busy", message="still busy", from_device="dev-b", attempt=second
+        )
+        assert progress.refusal(SID, from_device="dev-b", attempt=second) == (
+            "busy",
+            "still busy",
+        )
+        # ... and never a later one.
+        third = progress.begin_attempt(SID)
+        assert progress.refusal(SID, from_device="dev-b", attempt=third) is None
+
+    @pytest.mark.parametrize("use_prior_attempt", [False, True])
+    def test_a_wait_without_its_echo_ends_in_a_named_refusal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_prior_attempt: bool
+    ) -> None:
+        from types import SimpleNamespace
+
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        prior = progress.begin_attempt(SID)
+        attempt = progress.begin_attempt(SID)
+        echo = prior if use_prior_attempt else None
+        progress.signal_done(SID, echo)
+        progress.note_refusal(
+            SID, code="busy", message="other outcome", from_device="dev-b", attempt=echo
+        )
+        monkeypatch.setattr(mobility, "progress_for", lambda _server: progress)
+        # An expired wait over an empty store, without a transport or a handoff.
+        # The refusal is local: no uncorrelated record supplies a code or message.
+        stub_server: Any = SimpleNamespace(root=tmp_path)
+        assert mobility._await_own_progress(
+            stub_server, SID, budget=0.0, invited="dev-b", attempt=attempt
+        ) == ("move_attempt_unconfirmed", None)
+
+    def test_a_completion_answers_only_the_attempt_it_reports(self) -> None:
+        from local_operator.network import mobility
+
+        progress = mobility._Progress()
+        first = progress.begin_attempt(SID)
+        second = progress.begin_attempt(SID)
+        # A completion belonging to the FIRST attempt crosses the retry late.
+        progress.signal_done(SID, first)
+        assert progress.wait_done(SID, second, 0.05) is False, "the retry inherited a completion"
+
+        progress.signal_done(SID, second)
+        assert progress.wait_done(SID, second, 0.05) is True
+
+        # Unattributed (a destination from before the token): recorded, never
+        # credited to a tokenized wait, still readable by a caller holding no token.
+        third = progress.begin_attempt(SID)
+        progress.signal_done(SID, None)
+        assert progress.wait_done(SID, third, 0.05) is False
+        assert progress.wait_done(SID, None, 0.0) is True

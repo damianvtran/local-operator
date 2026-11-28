@@ -18,7 +18,9 @@
 //     phantom message the user believes was delivered, and the honest state is
 //     the composer's own alert with its same-envelope retry.
 //   - the retry path paints no second row for a command the session already
-//     wrote, and does not throw away a draft typed since.
+//     wrote, and does not throw away a draft typed since. That command's retry
+//     is not offered at all any more (the stream's row under the same id IS its
+//     acknowledgement), so the roll below reads the retention itself.
 //
 // The render site is the REAL `SessionScreen` and the REAL `Composer`, with
 // only the projection slot and the network faked, because the reconciliation
@@ -29,7 +31,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import * as api from "./api";
-import { clearPendingEchoes, registerPendingEcho } from "./pending-echo";
+import {
+	clearPendingEchoes,
+	markPendingEchoAccepted,
+	markPendingEchoWaking,
+	registerPendingEcho,
+} from "./pending-echo";
 import type { SessionProjection, TranscriptEntry } from "./types";
 
 vi.mock("./api", async (importOriginal) => ({
@@ -266,11 +273,13 @@ describe("optimistic pending echo", () => {
 		expect(screen.getByRole("button", { name: "Retry earlier instruction" })).toBeTruthy();
 	});
 
-	it("paints no second row for a retry of a command the session already wrote", async () => {
-		vi.mocked(api.sendCommand).mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+	it("retires a retained retry for a command the session already wrote", async () => {
 		/* The session already has the row — the acknowledgement-loss case, where
 		   the first attempt landed and only its reply was lost — and the immutable
-		   envelope for that command is what the composer's mount restores. */
+		   envelope for that command is what the composer's mount restores. The row
+		   under the SAME id is the definitive acknowledgement, so nothing is sent
+		   again and no retry is offered: a resend of a written instruction is the
+		   duplicate the retained envelope existed to prevent. */
 		localStorage.setItem(
 			"lo-mobile-command:s1",
 			JSON.stringify({
@@ -281,17 +290,11 @@ describe("optimistic pending echo", () => {
 		);
 		open([userRow(COMMAND_ID, SENT)]);
 
-		const retry = await screen.findByRole("button", { name: "Retry earlier instruction" });
-		fireEvent.click(retry);
-
-		await waitFor(() => expect(vi.mocked(api.sendCommand)).toHaveBeenCalledOnce());
-		/* The SAME envelope id, never a fresh one: that is what makes a second
-		   delivery of an already-admitted instruction impossible. */
-		expect(vi.mocked(api.sendCommand).mock.calls[0]?.[1]).toMatchObject({
-			op: "prompt",
-			command_id: COMMAND_ID,
-		});
-		/* And ONE row throughout — the projection's, never a pending twin of it. */
+		await screen.findByRole("textbox", { name: "Message" });
+		await waitFor(() => expect(localStorage.getItem("lo-mobile-command:s1")).toBeNull());
+		expect(screen.queryByRole("button", { name: "Retry earlier instruction" })).toBeNull();
+		expect(vi.mocked(api.sendCommand)).not.toHaveBeenCalled();
+		/* ONE row throughout — the projection's, never a pending twin of it. */
 		expect(screen.getAllByText(SENT)).toHaveLength(1);
 		expect(screen.queryByText("sending…")).toBeNull();
 	});
@@ -434,5 +437,48 @@ describe("optimistic pending echo", () => {
 		await waitFor(() => expect(pendingRows(view)).toHaveLength(0));
 		view.publish([], true);
 		expect(pendingRows(view)).toHaveLength(0);
+	});
+});
+
+describe("a pending row for a session that is still waking (design round 1, D2)", () => {
+	/* A cold prompt's boot runs for seconds; a bare `sending…` over that wait
+	   read as stuck. The flag is the row's own, set and cleared through the
+	   store, so the caption follows it on the rendered row. */
+	it("says `waking session…` while flagged, and `sending…` once cleared", async () => {
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: false,
+		});
+		const view = open();
+		await waitFor(() => expect(pendingRows(view)).toHaveLength(1));
+		expect(pendingRows(view)[0]?.textContent).toContain("sending…");
+
+		markPendingEchoWaking("s1", COMMAND_ID, true);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("sending…");
+
+		markPendingEchoWaking("s1", COMMAND_ID, false);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("sending…"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("waking session…");
+	});
+
+	it("lets an acceptance outrank the waking flag", async () => {
+		registerPendingEcho("s1", {
+			commandId: COMMAND_ID,
+			text: SENT,
+			imageCount: 0,
+			op: "prompt",
+			accepted: false,
+			waking: true,
+		});
+		const view = open();
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("waking session…"));
+
+		markPendingEchoAccepted("s1", COMMAND_ID);
+		await waitFor(() => expect(pendingRows(view)[0]?.textContent).toContain("sent"));
+		expect(pendingRows(view)[0]?.textContent).not.toContain("waking session…");
 	});
 });

@@ -3200,6 +3200,30 @@ Feed: the `approvals` frame ORs open pairing cards into `pending` and adds
 `pairing_id` (the oldest card's `id`, or `null`); the `open` frame adds
 `approvals_pairing_id`.
 
+## Inline charts and tables
+
+When `GET /v1/capabilities` reports `features.inline_ui: 1`, a capable client may
+send the exact JSON boolean `inline_ui: true` on `/messages` (including steer)
+and query `inline_ui=1` on `/sessions/{id}`, `/history`, and `/events`.
+A retry of the same send may change only this presentation declaration without
+conflicting; the first receipt still owns its original authoring choice. These
+fields negotiate presentation; they do not grant permission to read or send.
+
+Ordinary text is the same for both readers. A capable viewer may also receive
+`inline_ui: {version: 1, messages: {<message id>: <row>}}`. Each row is
+`{version: 1, text, widgets: [{offset, payload}]}`: `offset` is a UTF-16 offset
+into that exact `text`, not into a delta. SSE carries the envelope in an
+ordinary event's `payload.inline_ui`; live seed events are at
+`payload.frontend.snapshot.live_events` in snapshot/replace frames. History
+carries the same envelope at `result.inline_ui` (or `payload.history.inline_ui`
+inside a snapshot). An update can carry a widget with an empty text delta; a
+reconnect seed can carry `widgets: []` with authoritative cumulative text
+before the first fence closes; an ordinary delta never uses that shape. A
+`null` row retracts an earlier placement and restores the current base prose.
+Unknown versions, absent overlays, and peers opened through the separate mesh
+owner proxy are prose-only. Do not parse or expect widget source fences in any
+wire text.
+
 ## The machine-wide event feed
 
 `GET /v1/desktop/events` — authenticated SSE, the same bearer/Origin boundary as
@@ -3359,6 +3383,34 @@ to.
   `status_revision` is LOWER — the in-app marker effect triggers exactly the list
   refetch this frame speeds up, so without the guard that response clobbers the
   fresher frame. Differing epochs, or no stamp at all, means take the list's row.
+- **A headline revision is not a workspace-rest receipt.** Only a desktop
+  client that tracks unpinned workspace tabs requests that separate evidence.
+  It batches their IDs as repeated `workspace_rest_id` on the existing
+  `GET /v1/desktop/sessions` request (the same maximum as its 500-row page).
+  This does not change the requested scope, cursor, or which rows are
+  returned. Only requested local rows on the page itself can carry:
+
+  ```json
+  {"workspace_rest":{"version":1,"epoch":"<feed epoch>","revision":"<opaque equality token>"}}
+  ```
+
+  Version 1 is positive-only and cold-only: a settled, read completion;
+  no runtime owner or recovery in progress; no unsettled or unverifiable ask
+  journal. Unknown, remote or mesh-stamped rows, pins, archives and rows that
+  would require reading beyond the batch budget have no receipt. Normal
+  catalogue requests and the SSE stream do not run the probe, and no legacy
+  status/count value is changed.
+
+  Arm a tab's timer only from this opt-in response in the current connected
+  feed epoch. Treat an omission, unknown version, different revision, feed
+  gap/disconnect or epoch change as a reset. In-flight responses belong to the
+  connection and candidate set that requested them; discard obsolete replies
+  instead of merging these receipts into the normal rows. At expiry, coalesce
+  eligible IDs into one fresh catalogue request and compare the same epoch and
+  revision immediately before dropping a tab. Recheck local selection, pins,
+  drafts and queued input. A revision is an observation fence, not a lock:
+  even work that began and finished between samples can change it, and the
+  server neither closes a tab nor modifies a conversation.
 - **Neither `notification` nor `attention` is replayed.** The connection's first
   read is a BASELINE: it records the store's current revision and announces
   nothing that predates the connection. A reconnect therefore does not flood,
@@ -3886,6 +3938,42 @@ client supplied: it re-resolves every source itself.
   moves, as a level (the slot as it is now, not an edge). The open snapshot's
   baseline is the slot at connect.
 
+
+## Team Bridge held messages (`/v1/desktop/team-bridge/holds`)
+
+`GET /v1/desktop/team-bridge/holds?expected_account_id=…` lists every held
+conversation message on this machine, metadata only (no body, sender label or
+screener reason: the renderer joins those itself). `{enabled, key_protection,
+items: [...]}`, oldest hold first. Each item:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `message_id` | string (`bcmsg_…`) | The held message. |
+| `conversation_id` | string | Its conversation (`bcv_…`); `""` when unknown. |
+| `seq` | int \| null | Conversation sequence, when the hold ref carried one. |
+| `thread_root_id` | string (`bcmsg_…`) \| null | The root a thread REPLY answers; `null` for a channel-level message or a ref that did not carry one (a damaged tag reads `null`). The hub's owner-audit messages page excludes replies, so a reply's sender/body must be read from its thread, never that page. |
+| `held_at` / `first_held_at` | ISO-8601 UTC | Decision time (the Deliver window's start) / when the hold was first written. |
+| `kind` | `owner_decision` \| `screening` \| `waiting` | Coarse class. |
+| `hold_code` | closed code \| `unknown_hold` | The hold code. |
+| `releasable` | bool | An eligible owner decision exists. |
+| `can_deliver` / `can_discard` | bool | Which words the route accepts now. Every releasable hold has `can_discard`; `can_deliver` is false past `deliver_until`, for `screening_failed`, and for a `write_once_conflict` whose current screener pass rejected (Discard-only). |
+| `actionable` | bool | THE count predicate: undecided, a word is open, and the decision is bound to this row (its `conversation_id` equals the row's; `decide` refuses otherwise). The badge, nav count and "Dismiss all" count exactly these. |
+| `discard_receipt` | string (64 hex) \| null | Present exactly when a Discard is open, undecided and the decision is bound to this row (same `conversation_id`), so a `can_discard: true` row can still carry `null` here. POST it as `hold_receipt` (instead of `body_sha256`) to discard with no body on screen. Never accepted for Deliver. |
+| `unscreened` | bool | A review hold no model read. |
+| `deliver_until` | ISO-8601 UTC \| null | End of the Deliver window. |
+| `decision` | `{word, decided_at, outcome, key_id}` \| null | The recorded answer; `outcome` is `pending`, `admitted`, `rejected`, `discarded_local_unconfirmed` or `refused`. |
+
+`POST …/holds/{message_id}/deliver|discard` takes `{expected_account_id,
+conversation_id}` plus exactly one of `body_sha256` (the body the person saw)
+or `hold_receipt` (Discard only). A Discard never delivers. It is settled
+LOCALLY (`outcome: discarded_local_unconfirmed`, an
+`owner_release_local_terminals` audit row, no hub call, no connector pass)
+when it is receipt-bound past `deliver_until`, or for ANY Discard of a
+`write_once_conflict` hold (the connector could never commit a reject over the
+committed allow); otherwise it is queued `pending` for the connector, which
+bounces it. A row with `actionable: false` and no `decision` has no decision
+row to sign (an infrastructure wait the connector re-drives itself): offer
+no Discard for it, and never count it.
 
 ## Capability keys
 

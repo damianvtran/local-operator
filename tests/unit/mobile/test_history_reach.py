@@ -333,15 +333,11 @@ def _walk(config: Path, monkeypatch: pytest.MonkeyPatch, *, page: int = PAGE) ->
     # THE CLIENT'S OWN FIRST CURSOR. A projection at its cap pins the
     # conversation's opening user row ahead of a disjoint tail, and that pinned
     # row is not the tail's chronological neighbour — the web client pages from
-    # the row after it (``transcript.tsx``), and every fixture whose projection is
-    # UNDER the cap behaves identically either way.
-    cursor = (
-        seed_ids[1]
-        if len(seed_ids) >= PROJECTION_TRANSCRIPT_LIMIT
-        and seed_ids[1:]
-        and projection.transcript[0].kind == "user"
-        else seed_ids[0]
-    )
+    # the row after it (``transcript.tsx``). It reads that from the wire's
+    # ``transcript_head_pinned``, not from length, so neither does this: a
+    # compacted render at its cap is NOT pinned (PR #4521 R1-1), and an unpinned
+    # tail that happens to open on a user row must page from that row itself.
+    cursor = seed_ids[1] if projection.transcript_head_pinned and seed_ids[1:] else seed_ids[0]
     seen_more = True
     for _ in range(60):
         entries, has_more = _history_page(SESSION_ID, cursor, page)
@@ -1202,3 +1198,352 @@ def test_a_damaged_archive_is_reported_as_unavailable_not_as_the_end(
     warnings = [record.getMessage() for record in caplog.records]
     assert any("unavailable rather than empty" in line for line in warnings), warnings
     assert any("could not be decoded" in line for line in warnings), warnings
+
+
+def _build_many_preserved(config: Path, *, turns: int = 100, kept_turns: int = 2) -> dict[str, Any]:
+    """The operator's shape (2026-11-23): MANY real turns behind one compaction.
+
+    Each summarised turn is a real one — a user prompt, an assistant row that
+    calls a tool, the tool's result and a final answer — and the newest
+    compaction carries every user prompt as a preserved turn (built with the
+    core's own ``extract_preserved_user_turns`` + ``cap_preserved_user_turns``,
+    the payload a real journal holds; the reported session carried 126). The
+    kept window is short, so the render's head of carried copies is longer than
+    the phone's 80-row seed — the condition the report came from.
+    """
+    from local_operator.compaction.cutpoint import (
+        cap_preserved_user_turns,
+        extract_preserved_user_turns,
+    )
+
+    directory = config / "sessions" / SESSION_ID
+    directory.mkdir(parents=True)
+    transcript = Transcript(directory)
+    summarised: list[Any] = []
+
+    async def run() -> None:
+        for i in range(turns):
+            call = ToolCall(id=f"turn-call-{i}", name="bash", arguments={"command": "ls"})
+            turn = [
+                Message.user(f"operator request {i}", id=f"req-{i}"),
+                Message(
+                    role="assistant",
+                    content=[TextContent(text=f"looking {i}")],
+                    tool_calls=[call],
+                    stop_reason="toolUse",
+                    id=f"work-{i}",
+                ),
+                Message(
+                    role="tool",
+                    content=[TextContent(text=f"listing {i}")],
+                    tool_call_id=call.id,
+                    tool_name="bash",
+                    id=f"result-{i}",
+                ),
+                Message.assistant(f"final answer {i}", id=f"final-{i}"),
+            ]
+            for message in turn:
+                await transcript.append_message(message)
+            summarised.extend(turn)
+        cut = Message.user("kept request 0", id="kept-req-0")
+        await transcript.append_message(cut)
+        genuine = {str(m.id) for m in summarised if m.role == "user"}
+        preserved = [dict(t) for t in extract_preserved_user_turns(list(summarised), genuine)]
+        capped = cap_preserved_user_turns(preserved, cap=1_000_000)
+        await transcript.append_compaction(
+            "summary of the summarised turns",
+            cut.id,
+            180_000,
+            preserved_user_turns=[
+                {"id": str(turn["id"]), "text": str(turn["text"])} for turn in capped.turns
+            ],
+            preserved_turns_cap=1_000_000,
+        )
+        await transcript.append_message(Message.assistant("kept answer 0", id="kept-ans-0"))
+        for i in range(1, kept_turns):
+            await transcript.append_message(Message.user(f"kept request {i}", id=f"kept-req-{i}"))
+            await transcript.append_message(
+                Message.assistant(f"kept answer {i}", id=f"kept-ans-{i}")
+            )
+
+    asyncio.run(run())
+    transcript.close()
+    return {"preserved_user_ids": [f"req-{i}" for i in range(turns)]}
+
+
+def test_the_seed_does_not_paint_the_compactions_carried_user_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator report 2026-11-23: scrolled up, the phone showed a wall of the
+    operator's own messages with no agent work or final answers between them.
+
+    Those bubbles were the newest compaction's ``preserved_user_turns`` — model
+    context re-injected at the render's head under the ORIGINAL row ids — not
+    transcript rows. The desktop never paints them (its pages are journal rows,
+    and the journal holds each prompt once, at its own position, between the
+    work that answered it), and on the phone they were both the wall and the
+    cursor that stranded everything newer than the oldest copy the seed held.
+    """
+    config = tmp_path / "config"
+    built = _build_many_preserved(config)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = projection.transcript
+    copies = [row.id for row in seed if row.id in set(built["preserved_user_ids"])]
+    assert copies == [], f"the seed paints {len(copies)} carried user copies"
+    kinds = [row.kind for row in seed]
+    walls = [i for i in range(1, len(kinds)) if kinds[i] == kinds[i - 1] == "user"]
+    assert walls == [], "the seed shows consecutive user rows with no agent row between"
+
+    first_page, _ = _history_page(SESSION_ID, None, 50)
+    assert [row.id for row in first_page if row.id in set(built["preserved_user_ids"])] == []
+
+
+def test_paging_a_heavily_compacted_session_reaches_every_turns_answer_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same report: "I don't see any of the final responses".
+
+    With the carried copies in the seed, the phone's cursor was the oldest copy
+    it held, so ``?before=`` answered the rows older than THAT prompt's journal
+    position — and every assistant row, tool row and final answer between it and
+    the compaction was newer than the cursor and never served. The walk must
+    reproduce the whole-journal fold exactly: every row, once, in journal order,
+    ending with ``has_more`` false.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config)
+    walk = _walk(config, monkeypatch, page=50)
+    observed = _observed(walk)
+    expected = [row.id for row in _journal_rows(walk["directory"])]
+
+    assert walk["exhausted"], "the walk never reached the beginning of history"
+    missing = [row for row in expected if row not in set(observed)]
+    assert missing == [], f"{len(missing)} rows unreachable, e.g. {missing[:6]}"
+    assert len(observed) == len(set(observed)), "a row was served twice"
+    assert observed == expected, "the merged rows are not in journal order"
+    finals = [row for row in observed if row.startswith("final-")]
+    assert len(finals) == 100
+
+
+def test_a_long_kept_window_pins_no_false_opener_and_still_reaches_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4521 review R1-1/R1-2, QA Q1: the render > 80 rows shape.
+
+    With the carried copies shed, a compacted render opens at the marker, and
+    its first user row is the first prompt of the KEPT window. The 80-row cap
+    used to pin that row as the conversation's "opening message" (QA saw
+    ``req-120`` pinned where the real opener was ``req-0``). The render holds no
+    opener, so the seed must not claim one: no pin, a plain tail, and the real
+    opener served once — at its journal position, as the walk's oldest row.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) == PROJECTION_TRANSCRIPT_LIMIT, "the fixture must sit AT the cap"
+    assert projection.transcript_head_pinned is False, f"pinned {seed[0]!r} as the opener"
+    assert "transcript_head_pinned" not in projection.to_json()
+    assert "transcript_opener_absent" not in projection.to_json(), "in-process fact leaked"
+    assert seed[0] != "kept-req-0", "the kept window's first prompt was pinned"
+    # A plain tail: exactly the render's newest 80 rows, nothing out of order.
+    render = _fold([m for m in _replay_history(config)])
+    assert seed == [row.id for row in render][-PROJECTION_TRANSCRIPT_LIMIT:]
+
+    walk = _walk(config, monkeypatch, page=50)
+    observed = _observed(walk)
+    expected = [row.id for row in _journal_rows(walk["directory"])]
+    assert walk["exhausted"], "the walk never reached the beginning of history"
+    assert len(observed) == len(set(observed)), "a row was served twice"
+    assert observed == expected, "the merged rows are not the whole journal in order"
+    assert observed[0] == "req-0" and observed.count("req-0") == 1
+    assert len([row for row in observed if row.startswith("final-")]) == 100
+
+
+def test_a_live_append_after_a_compacted_seed_does_not_pin_a_kept_prompt(
+    tmp_path: Path,
+) -> None:
+    """The no-pin decision has to OUTLIVE the trim that made it.
+
+    The seed's trim drops the compaction marker, so the next live append — or
+    the frame cap's tail tier halving the published frame — would see a kept-
+    window prompt as the first user row and pin it after all. The fold keeps
+    the fact (``SessionProjection.transcript_opener_absent``) for both.
+    """
+    from local_operator.mobile.projection import ProjectionFold, cap_projection_frame
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(_replay_history(config))
+    assert fold.projection.transcript_head_pinned is False
+
+    for index in range(3):
+        fold._append(Row(id=f"live-{index}", kind="assistant", text="live work"))
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_head_pinned is False, f"re-pinned {ids[0]!r}"
+    assert ids[-3:] == ["live-0", "live-1", "live-2"]
+    assert len(ids) == PROJECTION_TRANSCRIPT_LIMIT
+
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=4_000)
+    assert degraded
+    capped = [row["id"] for row in frame["transcript"]]
+    assert "transcript_head_pinned" not in frame, f"the frame cap pinned {capped[0]!r}"
+    assert capped == ids[-len(capped) :], "the frame cap moved a row out of order"
+
+    # Control: a fold whose rows begin with a user row and no marker still pins
+    # it on both caps — the rule only stops claiming an opener the render lacks.
+    plain = ProjectionFold(SessionProjection(session_id="plain", pid=0, kind="daemon"))
+    plain._append(Row(id="opener", kind="user", text="the brief"))
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT + 2):
+        plain._append(Row(id=f"row-{index}", kind="assistant", text="body"))
+    assert plain.projection.transcript_head_pinned is True
+    assert plain.projection.transcript[0].id == "opener"
+    plain_frame, _ = cap_projection_frame(plain.projection, cap_bytes=4_000)
+    assert plain_frame["transcript"][0]["id"] == "opener"
+    assert plain_frame["transcript_head_pinned"] is True
+
+
+def _uncompacted_history(turns: int = 90) -> list[AgentMessage]:
+    """A marker-free history longer than the cap: an opener, then ``turns``
+    assistant replies, so the 80-row trim must PIN ``opener`` to keep it."""
+    return [
+        Message(role="user", content=[TextContent(text="the brief")], id="opener"),
+        *(
+            Message(role="assistant", content=[TextContent(text=f"reply {index}")], id=f"a-{index}")
+            for index in range(turns)
+        ),
+    ]
+
+
+def test_re_seeding_one_fold_re_decides_the_opener_each_time(tmp_path: Path) -> None:
+    """PR #4521 review R2-2: ``fold_history`` resets ``transcript_opener_absent``.
+
+    The same fold is re-seeded on reattach (``tui_handle.py`` and
+    ``serving.py`` both call ``self._fold.fold_history(session.history())``).
+    ``_cap_tail`` only DERIVES the no-opener fact while the flag is false, so
+    without the reset a compacted seed's True would outlive it: the next,
+    uncompacted seed would pin nothing and its real opener would fall out of
+    the 80-row tail. The reverse order must also hold — an uncompacted seed's
+    pin may not survive into a compacted one.
+    """
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=60)
+    compacted = _replay_history(config)
+    plain = _uncompacted_history()
+
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(compacted)
+    assert fold.projection.transcript_opener_absent is True
+    assert fold.projection.transcript_head_pinned is False
+
+    fold.fold_history(plain)
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_opener_absent is False, "the compacted seed's fact went stale"
+    assert fold.projection.transcript_head_pinned is True
+    assert ids[0] == "opener", f"the real opener fell out of the re-seed: {ids[:2]!r}"
+    assert len(ids) == PROJECTION_TRANSCRIPT_LIMIT
+
+    # Reverse: pinned first, then compacted — no pin, and no kept prompt claimed.
+    fold.fold_history(compacted)
+    ids = [row.id for row in fold.projection.transcript]
+    assert fold.projection.transcript_opener_absent is True
+    assert fold.projection.transcript_head_pinned is False, f"pinned {ids[0]!r}"
+    assert "opener" not in ids and ids[0] != "kept-req-0"
+
+
+def _replay_history(config: Path) -> list[AgentMessage]:
+    """The durable fold's replay (``history``) for the reach session."""
+    from local_operator.mobile.durable import _replay
+
+    history, _keep_start_id = _replay(_journal_entries(config / "sessions" / SESSION_ID))
+    return history
+
+
+def test_a_short_compacted_seed_tells_clients_older_rows_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #4521 QA Q3: a 3-turn kept window seeds a few rows and pins nothing.
+
+    With the carried copies shed, nothing pads a compacted render past the cap
+    any more, so neither the pin nor the 80-row length tells a client the seed
+    is partial — the relay SPA painted no load-earlier slot and made no fetch,
+    and every summarised turn was out of reach. ``transcript_has_older`` is the
+    wire fact; the pin must still be absent (QA Q1), and the walk from the
+    seed's own oldest row must reach the journal's first row.
+    """
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=3)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config)
+    projection = _durable_projection(SESSION_ID)
+    assert projection is not None
+    seed = [row.id for row in projection.transcript]
+    assert len(seed) < PROJECTION_TRANSCRIPT_LIMIT, "the fixture must be a SHORT seed"
+    wire = projection.to_json()
+    assert wire.get("transcript_has_older") is True, f"short compacted seed {seed!r} says nothing"
+    assert "transcript_head_pinned" not in wire, "a short compacted seed pinned an opener"
+    assert "req-0" not in seed
+
+    walk = _walk(config, monkeypatch, page=50)
+    assert walk["exhausted"]
+    assert _observed(walk)[0] == "req-0"
+
+
+def test_has_older_is_absent_on_a_complete_transcript_and_reset_by_a_re_seed(
+    tmp_path: Path,
+) -> None:
+    """The field must not claim a past a transcript does not have: an
+    uncompacted short session is complete (absent, so an older-daemon reading
+    and this one agree), and because the fact is sticky across live appends,
+    ``fold_history`` is what clears it when the same fold is re-seeded."""
+    from local_operator.mobile.projection import ProjectionFold
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    config = tmp_path / "config"
+    _build_many_preserved(config, kept_turns=3)
+    compacted = _replay_history(config)
+
+    fold = ProjectionFold(SessionProjection(session_id=SESSION_ID, pid=0, kind="daemon"))
+    fold.fold_history(_uncompacted_history(turns=5))
+    assert "transcript_has_older" not in fold.projection.to_json()
+
+    fold.fold_history(compacted)
+    assert fold.projection.transcript_has_older is True
+    # Sticky through live appends, including past the cap where the trim drops
+    # the marker that first said so.
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT + 5):
+        fold._append(Row(id=f"live-{index}", kind="assistant", text="body"))
+    assert fold.projection.transcript_has_older is True
+    assert fold.projection.transcript_head_pinned is False
+
+    fold.fold_history(_uncompacted_history(turns=5))
+    assert fold.projection.transcript_has_older is False, "a stale past outlived the re-seed"
+
+
+def test_the_frame_cap_says_older_rows_exist_when_it_cuts_a_short_head() -> None:
+    """``cap_projection_frame``'s tail tier trims below the fold's own length,
+    so it must state the fact itself: a 40-row fold says nothing (complete), and
+    the frame it halves to fit does."""
+    from local_operator.mobile.projection import ProjectionFold, cap_projection_frame
+    from local_operator.mobile.types import SessionProjection
+    from local_operator.mobile.types import TranscriptEntry as Row
+
+    fold = ProjectionFold(SessionProjection(session_id="short", pid=0, kind="daemon"))
+    for index in range(40):
+        fold._append(Row(id=f"row-{index}", kind="assistant", text="body " * 40))
+    assert fold.projection.transcript_has_older is False
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=4_000)
+    assert degraded and len(frame["transcript"]) < 40
+    assert frame["transcript_has_older"] is True
+    roomy, roomy_degraded = cap_projection_frame(fold.projection)
+    assert not roomy_degraded and "transcript_has_older" not in roomy

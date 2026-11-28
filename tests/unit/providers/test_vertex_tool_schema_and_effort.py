@@ -176,11 +176,20 @@ async def test_ai_studio_tool_schema_key_is_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("factory", [_vertex, _studio], ids=["vertex", "studio"])
-async def test_resolved_effort_rides_as_thinking_level(factory: Any) -> None:
-    request = _request(efforts=("low", "medium", "high", "xhigh"), effort="xhigh")
+@pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh"])
+@pytest.mark.parametrize("provider", ["google", "google-vertex"])
+async def test_offline_neon_effort_rides_as_thinking_level(
+    provider: str, level: str, disk_cache: Path
+) -> None:
+    spec = configure_mod.build_model_spec(provider, "gemini-4-neon")
+    assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh")
+    assert spec.reasoning_effort is None  # leave the model's default implicit
+    request = _request(provider=provider, tools=False).model_copy(
+        update={"model": spec.model_copy(update={"reasoning_effort": level})}
+    )
+    factory = _vertex if provider == "google-vertex" else _studio
     [body] = await _bodies(factory, request, api_key="k")
-    assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "xhigh"}
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": level}
 
 
 @pytest.mark.asyncio
@@ -329,8 +338,9 @@ def test_catalogue_ladder_is_gated_to_providers_with_a_wire_mapping(
 def test_build_model_spec_prefers_the_catalogue_over_the_table(
     models_dev: dict[str, Any], provider: str
 ) -> None:
-    spec = configure_mod.build_model_spec(provider, "gemini-4-neon")
-    assert spec.reasoning_efforts == ("low", "medium", "high", "xhigh")
+    # A projected ladder narrower than the family fallback proves precedence.
+    spec = configure_mod.build_model_spec(provider, "gemini-9-odd")
+    assert spec.reasoning_efforts == ("low",)
     # Nothing seeded: the model's own default applies until the user picks.
     assert spec.reasoning_effort is None
 
@@ -349,9 +359,7 @@ def test_build_model_spec_falls_back_to_the_table_offline(
     assert spec.reasoning_effort is None
 
 
-@pytest.mark.parametrize(
-    "model_id", ["gemini-3.8-flash", "gemini-4-neon", "gemini-5-x", "models/gemini-3-pro"]
-)
+@pytest.mark.parametrize("model_id", ["gemini-3.8-flash", "gemini-5-x", "models/gemini-3-pro"])
 def test_offline_table_covers_gemini_3_and_later(model_id: str) -> None:
     assert supported_efforts(model_id) == ("low", "medium", "high")
     assert default_effort(model_id) is None
@@ -378,8 +386,7 @@ def test_discovered_vertex_rows_carry_the_catalogue_ladder(
         "medium",
         "high",
     )
-    # A live publisher-listing row the registry has never heard of (the
-    # model-released-today case) gets its richer ladder from the catalogue.
+    # A publisher-listing row with no ladder picks up the catalogue's ladder.
     live = discovery.DiscoveredModel(id="gemini-4-neon")
     (filled,) = discovery._with_catalogue_efforts("google-vertex", [live], tmp_path)
     assert filled.reasoning_efforts == ("low", "medium", "high", "xhigh")
@@ -432,16 +439,19 @@ def test_catalogue_ladder_goes_live_once_the_document_lands(disk_cache: Path) ->
     built after the real document lands, in the same process, is live.
     """
     try:
-        cold = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
+        # Neon now agrees with the projection offline. Use a listing-only id
+        # whose projected ladder differs to keep each transition observable.
+        model_id = "gemini-9-odd"
+        cold = configure_mod.build_model_spec("google-vertex", model_id)
         assert cold.reasoning_efforts == ("low", "medium", "high")
 
         _write_models_dev(disk_cache, capture=prices.PRICE_CATALOGUE_CAPTURE - 1)
-        stale = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
+        stale = configure_mod.build_model_spec("google-vertex", model_id)
         assert stale.reasoning_efforts == ("low", "medium", "high")
 
         _write_models_dev(disk_cache)
-        warm = configure_mod.build_model_spec("google-vertex", "gemini-4-neon")
-        assert warm.reasoning_efforts == ("low", "medium", "high", "xhigh")
+        warm = configure_mod.build_model_spec("google-vertex", model_id)
+        assert warm.reasoning_efforts == ("low",)
     finally:
         configure_mod._catalogue_effort_memo.clear()
 

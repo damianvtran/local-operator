@@ -13,13 +13,14 @@ import hashlib
 import hmac
 import json
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Sequence, TypeGuard
 
 from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     model_serializer,
     model_validator,
 )
@@ -37,6 +38,7 @@ from local_operator.harness.types import (
     Message,
     TextContent,
 )
+from local_operator.session.inline_ui_text import INLINE_UI_V1, project_inline_ui
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
     audit_slice,
@@ -174,12 +176,18 @@ class DisplayHistoryWindow(BaseModel):
     # Specialized renderer metadata is not an AgentMessage/provider payload.
     # Absence stays absent on direct/legacy pages, not a new default null key.
     peer_cycle_display_records: dict[str, Any] | None = None
+    inline_ui: dict[str, Any] | None = None
+    # Sync assembles a larger frame than history_page. Defer this sidecar
+    # until the runtime knows the selected page and the actual frame budget.
+    _sync_inline_ui: dict[str, Any] | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
-    def _omit_absent_peer_cycles(self, handler: Any) -> dict[str, Any]:
+    def _omit_absent_sidecars(self, handler: Any) -> dict[str, Any]:
         payload = handler(self)
         if self.peer_cycle_display_records is None:
             payload.pop("peer_cycle_display_records", None)
+        if self.inline_ui is None:
+            payload.pop("inline_ui", None)
         return payload
 
     @model_validator(mode="before")
@@ -465,6 +473,7 @@ def display_window(
     max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
     durable_seed_tools: frozenset[str] = frozenset(),
     bound_oversized: bool = False,
+    inline_ui_sidecars: bool = False,
 ) -> DisplayHistoryWindow:
     """Reuse exact bounded display requests, never the mutable public replay.
 
@@ -496,10 +505,12 @@ def display_window(
         # A bounded page and the exact page for the same cut are different
         # answers; sharing a slot would hand a local viewer the cut rows.
         bound_oversized,
+        inline_ui_sidecars,
     )
     cached = cache.get(key)
     if cached is not None:
         return cached
+    inline_ui_sources: dict[str, Message] | None = {} if inline_ui_sidecars else None
     page = _capture_display_window(
         transcript,
         conversation_id=conversation_id,
@@ -511,6 +522,7 @@ def display_window(
         max_wire_bytes=max_wire_bytes,
         durable_seed_tools=durable_seed_tools,
         bound_oversized=bound_oversized,
+        inline_ui_sources=inline_ui_sources,
     )
     # Replay creates fresh models, but nested JSON-ish tool/provider payloads
     # may still share children with journal dictionaries. The mutable display
@@ -520,6 +532,8 @@ def display_window(
     from local_operator.harness.peer_cycle_display import BUILDING, attach_page_records
 
     page = attach_page_records(page, transcript, max_wire_bytes=max_wire_bytes)
+    if inline_ui_sources:
+        _attach_page_inline_ui(page, inline_ui_sources, max_wire_bytes=max_wire_bytes)
     # A page whose peer-cycle proof is still ``building`` (no current index
     # was in memory; the refresh is armed, not awaited) is served but NOT
     # cached: the cache key is the cut, which the refresh does not move, so a
@@ -549,6 +563,13 @@ def _audit_entry_cursor(transcript: Transcript) -> str | None:
     """
     entries = transcript._entries
     cut = context_cut_index(entries, quiet=True)
+    if getattr(transcript, "has_prefix", False) is True:
+        # Suffix-only load: the resident list starts at the cut's anchor, so the
+        # cut is resolved in it, and "a message precedes the cut" is the prefix
+        # flag the open computed. Same id the eager scan returns, no re-read.
+        if not transcript.prefix_flag("has_message"):
+            return None
+        return entries[cut].id if cut < len(entries) else _AUDIT_TAIL_CURSOR
     first = first_message_index(entries)
     # Nothing precedes the context replay: this conversation really does begin
     # where the context phase ends, and the chain terminates there as before.
@@ -563,7 +584,9 @@ def _audit_entry_cursor(transcript: Transcript) -> str | None:
 _AUDIT_TAIL_CURSOR = "\x00audit-tail"
 
 
-def _hoisted_turn_ids(transcript: Transcript) -> frozenset[str]:
+def _hoisted_turn_ids(
+    transcript: Transcript, entries: Sequence[TranscriptEntry] | None = None
+) -> frozenset[str]:
     """Cached :func:`context_preserved_turn_ids` for the current journal state.
 
     Cached because it is asked once per audit page and is not cheap: it runs the
@@ -581,7 +604,9 @@ def _hoisted_turn_ids(transcript: Transcript) -> frozenset[str]:
     cached = transcript._audit_hoisted_cache
     if cached is not None and cached[0] == generation:
         return cached[1]
-    resolved = frozenset(context_preserved_turn_ids(transcript._entries))
+    resolved = frozenset(
+        context_preserved_turn_ids(entries if entries is not None else transcript._entries)
+    )
     transcript._audit_hoisted_cache = (generation, resolved)
     return resolved
 
@@ -593,6 +618,7 @@ def _capture_audit_window(
     claims: dict[str, Any],
     max_messages: int,
     max_wire_bytes: int,
+    inline_ui_sources: dict[str, Message] | None,
 ) -> DisplayHistoryWindow:
     """One backward page of PRE-COMPACTION history.
 
@@ -615,7 +641,11 @@ def _capture_audit_window(
     cached presentation and re-fire the retitle gate across every session on
     the machine.
     """
-    entries = transcript._entries
+    # Audit pages are the one display path that needs prefix rows in full:
+    # ``entries()`` reads them back (counted). Off the boot path — only a reader
+    # scrolling above the compaction cut gets here. A paged offset reader is the
+    # follow-up (design brief §6 split).
+    entries = transcript.entries()
     cursor = str(claims.get("end_entry_id") or "")
     if cursor == _AUDIT_TAIL_CURSOR:
         end_index = len(entries)
@@ -647,7 +677,7 @@ def _capture_audit_window(
     # MISSING from the audit page rather than one shown twice. Suppress the
     # audit copy: the reader has already been shown that row by the context
     # page it scrolled through to get here.
-    hoisted = _hoisted_turn_ids(transcript)
+    hoisted = _hoisted_turn_ids(transcript, entries)
     messages, indices, window_start = audit_slice(
         entries,
         transcript._attachments,
@@ -714,11 +744,15 @@ def _capture_audit_window(
     used = 0
     keep = 0
     for offset in range(len(messages) - 1, -1, -1):
-        cost = len(json.dumps(messages[offset].model_dump(mode="json")).encode()) + 1
+        source = messages[offset]
+        messages[offset] = _history_prose_message(source)
+        cost = _message_wire_bytes(messages[offset]) + 1
         if used + cost > max_wire_bytes - 8192 and keep:
             break
         used += cost
         keep += 1
+        if inline_ui_sources is not None and _inline_ui_source(source):
+            inline_ui_sources[source.id] = source
     if not keep and messages:
         # A single row exceeds the whole frame budget. The context phase
         # answers this with ``full_required``, which escalates to a local
@@ -783,9 +817,11 @@ def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
     invalidation on every append.
     """
     from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+    from local_operator.session.transcript import projection_entries
 
     ids: set[str] = set()
-    for entry in transcript._entries:
+    # wake_prompt is a keep-set type, so prefix rows are in the projection.
+    for entry in projection_entries(transcript):
         payload = entry.payload
         if str(payload.get("custom_type", "")) != WAKE_PROMPT_MESSAGE_TYPE:
             continue
@@ -817,6 +853,94 @@ def _entry_time_join(
     carried = {str(getattr(message, "id", "")) for message in messages}
     carried.discard("")
     return {entry.id: entry.ts for entry in entries if entry.id in carried}
+
+
+def _carried_entry_times(
+    transcript: Transcript, messages: Sequence[AgentMessage]
+) -> dict[str, float]:
+    """:func:`_entry_time_join` for the context phase, prefix rows included.
+
+    A suffix-only load keeps only rows from the newest compaction's anchor
+    resident, yet the context replay hoists that compaction's preserved user
+    turns, which precede the anchor, onto the page. Joining over the resident
+    list alone dropped their times (PR #4591 review R1), so ask the transcript,
+    whose open scan kept a ``ts`` for every prefix row (no re-read). Doubles
+    without the method keep the old resident-list join.
+    """
+    resolve: Callable[[Iterable[str]], dict[str, float]] | None = getattr(
+        transcript, "entry_times_for", None
+    )
+    if not callable(resolve):
+        return _entry_time_join(transcript._entries, messages)
+    return resolve(str(getattr(message, "id", "")) for message in messages)
+
+
+def _inline_ui_source(message: AgentMessage) -> TypeGuard[Message]:
+    return (
+        isinstance(message, Message)
+        and message.role == "assistant"
+        and message._inline_ui_source_version == 1
+    )
+
+
+def _history_prose_message(message: AgentMessage) -> AgentMessage:
+    # Project before measuring or truncating the page so a widget never eats
+    # the prose budget or leaks as a partial fence. Replay still owns the source.
+    if not _inline_ui_source(message):
+        return message
+    source = message.text
+    text = project_inline_ui(
+        source,
+        streaming=False,
+        source_version=message._inline_ui_source_version,
+        capabilities=frozenset(),
+    )["text"]
+    if text == source:
+        return message
+
+    # Join before projection so a fence spanning content blocks cannot escape.
+    content = []
+    first_text = True
+    for block in message.content:
+        if not isinstance(block, TextContent):
+            content.append(block)
+        elif first_text:
+            if text:
+                content.append(block.model_copy(update={"text": text}))
+            first_text = False
+    return message.model_copy(update={"content": content})
+
+
+def _attach_page_inline_ui(
+    page: DisplayHistoryWindow, sources: dict[str, Message], *, max_wire_bytes: int
+) -> None:
+    from local_operator.session.runtime.inline_ui_egress import _attach
+
+    # Fit optional metadata after selection and peer-cycle records. A rich
+    # viewer must get exactly the same page and cursor as a prose-only viewer.
+    budget = max_wire_bytes - 8192 - len(json.dumps(page.model_dump(mode="json")).encode())
+    if budget <= 0:
+        return
+    extras: dict[str, Any] = {}
+    for row in page.messages:
+        source = sources.get(row.id)
+        if source is None:
+            continue
+        projection = project_inline_ui(
+            source.text,
+            streaming=False,
+            source_version=source._inline_ui_source_version,
+            capabilities=frozenset({INLINE_UI_V1}),
+        )
+        if not isinstance(row, Message) or projection["text"] != row.text:
+            # Bounded peer rows can have a shortened body; the original
+            # offsets are not a valid contract for that replacement text.
+            continue
+        trial = extras.copy()
+        _attach(trial, row.id, projection, include_text=True)
+        if len(json.dumps(trial).encode()) <= budget:
+            extras = trial
+    page.inline_ui = extras.get("inline_ui")
 
 
 def _message_wire_bytes(message: AgentMessage) -> int:
@@ -894,6 +1018,7 @@ def _capture_display_window(
     max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
     durable_seed_tools: frozenset[str] = frozenset(),
     bound_oversized: bool = False,
+    inline_ui_sources: dict[str, Message] | None = None,
 ) -> DisplayHistoryWindow:
     """Return complete replay rows, with tool call/result groups kept together.
 
@@ -932,6 +1057,7 @@ def _capture_display_window(
                 claims=claims,
                 max_messages=max_messages,
                 max_wire_bytes=max_wire_bytes,
+                inline_ui_sources=inline_ui_sources,
             )
     try:
         history = transcript.build_llm_history(through_id=through_id) if through_id else []
@@ -1023,10 +1149,10 @@ def _capture_display_window(
     selected: list[AgentMessage] = []
     used = 0
     for left in reversed([b for b in boundaries if b < end]):
-        group = history[left:start]
+        group = [_history_prose_message(message) for message in history[left:start]]
         # Match the socket's JSON encoding, including escaped non-ASCII text;
         # a character budget or UTF-8-only estimate understates that frame.
-        cost = sum(len(json.dumps(m.model_dump(mode="json")).encode()) + 1 for m in group)
+        cost = sum(_message_wire_bytes(m) + 1 for m in group)
         if (
             bound_oversized
             and not selected
@@ -1041,7 +1167,7 @@ def _capture_display_window(
             # the FIRST group selected, and never an anchored read, so every
             # other group is exact and older pages are reached by the same token.
             group = _bounded_group(group, max_wire_bytes - 8192)
-            cost = sum(len(json.dumps(m.model_dump(mode="json")).encode()) + 1 for m in group)
+            cost = sum(_message_wire_bytes(m) + 1 for m in group)
         if used + cost > max_wire_bytes - 8192 or len(selected) + len(group) > max_messages:
             if not selected or (
                 anchor
@@ -1075,6 +1201,10 @@ def _capture_display_window(
                     **envelope,
                 )
             break
+        if inline_ui_sources is not None:
+            for source in history[left:start]:
+                if _inline_ui_source(source):
+                    inline_ui_sources[source.id] = source
         selected[0:0] = group
         used += cost
         start = left
@@ -1103,7 +1233,9 @@ def _capture_display_window(
         messages=selected,
         # The id→ts join over the rows THIS page carries, so a reader downstream
         # can stamp a wire row with its true entry time instead of its serve time.
-        entry_times=_entry_time_join(transcript._entries, selected),
+        # Through the transcript, not ``_entries``: on a suffix-only load the
+        # page also carries hoisted preserved turns, which are PREFIX rows.
+        entry_times=_carried_entry_times(transcript, selected),
         durable_seed_tool_ids=seed_tool_ids,
         before_token=before_token,
         snapshot_token=snapshot_token,

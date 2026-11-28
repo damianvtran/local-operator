@@ -9,6 +9,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import aclosing, asynccontextmanager
@@ -159,12 +160,14 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.index_prewarm import start_session_warm
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.remote_open import PeerSessionUnresolved
 from local_operator.session.row_clip import (
     ROW_RANGE_MAX_BYTES,
     RowRangeUnsatisfiable,
     wire_json,
 )
+from local_operator.session.runtime.inline_ui_egress import without_desktop_inline_ui
 from local_operator.session.runtime.presence import PRESENCE_TTL_S
 from local_operator.slash_commands import (
     SESSION_COPY_FLAG,
@@ -1402,6 +1405,7 @@ class FileRef(Input):
 
 class Prompt(Input):
     request_id: RequestID
+    inline_ui: Annotated[bool, Field(strict=True)] = False
     text: str = Field(max_length=200_000)
     images: list[PromptImage] = Field(default_factory=list, max_length=8)
     # Documents ride as REFERENCES: the upload route stored the bytes, and the
@@ -1452,14 +1456,25 @@ class Prompt(Input):
     @model_serializer(mode="wrap")
     def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
         # The receipt journal fingerprints ``model_dump()`` bytes, so a
-        # same-id retry claimed BEFORE the delivery field existed must not
-        # read as a changed body after an upgrade. ``None`` is the absent
-        # reading, so it leaves the dump exactly as the pre-field build
-        # wrote it (the wrap-serializer pattern ``PromptImage.
-        # _omit_absent_origin`` already uses for the same reason).
+        # same-id retry claimed BEFORE a field existed must not read as a
+        # changed body after an upgrade. Each optional field's absent reading
+        # therefore leaves the dump exactly as the pre-field build wrote it
+        # (the wrap-serializer pattern ``PromptImage._omit_absent_origin``
+        # already uses for the same reason):
+        #
+        # * ``delivery``: ``None`` is absent.
+        # * ``inline_ui``: ``False`` is absent. The flag is the viewer's
+        #   per-send capability claim for inline UI widgets; a client that
+        #   predates it never sends it, and every reader downstream treats a
+        #   missing key as ``False`` (``frame.get("inline_ui") is True``), so
+        #   omitting the default changes no behaviour. ``True`` stays in the
+        #   dump: it is part of the retry identity, like ``input_mode``.
         data = handler(self)
-        if isinstance(data, dict) and data.get("delivery") is None:
-            data.pop("delivery", None)
+        if isinstance(data, dict):
+            if data.get("delivery") is None:
+                data.pop("delivery", None)
+            if data.get("inline_ui") is False:
+                data.pop("inline_ui", None)
         return data
 
     @model_validator(mode="after")
@@ -1765,13 +1780,16 @@ class Interrupt(Input):
 def host(request: Request) -> DesktopSessions:
     pool = getattr(request.app.state, "desktop_sessions", None)
     if pool is None:
+        from local_operator.server.desktop_idle_update import stopping
+
         pool = DesktopSessions(
             request.app.state.config_manager.config_dir,
             # The DAEMON's retirement, asked of app state rather than of the pool:
             # the pool is built lazily by the first request that needs it, and a
             # pool built after the announcement must refuse for the same reason
             # (and with the same 503) as one built before it.
-            retiring=lambda: bool(getattr(request.app.state, RETIRING_STATE_ATTR, False)),
+            retiring=lambda: bool(getattr(request.app.state, RETIRING_STATE_ATTR, False))
+            or stopping(request.app),
         )
         request.app.state.desktop_sessions = pool
     return pool
@@ -2231,7 +2249,7 @@ async def _queue_or_refuse(
         raise error
     line = InboxLine(
         text=body.text,
-        sender={},
+        sender={"input_surface": "desktop"},
         mode="steer" if body.mode == "steer" else "mailbox",
         written_at=time.time(),
         # ``wake`` + ``SOURCE_USER`` is what makes ``append_for_successor``
@@ -2241,6 +2259,7 @@ async def _queue_or_refuse(
         wake=True,
         source=SOURCE_USER,
         command_id=body.request_id,
+        inline_ui=body.inline_ui,
     )
     try:
         written = await await_spool_write(
@@ -2937,10 +2956,14 @@ async def browser_owner_status(request: Request, body: BrowserOwnerQuery):
     )
 
 
+_SESSION_PAGE_LIMIT = 500
+_WorkspaceRestID = Annotated[str, Field(pattern=BULK_RECEIPT_SESSION_ID_PATTERN)]
+
+
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
 async def list_sessions(
     request: Request,
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=_SESSION_PAGE_LIMIT),
     include_archived: bool = Query(default=False),
     # Temporary chats (``features.temporary_chats``): off by default, so an
     # older client never sees one; the UI asks and partitions them into its
@@ -2974,6 +2997,9 @@ async def list_sessions(
     # request's ``include_archived`` still governs which ROWS come back; a client
     # that asks for archived rows gets them and the counts do not move.
     with_counts: bool = Query(default=False),
+    # Only names a subset of the already authorized local page, never expands
+    # membership or starts a feed. Share the page's existing cardinality bound.
+    workspace_rest_id: list[_WorkspaceRestID] = Query(default=[], max_length=_SESSION_PAGE_LIMIT),
 ):
     # REFUSED BEFORE THE STORE IS TOUCHED, so a malformed scope costs no scan and
     # cannot be answered by anything the store says.
@@ -2998,6 +3024,12 @@ async def list_sessions(
         page = await host(request).list(
             limit,
             status_stamps=stamps,
+            workspace_rest_ids=frozenset(workspace_rest_id),
+            workspace_rest_epoch=(
+                engine.epoch
+                if workspace_rest_id and engine is not None and engine.subscribers
+                else None
+            ),
             include_archived=include_archived,
             include_temporary=include_temporary,
             include_peers=include_peers,
@@ -3820,6 +3852,7 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -3872,6 +3905,7 @@ async def snapshot(
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         frame = await bridge.snapshot(
+            **inline_ui_opt_in(inline_ui),
             entry_times=bool(entry_ts),
             open_frame=bool(open_frame),
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
@@ -3950,6 +3984,7 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -3998,6 +4033,7 @@ async def history(
     ):
         return reply(
             await bridge.history(
+                **inline_ui_opt_in(inline_ui),
                 before_id=before_id,
                 around_id=around_id,
                 before=before,
@@ -4944,7 +4980,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
             try:
                 async with host(request).session(session_id) as bridge:
 
-                    async def admit():
+                    async def admit(inline_ui: bool):
                         nonlocal admitted
                         assert bridge.remote is not None
                         # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
@@ -4987,6 +5023,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # legacy-sender frame stays byte-identical and an owner
                             # from before the modes never sees the key.
                             delivery=body.delivery,
+                            **inline_ui_opt_in(inline_ui),
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event
@@ -5001,11 +5038,10 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         }
 
                     return reply(
-                        await receipts(request).run(
+                        await receipts(request).run_prompt(
                             session_id + ":" + body.request_id,
                             body.model_dump(),
                             admit,
-                            retry_safe=True,
                         )
                     )
             except ConnectionError as error:
@@ -5019,11 +5055,20 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 # when queueing is honest and why it is at-most-once.
                 if not _owner_busy(error):
                     raise
-                queued = await receipts(request).run(
-                    session_id + ":" + body.request_id,
-                    body.model_dump(),
-                    functools.partial(_queue_or_refuse, request, session_id, body, error),
-                    retry_safe=True,
+                # The receipt callback must not close over the exception target
+                # Python clears at the end of an except block.
+                busy_error = error
+
+                async def spool(inline_ui: bool) -> dict[str, Any]:
+                    return await _queue_or_refuse(
+                        request,
+                        session_id,
+                        body.model_copy(update={"inline_ui": inline_ui}),
+                        busy_error,
+                    )
+
+                queued = await receipts(request).run_prompt(
+                    session_id + ":" + body.request_id, body.model_dump(), spool
                 )
                 # A queued message is the owner's from here, exactly like an
                 # admitted one: publishing ``admission.failed`` would tell every
@@ -5444,6 +5489,177 @@ async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, bo
     return "dismissed"
 
 
+def _indexed_ask(root: pathlib.Path, session_id: str, ask_id: str) -> bool:
+    """Whether the cross-session ask index lists ``ask_id`` under ``session_id``.
+
+    The index is what the Notifications page and the dock read
+    (``notifications.items.open_asks``), so this is exactly "an ask the inbox
+    could have shown". One small JSON read; never the session's log.
+    """
+    from local_operator.asks import store as ask_store
+
+    entry = ask_store.read_entry(root, session_id) or {}
+    return any(
+        isinstance(row, Mapping) and str(row.get("ask_id") or "") == ask_id
+        for row in entry.get("asks") or ()
+    )
+
+
+def _doorless_ask_target(root: pathlib.Path, session_id: str, ask_id: str) -> str | None:
+    """Which doorless arm an ask op takes: ``"delegated"``, ``"deleted"`` or ``None``.
+
+    WHY THIS EXISTS (operator report 2026-11-24, ask a-00ac). The Notifications
+    page lists every ask in the index, including asks a SUBAGENT raised, but the
+    desktop pool's door (``_door_may_open``) deliberately refuses hidden origins,
+    so Answer, Decline and Dismiss on such a row all answered 404
+    ``requested_not_found`` and the row could never be put away. The same 404
+    met a row whose conversation had been deleted while a client still showed it.
+
+    ``None`` keeps the ordinary door, and is the answer for every id the door can
+    serve (a user conversation, a peer's conversation) and for every id this
+    function cannot vouch for -- so nothing the door used to answer changes.
+
+    * ``"delegated"``: the directory is here, the door refuses its origin, and
+      the INDEX lists this ask under it. The widening is per ASK, not per origin:
+      a subagent id with no indexed ask still gets the door's 404, so this is not
+      the "hidden but reachable" catch-all ``_door_may_open`` forbids.
+    * ``"deleted"``: no directory here and the shared orphan verdict
+      (``asks.orphans.session_gone``: not handed away, not in the cached peer
+      listing) agrees. Only reached AFTER the pool door answered "unknown",
+      which already includes its own peer read -- a silent peer raises the
+      retryable peer refusal there and never reaches this function.
+
+    Blocking (a few stats, one JSON read): call it off the event loop.
+    """
+    from local_operator.server.utils.desktop_sessions import _door_may_open
+    from local_operator.session.catalog import session_directory_name
+
+    # Same id-shape guard ``cleanup.delete_session`` applies: ``Path`` joining
+    # does not keep an id inside ``sessions/``.
+    if not session_directory_name(session_id) or session_id != pathlib.Path(session_id).name:
+        return None
+    directory = root / "sessions" / session_id
+    if directory.is_dir():
+        if _door_may_open(directory):
+            return None
+        return "delegated" if _indexed_ask(root, session_id, ask_id) else None
+    from local_operator.asks.orphans import session_gone
+
+    return "deleted" if session_gone(root, session_id) else None
+
+
+async def _answer_deleted_owner(
+    request: Request, session_id: str, body: Answer
+) -> CRUDResponse[AnswerReceipt]:
+    """Settle an ask whose conversation no longer exists, locally (shared contract).
+
+    Dismiss and Decline are the operator putting a row away, and there is no
+    agent left to tell, so both succeed HERE: the ask is dropped from the index
+    entry (if the reader's sweep has not already dropped it) and its inbox read
+    mark is removed. Its deadline wake row is NOT touched: the wake supervisor
+    already skips a session whose directory is gone (``_session_exists``), and
+    the wake entry goes with the conversation's other records. Idempotent: a
+    second tap on a stale row is the same 200.
+
+    A plain answer (or a revision) is REFUSED 409 ``conversation_deleted``: an
+    answer is addressed to an agent, and claiming it was delivered would be a
+    lie. The sentence tells the user what to do instead.
+    """
+    from local_operator.asks import orphans
+
+    if not (body.dismiss is True or body.decline is True):
+        raise HTTPException(409, _wd.conversation_deleted().envelope(code="conversation_deleted"))
+    word = "dismissed" if body.dismiss is True else "declined"
+    await orphans.settle_deleted_ask(store_root(request), session_id, str(body.ask_id or ""))
+    return reply({"detail": word, "consent_bearing": None})
+
+
+async def _answer_delegated_ask(
+    request: Request, session_id: str, body: Answer
+) -> CRUDResponse[AnswerReceipt]:
+    """Answer, decline or dismiss a SUBAGENT's indexed ask without the pool door.
+
+    The same two doors the phone's cold ask route uses (``mobile/daemon.py``),
+    so a delegated session is reached the way every other surface reaches it:
+
+    * DISMISS goes cold first (``asks.dismiss.dismiss_cold``: boots nothing,
+      SA-D5 / §14), and only a LIVE owner is dialled.
+    * DECLINE / ANSWER / REVISE engage the session's runtime through the one
+      engage-and-dial seam (``engage_session_client`` with an ``AskErrand``),
+      so the answer lands in the subagent's own log and its runtime delivers it
+      as a turn -- the same "late answer arrives as a turn" contract as any ask.
+
+    POLICY DIFFERENCE FROM THE PHONE (review round 1, R2; deliberate, recorded
+    here). The phone's cold ask route refuses a non-user session outright
+    (``mobile/daemon.py`` ``_durable_user_session_dir`` -> 409
+    ``ask_session_gone``); this desktop arm instead lets the operator settle a
+    subagent's indexed ask. The cost: Decline on a COLD subagent boots its
+    runtime and spends one turn whose output reaches no parent if the parent run
+    has finished. There is no cold decline door to use instead -- a decline is
+    addressed to the agent (``AskQueue.decline`` notifies it), unlike a dismiss,
+    which ``dismiss_cold`` can record bootlessly. A user who only wants the row
+    gone has Dismiss, which never boots.
+    """
+    from local_operator.asks.dismiss import dismiss_cold
+    from local_operator.mobile.attach_client import engage_session_client
+    from local_operator.session.runtime.launch import AskErrand
+
+    root = store_root(request)
+    ask_id = str(body.ask_id or "")
+    if body.dismiss is True:
+        outcome = await dismiss_cold(root, session_id, ask_id, by="desktop", reason=body.reason)
+        if outcome.get("ok"):
+            return reply({"detail": "dismissed", "consent_bearing": None})
+        if str(outcome.get("code") or "") != "ask_owner_present":
+            raise _dismissal_refusal(outcome.get("error"))
+    # An engage failure (no provider, a runtime that died in the gap) reaches
+    # the caller's ``errors(request)`` ladder as the SAME types the pool arm's
+    # facade raises (``AttachedSession._ensure_bound``): a vetted sentence rides
+    # ``ActionableConnectionError`` ("No model provider is configured yet..."),
+    # anything else is a plain ``ConnectionError`` and gets the generic 503.
+    from local_operator.session.runtime.launch import (
+        ActionableConnectionError,
+        RuntimeStartupError,
+    )
+
+    try:
+        client, _ = await engage_session_client(root, session_id, AskErrand(ask_id=ask_id))
+    except RuntimeStartupError as error:
+        if error.actionable:
+            raise ActionableConnectionError(error.actionable) from error
+        raise ConnectionError(str(error)) from error
+    try:
+        if body.dismiss is True:
+            detail: Any = await client.ask_dismiss(ask_id, by="desktop", reason=body.reason)
+        elif body.decline is True:
+            detail = await client.ask_decline(ask_id, by="desktop")
+        elif body.revise is True:
+            detail = await client.ask_revise(ask_id, body.answers or {}, by="desktop")
+        elif body.images:
+            detail = await client.ask_respond(
+                ask_id,
+                body.answers or {},
+                by="desktop",
+                images=[image.model_dump() for image in body.images],
+            )
+        else:
+            detail = await client.ask_respond(ask_id, body.answers or {}, by="desktop")
+    except (ValueError, RuntimeError) as error:
+        # The ask's own sentence (already answered, expired...), as the pool
+        # arm maps the same refusal: 409, never a reconnect remedy.
+        raise HTTPException(409, str(error) or "the answer was refused") from None
+    finally:
+        client.close()
+    if isinstance(detail, Mapping):
+        if not detail.get("ok", True):
+            raise _dismissal_refusal(detail.get("error"))
+        detail = "dismissed"
+    # Never consent: this backend did not start that runtime with an operator
+    # proof, so the runtime stamps the answer ``unverified`` (incident a-48e3).
+    consent = None if (body.decline or body.dismiss) else False
+    return reply({"detail": str(detail), "consent_bearing": consent})
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/profile-action-status",
     response_model=CRUDResponse[dict[str, str]],
@@ -5455,9 +5671,84 @@ async def profile_action_status(session_id: str, body: ProfileActionStatus, requ
         return reply(await bridge.remote.profile_action_status(**body.model_dump()))
 
 
+class _AskOwnerUnknown(Exception):
+    """The pool door answered "unknown session" for a QUEUED-ASK op.
+
+    Deliberately NOT a ``KeyError``: it must pass through the ``errors()``
+    ladder (which would turn a ``KeyError`` into the 404) so :func:`answer` can
+    try the doorless arms first. Raised only while ENTERING the door, never from
+    the route body, so a ``KeyError`` from an ask op itself keeps its meaning.
+    """
+
+
+@asynccontextmanager
+async def _ask_door(gate: Any) -> AsyncIterator[Any]:
+    """The pool door ``gate``, with an unknown id raised as :class:`_AskOwnerUnknown`.
+
+    Takes the ALREADY-BUILT ``host(request).session(...)`` context so the call
+    that is the door stays visibly inside the route handler (the latch walk in
+    ``tests/unit/server/test_serve_retire.py`` matches handlers on that call).
+    The door stays the ONE place that decides "unknown" (its peer read, draft
+    containment and hidden-origin refusal run unchanged); this only lets the
+    answers route react to that verdict for an ask the inbox listed.
+    """
+    try:
+        bridge = await gate.__aenter__()
+    except KeyError as error:
+        raise _AskOwnerUnknown() from error
+    try:
+        yield bridge
+    except BaseException:
+        if not await gate.__aexit__(*sys.exc_info()):
+            raise
+    else:
+        await gate.__aexit__(None, None, None)
+
+
+def _with_doorless_ask_arms(through_door: Callable[..., Awaitable[Any]]) -> Any:
+    """Wrap the answers handler: the pool door first, then the doorless ask arms.
+
+    Every request runs the original handler exactly as before. Only when its
+    door answers "unknown session" for a QUEUED ASK (``ask_id``) does the route
+    look further (``_doorless_ask_target``): a subagent's indexed ask, or an ask
+    whose conversation is gone. Anything else keeps the door's 404 unchanged.
+    Operator report 2026-11-24 (ask a-00ac): those two cases answered 404 on
+    Answer, Decline and Dismiss alike, so the Notifications row was stuck.
+
+    ``functools.wraps`` keeps the handler's name and signature, which is what
+    FastAPI reads for the body model and what the latch walk keys routes by.
+    """
+
+    @functools.wraps(through_door)
+    async def answer(session_id: str, body: Answer, request: Request):
+        try:
+            return await through_door(session_id, body, request)
+        except _AskOwnerUnknown:
+            pass
+        doorless = await asyncio.to_thread(
+            _doorless_ask_target, store_root(request), session_id, str(body.ask_id or "")
+        )
+        if doorless is None:
+            raise HTTPException(404, _wd.requested_not_found().envelope())
+        async with errors(request):
+            if doorless == "deleted":
+                # A local settle of a row with nothing behind it: safe on a
+                # latched daemon too, so the door's latch is not consulted.
+                return await _answer_deleted_owner(request, session_id, body)
+            # The delegated arm can ENGAGE a runtime, so the latch applies to it
+            # exactly as it does to the door (``DesktopSessions.assert_admitting``).
+            admitting = getattr(host(request), "assert_admitting", None)
+            if callable(admitting):
+                admitting()
+            return await _answer_delegated_ask(request, session_id, body)
+
+    return answer
+
+
 @router.post(
     "/v1/desktop/sessions/{session_id}/answers", response_model=CRUDResponse[AnswerReceipt]
 )
+@_with_doorless_ask_arms
 async def answer(session_id: str, body: Answer, request: Request):
     """Answer the pending gate, or refuse because this process is leaving.
 
@@ -5489,7 +5780,12 @@ async def answer(session_id: str, body: Answer, request: Request):
     session_options: _AnswerSessionOptions = (
         {"control_only": True} if body.ask_id is not None else {}
     )
-    async with errors(request), host(request).session(session_id, **session_options) as bridge:
+    gate = host(request).session(session_id, **session_options)
+    # A queued ask's "unknown session" is raised as ``_AskOwnerUnknown`` so the
+    # wrapper (``_with_doorless_ask_arms``) can try the doorless arms; a gate
+    # answer keeps the plain door and its 404.
+    door = _ask_door(gate) if body.ask_id is not None else gate
+    async with errors(request), door as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
             # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
@@ -6975,6 +7271,7 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    inline_ui: Annotated[int, Query(ge=0, le=1)] = 0,
     # Viewer-declared (QA F5 on #3762): a client that can paint nested
     # write/edit binding rows sends 1; default 0 serves today's rows exactly.
     diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
@@ -7011,7 +7308,20 @@ async def events(
     # because the reduction some callers build is a request whose state carries
     # only the pool (`SimpleNamespace`), and the app-state attribute is not part
     # of what this route needs.
-    release_paint = transcript_index.hold_paint(pool.root, session_id)
+    release_index_hold = transcript_index.hold_paint(pool.root, session_id)
+    # INTERACTIVE-FIRST ADMISSION (``DesktopSessions.hold_interactive_open``):
+    # the same span, the same exits, a different resource. The paint hold makes
+    # index SCANS give way; this makes another session's background read that
+    # would COLD-BUILD a bridge wait (bounded) until this snapshot is written,
+    # because that build holds the GIL for 1-1.5 s on a large roster. Folded
+    # into ``release_paint`` so every exit that releases one releases both --
+    # the snapshot frame, a refusal, a disconnect, a never-iterated body.
+    release_admission = pool.hold_interactive_open()
+
+    def release_paint() -> None:
+        release_index_hold()
+        release_admission()
+
     # R1 HANDOFF: a first-paint open was already holding since before the
     # middleware stack (``server.early_paint_hold``). Dropped only AFTER the
     # route's hold is taken, so the count never reaches zero in between, and
@@ -7023,7 +7333,9 @@ async def events(
     session_options: _EventsSessionOptions = (
         {} if ingress_trace is None else {"ingress_trace": ingress_trace}
     )
-    context = pool.session(session_id, read=True, allow_draft=True, **session_options)
+    context = pool.session(
+        session_id, read=True, allow_draft=True, interactive_open=True, **session_options
+    )
     try:
         async with errors(request):
             bridge: DesktopSessionBridge = await context.__aenter__()
@@ -7080,6 +7392,9 @@ async def events(
         await context.__aexit__(None, None, None)
 
     async def stream():
+        # One HTTP request owns the correlation; the bridge and its cold/attach
+        # tasks may be reused by another stream of this same session.
+        wire_open_id = ingress_trace.open_id if ingress_trace is not None else None
         try:
             # THE GENERATOR IS CLOSED BEFORE THE RELEASE, AND THAT ORDER IS THE
             # FIX (F-A). On a CANCELLED teardown -- which is what an SSE client's
@@ -7111,13 +7426,19 @@ async def events(
                     entry_times=bool(entry_ts),
                     open_frame=bool(open_frame),
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    **inline_ui_opt_in(inline_ui),
                     peer_journal_source=bool(peer_journal_source),
+                    trace_open_id=wire_open_id,
                 )
             ) as frames:
                 try:
                     async for frame in frames:
+                        if not inline_ui:
+                            frame = without_desktop_inline_ui(frame)
                         ser_at = time.monotonic() if open_trace.enabled() else 0.0
-                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                        kind = frame.get("type") if isinstance(frame, dict) else ""
+                        is_snapshot = kind == "snapshot"
+                        if is_snapshot:
                             # The one frame proportional to the session (bounded
                             # state + a history page): encode it in a thread so a
                             # large session's open does not spend loop time here
@@ -7127,15 +7448,23 @@ async def events(
                         else:
                             text = _sse_data(frame)
                         if ser_at:
+                            # Only the first authoritative snapshot is on the
+                            # open's critical path. Resyncs and heartbeats keep
+                            # their existing uncorrelated rows.
+                            fields = {}
+                            if is_snapshot and wire_open_id is not None:
+                                fields["open_id"] = wire_open_id
+                                wire_open_id = None
                             open_trace.mark(
                                 "a.wire.frame",
                                 (time.monotonic() - ser_at) * 1000,
                                 session=session_id,
-                                kind=frame.get("type") if isinstance(frame, dict) else "",
+                                kind=kind,
                                 chars=len(text),
+                                **fields,
                             )
                         yield text
-                        if isinstance(frame, dict) and frame.get("type") == "snapshot":
+                        if is_snapshot:
                             # Written: the first paint no longer needs the GIL to
                             # itself, so a deferred scan may start now.
                             release_paint()

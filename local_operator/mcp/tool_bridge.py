@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import copy
 import re
+import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,12 @@ from local_operator.harness.types import (
     ToolContext,
     ToolExecuteFn,
     ToolResult,
+)
+from local_operator.tools.result_normalize import (
+    RESULT_NORMALIZATION_DEFAULT,
+    normalize_tool_text,
+    seen_url_key,
+    shown_urls,
 )
 
 if TYPE_CHECKING:
@@ -499,6 +506,70 @@ def _without_redundant_content_text(server_result: dict[str, Any]) -> dict[str, 
     return sanitized
 
 
+class SeenUrlLedger:
+    """The URLs one session has already shown its model through MCP results.
+
+    Why: a search hit whose URL the model already saw -- in a sibling search
+    of the same turn, an earlier search or a fetched page -- re-sends a
+    snippet the model already has, and every result is re-read from the
+    cache on each later turn (``result_normalize.elide_seen_snippets``).
+
+    Constraints:
+
+    * **One per session**, owned by the ``McpManager`` and keyed by
+      ``ToolContext.session_id``, so a subagent (its own session id) never
+      loses a snippet because its parent saw the URL. In memory only: after a
+      restart the ledger starts empty, which can only show a snippet again,
+      never hide one the model did not see.
+    * **Deterministic given call order.** ``format_mcp_result`` holds
+      ``lock`` from the snapshot to the record, so results are formatted one
+      at a time per session and each sees exactly the URLs of the results
+      formatted before it. Parallel calls are ordered by completion -- the
+      order their results are created and persisted in.
+    * **Byte-stable on resume and replay**: the elided text is what the
+      ``ToolResult`` persists; nothing re-normalizes it later, so the ledger
+      never has to be rebuilt to reproduce a transcript.
+    * Only URLs that reached the model are recorded: machine-read results and
+      ``off`` never touch it, and a URL a spill cut off the inline text is not
+      recorded (``format_mcp_result``).
+    * **Only as long as the model still has the text.** A compaction drops
+      the earlier results from the model's context while the session id
+      stays the same, so the manager drops the ledger then
+      (``McpManager.forget_seen_urls``, called from the session's compaction
+      commit) and again when the session is disposed (PR #4540 review M1/m5).
+    * **Bounded** to ``max_urls`` keys, least recently shown evicted first.
+      Forgetting a URL can only show its snippet again; the bound exists so a
+      host serving one session for days cannot grow without limit. POC run 2
+      showed at most 233 URLs per session (184 hits + 49 fetches), so the
+      5,000 default is ~20x the measured maximum and never evicts in practice.
+    """
+
+    #: See "Bounded" above.
+    MAX_URLS_DEFAULT = 5_000
+
+    def __init__(self, max_urls: int = MAX_URLS_DEFAULT) -> None:
+        # A thread lock, not an asyncio one: MCP results are formatted in a
+        # worker thread (``asyncio.to_thread``) by ``McpManager``.
+        self.lock = threading.Lock()
+        self._max_urls = max_urls
+        # Insertion-ordered dict as an LRU: a re-shown URL moves to the end.
+        self._keys: dict[str, None] = {}
+
+    def snapshot(self) -> frozenset[str]:
+        return frozenset(self._keys)
+
+    def record(self, urls: Iterable[str]) -> None:
+        for url in urls:
+            key = seen_url_key(url)
+            self._keys.pop(key, None)
+            self._keys[key] = None
+        while len(self._keys) > self._max_urls:
+            del self._keys[next(iter(self._keys))]
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+
 def format_mcp_result(
     result: CallToolResult | dict[str, Any],
     tool_call_id: str = "",
@@ -506,6 +577,60 @@ def format_mcp_result(
     context: ToolContext | None = None,
     *,
     producer_scope: str | None = None,
+    normalization: str = RESULT_NORMALIZATION_DEFAULT,
+    mcp_tool_name: str = "",
+    search_snippet_chars: int = 0,
+    seen_urls: SeenUrlLedger | None = None,
+    text_rendering: bool = False,
+) -> ToolResult:
+    """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
+
+    See ``_format_mcp_result`` for the flattening. ``seen_urls`` is the
+    session's ``SeenUrlLedger``: under a normalizing mode its snapshot drives
+    seen-URL snippet elision, and the URLs this result shows the model are
+    recorded in it afterwards, under its lock (see ``SeenUrlLedger`` for why).
+    ``text_rendering`` is ``mcp.result_text_rendering``
+    (``result_normalize.render_result_text``).
+    """
+    kwargs: dict[str, Any] = {
+        "producer_scope": producer_scope,
+        "normalization": normalization,
+        "mcp_tool_name": mcp_tool_name,
+        "search_snippet_chars": search_snippet_chars,
+        "text_rendering": text_rendering,
+    }
+    if seen_urls is None or normalization == "off":
+        return _format_mcp_result(result, tool_call_id, tool_name, context, **kwargs)
+    with seen_urls.lock:
+        shown: list[str] = []
+        formatted = _format_mcp_result(
+            result,
+            tool_call_id,
+            tool_name,
+            context,
+            seen=seen_urls.snapshot(),
+            shown=shown,
+            **kwargs,
+        )
+        if not formatted.is_error:
+            text = formatted.text
+            seen_urls.record(url for url in shown if url in text)
+        return formatted
+
+
+def _format_mcp_result(
+    result: CallToolResult | dict[str, Any],
+    tool_call_id: str = "",
+    tool_name: str = "",
+    context: ToolContext | None = None,
+    *,
+    producer_scope: str | None = None,
+    normalization: str = RESULT_NORMALIZATION_DEFAULT,
+    mcp_tool_name: str = "",
+    search_snippet_chars: int = 0,
+    text_rendering: bool = False,
+    seen: frozenset[str] = frozenset(),
+    shown: list[str] | None = None,
 ) -> ToolResult:
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
@@ -518,6 +643,17 @@ def format_mcp_result(
 
     ``result`` is the SDK model on every live call path; the raw-dict branch
     covers servers whose payload never went through SDK validation.
+
+    ``normalization`` is the ``mcp.result_normalization`` mode applied to a
+    non-error result's text (see :mod:`local_operator.tools.result_normalize`).
+    The caller reads the setting; this module stays pure.
+
+    ``mcp_tool_name`` is the tool's BARE name as its server lists it (not the
+    ``mcp__<server>_<tool>`` label in ``tool_name``, which a server named
+    ``research`` would make look like a search). When it names a search,
+    ``search_snippet_chars`` (``mcp.search_snippet_chars``; 0 = off) clips the
+    snippet fields of the JSON hit lists it returns, under the same gates as
+    ``normalization`` -- see ``result_normalize.clip_search_hits``.
 
     ``producer_scope`` is the harness-stamped identity of the ACTUAL producer
     (server+tool origin plus owning session -- see
@@ -552,8 +688,36 @@ def format_mcp_result(
                 parts.append(placeholder)
             continue
         rendered = _dict_block_text(block) if isinstance(block, dict) else _model_block_text(block)
-        if rendered is not None:
-            parts.append(rendered)
+        if rendered is None:
+            continue
+        block_type = block.get("type") if isinstance(block, dict) else block.type
+        if not is_error and block_type != "resource":
+            # Normalize HERE, once, at creation: the persisted ToolResult
+            # carries the normalized bytes, so resume/replay re-send them
+            # unchanged and no cached prefix moves. It runs before the spill
+            # cut so an oversized result's inline head carries more content
+            # per byte. Per block, so one fetched page's link cannot pull a
+            # sibling block through the markdown gate. Skipped: errors
+            # (diagnostics, not payload) and an embedded ``resource`` (exact
+            # file contents keyed by a URI, e.g. a GitHub-style file read --
+            # a model may write it back). ``server_result`` below keeps the
+            # raw text -- except when the result spills: then the spill holds
+            # the normalized text and the raw copy is dropped as before,
+            # because keeping it would persist every large result twice in
+            # the transcript (the de-duplication below exists to stop exactly
+            # that). Rationale and measurement:
+            # ``local_operator.tools.result_normalize``.
+            if shown is not None:
+                shown.extend(shown_urls(rendered, tool_name=mcp_tool_name))
+            rendered = normalize_tool_text(
+                rendered,
+                normalization,
+                tool_name=mcp_tool_name,
+                search_snippet_chars=search_snippet_chars,
+                seen_urls=seen,
+                text_rendering=text_rendering,
+            )
+        parts.append(rendered)
 
     text = "\n\n".join(parts)
     if is_error:

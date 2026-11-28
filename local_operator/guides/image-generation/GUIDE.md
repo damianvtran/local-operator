@@ -21,7 +21,7 @@ result's `details.attempts` records what each said.
 | Order | Provider | What it needs |
 |---|---|---|
 | 1 | Radient | a signed-in account (`/login radient`) |
-| 2 | FAL | a stored key (`lop login fal`, or an exported `FAL_API_KEY`) |
+| 2 | FAL | a stored key (`lop login fal`, or an exported `FAL_API_KEY` or `FAL_KEY`) |
 | 3 | OpenAI | a platform API key (`lop login openai-key`, or an exported `OPENAI_API_KEY`) |
 | 4 | ChatGPT plan | the ChatGPT subscription sign-in (`lop login openai`) |
 | 5 | Google | an AI Studio key (`lop login google`, or an exported `GOOGLE_AI_STUDIO_API_KEY`) |
@@ -44,7 +44,7 @@ Provider-by-provider provenance, wire shapes and verified-at dates:
 
 - **Radient**: `/login radient` (or `lop login radient` from a shell).
 - **FAL**: `lop login fal` — paste a key from your FAL dashboard. An exported
-  `FAL_API_KEY` also works.
+  `FAL_API_KEY` (or FAL's own `FAL_KEY`) also works.
 - **OpenAI**: `lop login openai-key` — paste a platform API key. An exported
   `OPENAI_API_KEY` also works.
 - **ChatGPT plan**: `lop login openai` — the ChatGPT subscription sign-in the
@@ -108,22 +108,35 @@ default "ask" mode). In unattended modes there is no prompt — treat
 
 `model` takes a provider-specific id and is optional everywhere:
 
-- **Radient**: any id from its live model list (read at call time).
-- **FAL**: an app path like `fal-ai/flux/dev` (the default).
-- **OpenAI**: a `gpt-image`-class id (a default runs when omitted).
+Every rung's unpinned default is a frontier model, and Radient, FAL, OpenAI
+and OpenRouter default to the same one (GPT Image 2.6 Sunburst), so failover
+does not change model character:
+
+- **Radient**: any id from its live model list (read at call time); the hub
+  resolves GPT Image 2.6 Sunburst for both generate and edit when unpinned.
+- **FAL**: an app path like `openai/gpt-image-2.6/sunburst/text-to-image`
+  (the default; edits run on its `/edit` app). `fal-ai/nano-banana-pro` and
+  `blackforestlabs/flux-3/text-to-image` are frontier alternatives (edits
+  route to their own edit apps; both size by aspect ratio, so `image_size`
+  is not applied on them).
+- **OpenAI**: `gpt-image-2.6-sunburst` (default) or another `gpt-image` id.
 - **ChatGPT plan**: the current Codex host model runs by default; override
   only if you know the catalogue.
-- **Google**: `gemini-nano-banana-2.1` (default) or another Nano Banana
-  family id.
+- **Google**: `gemini-3-pro-image` (Nano Banana Pro, default) or another
+  Nano Banana id — `gemini-nano-banana-2.1` for cheaper, faster work.
 - **xAI**: `grok-imagine-image-2.0` (default).
 - **OpenRouter**: any image model slug from its catalogue — e.g.
-  `bytedance-seed/seedream-4.5` (default),
-  `black-forest-labs/flux.2-klein-4b` (cheap), or `openai/gpt-image-2.5-*`
-  (flagship).
+  `openai/gpt-image-2.6-sunburst` (default), `google/gemini-3-pro-image`
+  (Nano Banana Pro) or `black-forest-labs/flux-3-image`. The GPT Image
+  default takes no `seed`: pin a model whose OpenRouter listing supports
+  `seed` for reproducible runs.
 
 `image_size` accepts `square_hd`, `square`, `portrait_4_3`, `portrait_16_9`,
 `landscape_4_3`, `landscape_16_9` and is mapped per provider. `seed` runs only
-where the provider supports it: Radient, FAL and OpenRouter (per model);
+where the provider and model support it: Radient, FAL and OpenRouter, per
+model — the GPT Image defaults on FAL and OpenRouter take no seed, and
+neither does FLUX 3; for reproducible runs pin a seed-capable model
+(`fal-ai/flux/dev` on FAL; check the model's parameters on OpenRouter);
 OpenAI, Google and the ChatGPT-plan route cannot honour it — do not promise
 reproducibility there.
 
@@ -148,10 +161,10 @@ pass `source_image_path` or `source_image_paths`, not both (same for the
 attachment pair).
 
 Per-provider ceilings decide what actually runs. Radient reads the ceiling
-off the live listing per pin at call time (its edit default, GPT Image 2.5
-sunburst edit, takes 16); FAL's multi-reference editors take up to 10
-(`blackforestlabs/flux-3/edit-image`, the unpinned multi-source default — a
-pinned single-reference app is skipped, never swapped); OpenAI's GPT-image
+off the live listing per pin at call time (its edit default, GPT Image 2.6
+sunburst edit, takes 16); FAL's default GPT Image editor takes up to 16 and
+`blackforestlabs/flux-3/edit-image` up to 10 (a pinned single-reference app
+is skipped, never swapped); OpenAI's GPT-image
 models take up to 16; Google up to 14; xAI up to 5; OpenRouter takes one
 reference in this version. A provider that cannot take the count is skipped
 with its ceiling named, and the ChatGPT-plan rung skips edits explicitly —
@@ -177,10 +190,11 @@ figure when the response carries usage, and otherwise says no figure was
 reported; Radient, xAI and OpenRouter report per-call figures as before.
 
 **Which edit model.** On Radient the harness resolves the pin the hub marks
-as its edit default — GPT Image 2.5 sunburst edit, the best single-edit
-quality on the listing. It **drifts across successive edits** (each round is
-free to move the whole image): for multi-round revision workflows prefer an
-NB2.1-class or flux-class model via FAL or OpenRouter. Radient value pins:
+as its edit default — GPT Image 2.6 sunburst edit, the successor to the
+listing's best single-edit model. The GPT Image family **drifts across
+successive edits** (each round is free to move the whole image): for
+multi-round revision workflows pin Nano Banana Pro (`fal-ai/nano-banana-pro/edit`
+on Radient/FAL, `gemini-3-pro-image` on Google) or a FLUX.2 max / FLUX 3 edit. Radient value pins:
 Nano Banana 2 edit ≈$0.08 and Nano Banana Pro edit ≈$0.15 per image;
 premium: FLUX.2 max edit. On every provider, pin `model` to choose
 specifically.

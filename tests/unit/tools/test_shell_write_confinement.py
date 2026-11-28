@@ -156,7 +156,7 @@ class TestProfileShape:
         assert f'(subpath "{config / "secrets"}")' in denied
         for rel in (".ssh", "Library/Keychains", ".aws", ".config/gh", ".netrc"):
             assert f'(subpath "{home / rel}")' in denied, rel
-        assert "credentials|auth\\.db" in denied
+        assert "credentials|auth\\.db|guard/install\\.key" in denied
         assert confinement_module._DOTENV_REGEX in denied
 
     def test_the_operators_real_config_dir_is_denied_even_when_isolated(

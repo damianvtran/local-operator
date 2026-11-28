@@ -57,6 +57,11 @@ from local_operator.model.catalogue import (
     note_unavailable,
 )
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
+from local_operator.model.defaults import (
+    RouteDefaultModel,
+    default_model_for,
+    suggested_model_for,
+)
 from local_operator.model.effort import (
     default_effort,
     resolve_effort_in,
@@ -100,7 +105,7 @@ if TYPE_CHECKING:
     from local_operator.clients.radient import RadientListModelsResponse
     from local_operator.env import EnvConfig
     from local_operator.model.discovery import DiscoveredModel
-    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.auth_store import AuthStore, OAuthAccess
     from local_operator.providers.clients import WireClient
     from local_operator.providers.usage import UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
@@ -872,6 +877,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     because both serve ids that legitimately begin with their own name
     (``openrouter/auto``; ``ollama/hf.co/...``).
     """
+    auth_route_default = isinstance(model_name, RouteDefaultModel)
     bare_name = _hosting_qualified_bare_id(hosting, model_name)
     if bare_name is not None:
         model_name = bare_name
@@ -1295,7 +1301,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
 
     return ModelSpec(
         provider=canonical,
-        model_id=model_name,
+        model_id=str(model_name),
+        auth_route_default=auth_route_default,
         bedrock_metadata=getattr(info, "bedrock_metadata", None),
         context_window=context_window,
         default_context_window=getattr(info, "default_context_window", None),
@@ -3400,7 +3407,7 @@ def configure_model(
     if definition.local_setup and not model_name:
         raise ValueError(f"Model is required for {canonical} hosting")
     if not model_name:
-        model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
+        model_name = default_model_for(canonical, config_dir=config_dir) or ""
 
     # Best-effort static key for legacy consumers; the store-first reader tries
     # the provider-class row, then the environment (the legacy plaintext file is
@@ -3552,6 +3559,36 @@ def _openai_use_max_context_window(settings: Mapping[str, Any] | None) -> bool:
     if isinstance(openai, Mapping) and openai.get("use_max_context_window") is False:
         return False
     return OPENAI_USE_MAX_CONTEXT_WINDOW
+
+
+def auth_route_spec(spec: ModelSpec, access: OAuthAccess | None) -> ModelSpec:
+    """Finalize an omitted ID against the credential used on this attempt."""
+    if not spec.auth_route_default or access is None:
+        return spec
+    location = str((access.raw or {}).get("location") or "")
+    suggestion = suggested_model_for(
+        spec.provider, oauth=access.kind == "oauth", vertex_locations=(location,)
+    )
+    if suggestion is None or suggestion.id == spec.model_id:
+        return spec
+    # The curated rows describe the model actually served; don't carry Neon's
+    # limits to Express Flash. Keep the user's sampling/effort intent.
+    resolved = build_model_spec(
+        spec.provider, suggestion.id, get_model_info(spec.provider, suggestion.id)
+    )
+    effort = spec.reasoning_effort
+    if effort is not None:
+        effort = resolve_effort_in(
+            resolved.reasoning_efforts, resolved.reasoning_default_effort, effort
+        )
+    return resolved.model_copy(
+        update={
+            "auth_route_default": True,
+            "temperature": spec.temperature,
+            "top_p": spec.top_p,
+            "reasoning_effort": effort if effort is not None else resolved.reasoning_effort,
+        }
+    )
 
 
 def context_spec_for_access(
@@ -4194,6 +4231,18 @@ class SessionStreamFn:
         # the constant). Instance state, so a fork starts clean: a child's
         # workload says nothing about its parent's.
         self._had_long_call = False
+        # Automation TTL state (``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S``).
+        # ``_automation`` is set by the entry point that KNOWS the run is
+        # non-interactive (``mark_automation``: ``lop exec`` and the SDK), never
+        # inferred here, because this stream cannot tell an exec run from a
+        # viewer-less interactive runtime. ``_last_turn_started`` is the
+        # monotonic start of the previous turn request, and ``_had_long_gap``
+        # latches once two of them were far enough apart for a 5m prefix to
+        # have expired in between. Instance state like ``_had_long_call``: a
+        # fork starts clean, and the policy ignores it for subagents anyway.
+        self._automation = False
+        self._last_turn_started: float | None = None
+        self._had_long_gap = False
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -5562,6 +5611,73 @@ class SessionStreamFn:
             or request.model.provider in {"radient", "radient-key"}
             or not request.messages
         )
+
+    def saver_may_reduce(self, model: ModelSpec) -> bool:
+        """Whether a main turn on ``model`` is, or may be, sent Saver-reduced.
+
+        For the cache keep-alive (``compaction/keepalive.py``), whose ping is
+        ``purpose="cache_keepalive"`` and so always bypasses the splice: while
+        this is true the ping's unreduced prefix is not the one the next turn
+        sends. Local only, never a network read: frozen epochs on the chain
+        are proof, and otherwise the resolver is asked with the best-case
+        availability exactly as :meth:`_saver_splice` asks it before its read.
+        A relaunched runtime has no chain yet, so the second half is what
+        detects a Saver session there. Over-reporting (signed out, no credit)
+        only withholds a ping.
+        """
+        chain = self._saver_chain
+        if chain is not None and getattr(chain, "frozen_ids", None):
+            return True
+        if model.provider in {"radient", "radient-key"}:
+            return False
+        from local_operator.saver.gate import (
+            Availability,
+            configured_mode,
+            resolve_saver,
+        )
+
+        if configured_mode(self._settings) == "off":
+            return False
+        session_choice, agent_pin, parent_value = self._saver_choices()
+        return resolve_saver(
+            self._settings,
+            Availability(True, True),
+            session_choice=session_choice,
+            agent_pin=agent_pin,
+            parent_value=parent_value,
+        ).on
+
+    def mark_automation(self) -> None:
+        """Mark this conversation as a non-interactive run for the cache-TTL policy.
+
+        Called by ``exec_session.run_session`` and the SDK's session builder,
+        the two entry points that know nobody idles between this run's calls.
+        One-way: an automation run never becomes interactive in-process.
+        """
+        self._automation = True
+
+    def _observe_turn_gap(self, request: ChatRequest) -> bool:
+        """Record a turn request's start; whether a long start-to-start gap was ever seen.
+
+        START to START because the 5m entry is refreshed when a request starts:
+        a gap past five minutes is an expiry whether it went into a long
+        stream or a long tool. Measured here, before dispatch, so the request
+        that ends a long gap is already sent at the main-thread TTL; it pays
+        the one rewrite either way, and its fresh write then survives the next
+        gap. Turn requests only: isolated errands and auxiliary purposes do not
+        refresh this conversation's prefix.
+        """
+        if request.purpose != "turn" or request.isolated:
+            return self._had_long_gap
+        from local_operator.providers.anthropic_cache_ttl import (
+            AUTOMATION_LONG_GAP_1H_THRESHOLD_S,
+        )
+
+        now = time.monotonic()
+        previous, self._last_turn_started = self._last_turn_started, now
+        if previous is not None and now - previous >= AUTOMATION_LONG_GAP_1H_THRESHOLD_S:
+            self._had_long_gap = True
+        return self._had_long_gap
 
     def bind_saver_session(self, session: Any) -> None:
         """Read the owning session's live choice without sharing stream state.
@@ -7467,7 +7583,10 @@ class SessionStreamFn:
         policy = getattr(root, "_request_admission", None)
         admission: tuple[str, AsyncExitStack] | None = None
         if policy is not None:
-            request_id = uuid.uuid4().hex
+            # An evidence companion pre-assigns its id and durably records it
+            # before dispatch; admission must reuse it rather than mint a second
+            # id, or the spend gate, the ledger row and that receipt disagree.
+            request_id = request._auxiliary_request_id or uuid.uuid4().hex
             finish = policy(request_id)
             exit_stack = AsyncExitStack()
             if finish is not None:
@@ -7582,6 +7701,8 @@ class SessionStreamFn:
                     delegated=bool(getattr(self, "_parent_session_id", None)),
                 ),
                 "cache_after_long_call": self._had_long_call,
+                "cache_automation": self._automation,
+                "cache_after_long_gap": self._observe_turn_gap(request),
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
@@ -7620,6 +7741,7 @@ class SessionStreamFn:
                     session_id=self._session_id,
                 ),
                 admission,
+                signal=signal,
             ):
                 yield event
             return
@@ -7843,11 +7965,15 @@ class SessionStreamFn:
         request: ChatRequest,
         stream: AsyncIterator[StreamEvent],
         admission: tuple[str, AsyncExitStack] | None,
+        *,
+        signal: AbortSignal | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
+        # ``signal`` lets the recorder classify an aborted evidence companion
+        # as "aborted" (matching its durable receipt) on either path.
         if admission is None:
-            return self._record_stream(request, stream)
+            return self._record_stream(request, stream, signal=signal)
         request_id, exit_stack = admission
-        recorder = self._record_stream(request, stream, request_id=request_id)
+        recorder = self._record_stream(request, stream, request_id=request_id, signal=signal)
         # If the consumer closes at a yield, settle the existing observation
         # before the cleanup callback checks for a missing final. Also close
         # the upstream iterator on this owned path rather than relying on GC.
@@ -7863,6 +7989,7 @@ class SessionStreamFn:
         stream: AsyncIterator[StreamEvent],
         *,
         request_id: str | None = None,
+        signal: AbortSignal | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Forward a provider stream unchanged, then record its usage analytics.
 
@@ -7894,7 +8021,10 @@ class SessionStreamFn:
         sent.
         """
         started_at = time.monotonic()
-        request_id = request_id or uuid.uuid4().hex
+        # An admitted request's id is the spend gate's; otherwise an evidence
+        # companion's pre-assigned id keeps its durable receipt and this
+        # ledger row on the same request.
+        request_id = request_id or request._auxiliary_request_id or uuid.uuid4().hex
         # Resolved ONCE here, at request start (see
         # ``_request_observation_target``): the ordinary path pays two
         # attribute reads and a ``None`` check per REQUEST, never per delta.
@@ -8167,6 +8297,14 @@ class SessionStreamFn:
             outcome = type(exc).__name__
             raise
         finally:
+            if (
+                request._evidence_binding is not None
+                and request._evidence_binding.expected is not None
+                and (outcome == "CancelledError" or (signal is not None and signal.aborted))
+            ):
+                # The companion's durable receipt calls both cancellation
+                # paths aborted; keep the observer and ledger on that outcome.
+                ok, outcome = False, "aborted"
             if counted_child_request:
                 # Stop representing provider work before the separate analytics
                 # handoff; that bookkeeping must not widen the in-flight window.
@@ -8728,7 +8866,7 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
 # OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
 # dated snapshots; future and aggregator models must not inherit these prices.
 _OPENAI_LONG_CONTEXT_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
     r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
 )
@@ -8738,7 +8876,7 @@ _OPENAI_LONG_CONTEXT_MODELS = re.compile(
 # twice Standard for these families, including their long-context rates. Other
 # tiers cannot inherit this rule: some have a different premium or no quote.
 _OPENAI_FAST_DOUBLE_MODELS = re.compile(
-    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"^(?:gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
     r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna)(?:-\d{4}-\d{2}-\d{2})?$"
 )
 # These two older Fast rows have only a short-context quote and one is 2.5x,

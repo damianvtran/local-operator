@@ -51,6 +51,15 @@ def _arm(root: Path, row: dict[str, Any], *, parked_at: bool = True) -> None:
     )
 
 
+def _seed_snapshot(root: Path) -> None:
+    """The blob the session writes beside every baseline hash (§7.2 pair).
+
+    A quiet probe now ENGAGES when the blob is missing (round 1, R3), so a test
+    of the quiet path seeds the pair the in-session scheduler would have left.
+    """
+    monitor_state.write_snapshot(root, SID, "m1", "baseline", truncated=False)
+
+
 async def _baseline(root: Path, row: dict[str, Any]) -> str:
     """The hash the in-session scheduler would have stored: same tool, same pipeline."""
     from local_operator.harness.types import AbortSignal, ToolContext
@@ -91,6 +100,8 @@ async def test_quiet_tick_advances_counters_and_a_change_engages_without_writing
         "last_check_at": NOW - 60_000,
     }
     monitor_state.write_counters(tmp_path, SID, "m1", counters)
+    _seed_snapshot(tmp_path)
+    blob = monitor_state.read_snapshot(tmp_path, SID, "m1")
 
     quiet = await parked.probe_session(tmp_path, SID, now_ms=NOW)
     assert quiet == {"verdict": "quiet", "why": "unchanged", "checked": 1}
@@ -110,7 +121,7 @@ async def test_quiet_tick_advances_counters_and_a_change_engages_without_writing
     changed = await parked.probe_session(tmp_path, SID, now_ms=later)
     assert changed["verdict"] == "engage" and changed["why"] == "m1: changed"
     assert monitor_state.read_counters(tmp_path, SID, "m1") == after
-    assert not monitor_state.snapshot_exists(tmp_path, SID, "m1")
+    assert monitor_state.read_snapshot(tmp_path, SID, "m1") == blob
 
 
 @pytest.mark.asyncio
@@ -147,10 +158,53 @@ async def test_a_call_the_readonly_gate_refuses_is_never_run(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_an_entry_that_is_not_parked_is_left_to_the_session(tmp_path: Path) -> None:
+async def test_an_entry_a_live_runtime_hosts_is_left_to_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live runtime owns its checks: the probe never runs them beside it."""
     row = _row("read", {"path": str(tmp_path)}, str(tmp_path))
     _arm(tmp_path, row, parked_at=False)
-    assert (await parked.probe_session(tmp_path, SID, now_ms=NOW))["verdict"] == "engage"
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _sid: ({"pid": 1}, "owner"),
+    )
+    outcome = await parked.probe_session(tmp_path, SID, now_ms=NOW)
+    assert outcome["verdict"] == "engage" and outcome["checked"] == 0
+
+
+@pytest.mark.asyncio
+async def test_an_idle_exited_unparked_session_is_probed_like_a_parked_one(
+    tmp_path: Path,
+) -> None:
+    """Wake boot economy: no runtime record is enough; parking is not required."""
+    watched = tmp_path / "watched.txt"
+    watched.write_text("unchanged\n", encoding="utf-8")
+    row = _row("read", {"path": str(watched)}, str(tmp_path))
+    _arm(tmp_path, row, parked_at=False)
+    _seed_snapshot(tmp_path)
+    monitor_state.write_counters(
+        tmp_path,
+        SID,
+        "m1",
+        {
+            "schema": 1,
+            "monitor_id": "m1",
+            "next_due_at": NOW - 1,
+            "content_hash": await _baseline(tmp_path, row),
+            "checks": 1,
+            "last_check_at": NOW - 60_000,
+        },
+    )
+    assert await parked.probe_session(tmp_path, SID, now_ms=NOW) == {
+        "verdict": "quiet",
+        "why": "unchanged",
+        "checked": 1,
+    }
+    # Negative control: a STOPPED (held) entry is never probed.
+    monitor_store.write_entry(
+        tmp_path, SID, cwd=row["cwd"], monitors=[row], preserve={"stopped_at": NOW}
+    )
+    assert (await parked.probe_session(tmp_path, SID, now_ms=NOW + 120_000))["checked"] == 0
 
 
 @pytest.mark.asyncio
@@ -184,6 +238,7 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
     watched.write_text("thread: 3 replies\n", encoding="utf-8")
     row = _row("read", {"path": str(watched)}, str(tmp_path))
     _arm(tmp_path, row)
+    _seed_snapshot(tmp_path)
     baseline = await _baseline(tmp_path, row)
     monitor_state.write_counters(
         tmp_path,
@@ -228,8 +283,9 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
     # The session's commit survives byte-for-byte: nothing was written over it.
     assert monitor_state.read_counters(tmp_path, SID, "m1") == session_commit
 
-    # Same race, but the entry stopped being parked (the session reopened)
-    # while its counters happened to be untouched: also no write.
+    # Same race, but a runtime came up (the session reopened) while its
+    # counters happened to be untouched: also no write. The runtime record is
+    # the signal now that unparked runtime-less sessions are probed too.
     monitor_state.write_counters(
         tmp_path,
         SID,
@@ -245,6 +301,10 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
         async def _execute(*args: Any, **kwargs: Any) -> Any:
             result = await real_execute(*args, **kwargs)
             monitor_store.write_entry(tmp_path, SID, cwd=row["cwd"], monitors=[row])
+            monkeypatch.setattr(
+                "local_operator.mobile.attach_client.find_runtime_record",
+                lambda _root, _sid: ({"pid": 1}, "owner"),
+            )
             return result
 
         monkeypatch.setattr(tool, "execute", _execute)
@@ -253,3 +313,38 @@ async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
     monkeypatch.setattr(parked, "_build_tool", _build_unpark)
     await parked.probe_session(tmp_path, SID, now_ms=NOW)
     assert monitor_state.read_counters(tmp_path, SID, "m1") == before
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_tick_with_its_snapshot_blob_lost_boots_the_session(
+    tmp_path: Path,
+) -> None:
+    """R3 parity: the in-session quiet tick heals a lost blob, so the probe boots.
+
+    The probe writes nothing (counters byte-identical), so the booted session's
+    scheduler runs the same quiet check and re-writes the blob itself.
+    """
+    watched = tmp_path / "watched.txt"
+    watched.write_text("unchanged\n", encoding="utf-8")
+    row = _row("read", {"path": str(watched)}, str(tmp_path))
+    _arm(tmp_path, row)
+    counters = {
+        "schema": 1,
+        "monitor_id": "m1",
+        "next_due_at": NOW - 1,
+        "content_hash": await _baseline(tmp_path, row),
+        "checks": 2,
+        "last_check_at": NOW - 60_000,
+    }
+    monitor_state.write_counters(tmp_path, SID, "m1", counters)
+    assert not monitor_state.snapshot_exists(tmp_path, SID, "m1")
+
+    lost = await parked.probe_session(tmp_path, SID, now_ms=NOW)
+    assert (
+        lost["verdict"] == "engage" and lost["why"] == "m1: snapshot missing; the session heals it"
+    )
+    assert monitor_state.read_counters(tmp_path, SID, "m1") == counters
+
+    # Negative control: the same check with its blob present stays quiet.
+    _seed_snapshot(tmp_path)
+    assert (await parked.probe_session(tmp_path, SID, now_ms=NOW))["verdict"] == "quiet"

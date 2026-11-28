@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 import pytest
 
+from local_operator.evaluation.evidence.models import ScoreArtifact
 from local_operator.evaluation.runner.secrets import StaticSecretResolver
 from local_operator.model.configure import build_model_spec
 from scripts import run_episode
@@ -532,7 +533,13 @@ async def test_first_session_turn_serializes_effective_effort(
         async with sdk.open_session(session_spec, roots=roots, mode="own") as session:
             # A known low auto-effort prompt; explicit levels must beat it.
             await session.prompt("show status")
-        return session_arm.SessionArmOutcome("completed", "effort-wire", record_root=None)
+        # A real session arm always scores; EXIT_OK requires a ``scored`` score.
+        return session_arm.SessionArmOutcome(
+            "completed",
+            "effort-wire",
+            record_root=None,
+            score=ScoreArtifact(status="scored", binary=1),
+        )
 
     monkeypatch.setattr(session_arm, "run_session_episode", open_and_prompt)
 

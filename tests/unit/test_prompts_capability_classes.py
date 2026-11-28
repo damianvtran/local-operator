@@ -62,7 +62,10 @@ _CLASS_GATED_MARKERS = (
     "`spill://` handle",
     "`scratchpad://`",
     "### Resources",
-    "`<guides>` lists Local Operator procedures",
+    # The Resources section's guide cue (reworded by the resource-reread PR:
+    # read-unless-in-view instead of an unconditional re-read).
+    "- `<guides>`: MUST read applicable `guide://<name>` before acting or answering.",
+    "`<skills>`: before proceeding, read applicable `skill://<name>`",
     "`web_search`/`web_fetch`",
     "delegate self-contained slices",
     # Wave 5: workspace-, shell- and subagent-specific prose.
@@ -84,7 +87,11 @@ _ALWAYS_ON_MARKERS = (
     "**Use tools before answering.**",
     "**Verify results.**",
     # PR #4375 B1: truncation is universal, so this rides every session.
-    "A capped or truncated result is",
+    "Page through a capped or truncated",
+    # Research economy: the stopping rule and the fan-out criterion are
+    # judgement, not capability prose, so every session carries them.
+    "stop at one read",
+    "**Parallelize only calls needed whatever the others return**",
     "**Be concise.**",
     "**Do real work fully.**",
     "**Recover, don't stop.**",
@@ -145,12 +152,17 @@ def test_a_session_holding_every_class_renders_the_ungated_bytes() -> None:
     flat = " ".join(head.split())
     assert "Direct user instructions and approval requirements still apply." in flat
     # PR #4375 B1 deliberately changes the full-tool template render: a capped
-    # page stopped 3/8 benchmark runs at its first 9 of 26 names.
+    # page stopped 3/8 benchmark runs at its first 9 of 26 names. The research-
+    # economy change keeps the paging instruction but drops its "or cross-check
+    # other sources" arm: corroboration now has ONE home, the stopping rule's
+    # conflict/stale exception, so a clipped result no longer reads as a reason
+    # to fan out to more sources.
     assert (
-        '"can\'t test": try two safe routes first. A capped or truncated result is '
-        "partial: page through it or cross-check other sources before treating a "
-        "list or count as complete. Claim success only when observable;"
+        '"can\'t test": try two safe routes first. Page through a capped or '
+        "truncated result before calling a list or count complete. Claim success "
+        "only when observable;"
     ) in flat
+    assert "cross-check other sources" not in flat
     for marker in _CLASS_GATED_MARKERS:
         assert marker in head, marker
     assert "your web search tools" not in head
@@ -170,7 +182,7 @@ def test_mcp_only_session_drops_class_prose_and_keeps_the_always_on_rules() -> N
     for marker in _ALWAYS_ON_MARKERS:
         assert marker in head, marker
     assert "use\n  your web search tools for third-party errors" in head
-    assert "- **Parallelize independent work:** batch calls.\n" in head
+    assert "- **Parallelize only calls needed whatever the others return**.\n" in head
     assert "never print credentials, tokens or keys.\n" in head
     # Wave 5's short arms, each in place of the workspace prose it replaces.
     assert "\nAct directly with your tools; use them before answering from memory.\n\n" in head

@@ -16,6 +16,7 @@ transcript-directory decision, so the rule has one definition.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -922,6 +923,8 @@ class SessionAttachment(NamedTuple):
     #: The standing ``/goal`` text; "" when unset. Stored here rather than left
     #: to the transcript because it shares the volatile tail's fate exactly.
     goal: str
+    skill_manifest: dict[str, str] | None = None
+    skill_manifest_pinned: bool = False
 
 
 def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
@@ -950,27 +953,72 @@ def read_session_attachment(session_dir: Path) -> SessionAttachment | None:
         value = payload.get(key)
         return value.strip() if isinstance(value, str) else ""
 
-    return SessionAttachment(team=_text("team"), agent=_text("agent"), goal=_text("goal"))
+    from local_operator.skills.manifest import parse_skill_manifest
+
+    manifest = parse_skill_manifest(payload.get("skill_manifest"))
+    return SessionAttachment(
+        team=_text("team"),
+        agent=_text("agent"),
+        goal=_text("goal"),
+        skill_manifest=manifest,
+        skill_manifest_pinned=manifest is not None and payload.get("skill_manifest_pinned") is True,
+    )
 
 
-def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: str) -> None:
+class SessionAttachmentUnreadable(ValueError):
+    """Attachment evidence exists but does not establish either slot's state."""
+
+
+def read_session_attachment_evidence(session_dir: Path) -> SessionAttachment | None:
+    """Strict authority read: missing, explicitly empty, and invalid are distinct.
+
+    Presentation callers can still use the tolerant reader. A transfer or
+    restore must not interpret a partial document, bad encoding or I/O error
+    as a deliberate detach.
+    """
+    try:
+        raw = (session_dir / ATTACHMENT_SIDECAR_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as error:
+        raise SessionAttachmentUnreadable from error
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise SessionAttachmentUnreadable from error
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("team"), str)
+        or any(not isinstance(payload.get(key, ""), str) for key in ("agent", "goal"))
+    ):
+        raise SessionAttachmentUnreadable
+    return SessionAttachment(*(payload.get(key, "").strip() for key in ("team", "agent", "goal")))
+
+
+def write_session_attachment(
+    session_dir: Path,
+    *,
+    team: str,
+    agent: str,
+    goal: str,
+    skill_manifest: dict[str, str] | None = None,
+    skill_manifest_pinned: bool = False,
+    strict: bool = False,
+) -> None:
     """Journal the session's attached identity so a resume can rebuild it.
 
-    Called on CHANGE (attach, detach, goal set/clear), never per turn: the
-    attachment moves a handful of times in a session's life, and a per-turn
-    write would be pure I/O for a value that did not move.
+    Called on attachment or goal changes and when a routed turn changes the
+    skill snapshot. The snapshot recorder deduplicates unchanged selections.
 
-    Best-effort by contract, exactly like :func:`write_session_title` and
-    :func:`mark_session_origin`. An attachment that cannot be journalled
-    (read-only volume, full disk) must never fail the turn that changed it: the
-    cost is one resume that opens unattached, which is the behaviour every
-    session had before this file existed.
+    Local journaling is best effort: an unavailable disk must not fail the
+    turn that changed the attachment. A move uses ``strict`` instead: a failed
+    pin write must be visible to the adopter before it publishes the session.
 
-    The write is ATOMIC (pid-named temp + ``replace``) because two processes
+    The write is ATOMIC (unique temp + ``replace``) because two processes
     can hold the same session directory — a live owner and a ``/resume`` that
     is about to be refused both touch it — and a reader hitting a half-written
     document would parse as "no attachment" and silently drop the persona. The
-    PID in the temp name keeps two concurrent writers from ``replace``-ing a
+    unique temp name keeps concurrent writers from ``replace``-ing a
     document the other is still filling, the same hazard ``write_session_title``
     and ``search_index._save`` document.
 
@@ -990,26 +1038,69 @@ def write_session_attachment(session_dir: Path, *, team: str, agent: str, goal: 
     # resume and told the user it had been renamed or deleted (R2). Normalising
     # is right for a title (the sidecar this shape was copied from) and wrong
     # for a key: what is stored has to be what the resolver will compare.
-    payload = {
+    # Persona/goal edits also rewrite this file. Keep the transfer data when
+    # those callers supply no manifest; an explicit {} is a real selection.
+    if skill_manifest is None:
+        stored = read_session_attachment(session_dir)
+        if stored is not None:
+            skill_manifest = stored.skill_manifest
+            skill_manifest_pinned = stored.skill_manifest_pinned
+    payload: dict[str, Any] = {
         "team": (team or "").strip(),
         "agent": (agent or "").strip(),
         "goal": (goal or "").strip(),
     }
+    if skill_manifest is not None:
+        payload["skill_manifest"] = skill_manifest
+        if skill_manifest_pinned:
+            payload["skill_manifest_pinned"] = True
+    sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
     try:
         try:
             previous = session_dir.stat().st_mtime
         except OSError:
             previous = None
         session_dir.mkdir(parents=True, exist_ok=True)
-        sidecar = session_dir / ATTACHMENT_SIDECAR_NAME
-        atomic_write_text(sidecar, json.dumps(payload))
-        if previous is not None:
-            os.utime(session_dir, (previous, previous))
+        # The shared atomic writer (unique sibling temp, discarded on failure)
+        # is the one write path for local and transfer writes. ``fsync`` only
+        # for a strict transfer pin: the adopter must not publish a sidecar the disk
+        # has not durably kept. A crash-left ``*.tmp`` at the session root is
+        # excluded from the transfer digest (``network.sync.TRANSIENT_SUFFIX``),
+        # so the unique temp name cannot poison a recovery re-verification.
+        atomic_write_text(sidecar, json.dumps(payload), fsync=strict)
     except (OSError, TypeError, ValueError):
+        if strict:
+            # A failed pre-publish pin must leave the verified sidecar intact;
+            # ``atomic_write_text`` already removed its own temp before raising,
+            # so no temporary member is left in the staged session.
+            raise
         return
+    if previous is not None:
+        with contextlib.suppress(OSError):
+            os.utime(session_dir, (previous, previous))
 
 
-def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool:
+def record_session_skill_manifest(
+    session_dir: Path, manifest: dict[str, str], *, pinned: bool = False, strict: bool = False
+) -> None:
+    """Update only skill metadata; local snapshots are not local routing pins."""
+    stored = read_session_attachment(session_dir) or SessionAttachment("", "", "")
+    if stored.skill_manifest == manifest and stored.skill_manifest_pinned == pinned:
+        return
+    write_session_attachment(
+        session_dir,
+        team=stored.team,
+        agent=stored.agent,
+        goal=stored.goal,
+        skill_manifest=manifest,
+        skill_manifest_pinned=pinned,
+        strict=strict,
+    )
+
+
+def bind_session_attachment(
+    session_dir: Path, *, agent: str, team: str, root: Path | None = None
+) -> bool:
     """Bind a NEW session to a profile or team before anything runs in it.
 
     ``write_session_attachment`` is best-effort by contract (an attach mid-session
@@ -1026,6 +1117,22 @@ def bind_session_attachment(session_dir: Path, *, agent: str, team: str) -> bool
     unconditionally, which is what binds the manager role, the briefs and the
     roster on the first turn rather than after it.
     """
+    if team:
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            authorize_named_team,
+        )
+        from local_operator.paths import config_dir
+
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            # This is an explicit CREATE, not a file-copy or restore. Publish
+            # its authorization first so a warm runtime can safely adopt it.
+            team = authorize_named_team(
+                root if root is not None else config_dir(), session_dir, team
+            )
+        except (OSError, TeamIdentityRefused):
+            return False
     write_session_attachment(session_dir, agent=agent, team=team, goal="")
     stored = read_session_attachment(session_dir)
     return stored is not None and stored.agent == agent and stored.team == team
@@ -3693,6 +3800,73 @@ def session_state_words(state: str) -> str:
     """
     token = (state or "").strip()
     return SESSION_STATE_WORDS.get(token, token)
+
+
+def session_row_state_words(
+    row: Mapping[str, Any], *, render: Callable[[Any], str] | None = None
+) -> str:
+    """One federated ROW's state in words: :func:`session_state_words`, plus a boot.
+
+    WHY A ROW AND NOT A TOKEN (PR #4572 QA Q6). A session whose owner accepted an
+    engage and is constructing its runtime is still ``state: "stored"`` on the
+    wire — deliberately, so an older reader keeps treating it as cold (see
+    ``network.relay.RelayServer._boot_row_state``) — and carries the additive
+    ``boot_state``/``boot_age_s`` claim beside it. Read from the token alone, that
+    row said "not running", the same as a session stopped on purpose, so a sender
+    told "still starting … message NOT queued" could not tell a boot from a stop.
+
+    ``starting`` reads "starting · 12s"; past the shared cold-boot budget the
+    owner says ``not_responding``, read "not answering · starting for 45s" — the
+    wedged state's own "not answering" word (``wire.session_status.wedged``),
+    because the lease holder is alive and that is all that was observed.
+
+    The boot claim is honoured ONLY on a ``stored`` row: a live row's registry
+    state is the better fact, and a stale claim beside it must not override it.
+    An unreadable age (absent, a bool, non-finite, negative) is no claim and the
+    row reads as it always did. ``render`` defaults to the process's active
+    locale (the CLI); a model-facing caller passes an English renderer.
+    """
+    import math
+
+    from local_operator.network.types import (
+        ROW_STATE_NOT_RESPONDING,
+        ROW_STATE_STARTING,
+    )
+
+    state = str(row.get("state") or "").strip()
+    boot = str(row.get("boot_state") or "").strip()
+    age = row.get("boot_age_s")
+    if (
+        state != "stored"
+        or boot not in (ROW_STATE_STARTING, ROW_STATE_NOT_RESPONDING)
+        or isinstance(age, bool)
+        or not isinstance(age, (int, float))
+        or not math.isfinite(age)
+        or age < 0
+    ):
+        return session_state_words(state)
+    from local_operator.i18n.duration_message import format_duration
+    from local_operator.i18n.keys import wire_session_status as status_keys
+
+    if render is None:
+        from local_operator.i18n.text import tr
+
+        render = tr("wire.session_status")
+    duration = format_duration(float(age), render)
+    if boot == ROW_STATE_STARTING:
+        return render(status_keys.booting(duration=duration))
+    return render(status_keys.booting_not_answering(duration=duration))
+
+
+def english_status_render(message: Any) -> str:
+    """``message`` rendered in English, for MODEL-FACING session state words.
+
+    Tool results are model-facing and pinned to ``en`` (docs/I18N.md, step 1);
+    the CLI renders in the user's locale instead.
+    """
+    from local_operator.i18n.messages import render
+
+    return render(message.code, dict(message.params), locale="en")
 
 
 #: What a SESSION with no stored name is called, on every surface that has to

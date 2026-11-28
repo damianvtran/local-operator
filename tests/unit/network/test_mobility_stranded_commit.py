@@ -98,9 +98,12 @@ def test_the_wait_separates_a_commit_here_from_a_confirmation_there(
         # AND THE CONFIRMATION WINDOW IS REAL: a `done` that arrives after the commit
         # still ends the wait as a confirmation. Under the old code the tombstone had
         # already returned, so this signal could never have been observed.
-        progress.forget(SESSION)
-        threading.Timer(0.3, lambda: progress.signal(SESSION, "done")).start()
-        outcome, refusal = mobility._await_own_progress(server_a, SESSION, budget=2.0)
+        attempt = progress.begin_attempt(SESSION)
+        # A phase marker does not confirm a move; only this attempt's completion does.
+        threading.Timer(0.3, lambda: progress.signal_done(SESSION, attempt)).start()
+        outcome, refusal = mobility._await_own_progress(
+            server_a, SESSION, budget=2.0, attempt=attempt
+        )
         assert outcome == "done", outcome
         assert refusal is None, refusal
     finally:

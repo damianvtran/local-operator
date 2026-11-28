@@ -355,6 +355,15 @@ class TestTheLegacyPairMigrates:
         rule superseded the stored profile."""
         (tmp_path / "sess").mkdir(parents=True, exist_ok=True)
         write_session_attachment(tmp_path / "sess", team="lopdev", agent="scout", goal="")
+        # The team was attached on THIS machine, so it carries the completed
+        # local binding an explicit attach writes. This cell is about the
+        # team/agent PAIR migrating to one identity, which still holds for a
+        # bound session; a pair with NO binding is a name-only hint the restore
+        # refuses with a notice (no name-only recovery), pinned in
+        # test_remote_cold.py's name-only cell.
+        from local_operator.network.move_team import authorize_named_team
+
+        authorize_named_team(tmp_path, tmp_path / "sess", "lopdev")
 
         resumed = _session(tmp_path, registries)
 
@@ -568,7 +577,14 @@ class TestTheRoutedCommands:
         """Design round 1, D5: switching teams displaces a TEAM's manager, not a
         profile, and the clause must not name a profile that never existed."""
         handle, session = routed
-        _, teams = registries
+        agents, teams = registries
+        # The manager must be a real definition: an attach now snapshots the
+        # manager's profile and refuses a team whose manager is unavailable
+        # ("manager definition 'lead' is unavailable"), rather than attaching a
+        # team that cannot say who speaks for it.
+        from local_operator.agents import AgentEditFields
+
+        agents.create_agent(AgentEditFields(**{"name": "lead", "tags": ["role"]}))
         teams.save_team(_team("pod", manager="lead"))
         await handle.run_slash_authoritative("team", "lopdev", [])
 

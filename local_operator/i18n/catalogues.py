@@ -138,6 +138,11 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
+    "wire.runtime_memory": (
+        "per-runtime memory guard settings rows rendered by settings_io._t, and the "
+        "sessions tool's force-stop hint and approval prompt rendered in-process as "
+        "plain strings"
+    ),
     "wire.guardrails": (
         "guardrails section title/description and row label/help rendered by settings_io._t"
     ),
@@ -206,6 +211,14 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.sessions": (
         "sessions tool receipts/approval prompts rendered in-process by "
         'tools/builtin.py (_sessions_copy = tr("wire.sessions")) and returned '
+        "as finished tool text"
+    ),
+    # The idle-only remote stop's receipts (``builtin._sessions_stop_peer_idle``): its
+    # own namespace so adding them could not move the audited ``wire.sessions``
+    # bytes (and lapse its ledger rows), the ``wire.runtime_memory`` precedent.
+    "wire.sessions_remote_stop": (
+        "sessions tool remote idle-only stop receipts and approval prompt rendered "
+        "in-process by tools/builtin.py (_sessions_remote_stop_copy) and returned "
         "as finished tool text"
     ),
     # Deferred rather than raising the eager total ceiling: the phone-approvals

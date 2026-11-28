@@ -4335,6 +4335,55 @@ class _TurnScriptedSession(_ScriptedSession):
         self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
 
 
+class _ToolOnlyGroupsSession(_ScriptedSession):
+    """A session whose every group calls a local tool, never ``apply_actions``.
+
+    Each group is one assistant message carrying a ``bash`` tool call (a
+    fresh message id, so the bridge charges one attempted group) followed by
+    its ``TurnEndEvent``; nothing ever reaches the bridge socket, so the
+    admitted-step clock stays at 0. Emission stops at the first graceful
+    cancel, the boundary the real loop honours it at. ``linger_s`` holds the
+    turn open after that, so a wall bound can fire before it ends.
+    """
+
+    def __init__(
+        self,
+        scratch_root: Path,
+        *,
+        groups: int,
+        cancel_ends_aborted: bool,
+        linger_s: float = 0.0,
+    ) -> None:
+        super().__init__(scratch_root, [])
+        self._groups = groups
+        self._cancel_ends_aborted = cancel_ends_aborted
+        self._linger_s = linger_s
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del images
+        self.prompts.append((text, harness_injected))
+        if len(self.prompts) > 1:
+            return
+        for group in range(self._groups):
+            self._emit(
+                MessageEndEvent(
+                    message=Message(
+                        role="assistant",
+                        tool_calls=[ToolCall(id=f"local-{group}", name="bash", arguments={})],
+                        stop_reason="toolUse",
+                    )
+                )
+            )
+            self._emit(TurnEndEvent())
+            if self.cancels:
+                break
+        if self._linger_s:
+            await asyncio.sleep(self._linger_s)
+        self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
+
+
 def _record_kinds(outcome: Any) -> list[str]:
     """The ``kind`` sequence of an episode's ``events.jsonl``."""
 
@@ -4528,6 +4577,64 @@ class TestTextOnlyContinuationThroughTheDriver:
         assert len(rows) == 1
         assert rows[0]["delivered"] is False
         assert rows[0]["stopped"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_groups_that_never_apply_actions_end_max_steps_on_the_budget_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """The driver's own budget stop is a ``max-steps`` truncation.
+
+        The smoke shape (OSWorld smoke ep-ab550b5dd3e2): every group called a
+        tool other than ``apply_actions``, so the admitted-step clock stayed
+        at 0 while the attempted-group budget ran out. The driver wrote
+        ``budget_stop`` and asked for a graceful cancel, the Session ended the
+        turn ``aborted`` with no cause (it drops graceful-cancel reasons), and
+        the outcome read ``agent_stop`` / ``aborted`` / "no cut-off cause".
+        """
+
+        session = _ToolOnlyGroupsSession(short_scratch, groups=4, cancel_ends_aborted=True)
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert session.cancels == ["episode step budget reached"]
+        assert outcome.steps == 0  # unchanged: admitted epochs only
+        assert outcome.attempted_groups == 4
+        assert outcome.status == "truncated", outcome
+        assert outcome.terminal_reason == "max-steps"
+        assert "no cut-off cause" not in (outcome.diagnostic or "")
+        assert "budget_stop" in _record_kinds(outcome)
+
+    @pytest.mark.asyncio
+    async def test_a_wall_bound_after_the_budget_stop_keeps_its_own_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # Precedence guard: the wall bound is the driver's harder act, so a
+        # wall firing while the budget-cancelled turn is still winding down
+        # stays ``wall-bound`` rather than becoming ``max-steps``.
+        session = _ToolOnlyGroupsSession(
+            short_scratch, groups=4, cancel_ends_aborted=True, linger_s=1.0
+        )
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+            max_wall_s=0.3,
+        )
+        outcome = await run()
+
+        assert session.cancels == ["episode step budget reached"]
+        assert session.aborts == ["episode wall budget"]
+        assert "budget_stop" in _record_kinds(outcome)
+        assert outcome.status == "agent_stop", outcome
+        assert outcome.terminal_reason == "wall-bound"
 
     @pytest.mark.asyncio
     async def test_a_normal_finish_run_records_the_base_event_sequence(
@@ -6233,11 +6340,12 @@ class TestTheStreamCompletedStopBoundary:
                 }
             )
         )
-        # The existing command-only close-out labels graceful budget stops as
-        # agent_stop/aborted (unlike screen-epoch exhaustion). Reporting must
-        # neither change that legacy status nor mistake it for lost enforcement.
-        assert outcome.status == "agent_stop", (outcome, text)
-        assert outcome.terminal_reason == "aborted"
+        # A command-only run exhausts the attempted-group budget with zero
+        # screen epochs; the driver's own budget stop names it ``max-steps``
+        # (it used to fall through to agent_stop/aborted, because the Session
+        # drops the graceful-cancel reason). ``steps`` stays admitted epochs.
+        assert outcome.status == "truncated", (outcome, text)
+        assert outcome.terminal_reason == "max-steps"
         assert len(wire) == 3
         assert outcome.steps == 0  # commands never claimed a screen epoch
         assert outcome.attempted_groups == 3

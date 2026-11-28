@@ -24,12 +24,15 @@ set the variable, run the same drive, read the JSONL rows back.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from enum import StrEnum
+from typing import ParamSpec, TypeVar
 from uuid import uuid4
 
 #: Reads the variable ONCE at import: the mark sites guard on :func:`enabled`,
@@ -80,13 +83,23 @@ class DesktopEventsIngressTrace:
     On ``desktop.events.*`` rows, ``ms`` is always since ASGI entry, and
     ``open_id`` joins the request without its URL or session id. The acquire
     row's separate ``acquire_id`` joins to the existing ``a.acquire`` span
-    (whose ``ms`` remains its own duration).
+    (whose ``ms`` remains its own duration), and to ``cold.summary.span`` only
+    when that acquire built the facade. A reused facade/shared cold work is
+    not a cold construction cost attributable to each waiter. A read attach's
+    ``a.attach.owner_lookup`` also joins by ``acquire_id``; it can arrive after
+    headers, so it must not backfill ``a.acquire.owner_lookup_result_at_acquire``.
+
+    The optional client stream ID appears only on ``asgi_entry``. Later phases
+    use the server's own ID so even repeated client IDs cannot conflate them.
     """
 
-    def __init__(self, entry_mono: float, entry_at: float) -> None:
+    def __init__(
+        self, entry_mono: float, entry_at: float, *, client_stream: str | None = None
+    ) -> None:
         self._entry_mono = entry_mono
         self._entry_at = entry_at
-        self._open_id = uuid4().hex
+        self._client_stream = client_stream
+        self.open_id = uuid4().hex
         self.started = False
 
     def start(self) -> None:
@@ -95,15 +108,69 @@ class DesktopEventsIngressTrace:
         self.started = True
         # Record both boundaries, not the writer's later emission times: the
         # first row's write must not count as time spent in middleware.
-        mark("desktop.events.asgi_entry", 0.0, at=self._entry_at, open_id=self._open_id)
-        mark("desktop.events.route", route_ms, at=route_at, open_id=self._open_id)
+        client = {} if self._client_stream is None else {"client_stream": self._client_stream}
+        mark("desktop.events.asgi_entry", 0.0, at=self._entry_at, open_id=self.open_id, **client)
+        mark("desktop.events.route", route_ms, at=route_at, open_id=self.open_id)
 
     def mark(self, stage: str, **fields: object) -> None:
-        mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self._open_id, **fields)
+        mark(stage, (time.monotonic() - self._entry_mono) * 1000, open_id=self.open_id, **fields)
+
+
+class OwnerLookupResult(StrEnum):
+    """The initial locate tuple, not whether the owner bound or was reachable."""
+
+    UNKNOWN = "unknown"
+    NONE = "none"
+    RECORD = "record"
+    PID_ONLY = "pid_only"
+
+
+class ReadAttachOwnerLookupTrace:
+    """Only the request that starts a read-attach flight can observe its lookup.
+
+    ``acquire_id`` joins to ``desktop.events.acquire``, not to a session or
+    whichever request happens to be waiting when the result arrives. The
+    attempt can outlive that request's grace: still log the actual result,
+    but never backfill the acquisition's already-frozen observation.
+    """
+
+    def __init__(self, acquire_id: str) -> None:
+        self._acquire_id = acquire_id
+        self._during_acquire: OwnerLookupResult | None = OwnerLookupResult.UNKNOWN
+
+    def record(self, *, has_record: bool, has_pid: bool) -> None:
+        # ``none`` means the seam returned (None, None). On a peer, that
+        # answer can also reflect a failed relay; it is not proof of absence.
+        if has_record:
+            result = OwnerLookupResult.RECORD
+        elif has_pid:
+            result = OwnerLookupResult.PID_ONLY
+        else:
+            result = OwnerLookupResult.NONE
+        if self._during_acquire is not None:
+            self._during_acquire = result
+        mark("a.attach.owner_lookup", acquire_id=self._acquire_id, result=result)
+
+    def finish_acquire(self) -> OwnerLookupResult:
+        result = self._during_acquire
+        self._during_acquire = None
+        return result if result is not None else OwnerLookupResult.UNKNOWN
+
+
+class ColdWorkerPhase(StrEnum):
+    """The selected default-executor handoffs, never request-supplied labels."""
+
+    MODEL_SYNTHESIS = "model_synthesis"
+    ACCOUNT_CONTEXT = "account_context"
+    DURABLE_VALIDATE = "durable_validate"
+
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
 
 
 class ColdOpenTrace:
-    """One bounded summary per cold call; never retain facade or journal data.
+    """A bounded summary per cold call, plus worker timing for desktop acquires.
 
     Phases include scheduling time in existing awaits. The final row also closes
     failed/cancelled calls, with no exception text or extra task/thread/timer.
@@ -120,6 +187,67 @@ class ColdOpenTrace:
             "started_at": time.time() * 1000.0,
         }
         self.started = time.monotonic()
+        self._acquire_id = span or None
+        # Non-acquire cold opens still have summaries but no existing acquire
+        # ID to join to. Worker samples live only on this acquire's trace.
+        self._workers: dict[ColdWorkerPhase, tuple[int, int, int, int, int]] | None = (
+            {} if self._acquire_id is not None else None
+        )
+
+    async def worker(
+        self, phase: ColdWorkerPhase, func: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
+    ) -> _T:
+        """Measure an existing ``to_thread`` call without moving or owning its work.
+
+        Submit→start includes handoff, executor queuing and worker scheduling;
+        end→resume includes future delivery and loop scheduling. Neither alone
+        proves saturation or a blocked loop. The CPU delta belongs to the same
+        worker thread; wall without CPU does not identify who held the GIL.
+        """
+        workers = self._workers
+        if workers is None:
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+        sample: tuple[int, int, int] | None = None
+
+        def run() -> _T:
+            nonlocal sample
+            started = cpu_started = None
+            # Publish only a complete numeric tuple, without I/O or locks on
+            # the measured worker. The original to_thread Future delivers it.
+            with suppress(Exception):
+                started = time.monotonic_ns()
+                cpu_started = time.thread_time_ns()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                if started is not None and cpu_started is not None:
+                    with suppress(Exception):
+                        cpu_ns = time.thread_time_ns() - cpu_started
+                        sample = (started, time.monotonic_ns(), cpu_ns)
+
+        try:
+            submitted = time.monotonic_ns()
+        except Exception:  # noqa: BLE001 — failed diagnostics are not failed work
+            submitted = None
+        if submitted is None:
+            return await asyncio.to_thread(func, *args, **kwargs)
+
+        cancelled = False
+        try:
+            return await asyncio.to_thread(run)
+        except asyncio.CancelledError:
+            # Don't join the original worker or read a sample that it may
+            # still be writing. Cancellation is not result delivery.
+            cancelled = True
+            raise
+        finally:
+            if not cancelled and sample is not None:
+                with suppress(Exception):
+                    resumed = time.monotonic_ns()
+                    started, ended, cpu_ns = sample
+                    if submitted <= started <= ended <= resumed and cpu_ns >= 0:
+                        workers[phase] = (submitted, started, ended, resumed, cpu_ns)
 
     @contextmanager
     def phase(self, name: str) -> Iterator[None]:
@@ -136,3 +264,22 @@ class ColdOpenTrace:
             outcome=outcome,
             **self.fields,
         )
+        # Bound output to one row per constant phase, after the existing
+        # state install and summary. The acquire ID is the only correlation
+        # value; no session, model, checkpoint or exception data enter here.
+        if self._workers is not None:
+            with suppress(Exception):
+                for phase in ColdWorkerPhase:
+                    sample = self._workers.get(phase)
+                    if sample is not None:
+                        submitted, started, ended, resumed, cpu_ns = sample
+                        mark(
+                            "cold.worker",
+                            acquire_id=self._acquire_id,
+                            phase=phase.value,
+                            submit_ns=submitted,
+                            worker_start_ns=started,
+                            worker_end_ns=ended,
+                            resume_ns=resumed,
+                            worker_cpu_ns=cpu_ns,
+                        )

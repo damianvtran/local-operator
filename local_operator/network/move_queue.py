@@ -791,6 +791,13 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
     record = read_record(root, session_id)
     if record is None or is_terminal(record):
         return str((record or {}).get("phase") or "")
+    # ONE TOKEN PER COPY ATTEMPT (review round 4, R4-1). The decision about a move
+    # is computed per attempt, from the state at that attempt: a refusal recorded
+    # for an earlier try answers nothing about this one, and a fresh queued request
+    # that reused a stale sentence would report a failure nobody computed for it.
+    # Both watches below are scoped to this token, and the invite carries it so the
+    # destination's refusal comes back addressed to THIS attempt.
+    attempt = mobility.progress_for(server).begin_attempt(session_id)  # noqa: SLF001
     to_device = str(record.get("to_device") or "")
     if not to_device:
         transition(
@@ -828,7 +835,7 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
         entry = None
     if entry and str(entry.get("phase") or "") == "handing-off":
         # A handoff that is past the rollback point: watch it to the tombstone.
-        return _watch_for_commit(server, session_id)
+        return _watch_for_commit(server, session_id, attempt=attempt)
     if entry:
         # A ``prepared`` entry that reconcile left alone is written by THIS
         # relay's live instance: a handoff this queue did not start is under
@@ -875,18 +882,12 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
             writer="relay",
         )
         return QUEUE_PHASE_FAILED
-    # THE TEAM/AGENT BRIEF GOES FIRST, as on the immediate move
-    # (``mobility._push_move_definitions``): the queued path sent the invite with no
-    # definitions reconcile at all, so a session attached to a team the destination
-    # had never been sent restored unattached there (2026-11-13: the lopdev brief was
-    # missing from the moved session's prompt). Non-fatal by the same contract; the
-    # destination's promote names a team it still cannot resolve (``carry.team``).
-    try:
-        mobility._push_move_definitions(  # noqa: SLF001
-            server, session_id, target_device, target_name or target_device
-        )
-    except Exception:  # noqa: BLE001 — a brief that could not be refreshed never blocks
-        logger.warning("move queue: definitions push before %s failed", session_id, exc_info=True)
+    # NOTHING IS APPLIED ON THE DESTINATION BEFORE THIS INVITE (review round 4,
+    # R4-2), exactly as on the immediate path: the queued invite is not authority to
+    # install anything there, and the mechanism that installs (``apply_bundle`` on
+    # the receiver) is what must not run pre-invite, whatever rows a caller passes
+    # it today. Independent reconciliation owns those writes and arrival checks the
+    # destination's recorded ceiling.
     try:
         accepted = mobility.LinkTransport(server, link, session_id).ask(
             {
@@ -906,6 +907,9 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
                 # deliberately False — the queueing is DONE; this is the move.
                 "request_id": str(record.get("request_id") or ""),
                 "resume_queued": True,
+                # THE ATTEMPT THIS COMMIT BELONGS TO (R4-1), echoed on any refusal
+                # it produces so the watch below ends only on this attempt's answer.
+                "attempt": attempt,
                 # Stored when the move was queued; the prepare this invite starts
                 # is on the SOURCE, which cannot see the original request.
                 "drop_session_roles": bool(record.get("drop_session_roles") or False),
@@ -941,15 +945,18 @@ def _drive_copy(server: "RelayServer", session_id: str) -> str:
         )
         return QUEUE_PHASE_FAILED
     logger.info("move queue: invited %s to pull %s", target_device, session_id)
-    return _watch_for_commit(server, session_id)
+    return _watch_for_commit(server, session_id, attempt=attempt)
 
 
-def _watch_for_commit(server: "RelayServer", session_id: str) -> str:
+def _watch_for_commit(server: "RelayServer", session_id: str, *, attempt: int) -> str:
     """Wait for the commit (tombstone) or a reported refusal; fold on timeout.
 
     Refusals are scoped to the device this move was invited to
     (``from_device``), the ``_source_refused`` contract: a member that did not
-    receive this move cannot end its wait.
+    receive this move cannot end its wait. They are ALSO scoped to ``attempt``
+    (review round 4, R4-1): only the sentence this attempt's own invite produced
+    can fold the record, so a request that re-runs after a reconciliation sync
+    decides from its own state rather than from a remembered failure.
     """
     from local_operator.network import mobility
 
@@ -965,7 +972,7 @@ def _watch_for_commit(server: "RelayServer", session_id: str) -> str:
             transition(root, session_id, QUEUE_PHASE_RESUMED, writer="relay")
             logger.info("move queue: %s committed and resumed at its destination", session_id)
             return QUEUE_PHASE_RESUMED
-        refusal = progress.refusal(session_id, from_device=invited)
+        refusal = progress.refusal(session_id, from_device=invited, attempt=attempt)
         if refusal is not None:
             code, message = refusal
             transition(

@@ -402,6 +402,87 @@ def read_events(session_directory: Path | str, *, strict: bool = False) -> list[
     return events
 
 
+_ASK_CREATION_KINDS = frozenset({EVENT_QUEUED, EVENT_RELAYED})
+_ASK_FOLLOWUP_KINDS = frozenset(
+    {
+        EVENT_ANSWERED,
+        EVENT_DECLINED,
+        EVENT_DISMISSED,
+        EVENT_REVISED,
+        EVENT_WITHDRAWN,
+        EVENT_RELAY_SURFACED,
+        EVENT_CONTEXT,
+        EVENT_CONSENT_USED,
+    }
+)
+
+
+def read_complete_events(session_directory: Path | str) -> list[dict[str, Any]] | None:
+    """Evidence for clearing a live queued claim, not the tolerant inbox view.
+
+    Validate and consume the same bytes from one open of the append-only file.
+    Writers append a whole LF-terminated row in one write; a complete prefix is
+    a point-in-time view, not a promise that another append cannot follow it.
+    Never skip a bad row here: older settled rows can otherwise conceal the
+    one outstanding ask. Missing/empty is unknown, not a settled queue.
+    """
+    from local_operator.network.origin import StampLineRejected, parse_stamp_line
+
+    try:
+        raw = asks_log_path(session_directory).read_bytes()
+    except FileNotFoundError:
+        return None
+    if not raw.endswith(b"\n"):
+        return None
+
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    lines = raw.split(b"\n")
+    lines.pop()  # The required final LF leaves exactly one empty fragment.
+    for line in lines:
+        try:
+            event = parse_stamp_line(line)
+        except StampLineRejected:
+            return None
+        if not isinstance(event, dict):
+            return None
+        version, at, kind, ask_id = (event.get(key) for key in ("v", "at", "kind", "ask_id"))
+        if (
+            type(version) is not int
+            or version != EVENT_SCHEMA
+            or type(at) is not int
+            or at <= 0
+            or not isinstance(ask_id, str)
+            or not ask_id
+            or not isinstance(kind, str)
+        ):
+            return None
+        if kind in _ASK_CREATION_KINDS:
+            if ask_id in seen:
+                return None
+            if kind == EVENT_QUEUED:
+                # Both queued writers add a positive timeout to the row's
+                # creation time (`at`). An impossible deadline is not evidence
+                # of expiry, even if the tolerant fold would mark it expired.
+                deadline = event.get("expires_at")
+                if type(deadline) is not int or deadline <= at:
+                    return None
+            else:
+                origin = event.get("relay")
+                if not isinstance(origin, dict) or not all(
+                    isinstance(origin.get(key), str) and origin[key]
+                    for key in ("session_id", "ask_id")
+                ):
+                    return None
+            seen.add(ask_id)
+        elif kind not in _ASK_FOLLOWUP_KINDS or ask_id not in seen:
+            return None
+        elif kind in {EVENT_ANSWERED, EVENT_REVISED} and not isinstance(event.get("answers"), dict):
+            return None
+        events.append(event)
+    return events
+
+
 # ---------------------------------------------------------------------------
 # The fold
 # ---------------------------------------------------------------------------
@@ -1369,13 +1450,26 @@ def read_entry(config_dir: Path | str, session_id: str) -> dict[str, Any] | None
     return data
 
 
-def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, dict[str, Any]]:
+def read_index(
+    config_dir: Path | str, *, now: int | None = None, include_orphans: bool = False
+) -> dict[str, dict[str, Any]]:
     """Every readable entry keyed by session id, with the TTL sweep applied.
 
     A missing directory is an empty index — the ordinary state of a machine
-    that has no queued asks. The sweep (see :func:`entry_is_stale`) unlinks an
-    orphaned entry best-effort; a failure to unlink is not reported, because
+    that has no queued asks. The sweep (see :func:`entry_is_stale`) unlinks a
+    stale entry best-effort; a failure to unlink is not reported, because
     the next read sweeps again and the file is derived in any case.
+
+    AN ENTRY WHOSE SESSION DIRECTORY IS MISSING IS SKIPPED, NOT UNLINKED
+    (orphan-ask review round 1, Q-U1). Unlinking it here made a deleted
+    conversation's ask vanish from the Notifications list on the first read,
+    and its detail answer 404, so the row could never carry its "conversation
+    deleted" label; and "no directory" is not "deleted" (a hand-off or a move
+    to another device also leaves none). Removing it is now the job of the
+    bounded orphan sweep (``asks/orphans.sweep``), which acts only on a
+    PROVABLY gone session. ``include_orphans`` returns such entries (still
+    subject to the age rule) for the one reader that labels them: the
+    Notifications inbox (``notifications.items.open_asks``).
     """
     root = Path(config_dir)
     directory = asks_dir(root)
@@ -1396,6 +1490,11 @@ def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, d
         if entry is None:
             continue
         exists = session_dir(root, session_id).is_dir()
+        if not exists:
+            if include_orphans and not entry_is_stale(entry, stamp, session_exists=True):
+                entry["session_id"] = session_id
+                index[session_id] = entry
+            continue
         if entry_is_stale(entry, stamp, session_exists=exists):
             logger.debug("ask index: sweeping stale entry %s", name)
             try:
@@ -1416,6 +1515,7 @@ def index_asks(
     *,
     now: int | None = None,
     lapsed_visible_ms: int = DEFAULT_LAPSED_VISIBLE_MS,
+    include_orphans: bool = False,
 ) -> list[dict[str, Any]]:
     """Every ask worth showing across sessions, newest-first within each status.
 
@@ -1436,6 +1536,8 @@ def index_asks(
     stdlib-only. Applied here at READ time rather than by the index writer, so
     a changed setting moves every reader at once — a stopped session never
     writes again, and a writer-side filter could not bring its rows back.
+
+    ``include_orphans``: see :func:`read_index`.
     """
     stamp = now if now is not None else now_ms()
     #: NO CROSS-SESSION CAP, deliberately (review round 1, NIT 9). The population
@@ -1447,7 +1549,8 @@ def index_asks(
     #: into a push, add the cap here (newest first, open-first) rather than in
     #: each caller.
     rows: list[dict[str, Any]] = []
-    for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
+    index = read_index(config_dir, now=stamp, include_orphans=include_orphans) or {}
+    for session_id, entry in index.items():
         rows.extend(_shown_rows(session_id, entry, stamp, lapsed_visible_ms))
     rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
     return rows
@@ -1641,6 +1744,7 @@ __all__ = [
     "open_asks",
     "outstanding_asks",
     "pending_row",
+    "read_complete_events",
     "read_entry",
     "read_events",
     "read_index",

@@ -98,6 +98,10 @@ KIND_OPERATOR_DEVICE_PAIR = "operator_device_pair"
 #: Its provider enforces authenticated incoming-key provenance and installed
 #: presence at every mutation boundary; no existing generic signer can mint it.
 KIND_FILE_DEVICE_APPROVAL = "file_device_approval"
+#: A member's Radient Guard sharing consent (Guard RFC v0.9 §5.2.2, ``guard/consent_op.py``):
+#: a host-level decision about THIS computer, so it carries a ``machine`` block. Accepted only
+#: through the typed ``/approve-operation`` path; the generic approvers refuse it.
+KIND_GUARD_CONSENT = "guard_consent"
 KINDS: tuple[str, ...] = (
     KIND_DEVICE_ONBOARD,
     KIND_LOCAL_AUTHORITY,
@@ -105,6 +109,7 @@ KINDS: tuple[str, ...] = (
     enrollment.KIND,
     KIND_OPERATOR_DEVICE_PAIR,
     KIND_FILE_DEVICE_APPROVAL,
+    KIND_GUARD_CONSENT,
 )
 
 #: The envelope block each kind files, and therefore the block ``request_digest`` binds in
@@ -119,6 +124,7 @@ _SUBJECT_BLOCKS: dict[str, str] = {
     # A profile save names a LOCAL target (row id, name, scope), not a device.
     KIND_PROFILE_SAVE: "machine",
     KIND_FILE_DEVICE_APPROVAL: "machine",
+    KIND_GUARD_CONSENT: "machine",
 }
 
 STATE_REQUESTED = "requested"

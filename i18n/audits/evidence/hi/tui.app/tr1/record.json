@@ -1,0 +1,34 @@
+{
+  "locale": "hi",
+  "audit_date": "2026-11-23",
+  "key_count": 5,
+  "auditor": {"agent": "i18n-auditor (lopdev team)", "session": "3c9b77a26ab4", "model": "anthropic/claude-opus-5-5 (no fallback observed)", "actual_model_source": "session system prompt Model line", "date": "2026-11-23", "independent_from_translator": true},
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "c3ba6a516c6a"},
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/hi.json (sha256 bf46cb00e7d9a3f1b49863300423811c3d3edee086120a62d5d5486cec31523f; translator: lopdev i18n-translator, anthropic/claude-opus-5-5). Briefed path under eac1855834c5 did not exist; located via the briefed ls fallback.",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+  },
+  "input_hashes": {
+    "context": {
+      "local_operator/i18n/catalogues/en/tui.app.context.json": "c61aa36456fc6e6e78542e15972d31fb5711b5a6f80578e2dbd1cfd991dcfba5",
+      "local_operator/i18n/catalogues/en/tui.projects.context.json": "411f134fa0a8defb711623ab65ec90946fd5d92612d23c941ba3149a3dd529b0"
+    },
+    "hi_base": {
+      "local_operator/i18n/catalogues/hi/tui.app.json": "f68a82306c546acfc4245395d52c73ee32c17bf83bd6cafb9ec6edb23f873b1f",
+      "local_operator/i18n/catalogues/hi/tui.projects.json": "d855bcf8e5f7249b2e241785c92c5b33793ef427495214fddc6f782a824861e1"
+    },
+    "i18n/glossary.md": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7",
+    "i18n/style-guides/hi.md": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  },
+  "artifacts": {"audit.log": {"path": "audit.log (same dir)", "sha256": "d76e71bd6f9d4624c5fa1ab89e6b90014bab1d03c0d74dc1f1b712786c70d529", "kind": "actual execution log (validator control/merged + rendered widths)"}},
+  "validator": "scripts/i18n/check.py::check_catalogues() run against a scratch catalogue root holding only en+hi tui.app/tui.projects (monkeypatched catalogues._CATALOGUES): control (hi base) = 5 'missing key' problems (exactly the 5 keys); merged (hi base + translation) = 0 problems. See audit.log.",
+  "per_namespace": {
+    "tui.app": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "member_count '{count, plural, one {{shown} सदस्य} other {{shown} सदस्य}}': hi one/other per glossary; invariant direct-case सदस्य is correct and byte-identical to the arms of existing tui.app.skills.led_by and tui.small.network_panel.member_count. Rendered cells (rich cell_len) 0/1/2/5/21/100/1000000 → 6/6/6/6/7/8/12 ≤ maxCells 14. team_aliases 'उपनाम: {aliases}' matches tui.team_authoring.aliases (उपनाम) for the same team-alias concept; invariant noun reads right for one or many aliases; 14 cells with 'dev, ops'. team_no_description 'कोई विवरण नहीं' natural absence statement, consistent with tui.projects.detail.no_description minus अभी (source has no 'yet'); 10 cells ≤ 30. team_fallback_facts 'टीम' = glossary team. Placeholders identical; no bidi/ZWJ controls."},
+    "tui.projects": {"result": "clean", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [],
+      "notes": "start.team_detail '{manager} · {count, plural, one {{shown} भूमिका} other {{shown} भूमिकाएँ}}': {manager}, {count}, {shown} identical, ' · ' kept; भूमिका matches tui.authoring.role; plural भूमिकाएँ uses the style guide's chandrabindu spelling (no competing भूमिकाएं in hi catalogues). 0 and 1 → one ('0 भूमिका') per hi style guide. Rendered with manager='manager': 15/15/16/16/17/18/22 cells for 0/1/2/5/21/100/1e6, shorter than en (17–23); no maxCells set."}
+  },
+  "current_report_verdict": {"status": "passed", "unresolved_blocker_major_count": 0, "finding_ids": []},
+  "audit_notes_not_execution_log": "Linguistic judgments above are reasoning notes; only audit.log is command output. No MT/translation service used."
+}

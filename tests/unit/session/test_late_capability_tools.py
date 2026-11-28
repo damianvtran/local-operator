@@ -167,7 +167,13 @@ async def answer_nothing(questions: list[AskQuestion]) -> dict[str, list[str]] |
     return None
 
 
-def make_prompt_session(tmp_path, stream: RecordingStream) -> Session:
+async def allow_all(tool_name: str, description: str) -> bool:
+    """A host approval gate that exists: Team Integrations gates on its PRESENCE
+    (an interactive host has one; an unattended resume worker does not)."""
+    return True
+
+
+def make_prompt_session(tmp_path, stream: RecordingStream, **kwargs: Any) -> Session:
     """A session whose prompt is REAL, wired exactly as the shipped hosts wire it.
 
     ``make_session`` above returns a fixed one-block prompt, which is fine for
@@ -191,6 +197,7 @@ def make_prompt_session(tmp_path, stream: RecordingStream) -> Session:
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=provider,
         has_ui=True,
+        **kwargs,
     )
 
 
@@ -297,6 +304,270 @@ async def test_installing_ask_does_not_resurrect_a_pruned_capability(tmp_path) -
     await session.dispose()
 
 
+class _FakeCredential:
+    def __init__(self, credential_type: str) -> None:
+        self.credential_type = credential_type
+
+
+def _sign_in_to_radient(monkeypatch: pytest.MonkeyPatch, rows: int = 1) -> None:
+    """Back the REAL ``_gate_bridge_login`` with ``rows`` Radient OAuth rows.
+
+    Patches the auth store the gate reads, not the gate, so the pin rule
+    (exactly one row) is still evaluated by production code.
+    """
+    from local_operator.providers import auth_store
+
+    class _Store:
+        def list_credentials(self, provider: str) -> list[_FakeCredential]:
+            assert provider == "radient"
+            return [_FakeCredential("oauth") for _ in range(rows)]
+
+    monkeypatch.setattr(auth_store, "shared_auth_store", lambda *a, **k: _Store())
+
+
+def _inventory_names(session: Session) -> list[str]:
+    return [tool.name for tool in session._tools]
+
+
+@pytest.mark.asyncio
+async def test_an_ask_handler_installed_after_construction_mounts_integrations(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Team Integrations never reached a live session.
+
+    ``build_integrations_tool`` needs ``ask_user`` AND the consent seam, and the
+    constructor's one-time merge runs before any front end installs the hook, so
+    it built against ``ask_user=None``. ``set_ask_handler`` re-ran only
+    ``ask``/``ask_withdraw``. Goes through the REAL ``set_ask_handler`` — the
+    earlier stub-context QA bound both fields by hand and so could not see it.
+    """
+    _sign_in_to_radient(monkeypatch)
+    stream = RecordingStream()
+    session = make_prompt_session(tmp_path, stream, request_approval=allow_all)
+    assert "integrations" not in _inventory_names(session)
+
+    session.set_ask_handler(answer_nothing)
+
+    assert "integrations" in _inventory_names(session)
+    assert {"ask", "ask_withdraw"} <= set(_inventory_names(session))
+    # DEFERRED: described on the one "schema on demand" line, off the array
+    # until read — and the read the model is told to make must resolve.
+    await session.prompt("hi")
+    assert "integrations" in stream.described()
+    assert "integrations" not in stream.advertised()
+    doc = session._skill_resolver("tool://integrations")
+    assert doc and "integrations" in doc.lower()
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_stays_off_without_a_handler(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+
+    session.set_ask_handler(None)
+
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [0, 2])
+async def test_integrations_stays_off_unless_exactly_one_radient_oauth_row(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, rows: int
+) -> None:
+    """No login -> nothing to provision with; two -> the bridge client's pin
+    rule cannot choose one, so the gate fails closed. ``ask`` still mounts, so
+    this is the integrations gate and not a broken install."""
+    _sign_in_to_radient(monkeypatch, rows=rows)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+
+    session.set_ask_handler(answer_nothing)
+
+    assert "ask" in _inventory_names(session)
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_stays_off_for_a_delegated_child(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RFC §8.1 R4 / S-83: a child (or a channel post that reached one) must
+    never reach an integration admin operation. The consent seam is None for a
+    child, and the rescue must not route around that."""
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(
+        tmp_path,
+        RecordingStream(),
+        parent_session_id="parent-session",
+        request_approval=allow_all,
+    )
+
+    session.set_ask_handler(answer_nothing)
+
+    assert session._integration_consent_seam() is None
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_stays_off_on_the_blocking_ask_arm(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LOP_ASK_NONBLOCKING=0``: no queue, so no consent seam, so no tool —
+    while ``ask`` itself still mounts on its blocking path."""
+    from local_operator.asks import policy
+
+    _sign_in_to_radient(monkeypatch)
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+
+    session.set_ask_handler(answer_nothing)
+
+    assert "ask" in _inventory_names(session)
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_uninstalling_the_handler_takes_integrations_off_with_ask(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+    session.set_ask_handler(answer_nothing)
+    assert "integrations" in _inventory_names(session)
+
+    session.set_ask_handler(None)
+
+    names = _inventory_names(session)
+    assert not {"ask", "ask_withdraw", "integrations"} & set(names)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_rescue_does_not_resurrect_other_pruned_tools(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Widening the rescue set must stay a SUBSET of the merge set."""
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+    session.refresh_tools([tool for tool in session._tools if tool.name != "wake"])
+
+    session.set_ask_handler(answer_nothing)
+
+    assert "integrations" in _inventory_names(session)
+    assert "wake" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_stays_off_on_an_unattended_host_with_no_approval_gate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-1: a resume worker / agent-started workstream installs
+    ``_unanswerable_ask`` and NO approval gate. ``revoke``/``draft_app``/
+    ``status``/``list`` never use the consent seam, and with no gate the loop
+    skips the write-tier card, so the tool would run them with no person. The
+    handler is the REAL one serving installs, through the real
+    ``set_ask_handler``; ``ask`` still mounts (its queue is the point of that
+    arm), so this is the integrations gate and not a broken install."""
+    from local_operator.session.runtime.serving import _unanswerable_ask
+
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream())  # no request_approval
+
+    session.set_ask_handler(_unanswerable_ask)
+
+    assert session._integration_consent_seam() is None
+    assert "ask" in _inventory_names(session)
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yolo", [False, True])
+async def test_integrations_mounts_on_an_interactive_host_with_an_approval_gate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, yolo: bool
+) -> None:
+    """The positive twin of the S-1 test, same sign-in and same handler path.
+    ``--yolo`` is applied where the loop is handed the gate (the Session keeps
+    it), so an interactive yolo session still gets the tool — the S-1 condition
+    must not turn the flag into a feature kill switch."""
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all, yolo=yolo)
+
+    session.set_ask_handler(answer_nothing)
+
+    assert session._integration_consent_seam() is not None
+    assert "integrations" in _inventory_names(session)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_integrations_stays_off_for_a_child_resumed_by_id(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-2: a child reopened by id has no constructor parent, but ``origin.json``
+    still records who delegated it (the divergence judge recovers it the same
+    way). It must stay a child here too — RFC §8.1 R4 / S-83. The control
+    session, identical but for the marker, DOES mount the tool, so the absence
+    is the marker's doing and not a missing fixture."""
+    import json
+
+    _sign_in_to_radient(monkeypatch)
+    control = make_session(tmp_path / "control", RecordingStream(), request_approval=allow_all)
+    control.set_ask_handler(answer_nothing)
+    assert "integrations" in _inventory_names(control)
+    await control.dispose()
+
+    child_dir = tmp_path / "child" / "sess"
+    child_dir.mkdir(parents=True)
+    (child_dir / "origin.json").write_text(
+        json.dumps({"origin": "subagent", "parent": "parent-session"}), encoding="utf-8"
+    )
+    child = make_session(tmp_path / "child", RecordingStream(), request_approval=allow_all)
+    assert child._parent_session_id == ""  # the premise: no live parent handle
+
+    child.set_ask_handler(answer_nothing)
+
+    assert child._integration_consent_seam() is None
+    assert "integrations" not in _inventory_names(child)
+    await child.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_moderation_eval_agent_is_never_offered_integrations(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-4: ``AgentLeg`` installs its ``RecordingAskSurface`` through the real
+    ``set_ask_handler`` on an SDK session whose ``ApprovalPolicy.auto()`` gate is
+    a real, non-None approver — so the S-1 condition alone does not keep the tool
+    out of it. With one Radient row on the machine the model would hold an app
+    revoker inside a harness that measures only the Team Bridge, and the measured
+    inventory would differ per machine. The leg removes it by name."""
+    from local_operator.evaluation.team_bridge_moderation.agent import (
+        AgentLeg,
+        RecordingAskSurface,
+    )
+
+    _sign_in_to_radient(monkeypatch)
+    session = make_session(tmp_path, RecordingStream(), request_approval=allow_all)
+    leg = AgentLeg.__new__(AgentLeg)  # only the two attributes the method reads
+    leg.ask = RecordingAskSurface()
+    leg.ask_surface = "missing"
+
+    leg._install_ask_surface(session)
+
+    assert leg.ask_surface == "installed"
+    assert "ask" in _inventory_names(session)
+    assert "integrations" not in _inventory_names(session)
+    await session.dispose()
+
+
 @pytest.mark.asyncio
 async def test_every_session_gated_tool_is_in_the_merge_set(
     tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -318,9 +589,11 @@ async def test_every_session_gated_tool_is_in_the_merge_set(
     from local_operator.tools import music_tool
 
     monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
+    # ``integrations`` carries a second gate too (a stored Radient OAuth row).
+    _sign_in_to_radient(monkeypatch)
 
     stream = RecordingStream()
-    session = make_session(tmp_path, stream)
+    session = make_session(tmp_path, stream, request_approval=allow_all)
     session.set_ask_handler(answer_nothing)
 
     # What ``session_factory`` builds the inventory from: no session fields.
@@ -394,9 +667,11 @@ async def test_a_late_installed_ask_is_described_in_the_prompt_not_just_advertis
     from local_operator.tools import music_tool
 
     monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
+    # ``integrations`` needs a stored Radient OAuth row as well as the hook.
+    _sign_in_to_radient(monkeypatch)
 
     stream = RecordingStream()
-    session = make_prompt_session(tmp_path, stream)
+    session = make_prompt_session(tmp_path, stream, request_approval=allow_all)
     session.set_ask_handler(answer_nothing)
 
     await session.prompt("go")

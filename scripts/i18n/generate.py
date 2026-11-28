@@ -237,6 +237,10 @@ OWNED_SPA_NAMESPACES = (
     # The mermaid diagram block: copy/save/full-size controls and the error card.
     # Its own namespace for the frozen-bytes reason above.
     "relay.diagram",
+    # Inline lop-ui charts: the "Chart data" disclosure, tooltip rows, the
+    # folded "Other (n)" slice and the screen-reader position. Its own
+    # namespace for the frozen-bytes reason above.
+    "relay.chart",
 )
 
 # WHY A COMMENT HEADER, NOT A MODULE DOCSTRING (2026-11-15): the header is for

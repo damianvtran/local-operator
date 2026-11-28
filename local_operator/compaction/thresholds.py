@@ -24,6 +24,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from local_operator.compaction.keepalive import (
+    DEFAULT_KEEPALIVE_DAILY_MAX,
+    DEFAULT_KEEPALIVE_MAX_CONSECUTIVE,
+    DEFAULT_KEEPALIVE_MODE,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -392,6 +398,35 @@ class CompactionSettings(BaseModel):
             " before another idle pass (capped at 25% of the effective"
             " threshold). The anti-thrash rule."
         ),
+    )
+    # Prompt-cache keep-alive (``compaction/keepalive.py``). Beside the idle
+    # keys because it answers the same question from the other side: idle
+    # compaction shrinks a parked prefix before the cache lapses, the
+    # keep-alive keeps it from lapsing at all for the sessions that are
+    # always about to be used again.
+    keepalive_mode: Literal["off", "chief_of_staff", "always_on"] = Field(
+        default=DEFAULT_KEEPALIVE_MODE,
+        description=(
+            "Re-read an idle session's 1-hour prompt cache shortly before it"
+            " expires, so the next message starts warm. chief_of_staff: only"
+            " the chief-of-staff session; always_on: also the Team Bridge"
+            " session; off: never. Never subagents, never while Radient Saver"
+            " reduces the session; pings continue while the chief of staff is"
+            " paused."
+        ),
+    )
+    keepalive_max_consecutive: int = Field(
+        default=DEFAULT_KEEPALIVE_MAX_CONSECUTIVE,
+        ge=0,
+        description=(
+            "Keep-alive requests per idle gap (one every 55 minutes) before the"
+            " cache is let go. 0 sends none."
+        ),
+    )
+    keepalive_daily_max: int = Field(
+        default=DEFAULT_KEEPALIVE_DAILY_MAX,
+        ge=0,
+        description="Keep-alive requests per session in any 24 hours. 0 sends none.",
     )
 
     @model_validator(mode="before")

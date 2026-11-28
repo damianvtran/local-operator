@@ -792,6 +792,10 @@ _CONFIG_SECRET_SUBPATHS: tuple[str, ...] = (
     "tunnel/cloudflared.token",
     "push-handle.key",
     "mcp.json",
+    # The Radient Guard install key's 0600 file fallback (``guard/install_key``;
+    # Windows, Linux without libsecret, or ``LOCAL_OPERATOR_GUARD_KEY_STORE=file``).
+    # Guard RFC v0.9 §5.7a: a model shell must not read it (security S-2).
+    "guard/install.key",
 )
 
 #: Per-network secret files: ``network/networks/<id>.secrets.json``. A regex
@@ -1044,7 +1048,10 @@ def _secret_read_denials() -> tuple[str, ...]:
         # ``auth.db`` (+ WAL/SHM) are matched by prefix so a sibling
         # spelling the store writes later is covered too.
         prefix = _seatbelt_regex_literal(str(root))
-        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db)")')
+        # ``guard/install.key`` likewise, so the file store's per-writer temp
+        # (``install.key.<hex>.tmp``, which holds the key until it is linked)
+        # is denied too (L2a security S-7).
+        filters.append(f'(regex #"^{prefix}/(credentials|auth\\.db|guard/install\\.key)")')
         suffix = _seatbelt_regex_literal(_NETWORK_SECRETS_SUFFIX)
         filters.append(f'(regex #"^{prefix}/network/networks/[^/]*{suffix}$")')
     filters.extend(f'(subpath "{home / rel}")' for rel in _HOME_SECRET_SUBPATHS)

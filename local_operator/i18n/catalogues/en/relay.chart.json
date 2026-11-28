@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "Also: {items}",
+  "relay.chart.axis_value": "{label}: {value}",
+  "relay.chart.data_toggle": "Chart data",
+  "relay.chart.more": "+{count} more",
+  "relay.chart.no_data": "No data",
+  "relay.chart.other": "Other ({count})",
+  "relay.chart.position": "{index} of {count}",
+  "relay.chart.right_axis": "{label} · right axis",
+  "relay.chart.role": "chart",
+  "relay.chart.share": "{share} of total",
+  "relay.chart.total": "Total"
+}

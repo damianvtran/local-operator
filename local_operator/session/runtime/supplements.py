@@ -507,7 +507,9 @@ class SupplementRunner:
 
         settled = 0
         try:
-            rows = sweep.stale_rows(self._session.transcript.entries())
+            from local_operator.session.transcript import projection_entries
+
+            rows = sweep.stale_rows(projection_entries(self._session.transcript))
         except Exception:  # noqa: BLE001 -- an unreadable journal settles nothing
             logger.debug("supplement stale rows could not be read", exc_info=True)
             return 0
@@ -691,9 +693,14 @@ class SupplementRunner:
                     components.extend(result.components)
                 if refusal:
                     prepared_detail.append(refusal)
-        # Explicit prepared work must not wait for a decoration vendor. The same
-        # decision function applies its deterministic file rules and bounds locally.
-        service = self._seam() if self._seam is not None and not pre.prepared else None
+        # Charts now belong in the primary answer. Preserve the existing file
+        # ranking seam (and local fallback) without asking for graphics or
+        # starting another generation job on any viewer, including legacy.
+        service = (
+            self._seam()
+            if self._seam is not None and not pre.prepared and want_files and pre.candidates
+            else None
+        )
         decision = await decide_supplement(
             service,
             user_text=provenance.user_text,
@@ -701,7 +708,7 @@ class SupplementRunner:
             candidates=pre.candidates,
             evidence=pre.evidence,
             want_files=want_files,
-            want_graphics=want_graphics,
+            want_graphics=False,
             max_featured=settings.max_featured,
         )
         if pre.sweep_more:
@@ -742,28 +749,6 @@ class SupplementRunner:
                 sounds=sounds,
                 withheld=withheld,
                 music_jobs=music_jobs,
-            )
-            return
-        if decision.graphics and want_graphics:
-            # Files AND graphics: the generator half runs on its own task so a steer can cut
-            # it without touching the decision's work, and so a slow model can never delay
-            # the turn that is already over (§2.9).
-            # Only when present: the keywords are additive, and a turn with nothing
-            # withheld and no music keeps the exact call shape the render seam always had.
-            optional: dict[str, Any] = {}
-            if withheld:
-                optional["withheld"] = withheld
-            if music_jobs:
-                optional["music_jobs"] = music_jobs
-            self._render(
-                answer.id,
-                decision,
-                pre.evidence.datasets,
-                provenance.user_text,
-                answer.text,
-                settings,
-                sounds=sounds,
-                **optional,
             )
             return
         await self._write(
@@ -1521,7 +1506,9 @@ class SupplementRunner:
         """The anchor whose highlights row recorded music ``job`` (newest such row wins)."""
         anchor: str | None = None
         try:
-            for entry in self._session.transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            for entry in projection_entries(self._session.transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}
@@ -1906,7 +1893,9 @@ class SupplementRunner:
         """
         rows: list[dict[str, Any]] = []
         try:
-            for entry in self._session.transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            for entry in projection_entries(self._session.transcript):
                 if entry.type != "custom":
                     continue
                 payload = entry.payload if isinstance(entry.payload, dict) else {}

@@ -1,0 +1,13 @@
+{
+  "wire.sessions_remote_stop.approval_stop_peer_force": "stop {address} on {peer} with force: always refused — force is never sent to another device, so nothing will be sent",
+  "wire.sessions_remote_stop.approval_stop_peer_idle": "stop {address} on {peer} if it is idle there: its device ends it only when it confirms it idle, and never signals; refused while it is working",
+  "wire.sessions_remote_stop.dormant_hint": "Its wakes and monitors on {peer} are DORMANT until the session is reopened there. To rearm them, reopen it with `sessions op=resume session={address} peer={peer}`.",
+  "wire.sessions_remote_stop.force_refused": "A session on another device can only be stopped idle-only from here: force is never sent to a peer, so nothing was sent. The operator can force-stop it on that device.",
+  "wire.sessions_remote_stop.not_running": "\"{name}\" is not running on {peer}, so there was nothing to stop.",
+  "wire.sessions_remote_stop.not_served": "{peer} did not run the idle-only stop it was sent, so nothing was stopped. Update that device, or ask the operator to stop the session there.",
+  "wire.sessions_remote_stop.pending": "stop accepted by \"{name}\" on {peer}, but it had not exited after {seconds} s. No signal was sent — check with `sessions op=list peer={peer}` before retrying.",
+  "wire.sessions_remote_stop.refused_unanswered": "\"{name}\" did not answer on {peer}, so an idle-only stop could not be confirmed and no signal was sent. Check with `sessions op=list peer={peer}` first — it may already be gone.",
+  "wire.sessions_remote_stop.relay_restart": "This device's relay is older than this lop and cannot send an idle-only stop, so nothing was sent and nothing was stopped. Restart it with `lop network restart`, then try again.",
+  "wire.sessions_remote_stop.unconfirmed": "Unconfirmed: the session may or may not have been stopped on {peer}, and nothing was retried. Check with `sessions op=list peer={peer}` before trying again.",
+  "wire.sessions_remote_stop.unsupported": "{peer} runs a build without the idle-only stop, so nothing was sent and nothing was stopped. Update that device, or ask the operator to stop the session there."
+}

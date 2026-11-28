@@ -64,6 +64,7 @@ def ensure_applier(app: Any) -> SettingsApplier:
     applier = getattr(app.state, "settings_applier", None)
     if applier is not None:
         return applier
+    from local_operator.server.desktop_idle_update import stopping
     from local_operator.server.routes import desktop_sessions
 
     shim = SimpleNamespace(app=app)
@@ -77,6 +78,7 @@ def ensure_applier(app: Any) -> SettingsApplier:
         app.state.config_manager.config_dir,
         BridgeDriver(lambda: desktop_sessions.host(shim)),  # type: ignore[arg-type]
         publish=publish,
+        update_stopping=lambda: stopping(app),
     )
     app.state.settings_applier = applier
     return applier

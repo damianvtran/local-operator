@@ -19,18 +19,21 @@ expectation:
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
+import operator
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, SupportsIndex
 
 import pytest
 
 from local_operator.harness.types import Message, TextContent, Usage
-from local_operator.session import replay_cache
+from local_operator.session import cold_metadata, open_trace, replay_cache, tail_anchor
 from local_operator.session import transcript as transcript_module
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
-from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
+from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
     Transcript,
     TranscriptEntry,
@@ -99,6 +102,563 @@ async def _journal(
         await transcript.append_message(answer)
     transcript.flush()
     return directory
+
+
+@pytest.mark.asyncio
+async def test_desktop_recovers_checkpoint_just_below_row_bound(tmp_path: Path) -> None:
+    directory = await _journal(tmp_path, turns=150, checkpoint_first=True)
+    writer = Transcript(directory)
+    await writer.append_message(
+        Message(id="receipt", role="assistant", usage=Usage(input_tokens=1, output_tokens=2))
+    )
+    writer.flush()
+    writer.close()
+    key = replay_cache.replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=WANTED[:1],
+        opportunistic_types=WANTED[1:],
+    )
+    assert key is not None
+    expected = eager_facts(directory)
+    assert expected["checkpoint"] == {"checkpoint_id": "buried"}
+    target = tmp_path / "record.json"
+    stats: dict[str, Any] = {}
+    actual = replay_cache.build_cold_tail_metadata(key, target, stats)
+    assert actual is not None, "desktop must not replay eager for a provably recoverable checkpoint"
+    assert actual.checkpoint == expected["checkpoint"]
+    assert actual.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE) == expected["spend"]
+    assert actual.order == expected["order"]
+    assert actual.seed_usage is not None
+    assert actual.seed_usage.model_dump(mode="json") == expected["seed"]
+    assert cold_metadata.read_cold_metadata(target, replay_cache.witness_for(key)) == actual
+    assert stats["proof_mode"] == "recovered"
+
+
+def _encoded(id_: str, kind: str, **payload: Any) -> bytes:
+    return TranscriptEntry(id_, 1.0, kind, payload).to_json().encode() + b"\n"
+
+
+def _custom_row(name: str, details: Any, *, id_: str = "custom") -> bytes:
+    return _encoded(id_, "custom", custom_type=name, details=details)
+
+
+_CHECKPOINT = _custom_row(WANTED[0], {"checkpoint_id": "newest"})
+_SPEND = _custom_row(WANTED[1], {"version": 1, "micro": 310, "calls": 1, "priced_calls": 1})
+_RECEIPT = _encoded("receipt", "message", role="assistant", usage={"context_tokens": 125})
+_LOOKALIKE = _custom_row("unrelated", {"custom_type": WANTED[0]})
+_DENSE_LINE = _encoded("filler", "message", role="user")
+_FILLER = b"".join(_encoded(f"row-{i}", "message", role="user") for i in range(256))
+_SHRINK = _encoded("compact", "compaction", first_kept_entry_id="row-0")
+
+
+def _raw_journal(tmp_path: Path, data: bytes) -> tuple[Path, Path]:
+    directory = tmp_path / "session"
+    directory.mkdir()
+    journal = directory / "transcript.jsonl"
+    journal.write_bytes(data)
+    return directory, journal
+
+
+def _desktop_key(directory: Path) -> replay_cache.ReplayKey:
+    key = replay_cache.replay_key(
+        directory,
+        through_id=None,
+        strict_cut=False,
+        checkpoint_types=WANTED[:1],
+        opportunistic_types=WANTED[1:],
+    )
+    assert key is not None
+    return key
+
+
+@pytest.mark.parametrize("met_spend", [False, True], ids=["absent-spend", "met-spend"])
+@pytest.mark.parametrize("in_window", [False, True], ids=["beyond-window", "within-window"])
+def test_desktop_checkpoint_recovery_matrix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, met_spend: bool, in_window: bool
+) -> None:
+    # Exercise default json.dumps as well as the compact encoding (the older
+    # duplicate). Include blank lines, a shrink, and an old receipt that must
+    # not seed the recovered first frame. A no-hit window is full and dense.
+    newest = json.dumps(json.loads(_CHECKPOINT)).encode() + b"\n"
+    older_receipt = _encoded(
+        "before-shrink", "message", role="assistant", usage={"context_tokens": 999}
+    )
+    dense = _DENSE_LINE * (((4 << 20) // len(_DENSE_LINE)) + 1) if not in_window else b""
+    directory, _ = _raw_journal(
+        tmp_path,
+        _custom_row(WANTED[0], {"checkpoint_id": "older"}, id_="older")
+        + newest
+        + dense
+        + b"\n \n"
+        + older_receipt
+        + _SHRINK
+        + _FILLER
+        + (_SPEND if met_spend else b"")
+        + _RECEIPT,
+    )
+    key = _desktop_key(directory)
+    target = tmp_path / "metadata.json"
+    expected = eager_facts(directory)
+    assert expected["checkpoint"] == {"checkpoint_id": "newest"}
+    assert expected["seed"]["context_tokens"] == 125
+    calls: list[tuple[bytes, ...]] = []
+    original_absence = transcript_module._spellings_absent
+    original_parse = TranscriptEntry.from_json
+    parses = 0
+
+    def count_absence(handle: Any, start: int, end: int, needles: tuple[bytes, ...]) -> bool:
+        calls.append(needles)
+        return original_absence(handle, start, end, needles)
+
+    def count_parse(line: str, *, warn_malformed: bool = True) -> TranscriptEntry | None:
+        nonlocal parses
+        parses += 1
+        return original_parse(line, warn_malformed=warn_malformed)
+
+    monkeypatch.setattr(transcript_module, "_spellings_absent", count_absence)
+    monkeypatch.setattr(TranscriptEntry, "from_json", count_parse)
+    stats: dict[str, Any] = {}
+    actual = replay_cache.build_cold_tail_metadata(key, target, stats)
+    front = _custom_type_spellings(WANTED[0])
+    spend = _custom_type_spellings(WANTED[1])
+    assert front is not None and spend is not None
+    if not in_window:
+        assert actual is None
+        # The cold tail parses 256 rows as before. The dense continuation adds
+        # bytes, not even one parse or a second prefix scan.
+        assert parses == 256
+        assert stats["lookup_rows"] == stats["lookup_candidates"] == 0
+        assert stats["lookup_bytes"] == 4 << 20
+        assert stats["lookup_outcome"] == "no_spelling"
+        assert stats["proof_mode"] == "declined"
+        assert calls == [front if met_spend else front + spend]
+        assert not target.exists() and not replay_cache.absence_proof_path(target).exists()
+    else:
+        assert actual is not None
+        assert calls == ([] if met_spend else [spend]), "no combined prefix scan on a recovery"
+        assert stats["proof_mode"] == "recovered" and stats["lookup_rows"] > 0
+        assert actual.checkpoint == expected["checkpoint"]
+        assert actual.checkpoints.get(WANTED[1]) == expected["spend"]
+        if met_spend:
+            assert SessionSpend.from_details(actual.checkpoints[WANTED[1]]) is not None
+        assert actual.order == expected["order"]
+        assert actual.seed_usage is not None
+        assert actual.seed_usage.model_dump(mode="json") == expected["seed"]
+        assert cold_metadata.read_cold_metadata(target, replay_cache.witness_for(key)) == actual
+        sidecar = replay_cache.absence_proof_path(target)
+        if met_spend:
+            assert not sidecar.exists()
+        else:
+            assert set(json.loads(sidecar.read_text())["needles"]) == {n.decode() for n in spend}
+    assert replay_cache.cached_replay(key) is None
+
+
+@pytest.mark.parametrize(
+    ("prefix", "tip", "reason", "lookup_outcome"),
+    [
+        (_CHECKPOINT + b"{not json}\n", _SPEND + _RECEIPT, "below_tail_presence", "malformed"),
+        (_CHECKPOINT + b"\xff\n", _SPEND + _RECEIPT, "below_tail_presence", "malformed"),
+        (_custom_row(WANTED[0], None), _SPEND + _RECEIPT, "below_tail_presence", "malformed"),
+        (
+            _CHECKPOINT,
+            _custom_row(WANTED[1], {"version": 999}) + _RECEIPT,
+            "below_tail_presence",
+            "invalid_spend",
+        ),
+        (_SPEND + _CHECKPOINT, _RECEIPT, "spend_unproven", "matched"),
+        (_CHECKPOINT, _SPEND, "below_tail_presence", None),
+        (_CHECKPOINT, _RECEIPT + _SHRINK, "shrink_before_seed", None),
+        (_CHECKPOINT, _RECEIPT[:-1], "torn_tail", None),
+    ],
+)
+def test_desktop_recovery_declines_uncertain_facts_without_writes(
+    tmp_path: Path, prefix: bytes, tip: bytes, reason: str, lookup_outcome: str | None
+) -> None:
+    directory, journal = _raw_journal(tmp_path, prefix + _FILLER + tip)
+    key = _desktop_key(directory)
+    old = journal.read_bytes()
+    target = tmp_path / "metadata.json"
+    stats: dict[str, Any] = {}
+    assert replay_cache.build_cold_tail_metadata(key, target, stats) is None
+    assert stats["proof_mode"] == "declined" and stats["decline_reason"] == reason
+    assert stats.get("lookup_outcome") == lookup_outcome
+    assert not target.exists() and not replay_cache.absence_proof_path(target).exists()
+    assert replay_cache.cached_replay(key) is None and journal.read_bytes() == old
+
+
+@pytest.mark.parametrize("dense_rows", [0, 49_849], ids=["near", "far"])
+def test_false_presence_decodes_only_the_candidate(tmp_path: Path, dense_rows: int) -> None:
+    # Two writer spellings in one unrelated row are still only one candidate.
+    quoted = json.dumps(WANTED[0]).encode()
+    foreign = _LOOKALIKE.replace(
+        b'"details":{', b'"other":{"custom_type": ' + quoted + b'},"details":{'
+    )
+    # Keep the anchor eligible: the foreign spelling is itself a false byte
+    # presence to the anchor builder, so test that spelling separately below.
+    long = _encoded("long", "message", role="user", text="x" * (1025 << 10))
+    lookalike = _LOOKALIKE if dense_rows else foreign
+    tip = (
+        _encoded("compact", "compaction", first_kept_entry_id="s")
+        + _SPEND.replace(b'"id":"custom"', b'"id":"s"')
+        + _RECEIPT
+    )
+    # 63-byte writer-format rows fit the review's 49,849-row gap inside 4 MiB.
+    filler = _encoded("f", "message", role="user") * dense_rows
+    data = lookalike + filler + long + tip
+    assert len(data) <= 4 << 20
+    directory, _ = _raw_journal(tmp_path, data)
+    if dense_rows:
+        anchor = tail_anchor.build_anchor(directory)
+        assert anchor is not None and tail_anchor.write_anchor(directory, anchor)
+        assert tail_anchor.proves_absent(directory)
+        eager = read_replay_suffix(
+            directory, checkpoint_types=WANTED[:1], opportunistic_types=WANTED[1:]
+        )
+        assert [entry.id for entry in eager.entries] == ["compact", "s", "receipt"]
+    stats: dict[str, Any] = {}
+    key = _desktop_key(directory)
+    result = replay_cache.build_cold_tail_metadata(key, tmp_path / "meta", stats)
+    assert result is None
+    assert stats["lookup_outcome"] == "not_checkpoint"
+    assert stats["lookup_rows"] == 1, "a nested needle must not make us decode the gap"
+    assert stats["lookup_candidates"] == 1
+
+
+@pytest.mark.parametrize("far_hit", [False, True], ids=["no-hit", "far-false-hit"])
+def test_checkpoint_search_keeps_long_misses_off_the_reverse_search(far_hit: bool) -> None:
+    needles = _custom_type_spellings(WANTED[0])
+    assert needles is not None
+    raw = (_LOOKALIKE if far_hit else b"") + _DENSE_LINE * 49_849
+    forward_bytes = reverse_bytes = 0
+
+    class SearchWindow(bytes):
+        def find(
+            self, sub: Any, start: SupportsIndex | None = None, end: SupportsIndex | None = None
+        ) -> int:
+            nonlocal forward_bytes
+            if sub in needles:
+                forward_bytes += self._range_bytes(start, end)
+            return super().find(sub, start, end)
+
+        def rfind(
+            self, sub: Any, start: SupportsIndex | None = None, end: SupportsIndex | None = None
+        ) -> int:
+            nonlocal reverse_bytes
+            if sub in needles:
+                reverse_bytes += self._range_bytes(start, end)
+            return super().rfind(sub, start, end)
+
+        def _range_bytes(self, start: SupportsIndex | None, end: SupportsIndex | None) -> int:
+            return (len(self) if end is None else operator.index(end)) - (
+                0 if start is None else operator.index(start)
+            )
+
+    class Journal(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            return SearchWindow(super().read(size))
+
+    stats: dict[str, Any] = {}
+    with Journal(raw) as handle:
+        offset, recovery = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(raw),
+            max_bytes=len(raw),
+            name=WANTED[0],
+            needles=needles,
+            spend=None,
+            stats=stats,
+        )
+    assert offset == (raw.index(needles[0]) if far_hit else None) and recovery is None
+    assert stats["lookup_rows"] == stats["lookup_candidates"] == int(far_hit)
+    # Misses should use the fast forward search, with at most linear input
+    # plus boundary overlap. Only the block actually containing a hit may
+    # use reverse substring search, rather than re-probing the whole gap.
+    assert forward_bytes <= 3 * len(raw)
+    assert reverse_bytes <= (len(raw) // 8 if far_hit else 0)
+
+
+@pytest.mark.parametrize("spaced", [False, True], ids=["compact", "spaced"])
+def test_checkpoint_spelling_can_cross_a_search_block(spaced: bool) -> None:
+    needles = _custom_type_spellings(WANTED[0])
+    assert needles is not None
+    width = transcript_module._COLD_CHECKPOINT_SEARCH_BLOCK_BYTES
+    row = _LOOKALIKE.replace(b'"custom_type":', b'"custom_type": ') if spaced else _LOOKALIKE
+    expected = row.index(needles[spaced])
+    # The newer block starts one byte into the exact spelling. Whole-row
+    # validation still has to see the intact row and reject its nested hit.
+    raw = row + b" " * (width + expected - len(row)) + b"\n"
+    stats: dict[str, Any] = {}
+    with io.BytesIO(raw) as handle:
+        offset, recovery = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(raw),
+            max_bytes=len(raw),
+            name=WANTED[0],
+            needles=needles,
+            spend=None,
+            stats=stats,
+        )
+    assert offset == expected and recovery is None
+    assert stats["lookup_outcome"] == "not_checkpoint"
+    assert stats["lookup_rows"] == stats["lookup_candidates"] == 1
+
+
+@pytest.mark.parametrize("shape", ["false-newer", "real-newer", "alternate-writer"])
+def test_only_newer_rows_can_change_checkpoint_order(tmp_path: Path, shape: str) -> None:
+    # Distinct IDs let us assert both the winning row and its eager ordinal.
+    real = _custom_row(WANTED[0], {"checkpoint_id": "compact"}, id_="real")
+    if shape == "false-newer":
+        prefix = real + _LOOKALIKE
+        candidates, order, expected = 2, 261, "compact"
+    elif shape == "real-newer":
+        prefix = _LOOKALIKE + real
+        candidates, order, expected = 1, 260, "compact"
+    else:
+        # The candidate admits the walk, not the answer. A newer valid row
+        # written with different whitespace still wins by eager's rule.
+        alternate = _custom_row(WANTED[0], {"checkpoint_id": "alternate"}, id_="alt")
+        alternate = alternate.replace(b'"custom_type":', b'"custom_type" : ')
+        prefix = real + alternate
+        candidates, order, expected = 1, 260, "alternate"
+    directory, _ = _raw_journal(
+        tmp_path, prefix + b"\n \t\n" + _SHRINK + _FILLER + _SPEND + _RECEIPT
+    )
+    eager = eager_facts(directory)
+    assert eager["checkpoint"] == {"checkpoint_id": expected}
+    assert eager["order"] == {WANTED[0]: order, WANTED[1]: 2}
+    stats: dict[str, Any] = {}
+    key = _desktop_key(directory)
+    actual = replay_cache.build_cold_tail_metadata(key, tmp_path / "meta", stats)
+    assert actual is not None and actual.checkpoint == eager["checkpoint"]
+    assert actual.order == eager["order"] and actual.checkpoints[WANTED[1]] == eager["spend"]
+    assert actual.seed_usage is not None
+    assert actual.seed_usage.model_dump(mode="json") == eager["seed"]
+    assert stats["lookup_candidates"] == candidates
+    assert stats["lookup_rows"] == order - 256 + (shape == "alternate-writer")
+    assert stats["lookup_outcome"] == "matched" and stats["absence_scan_bytes"] == 0
+
+
+def test_lookup_uses_absolute_newest_hit_in_prior_absence_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    front = _custom_type_spellings(WANTED[0])
+    spend = _custom_type_spellings(WANTED[1])
+    assert front is not None and spend is not None
+    prefix = _DENSE_LINE * 50
+    before_tail = prefix + _LOOKALIKE + _DENSE_LINE + _LOOKALIKE
+    directory, journal = _raw_journal(tmp_path, before_tail + _RECEIPT)
+    with journal.open("rb") as handle:
+        offset, result = transcript_module._recover_cold_checkpoint(
+            handle,
+            low=len(before_tail),
+            max_bytes=512,
+            name=WANTED[0],
+            needles=front,
+            spend=None,
+            stats=None,
+        )
+    assert result is None and offset == before_tail.rindex(front[0])
+
+    def unexpected_scan(*args: Any) -> bool:
+        pytest.fail("the newest byte hit already invalidates the reusable absence range")
+
+    monkeypatch.setattr(transcript_module, "_spellings_absent", unexpected_scan)
+    # Simulate a proof boundary at the newest row; the older hit is outside
+    # this scan, and cannot justify skipping the fallback on its own.
+    prior = (len(before_tail) - len(_LOOKALIKE), frozenset(front + spend))
+    key = _desktop_key(directory)
+    stats: dict[str, Any] = {}
+    suffix = read_cold_tail(
+        directory,
+        checkpoint_types=WANTED,
+        max_rows=1,
+        max_bytes=512,
+        known_absent=prior,
+        desktop_source=(key.inode, key.size, key.mtime_ns, key.ctime_ns),
+        stats=stats,
+    )
+    assert suffix is None
+    assert stats["decline_reason"] == "below_tail_presence" and stats["lookup_rows"] == 2
+
+
+@pytest.mark.parametrize("trace", [False, True], ids=["off", "on"])
+@pytest.mark.parametrize("site", ["false-then-malformed", "candidate", "order"])
+def test_recovery_does_not_log_speculative_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    trace: bool,
+    site: str,
+) -> None:
+    canary = "synthetic-private-text-outside-eager-window"
+    raw = canary.encode() + b"\n"
+    if site == "candidate":
+        raw = raw.rstrip() + b" " + _CHECKPOINT  # byte hit in malformed JSON
+    elif site == "order":
+        raw = _CHECKPOINT + raw  # genuine older candidate, malformed newer order row
+    else:
+        raw = _LOOKALIKE + raw
+    long = _encoded("long", "message", role="user", text="x" * (1200 << 10))
+    compact = _encoded("compact", "compaction", first_kept_entry_id="receipt")
+    directory, _ = _raw_journal(tmp_path, raw + long + compact + _SPEND + _RECEIPT)
+    key = _desktop_key(directory)
+    # The anchored eager negative never reaches the malformed row. With a real
+    # checkpoint, eager *does* reach it and must still log the usual warning.
+    if site != "order":
+        anchor = tail_anchor.build_anchor(directory)
+        assert anchor is not None and tail_anchor.write_anchor(directory, anchor)
+        assert tail_anchor.proves_absent(directory)
+    caplog.clear()  # The independent anchor producer is not part of either open.
+    trace_path = tmp_path / "open.jsonl"
+    monkeypatch.setattr(open_trace, "_PATH", trace_path if trace else None)
+    span = open_trace.ColdOpenTrace("synthetic") if open_trace.enabled() else None
+    stats = span.fields if span is not None else None
+    target = tmp_path / "meta"
+    assert replay_cache.build_cold_tail_metadata(key, target, stats) is None
+    assert not target.exists() and not replay_cache.absence_proof_path(target).exists()
+    assert canary not in caplog.text
+    if span is not None:
+        span.finish("synthetic")
+        trace_data = trace_path.read_text()
+        assert canary not in trace_data
+        assert json.loads(trace_data)["lookup_outcome"] == (
+            "not_checkpoint" if site == "false-then-malformed" else "malformed"
+        )
+    else:
+        assert not trace_path.exists()
+    eager = read_replay_suffix(
+        directory, checkpoint_types=WANTED[:1], opportunistic_types=WANTED[1:]
+    )
+    if site == "order":
+        assert f"dropping malformed transcript line: {canary}" in caplog.text
+        assert eager.checkpoint == {"checkpoint_id": "newest"}
+    else:
+        assert canary not in caplog.text
+        assert [entry.id for entry in eager.entries] == ["compact", "custom", "receipt"]
+
+
+@pytest.mark.parametrize("complete", [False, True], ids=["partial-floor", "crosses-chunk"])
+def test_preflight_needs_the_whole_checkpoint_row(tmp_path: Path, complete: bool) -> None:
+    needle = _custom_type_spellings(WANTED[0])
+    assert needle is not None
+    if complete:
+        # The needle straddles the usual backward tail chunk boundary: a
+        # byte scan split with no overlap would miss this complete row.
+        filler = _encoded("long", "message", role="user", text="")
+        target_distance = (64 << 10) + len(needle[0]) // 2
+        distance = len(_CHECKPOINT) - _CHECKPOINT.index(needle[0]) + len(filler)
+        older = _CHECKPOINT + _encoded(
+            "long", "message", role="user", text="x" * (target_distance - distance)
+        )
+    else:
+        # The needle itself fits; its row start does not. The legacy absence
+        # proof still sees it but the recovery cannot count this partial row.
+        older = _encoded(
+            "custom", "custom", details={"text": "x" * (256 << 10)}, custom_type=WANTED[0]
+        )
+    directory, _ = _raw_journal(tmp_path, older + _RECEIPT)
+    key = _desktop_key(directory)
+    stats: dict[str, Any] = {}
+    suffix = read_cold_tail(
+        directory,
+        checkpoint_types=WANTED,
+        desktop_source=(key.inode, key.size, key.mtime_ns, key.ctime_ns),
+        max_bytes=128 << 10,
+        max_rows=1,
+        stats=stats,
+    )
+    if complete:
+        assert suffix is not None and suffix.recovered_checkpoint
+        assert suffix.checkpoint_order[WANTED[0]] == 3
+        assert stats["lookup_rows"] == 2  # the long row and the checkpoint
+    else:
+        assert suffix is None
+        assert needle[0] in older[-(128 << 10) :]
+        assert stats["lookup_outcome"] == "no_spelling" and stats["lookup_rows"] == 0
+
+
+def test_recovery_cannot_extend_the_spend_absence_cap(tmp_path: Path) -> None:
+    directory, _ = _raw_journal(tmp_path, _CHECKPOINT + _FILLER + _RECEIPT)
+    key = _desktop_key(directory)
+    stats: dict[str, Any] = {}
+    result = read_cold_tail(
+        directory,
+        checkpoint_types=WANTED,
+        desktop_source=(key.inode, key.size, key.mtime_ns, key.ctime_ns),
+        max_scan_bytes=1,
+        stats=stats,
+    )
+    assert result is None
+    assert stats == {"decline_reason": "absence_cap"}
+
+
+def test_untraced_recovery_does_not_read_a_lookup_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory, _ = _raw_journal(tmp_path, _CHECKPOINT + _FILLER + _SPEND + _RECEIPT)
+
+    def unexpected() -> float:
+        pytest.fail("disabled lookup tracing sampled a clock")
+
+    monkeypatch.setattr(transcript_module, "time", SimpleNamespace(monotonic=unexpected))
+    key = _desktop_key(directory)
+    assert replay_cache.build_cold_tail_metadata(key, tmp_path / "meta") is not None
+
+
+@pytest.mark.parametrize("move", ["append", "replace"])
+def test_recovered_checkpoint_must_pass_both_journal_witnesses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, move: str
+) -> None:
+    # With spend absent, an accepted result would file both metadata and the
+    # spend-only sidecar. Change the descriptor during lookup, or the pathname
+    # after descriptor verification while building the selection reading.
+    data = _CHECKPOINT + _FILLER + _RECEIPT
+    directory, journal = _raw_journal(tmp_path, data)
+    key = _desktop_key(directory)
+    if move == "append":
+        original_lookup = transcript_module._recover_cold_checkpoint
+
+        def grow(*args: Any, **kwargs: Any) -> Any:
+            hit, found = original_lookup(*args, **kwargs)
+            assert hit is not None and found is not None
+            with journal.open("ab") as handle:
+                handle.write(_DENSE_LINE)
+            return hit, found
+
+        monkeypatch.setattr(transcript_module, "_recover_cold_checkpoint", grow)
+    else:
+        original_selection = replay_cache.read_selection_reading
+
+        def replace(*args: Any, **kwargs: Any) -> Any:
+            selection = original_selection(*args, **kwargs)
+            new = directory / "replacement.jsonl"
+            new.write_bytes(data)
+            new.replace(journal)
+            return selection
+
+        monkeypatch.setattr(replay_cache, "read_selection_reading", replace)
+    target = tmp_path / "metadata.json"
+    stats: dict[str, Any] = {}
+    assert replay_cache.build_cold_tail_metadata(key, target, stats) is None
+    assert stats["lookup_outcome"] == "matched"
+    assert stats["decline_reason"] == "source_changed"
+    fresh = _desktop_key(directory)
+    assert fresh != key and (fresh.inode == key.inode) == (move == "append")
+    assert not target.exists() and not replay_cache.absence_proof_path(target).exists()
+
+
+def test_archive_declines_read_only(tmp_path: Path) -> None:
+    directory = tmp_path / "session"
+    directory.mkdir()
+    archive = directory / "transcript.jsonl.gz"
+    archive.write_bytes(gzip.compress(_CHECKPOINT + _FILLER + _RECEIPT))
+    key = _desktop_key(directory)
+    stats: dict[str, Any] = {}
+    assert replay_cache.build_cold_tail_metadata(key, directory / "metadata.json", stats) is None
+    assert stats["decline_reason"] == "archive" and "lookup_bytes" not in stats
+    assert _desktop_key(directory) == key and set(directory.iterdir()) == {archive}
 
 
 @pytest.mark.asyncio

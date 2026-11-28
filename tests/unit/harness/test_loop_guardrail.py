@@ -86,6 +86,7 @@ async def _run(
     authorised: bool = False,
     tool_text: str = "ok",
     user_text: str = "please clean up the ds* scratch files",
+    session_id: str = "own",
 ) -> tuple[ToolResult, list[dict[str, Any]]]:
     executed: list[dict[str, Any]] = []
 
@@ -97,8 +98,8 @@ async def _run(
         messages=[Message.user(user_text)],
         tool_context=ToolContext(
             cwd=str(home),
-            session_id="own",
-            scratchpad_dir=str(state / "sessions" / "own" / "scratchpad"),
+            session_id=session_id,
+            scratchpad_dir=str(state / "sessions" / session_id / "scratchpad"),
             request_approval=request_approval if approve else None,
         ),
     )
@@ -483,3 +484,39 @@ async def test_loop_builds_no_operator_brief_for_an_ordinary_write(
     assert len(executed) == 1 and built == []
     await _run_write(home, str(home / ".local-operator" / "hooks.json"), judge=_Judge("ALLOW"))
     assert built == [1]
+
+
+@pytest.mark.asyncio
+async def test_loop_fault_in_the_guard_still_closes_for_guard_key_material(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guard L2a: a setup fault must not open ``guard-credential`` (it needs no
+    setup), and the fail-closed refusal is recorded as block/guard_error (L1 Q1)."""
+    from local_operator.guard import decisions as gd
+    from local_operator.guardrails import check as guard_check
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("settings unreadable")
+
+    class Collect:
+        def __init__(self) -> None:
+            self.records: list[Any] = []
+
+        def emit(self, record: Any) -> None:
+            self.records.append(record)
+
+    collect = Collect()
+    previous = gd.set_decision_sink(collect)
+    try:
+        monkeypatch.setattr(guard_check, "read_settings", boom)
+        judge = _Judge("ALLOW operator")
+        result, executed = await _run_write(
+            home, str(home / "proj" / "guard" / "install.key"), judge=judge
+        )
+    finally:
+        gd.set_decision_sink(previous)
+    assert executed == [] and result.is_error
+    assert _text(result).startswith("BLOCKED by guardrail (error)")
+    assert [(r.outcome, r.rule_class) for r in collect.records] == [
+        (gd.OUTCOME_BLOCK, gd.RULE_CLASS_GUARD_ERROR)
+    ]

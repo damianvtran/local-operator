@@ -1,0 +1,65 @@
+{
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team, task audit-vi)",
+    "session": "512639ecdf78",
+    "model": "anthropic/claude-opus-5-5 (no fallback observed)",
+    "date": "2026-11-23",
+    "independent_from_translator": true
+  },
+  "repo": {
+    "worktree": "~/local-operator/.worktrees/i18n-model-persist-notice",
+    "head": "c3ba6a516c6a317ad695f02bcac70a09adc1f774"
+  },
+  "audited_input": {
+    "path": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/vi.json",
+    "sha256": "85ac5ce9958feab01fd506d07191c0292452523193d6f1e21dd37415b0fc39ba",
+    "note": "briefed path under session eac1855834c5 did not exist; located via ls -d sessions/*/scratchpad/i18n-settings-residual/translations (only match). Translator notes: notes.md in same dir."
+  },
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584",
+    "local_operator/i18n/catalogues/en/tui.projects.json": "67f3026d93e001347e1606b293b1a49594f2a897217b891003db4eafa216abb2"
+  },
+  "per_namespace": {
+    "tui.app": {
+      "result": "findings",
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 1
+      },
+      "findings": [
+        {
+          "id": "VI-1",
+          "key": "tui.app.skills.team_no_description",
+          "severity": "minor",
+          "current": "không có mô tả",
+          "problem": "Inconsistent with the established vi rendering of the identical EN source string. Translator note says existing 'chưa có mô tả' maps 'no description yet', but tui.library.detail_no_description is EN 'no description' (not 'yet') and vi renders it 'chưa có mô tả'. 'chưa có …' is also the more idiomatic Vietnamese empty-state phrasing (cf. 'Chưa có dữ liệu'). 'không có mô tả' is correct and natural, so not major.",
+          "evidence": "en/tui.library.json:20 'tui.library.detail_no_description' = 'no description' -> vi 'chưa có mô tả'; vi/tui.projects.json:21 'chưa có mô tả' (EN 'no description yet'). No vi catalogue currently uses 'không có mô tả'.",
+          "suggested": "chưa có mô tả"
+        },
+        {
+          "id": "VI-2",
+          "key": "tui.app.skills.member_count",
+          "severity": "nit",
+          "current": "{count, plural, other {{shown} thành viên}}",
+          "problem": "Fits maxCells 14 for counts 0..999 (0/1/2/5 -> 12, 21 -> 13, 100 -> 14) but 4-digit counts render 15 cells ('1000 thành viên'), where EN stays at 12. Translator note's claim that only the 10^6 arm overflows does not hold for vi. Team rosters of 1000+ are unrealistic; no change required.",
+          "evidence": "cell count computed by script (east-asian width; all values NFC, no combining marks).",
+          "suggested": "keep as is"
+        }
+      ],
+      "notes": "Mechanical: valid JSON; 4 keys = EN key set; placeholders identical ({count},{shown} / {aliases}); plural is other-only per glossary 'plurals' row and vi style guide §Plurals, matches tui.app.skills.led_by; all values NFC, no bidi controls. member_count 'thành viên' matches led_by and style guide 'thành viên' = member. team_aliases 'bí danh: {aliases}' (18 cells) matches tui.team_authoring.aliases 'bí danh'; {aliases} untouched; no-plural label fine for lists. team_fallback_facts 'nhóm' = glossary 'team' and tui.projects.form.team_placeholder. Repo validator not run by auditor (values not applied to a catalogue and auditor may not copy the tree); translator reports check_catalogues() 0 problems — that is their claim, not verified here."
+    },
+    "tui.projects": {
+      "result": "clean",
+      "severity_counts": {
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "findings": [],
+      "notes": "team_detail '{manager} · {count, plural, other {{shown} vai trò}}': placeholders {manager},{count},{shown} identical; other-only plural; ' · ' separator kept; 'vai trò' = tui.authoring.role and correctly 'roles' (not 'members') per sidecar. No maxCells; renders 19-21 cells for counts 0..100 with a 7-char manager id, vs EN 'manager · 5 roles' 17. Natural compact label order for a detail column."
+    }
+  }
+}

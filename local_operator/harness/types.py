@@ -732,9 +732,18 @@ _CLONE_GUARD_FIELDS = frozenset(
         # Marker placement for one-shot auxiliary calls (``cache_markers``):
         # where cache_control goes, never which bytes the model reads.
         "cache_markers",
+        # Frozen-system marker policy (``system_blocks_frozen``): controls only
+        # where cache_control lands on system blocks, never prompt bytes.
+        "system_blocks_frozen",
+        # Where the session-agnostic system head ends (marker placement only).
+        "system_stable_head_blocks",
         # Same policy input, same stamper: "this conversation already had a
         # long-streaming turn" picks the marker TTL and nothing else.
         "cache_after_long_call",
+        # Same stamper, same policy-only effect: "this main thread is an
+        # exec/SDK run" and "its turn requests were once far apart".
+        "cache_automation",
+        "cache_after_long_gap",
     }
 )
 #: Model fields that same decoration may set: the per-turn effort fit.
@@ -1197,6 +1206,12 @@ class Message(BaseModel):
     provider_payload: dict[str, Any] | None = None
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+
+    # Admitted input intent only; replay must not reauthorize a future run.
+    _inline_ui_viewer_capable: bool = PrivateAttr(default=False)
+    # Journal-envelope presentation provenance; never serialized as a Message field.
+    _inline_ui_source_version: int | None = PrivateAttr(default=None)
+    _inline_ui_overlay: dict[str, Any] | None = PrivateAttr(default=None)
 
     # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
     # Explicit provider encoders may read the content; generic serialization may
@@ -2745,6 +2760,9 @@ class ToolContext(BaseModel):
     # Monitor scheduling — the wake field's twin. ``None`` means the host has
     # no monitor scheduler; the monitor tool is then not advertised at all.
     monitor_scheduler: MonitorSchedulerProtocol | None = None
+    #: Host-only resolver for an exact ``todo block`` receipt. Resolved at the
+    #: write, so a persisted block cannot inherit a later reuse of the handle.
+    bind_todo_block: Callable[[str, str], str | None] | None = Field(default=None, exclude=True)
     #: The session's effective action class, resolved FRESH by the host each
     #: time this context is built (``local_operator.action_class``). The
     #: ``patience`` tool's createIf reads it (reactive sessions are never
@@ -3387,17 +3405,16 @@ class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
     limit could still reject — silently losing the work while the supervisor
     believed it was accepted.
 
-    ``response_id`` is the provider's native turn identity, or ``None`` when
-    the provider exposes none (Google). A consumer that requires no-replay
-    proof must treat ``None`` as indeterminate and fail closed rather than
-    substituting an id of its own. It is always emitted, even with a null id:
-    a MISSING boundary cannot be distinguished from "the request never went
-    out", so a consumer would wait forever instead of failing closed.
+    ``response_id`` is the provider's native turn identity, or ``None`` for
+    a wire with no stable ID (Google) or a withheld ID. A consumer that
+    requires no-replay proof must treat missing proof as indeterminate rather
+    than inventing an ID. A native stream that omits its opener supplies no
+    boundary; absence alone is not proof the request never went out.
 
     **One turn may emit SEVERAL of these, and the LATEST supersedes.** A
     credential rotation or a provider fallback retries the request, and each
-    attempt that reaches a provider announces its own boundary with its own
-    id. This is not a duplicate to be deduplicated: the earlier attempt failed
+    reported boundary names its own attempt. This is not a duplicate to be
+    deduplicated: the earlier attempt failed
     before rendering anything, so its id names a turn that produced no output,
     while the last one names the turn actually being served. A consumer
     committing no-replay proof must therefore key on the most recent id rather
@@ -4225,6 +4242,17 @@ class LoopConfig(BaseModel):
         Field(default=None, exclude=True)
     )
 
+    # Whether the system blocks resolved by ``get_system_blocks`` are frozen
+    # for the current prefix epoch (trailing blocks stay byte-stable and live
+    # state changes travel as append-only messages). Checked after
+    # ``get_system_blocks`` runs so turn 1 reports ``True`` as soon as the
+    # epoch freezes; ``None`` defaults to ``False`` for standalone callers.
+    get_system_blocks_frozen: Callable[[], bool] | None = Field(default=None, exclude=True)
+    # How many leading system blocks are session-agnostic (see
+    # ``ChatRequest.system_stable_head_blocks``); read per call next to
+    # ``get_system_blocks_frozen``. ``None`` means 0: no head marker.
+    get_system_stable_head_blocks: Callable[[], int] | None = Field(default=None, exclude=True)
+
     # The tools array to send NOW, re-read immediately before every provider
     # call. Supplying this does NOT re-read ``LoopContext.tools`` per call — it
     # supersedes it, and the host is what decides how often the array may move.
@@ -4247,6 +4275,16 @@ class LoopConfig(BaseModel):
     # Required: render transcript messages (incl. custom entries) into the
     # LLM-visible list sent to the provider.
     convert_to_llm: Callable[[list[AgentMessage]], list[Message]] = Field(exclude=True)
+    # Model-facing widget discovery is an input capability, not a new user
+    # message. The host reads its current grant at each real request boundary.
+    # It receives the spec THIS request is built for (like ``get_system_blocks``),
+    # because where the hint goes depends on the model: on an Anthropic thinking
+    # wire it is a fixed head row bound into every signed thinking block's
+    # prefix, elsewhere it follows the live surface. A host re-reading its own
+    # current model could disagree with the request after a mid-call ``/model``.
+    get_inline_ui_hint: Callable[["ModelSpec"], str | None] | None = Field(
+        default=None, exclude=True
+    )
 
     # Required in practice: stream one assistant response. Providers implement
     # this; the loop only knows the signature.
@@ -4554,6 +4592,9 @@ class ModelSpec(BaseModel):
 
     provider: str  # registry id: openai, anthropic, kimi, xai, ollama, ...
     model_id: str
+    # A login-sensitive default can only be finalized once the request selects
+    # its credential. Never infer this from the ID: users can name either ID.
+    auth_route_default: bool = Field(default=False, exclude=True)
     context_window: int = 128_000
     # A conservative unknown route is still freshly resolved; absence of
     # positive provider limits must not let a legacy checkpoint override it.
@@ -5008,6 +5049,11 @@ class ChatRequest(BaseModel):
     system_blocks: list[str] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)
     tools: list[AgentTool] = Field(default_factory=list)
+    # Not a conversation row: history/Saver, cache breakpoints and last-user
+    # accounting must never treat it as one. Compatible wire builders append
+    # it only after encoding the durable prefix. As a declared field it is
+    # still covered by the armed one-turn retry/copy integrity check.
+    inline_ui_hint: str | None = Field(default=None, exclude=True, repr=False)
     # The generation bound for THIS call. Left ``None`` it is filled from
     # :func:`turn_output_budget` by the validator at the end of this class, so a
     # request built anywhere in the harness is bounded without the caller having
@@ -5164,6 +5210,28 @@ class ChatRequest(BaseModel):
     cache_markers: Literal["auto", "system", "none"] = Field(
         default="auto", exclude=True, repr=False
     )
+    #: Whether every entry in ``system_blocks`` is frozen for the epoch.
+    #:
+    #: ``Session._prepare_system_blocks`` freezes all system blocks for the
+    #: epoch (including ``env``, ``<skills/>``, and any ``OutputContract``) and
+    #: ships later state changes as append-only messages, whereas standalone
+    #: callers pass dynamic trailing blocks. Making the guarantee explicit lets
+    #: ``AnthropicClient._system_blocks`` place one trailing breakpoint on
+    #: ``system[-1]`` instead of guessing from block count. Transport metadata,
+    #: never wire content.
+    system_blocks_frozen: bool = Field(default=False, exclude=True, repr=False)
+    #: How many LEADING ``system_blocks`` carry no date or cwd (persona + tool
+    #: inventory; ``prompts_api.STABLE_HEAD_BLOCK_COUNT``), i.e. where the first
+    #: volatile block (env: date, cwd) begins. ``0`` means unknown, and the wire
+    #: places no head marker. Only meaningful with ``system_blocks_frozen``:
+    #: ``AnthropicClient`` then adds a second system breakpoint after the head
+    #: so a new session or subagent on another day reads tools+persona from
+    #: cache instead of rewriting it. The head is shared only between sessions
+    #: with the same tools AND the same repo guidance, custom instructions,
+    #: language line and identity name (all folded into block 0); subagents'
+    #: pruned tool set (no ``wake``/``monitor``) means they share a head with
+    #: each other, not with the parent. Transport metadata, never wire content.
+    system_stable_head_blocks: int = Field(default=0, exclude=True, repr=False)
     #: This conversation has already had a turn that ran at least
     #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
     #: start to stream end. Stamped by ``SessionStreamFn`` from its own
@@ -5172,6 +5240,20 @@ class ChatRequest(BaseModel):
     #: would otherwise find the 5m prefix expired. Transport policy, never
     #: wire content.
     cache_after_long_call: bool = Field(default=False, exclude=True, repr=False)
+    #: This conversation is a non-interactive automation run (``lop exec``, an
+    #: SDK session), marked on its ``SessionStreamFn`` by the entry point. Read
+    #: only by the cache-TTL policy, which keeps such a main thread at 5m until
+    #: a long gap: in the measured solo runs its next call followed within
+    #: seconds and the run ended at the turn's end. The entry points leave it
+    #: unset for workstream runs and for any session with a team, passed in or
+    #: restored on resume. Transport policy, never wire content.
+    cache_automation: bool = Field(default=False, exclude=True, repr=False)
+    #: Two of this conversation's turn requests were already at least
+    #: ``anthropic_cache_ttl.AUTOMATION_LONG_GAP_1H_THRESHOLD_S`` apart, start
+    #: to start (a long stream, a long tool, a subagent wait). Returns an
+    #: automation main thread to the ordinary main-thread TTL. Transport
+    #: policy, never wire content.
+    cache_after_long_gap: bool = Field(default=False, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
@@ -5439,6 +5521,9 @@ class ChatRequest(BaseModel):
     # Shared only by the main turn's request clones; never serialized to a
     # transcript, telemetry row, helper call or independent conversation.
     _codex_turn_state: Any = PrivateAttr(default=None)
+    # Shallow request clones must carry the same wire proof and receipt ID.
+    _evidence_binding: Any = PrivateAttr(default=None)
+    _auxiliary_request_id: str | None = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 
@@ -5562,10 +5647,11 @@ class ChatRequest(BaseModel):
 class StreamStartEvent(BaseModel):
     """The provider began responding to THIS request, on the wire.
 
-    Emitted by a wire client the moment the provider reveals its own identity
-    for the turn — the first chunk of an OpenAI-compatible stream, the
-    ``response.created`` event on the Responses API, Anthropic's
-    ``message_start``. It exists to give supervisors a boundary that means
+    Emitted at the wire client's acceptance boundary: the first chunk of an
+    OpenAI-compatible stream, ``response.created`` on Responses, or Anthropic's
+    ``message_start``. On the native streams a missing or nameless opener is
+    not grounds to synthesize acceptance from output. This gives supervisors
+    a boundary that means
     "the request crossed the wire and the provider started generating", which
     is NOT what ``MessageStartEvent`` means: the loop emits that one from a
     bare placeholder message before the ``ChatRequest`` is even constructed
@@ -5573,14 +5659,16 @@ class StreamStartEvent(BaseModel):
     prompt un-retryable that DNS, auth, or a rate limit could still reject.
 
     ``response_id`` is the provider's native turn identity, and is the token an
-    external runtime commits as no-replay proof. It is ``None`` when the
-    provider exposes no stable per-response id on its streaming surface
-    (Google), and a consumer must then treat acceptance as indeterminate
-    rather than inventing one.
+    external runtime commits as no-replay proof. It is ``None`` when a stable
+    per-response id isn't available at that boundary, and a consumer must then
+    treat acceptance as indeterminate for replay rather than inventing one.
     """
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    # A native id belongs to the adapter's route, not the loop's display
+    # model (ordinary API-key fallback need not emit StreamModelEvent).
+    _native_selector: tuple[str, str] | None = PrivateAttr(default=None)
     #: Anthropic cache diagnostics for THIS request, when it was opted in (see
     #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
     #: provider, the conversation's first request, or the feature latched off).
@@ -5741,8 +5829,20 @@ class StreamModelEvent(BaseModel):
     model: ModelSpec
 
 
+class StreamAttemptReceipt(BaseModel, frozen=True):
+    """Provider-to-loop metadata; never an AgentEvent or evidence of acceptance.
+
+    None explicitly clears a previous route's opt-in before this attempt's
+    output. Only the encoder of the posted body can supply version 1.
+    """
+
+    type: Literal["attempt_receipt"] = "attempt_receipt"
+    inline_ui_source_version: Literal[1] | None = Field(exclude=True)
+
+
 StreamEvent = (
     StreamStartEvent
+    | StreamAttemptReceipt
     | StreamTextDelta
     # Beside the text delta it is the sibling of: one channel carries the
     # answer, the other carries the work behind it, and a consumer that

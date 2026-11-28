@@ -664,6 +664,12 @@ class AsyncJob(BaseModel):
     # relationship, whereas a direct pick stays pinned across parent switches.
     model_selector: str | None = None
     model_selection_source: str = ""
+    # Why a live tier/effort edit was NOT applied to this child on a bound
+    # session (provider ceiling, mesh replica), shown inside the receipt's
+    # ``[selection: ...]``. "Refused, with the reason surfaced" is the
+    # requirement: a reason only in the log reads, on the receipt, as though
+    # the edit took effect.
+    model_selection_note: str = ""
     # The label the launch's PIN resolved to (a tier or role pin), stamped at
     # REGISTRATION beside ``owns_model`` and NEVER overwritten — the mirror of
     # the attribution stamp for the MODEL. ``model_label`` above is deliberately
@@ -926,6 +932,16 @@ def model_fallback_badge(
     provider, _, model_id = running.partition("/")
     display = model_label_forms(provider, model_id, effective_name).full
     return f"{str(requested).strip()} → {display} {FALLBACK_MARKER} fallback"
+
+
+def _guard_note_job_settled(job: AsyncJob) -> None:
+    # Imported lazily and guarded: Guard is optional telemetry, and a broken
+    # Guard package must never be able to stop a job from settling.
+    try:
+        from local_operator.guard.activity import note_job_settled
+    except Exception:  # noqa: BLE001
+        return
+    note_job_settled(job)
 
 
 class AsyncJobManager:
@@ -1941,6 +1957,9 @@ class AsyncJobManager:
             # Same transition as the settle stamp: after this line retention may
             # erase the row immediately without erasing its financial history.
             self._record_settled_accounting(job)
+            # Radient Guard task timing (slice L3): a no-op attribute read
+            # unless a live ``task_time`` consent installed the sink; never raises.
+            _guard_note_job_settled(job)
         event = self._settled_events.get(job.id)
         if event is not None:
             event.set()

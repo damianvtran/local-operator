@@ -78,6 +78,11 @@ TRANSCRIPT_COMMAND = "transcript"
 #: exact command count still pins both rows.
 RADIENT_COMMAND = "radient"
 SAVER_COMMAND = "saver"
+#: ``/guard`` (Radient Guard, RFC v0.9 slice L2b) repeats the ``/sound`` shape:
+#: its description lives with the screen's copy in ``tui.guard``, so the audited
+#: wire.slash catalogue is untouched. Exempt from the key walk; the exact count
+#: still pins its row.
+GUARD_COMMAND = "guard"
 
 #: The completion-receipt listing MOVED to ``/unread`` with its meaning
 #: unchanged, so it keeps the audited ``wire.slash.notifications`` key (a key's
@@ -169,9 +174,10 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # audited wire.slash hash. The census still catches an unaccounted row.
     # +14: the eleven commands above, the LO2 pair (/radient, /saver), whose
     # copy lives in wire.radient_saver rather than in this audited namespace,
-    # `/sound`, whose copy lives in tui.sound, and `/transcript`, whose copy
-    # lives in tui.transcript_display.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 14 == 68
+    # `/sound`, whose copy lives in tui.sound, `/transcript`, whose copy
+    # lives in tui.transcript_display, and `/guard`, whose copy lives in
+    # tui.guard.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 15 == 69
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,
@@ -188,6 +194,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,
+            GUARD_COMMAND,
         ):
             continue
         key = KEY_FOR_COMMAND.get(command.name, command.name)
@@ -225,6 +232,7 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
             NOTIFICATIONS_PAGE_COMMAND,
             RADIENT_COMMAND,
             SAVER_COMMAND,
+            GUARD_COMMAND,
         ):
             continue
         key = KEY_FOR_COMMAND.get(command.name, command.name)

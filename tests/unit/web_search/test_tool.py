@@ -48,12 +48,23 @@ def test_provider_argument_is_closed_to_supported_catalogue() -> None:
         "duckduckgo",
         "tavily",
         "deepseek",
+        "radient",
         "perplexity",
         "brave",
         "exa",
         "parallel",
         "serpapi",
         "searxng",
+        # The native-search family (web_search/native/), PR2.
+        "openai",
+        "anthropic",
+        "xai",
+        "alibaba",
+        "google",
+        "kimi",
+        "zai",
+        "mistral",
+        "openrouter",
     }
 
 
@@ -459,3 +470,68 @@ async def test_the_singleflight_key_covers_auto_joined_credentials_and_ignores_r
     await call()
     assert keys[-1] != first_key, "an auto-joined provider's credential is outside the key"
     assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_a_radient_search_is_recorded_as_billed_with_its_usage_record(
+    tmp_path, monkeypatch
+) -> None:
+    """R1-1 (PR #4553 review round 1, MAJOR): Radient's server sends the charge and
+    its usage record id; the channel ledger row must say ``billed`` /
+    ``server_reported`` and carry that id, not the client-table estimate."""
+    from local_operator.session.channel_spend import (
+        BASIS_BILLED,
+        BASIS_ESTIMATED,
+        COST_SOURCE_SERVER,
+        ChannelSpendRecord,
+    )
+    from local_operator.web_search import tool
+    from local_operator.web_search.models import SearchCost, WebSearchSettings
+    from local_operator.web_search.service import WebSearchService
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        tool, "load_search_settings", lambda _manager: WebSearchSettings(providers=["duckduckgo"])
+    )
+    served: list[SearchResponse] = []
+
+    async def search(self, query, **kwargs):
+        return served[-1]
+
+    monkeypatch.setattr(WebSearchService, "search", search)
+    rows: list[ChannelSpendRecord] = []
+    context = ToolContext(cwd=str(tmp_path), record_channel_spend=rows.append)
+
+    served.append(
+        SearchResponse(
+            provider="radient",
+            auth_mode="radient-credits",
+            sources=[SearchSource(title="a", url="https://example.com/a")],
+            request_id="6b05ad92-usage",
+            cost=SearchCost(usd=0.01, basis="billed by Radient (tavily)", priced_from_usage=True),
+        )
+    )
+    result = await tool.execute_web_search("s1", {"query": "q"}, context=context)
+    assert result.is_error is False
+    # Read the row back through its persisted shape, as the ledger does.
+    billed = ChannelSpendRecord.from_details(rows[-1].to_details())
+    assert billed is not None
+    assert billed.billing_basis == BASIS_BILLED
+    assert billed.cost_source == COST_SOURCE_SERVER
+    assert billed.usage_record_id == "6b05ad92-usage"
+    assert billed.amount_micro == 10_000
+    assert billed.price_version == ""
+
+    # A Radient response with NO server cost (list-price fallback) and every other
+    # provider stay estimates: only a server bill is recorded as billed.
+    served.append(
+        SearchResponse(
+            provider="radient",
+            auth_mode="radient-credits",
+            sources=[SearchSource(title="b", url="https://example.com/b")],
+            cost=SearchCost(usd=0.01, basis="list", priced_from_usage=False),
+        )
+    )
+    await tool.execute_web_search("s2", {"query": "q2"}, context=context)
+    assert rows[-1].billing_basis == BASIS_ESTIMATED
+    assert rows[-1].usage_record_id == ""

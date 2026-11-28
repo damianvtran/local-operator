@@ -1,8 +1,10 @@
 {
+  "relay.approvals.card.always_ask": "Toujours demander",
+  "relay.approvals.card.guardrails_still_apply": "Les refus des garde-fous et la vérification des suppressions dangereuses restent actifs.",
   "relay.approvals.card.notice_session_auto": "cette session est désormais en auto",
   "relay.approvals.card.request_needs_answer": "Cette demande attend toujours votre réponse.",
-  "relay.approvals.card.set_auto_all": "Mettre toutes les sessions en auto",
-  "relay.approvals.card.set_auto_session": "Mettre cette session en auto",
+  "relay.approvals.card.set_auto_all": "Approuver automatiquement toutes les sessions",
+  "relay.approvals.card.set_auto_session": "Approuver automatiquement cette session",
   "relay.approvals.card.still_needs_answer": "Cet appel attend toujours votre réponse.",
   "relay.approvals.gate.body_scope.after": "suivantes.",
   "relay.approvals.gate.body_scope.before": "Les deux premiers choix ne changent que",

@@ -220,6 +220,11 @@ PREFIXES_TEXT_POLICY = {
     "tags": False,
     # `/sound`'s words are a SUBCOMMAND vocabulary (below), not an inline list.
     "sound": False,
+    # FALSE: `/guard` opens a screen and `_cmd_guard()` takes no argument, so
+    # there is no list value for the trailing text to be. A sentence after the
+    # word stays a message. The command is TUI-only by decision (see the
+    # argument-shape row below), so no desktop path ever plans it.
+    "guard": False,
 }
 
 
@@ -364,6 +369,13 @@ ARGUMENT_SHAPE_POLICY = {
     "radient": ArgumentShape.SUBCOMMAND,
     # The page is the receipt and takes no argument at all.
     "library": ArgumentShape.NONE,
+    # NONE, `/library`'s class: `/guard` (Radient Guard, RFC v0.9 slice L2b) is
+    # the TUI consent/status screen and the dispatcher calls `_cmd_guard()` with
+    # no argument, so trailing text is dropped, not read. Guard consent itself
+    # is enforced by the `lop` backend; the desktop UI and mobile reach the same
+    # backend state through the settings API rather than a mirrored command, so
+    # the spec deliberately carries no `desktop_destination`.
+    "guard": ArgumentShape.NONE,
     # The operator's own row, and the reason it is NONE rather than ANY: the
     # desktop runs `/compact` and SILENTLY DROPS what follows (the report was
     # that `/compact hello` "used to run and silently eat `hello`"). A command

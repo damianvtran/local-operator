@@ -313,7 +313,7 @@ async def test_a_pre_remediation_record_is_ignored_rather_than_reinterpreted(tmp
         )
     )
 
-    assert ANCHOR_VERSION == 4, "the version moved; a v1 record must not be reinterpreted"
+    assert ANCHOR_VERSION > 1, "the version moved; a v1 record must not be reinterpreted"
     assert read_anchor(tmp_path) is None
     assert proves_absent(tmp_path) is False
 
@@ -396,8 +396,7 @@ async def test_a_spaced_checkpoint_appended_after_the_record_invalidates_it(tmp_
 async def test_an_absence_record_from_a_compact_only_version_proves_nothing(tmp_path, version):
     """A v2/v3 record on disk after the upgrade may describe a spaced-checkpoint
     journal as absent, and it would still validate (same inode, size, digest). Its
-    absence claim is therefore never trusted; the record itself stays readable so
-    the selection evidence it carries is not discarded with it."""
+    absence claim is therefore never trusted, even though the record is readable."""
     (tmp_path / "transcript.jsonl").write_text(_spaced_checkpoint_row("/cwd-START") + "\n")
     await journal_without_a_checkpoint(tmp_path, messages=4)
     path = tmp_path / "transcript.jsonl"
@@ -413,8 +412,7 @@ async def test_an_absence_record_from_a_compact_only_version_proves_nothing(tmp_
     record["version"] = version
     (tmp_path / ANCHOR_FILENAME).write_text(json.dumps(record))
     # The disk still holds the v2/v3 record (only the in-memory copy is bumped
-    # here, for the control below): it reads, so its selection evidence
-    # survives, but its absence claim is refused.
+    # here, for the control below): it reads, but its absence claim is refused.
     record["version"] = ANCHOR_VERSION
     loaded = read_anchor(tmp_path)
     assert loaded is not None and loaded.checkpoint_absent is False

@@ -1,0 +1,43 @@
+{
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), round 2 delta",
+    "session": "1ce610cb6427",
+    "model": "anthropic/claude-opus-5-5 (no fallback observed)",
+    "date": "2026-11-23",
+    "independent_from_translator": true,
+    "independent_from_round1_auditor": true,
+    "translator": "lopdev i18n-translator session 17b81fee8ed1, anthropic/claude-opus-5-5",
+    "round1_auditor_session": "e1ac85590ece"
+  },
+  "repo": {"worktree": "~/local-operator/.worktrees/i18n-model-persist-notice", "head": "c3ba6a516c6a"},
+  "audited_input": "~/.local-operator/sessions/17b81fee8ed1/scratchpad/i18n-settings-residual/translations/ur.json (sha256 983aa64f441025b3a01cf10f78042c7e593b1899c24b6f5641f0166adda2d3fb, matches the briefed hash)",
+  "round1_input_sha256": "bb64fafbde0bd7e8b993b91547d3473791a9f80803c5f31dd92c595290a35bd9",
+  "source_sha256": {
+    "local_operator/i18n/catalogues/en/tui.app.json": "44dc6cf98063b8f95afec332e3ec08fa3ce4e3876a126c01ea65f40c3975a584"
+  },
+  "scope": "Delta only: tui.app.skills.team_aliases (U1 remediation), plus proof that the other bytes are unchanged since round 1. The round-1 tui.projects verdict (passed) is retained, not re-audited.",
+  "unchanged_proof": "In memory, the new value 'عرفی نام: {aliases}' (1 occurrence) was replaced with the round-1 value 'متبادل نام: {aliases}'. The resulting bytes hash to bb64fafb…35bd9, the exact sha256 recorded in round 1, so every other byte in the file, including all other tui.app values and tui.projects, is identical to round 1.",
+  "per_namespace": {
+    "tui.app": {
+      "result": "clean",
+      "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0},
+      "findings": [],
+      "resolved_prior_findings": [
+        {"id": "U1", "key": "tui.app.skills.team_aliases", "prior": "متبادل نام: {aliases}", "current": "عرفی نام: {aliases}", "status": "fixed",
+         "verification": "The new value matches the round-1 suggestion exactly and agrees with the worktree's ur/tui.team_authoring.aliases='عرفی نام' and with aliases_hint '…خالی سے عرفی نام ہٹ جائیں گے'. The settings facts line now uses the same term as the /team editor."}
+      ],
+      "notes": "en is 'alias: {aliases}'. Argument parity: message_arguments gives (('aliases','simple'),) for both, and check._arguments_problem returns None. «عرفی نام» is the standard Urdu term for an alias or a name someone is also known by, and because نام does not inflect it covers both the singular and plural senses. The Latin ':' matches the round-1 precedent «قیادت:». The context has no maxCells for this key: rendered widths are 13/20/35 cells against en's 10/17/32, a constant +3. RTL: no Cc/Cf or bidi control characters in the file. The Latin alias list after the neutral colon resolves correctly inside the RLI…PDI wrap noted in round 1."
+    },
+    "tui.projects": {"result": "clean (retained from round 1; bytes unchanged)", "severity_counts": {"blocker": 0, "major": 0, "minor": 0, "nit": 0}, "findings": [], "notes": "Retained. The unchanged-bytes proof covers this namespace."}
+  },
+  "mechanical": {
+    "log": "mechanical.log",
+    "method": "Run in-process and read-only against the worktree: local_operator.i18n.runtime.message_arguments and scripts/i18n/check.py::_arguments_problem (ur, with plural rules), render_message plus rich.cells.cell_len for the widths, a unicodedata Cc/Cf scan, a JSON parse and the sha256 checks. The full check_catalogues() was NOT run, because the translations are not applied to a catalogue.",
+    "result": "pass"
+  },
+  "current_report_verdict": {
+    "tui.app": {"status": "passed", "unresolved_blocker_major_count": 0, "finding_ids": []},
+    "tui.projects": {"status": "passed", "unresolved_blocker_major_count": 0, "finding_ids": []}
+  },
+  "ledger": "No ledger row written: the brief forbids repo edits. scripts/i18n/ledger.py is the recording step for whoever lands the catalogue change."
+}

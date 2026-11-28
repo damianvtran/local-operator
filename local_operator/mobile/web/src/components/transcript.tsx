@@ -10,7 +10,8 @@ import { useScrollCues } from "../lib/use-scroll-cues";
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Markdown } from "./markdown"
+import type { AssistantPart, InlineUiMessages } from "../inline-ui-parts";
+import { AssistantContent } from "./inline-ui";
 import { AskRow } from "./ask-row";
 import { useAskChipHost } from "./ask-id";
 import { BridgeCardBodyPanel, isBridgeCardNotice } from "./bridge-card-body";
@@ -24,7 +25,7 @@ import { Disclosure } from "./ui/disclosure";
 import { CONTENT_RESIZED_EVENT } from "../lib/content-resized";
 import { MESSAGE_PRESSED_EVENT } from "../lib/message-fold";
 import { followScrollTop, jumpOffered, newCommandIds } from "../lib/scroll-follow";
-import { getHistory, getSubagentHistory } from "../api";
+import { getHistory, getSubagentHistory, type TranscriptPage } from "../api";
 import { messageRuntime } from "../store";
 import { cn } from "../lib/cn";
 import { IMAGE_GEN_TOOLS } from "../lib/image-gen";
@@ -40,47 +41,13 @@ import { beatLive, type SupplementBeat } from "../lib/supplement";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
 import type { TranscriptEntry } from "../types";
 import { rowKey } from "../lib/condense-records";
+import { firstHistoryCursor, projectionHeadPinned } from "../lib/history-cursor";
 import { UserText } from "./user-text";
 import { composeCondensedEntries, type CondenseEntry } from "../lib/condense-view";
 import { FoldBar, TurnBar } from "./condense-rows";
 import { listenForReducedMotion, revealRow, settleReveals } from "../lib/stream-reveal";
 
 const PAGE = 120;
-
-/* The daemon's ``PROJECTION_TRANSCRIPT_LIMIT`` (``local_operator/mobile/types.py``):
-   the projection is the pinned opener plus the newest 79 rows, so a transcript
-   this long is a CAPPED window whose head row is not the tail's chronological
-   neighbour. Mirrored rather than fetched because the rule is about the SHAPE of
-   what arrived, and ``agent-view.tsx`` mirrors the same number for the child
-   sheet. It was compared against ``PAGE`` (120) before — a number the daemon
-   never sends — so the pinned-opener branch never ran on a real projection and
-   the first cursor was the opener itself: the page came back as the opener's own
-   neighbour plus the journal BELOW the cut, and the turns in between were never
-   requested (measured with the S6 first-paint fixture: 22 user turns, 272 rows;
-   on S3, 28 turns and 839 rows). ``>=`` rather than ``===`` is safe because the
-   head row is already held either way — paging from the row after it cannot lose
-   it, only re-offer it to the merge's id de-dup. */
-const PROJECTION_ROWS = 80;
-
-/** Every row id the LIVE fold mints, which no journal row can ever match. The
- *  fold creates them for content that is not a journal entry: reasoning
- *  (`rz-`, never persisted), tool rows (`tc-`), notices (`nt-`, `rt-`, `err-`,
- *  `rej-`), compaction (`cx-`) and the peer families' `peer-`/`nonpeer-`
- *  fallbacks when a custom message carried no id — all timestamp- or
- *  call-keyed (`local_operator/mobile/projection.py`, the `id=f"<p>-…"`
- *  sites). The child sheet also synthesises a head row `prompt:<job_id>`
- *  (`agent-view.tsx`). A cursor naming any of these is answered as
- *  end-of-history. */
-const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "peer-", "nonpeer-", "prompt:"];
-
-/** Whether a rendered row's id can name a journal entry — the only kind a
- *  history cursor may use. Anything else is a cursor the daemon can only
- *  answer as end-of-history. */
-function journalAddressableRow(entry: TranscriptEntry | undefined): boolean {
-	return entry !== undefined
-		&& entry.kind !== "reasoning"
-		&& !LIVE_ONLY_ROW_PREFIXES.some((prefix) => entry.id.startsWith(prefix));
-}
 
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
@@ -155,8 +122,12 @@ function NoticeRow({ entry }: { entry: TranscriptEntry }) {
 	);
 }
 
-function Entry({ entry, pid, condensed = false, liveText = false }: {
-	entry: TranscriptEntry; pid: string; condensed?: boolean; liveText?: boolean;
+function Entry({ entry, pid, condensed = false, liveText = false, overlay }: {
+	entry: TranscriptEntry;
+	pid: string;
+	condensed?: boolean;
+	liveText?: boolean;
+	overlay?: readonly AssistantPart[];
 }) {
 	/* A CHIP NEEDS A SCREEN THAT OWNS ITS ASKS. The context is that screen's
 	   opt-in: the session route wraps its transcript in `AskChipHostProvider`, so
@@ -276,7 +247,7 @@ function Entry({ entry, pid, condensed = false, liveText = false }: {
 			   report). */
 			return (
 				<div className="min-w-0 text-body leading-normal break-words">
-					<Markdown text={entry.text} live={liveText} askChips={askChips} />
+					<AssistantContent text={entry.text} overlay={overlay} live={liveText} askChips={askChips} />
 				</div>
 			);
 		case "tool":
@@ -341,11 +312,12 @@ function Entry({ entry, pid, condensed = false, liveText = false }: {
  * competing-patterns defect that rule exists for — so the pending state is said
  * in words and ink, not in motion. */
 function CondensedRows({
-	items, pid, supplements, supplementLive, openRuns, onToggle, liveTextIds,
+	items, pid, overlayFor, liveTextIds, supplements, supplementLive, openRuns, onToggle,
 }: {
 	items: readonly CondenseEntry[];
 	liveTextIds: ReadonlySet<string>;
 	pid: string;
+	overlayFor: (entry: TranscriptEntry) => readonly AssistantPart[] | undefined;
 	supplements: Record<string, SupplementBeat>;
 	supplementLive: (beat: SupplementBeat) => boolean;
 	openRuns: ReadonlySet<string>;
@@ -357,12 +329,12 @@ function CondensedRows({
 			const showBeat = beat && item.entry.kind === "assistant" && !item.condensed;
 			return <RowBoundary key={item.key}>
 				<div data-completion-anchor={item.entry.id} data-completion-complete={item.entry.final && item.entry.text_complete === true ? "true" : "false"}>
-					<Entry entry={item.entry} pid={pid} condensed={item.condensed} liveText={liveTextIds.has(rowKey(item.entry))} />
+					<Entry entry={item.entry} pid={pid} condensed={item.condensed} overlay={overlayFor(item.entry)} liveText={liveTextIds.has(rowKey(item.entry))} />
 				</div>
 				{showBeat ? <SupplementBlock beat={beat} sessionId={pid} jobLive={supplementLive(beat)} /> : null}
 			</RowBoundary>;
 		}
-		const children = <CondensedRows liveTextIds={liveTextIds} items={item.children} pid={pid} supplements={supplements}
+		const children = <CondensedRows items={item.children} pid={pid} overlayFor={overlayFor} liveTextIds={liveTextIds} supplements={supplements}
 			supplementLive={supplementLive} openRuns={openRuns} onToggle={onToggle} />;
 		return item.kind === "turn" ? (
 			<TurnBar key={item.key} entry={item} open={openRuns.has(item.segment.key)}
@@ -612,15 +584,18 @@ export function Transcript({
 	revealEpoch,
 	journalArrivals,
 	topInset = 0,
+	inlineUi,
 	supplements,
 	projectionPid = 0,
 	peerCycles = false,
 	headPinned,
+	hasOlder,
 	tailContent,
 	emptyContent,
 }: {
 	pid: string;
 	entries: TranscriptEntry[];
+	inlineUi?: InlineUiMessages;
 	jobId?: string;
 	scrollKey?: string;
 	/** Turn supplements ("Highlights", memo §3.1 row 18): the projection's
@@ -641,6 +616,12 @@ export function Transcript({
 	 *  must start below it. Absent on an older daemon — the length/kind fallback
 	 *  then applies. */
 	headPinned?: boolean;
+	/** The projection's `transcript_has_older`: rows older than the frame exist
+	 *  even though no opener is pinned (a compacted render opens at the marker,
+	 *  so a short kept window seeds a few rows with a whole past behind it).
+	 *  Makes the projection capped — slot and mount fetch — without pinning
+	 *  `entries[0]`. Absent on an older daemon: the pin/length test alone. */
+	hasOlder?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -678,6 +659,13 @@ export function Transcript({
 	   never arrives over SSE — it is paged in from the transcript on disk as
 	   the user scrolls up. */
 	const [older, setOlder] = useState<TranscriptEntry[]>([]);
+	// A held overlay belongs to the actual row snapshot, not just its id.
+	// A current live row lacking an overlay must not inherit one from a page,
+	// while a settled row scrolling out of the live tail may keep its last view.
+	const heldInlineUi = useRef(new WeakMap<TranscriptEntry, readonly AssistantPart[]>());
+	const currentRows = useMemo(() => new Set(entries), [entries]);
+	const overlayFor = (entry: TranscriptEntry) => currentRows.has(entry)
+		? inlineUi?.get(entry.id) : heldInlineUi.current.get(entry);
 	/* Retention is a merge input, not a second UI state update. The current
 	   frame already owns the render; writing the same rows into state after
 	   paint ran the folds and scroll geometry a second time on every delta. */
@@ -825,8 +813,16 @@ export function Transcript({
 	   projection is treated as pinned in that fallback: the opener is held either
 	   way, so the cost of a false positive is one row of overlap in the next
 	   page, which the merge's rowKey de-dup discards. */
-	const cappedProjection = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
-	const pinnedOpener = cappedProjection && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
+	const pinnedHead = projectionHeadPinned(entries, headPinned);
+	/* CAPPED IS WIDER THAN PINNED (PR #4521 QA Q3). A compacted render opens at
+	   the marker and pins no opener, so a short kept window arrived as ~14 rows
+	   with neither signal: no slot, no mount fetch, and nothing to scroll for
+	   `onScroll`'s near-top fetch — every turn before the compaction was
+	   unreachable. `hasOlder` turns on the paging half of "capped" only; the
+	   opener detach and the cursor skip stay on the pin, because a kept-window
+	   prompt at `entries[0]` is NOT the conversation's opener (QA Q1). */
+	const cappedProjection = pinnedHead || hasOlder === true;
+	const pinnedOpener = pinnedHead && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
 	const liveTail = pinnedOpener ? entries.slice(1) : entries;
 	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
 	const openerJoined = pinnedOpener !== null && older.some((entry) => rowKey(entry) === rowKey(pinnedOpener));
@@ -873,11 +869,11 @@ export function Transcript({
 	   Skipping the head costs at most one already-held row on a projection that
 	   merely STARTS with a user turn, which the merge's rowKey de-dup discards.
 	   A DETACHED opener is not in `merged` at all, so nothing is skipped then. */
-	const cursorStart = cappedProjection && !detachedOpener ? 1 : 0;
+	const cursorStart = pinnedHead && !detachedOpener ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id
-			: merged.slice(cursorStart).find(journalAddressableRow)?.id ?? merged[0]?.id ?? null;
+			: firstHistoryCursor(merged, cursorStart === 1);
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
@@ -963,7 +959,7 @@ export function Transcript({
 	const transcriptRow = (entry: TranscriptEntry) => (
 		<RowBoundary key={entry.id}>
 			<div data-completion-anchor={entry.id} data-completion-complete={entry.final && entry.text_complete === true}>
-				<Entry entry={entry} pid={pid} liveText={motion.liveTextIds.has(rowKey(entry))} />
+				<Entry entry={entry} pid={pid} overlay={overlayFor(entry)} liveText={motion.liveTextIds.has(rowKey(entry))} />
 			</div>
 			{(() => {
 				/* The supplement block's seat: under the FINAL answer, outside
@@ -1115,6 +1111,15 @@ export function Transcript({
 		});
 	};
 
+	// Retain the settled overlay in the same committed frame as the live tail.
+	useLayoutEffect(() => {
+		for (const entry of entries) {
+			const parts = entry.final && inlineUi?.get(entry.id);
+			if (parts) heldInlineUi.current.set(entry, parts);
+			else heldInlineUi.current.delete(entry);
+		}
+	}, [entries, inlineUi]);
+
 	const toggleCondensed = (item: Extract<CondenseEntry, { kind: "turn" | "fold" }>, open: boolean) => {
 		const id = item.kind === "turn" ? item.segment.key : item.key;
 		const header = scrollRef.current?.querySelector(`[data-condense-header="${CSS.escape(item.key)}"]`);
@@ -1136,10 +1141,16 @@ export function Transcript({
 		setLoadingOlder(true);
 		setOlderError(false);
 		try {
-			const { entries: page, has_more } = jobId
+			const { entries: page, has_more, inline_ui: pageInlineUi }: TranscriptPage = jobId
 				? await getSubagentHistory(pid, jobId, oldestId, PAGE)
 				: await getHistory(pid, oldestId, PAGE);
 			if (page.length > 0) {
+				if (pageInlineUi) {
+					for (const row of page) {
+						const parts = pageInlineUi.get(row.id);
+						if (parts) heldInlineUi.current.set(row, parts);
+					}
+				}
 				prependPage(page);
 				/* A page that lands while the reader is parked at the top has to MOUNT
 				   in the same commit, or they see the idle hairline and nothing else
@@ -1383,8 +1394,18 @@ export function Transcript({
 
 				   Inline rather than a class for the reason `lib/column.ts` spells
 				   out: the vitest layer has no stylesheet, so only an inline style
-				   RESOLVES and a test can fail when the property is dropped. */
-				style={{ overscrollBehaviorY: "contain" }}
+				   RESOLVES and a test can fail when the property is dropped.
+
+				   `scrollbarGutter: stable` (design round 1, D2 on PR #4521): a
+				   classic (non-overlay) scrollbar appearing as the conversation
+				   outgrew the box took ~11 px from the content width, so the
+				   right-aligned user bubbles jumped sideways. Reserved HERE and not
+				   on every `.lo-scroll` (review round 1, m3 on PR #4584): the other
+				   scrollers (composer textarea, pending card, trays) never had the
+				   jump, and `pending-card.tsx` records a decision not to give up a
+				   gutter's line length at 360 px. A no-op where the bar is an
+				   overlay (phones). */
+				style={{ overscrollBehaviorY: "contain", scrollbarGutter: "stable" }}
 				className={cn(
 					/* overflow-x-hidden as the backstop: break-words on the rows should
 					   wrap everything, but a table or pre that still overflows scrolls
@@ -1420,12 +1441,32 @@ export function Transcript({
 						style={{ height: `${topInset}px` }}
 					/>
 				) : null}
+				{/* SHORT CONTENT SITS ON THE BOTTOM EDGE (design round 1, D1 on PR
+				    #4521). A transcript shorter than the viewport used to stack from the
+				    top, so the compacted seed's automatic earlier-page load pushed every
+				    row ~231 px down when it landed. This spacer takes the free space
+				    ABOVE the rows instead, the way the desktop UI and chat apps anchor:
+				    a prepend shrinks the spacer and the newest row does not move; past
+				    the viewport it is 0 px tall and the pinned/anchor-follow paths
+				    above own `scrollTop` exactly as before.
+
+				    WHY A SPACER and not `justify-content: flex-end` on the scroller: a
+				    flex-end column that overflows pushes its excess out of the START
+				    edge, where it cannot be scrolled to. And not `margin-top: auto` on
+				    the first row: the first child varies (slot, opener, seam, row,
+				    empty state). After the top-inset reserve so the reserve stays the
+				    first child (anything under the overlay is still reserved).
+				    `flex: 1 0 0` grows into free space only and never shrinks a row;
+				    the -0.5rem bottom margin cancels the scroller's `gap-2` so a long
+				    transcript's geometry is byte-for-byte what it was. Inline for the
+				    `lib/column.ts` reason: only an inline style resolves under vitest. */}
+				<div aria-hidden data-bottom-anchor="" style={{ flex: "1 0 0px", marginBottom: "-0.5rem" }} />
 				{/* History loads automatically as the user scrolls up. The slot below is the
 				   only chrome, and it is ONE height in every state (see `HistorySlot`):
 				   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
 				   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
 				{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
-				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
+				{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} overlay={overlayFor(detachedOpener)} /></div> : null}
 				{seamOpen ? <SeamLine /> : null}
 				{pagedItems.map((item) => {
 					if (item.kind === "quiet") {
@@ -1440,10 +1481,10 @@ export function Transcript({
 					}
 					if (item.kind !== "row") {
 						return <CondensedRows liveTextIds={motion.liveTextIds} key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+							supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 					}
 					return <CondensedRows liveTextIds={motion.liveTextIds} key={item.key} items={[item]} pid={pid} supplements={supplements ?? {}}
-						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} />;
+						supplementLive={(beat) => beatLive(beat, projectionPid ?? pid)} openRuns={openRuns} onToggle={toggleCondensed} overlayFor={overlayFor} />;
 				})}
 				{pagedItems.length === 0 && pending.length === 0 ? emptyContent : null}
 				{/* After the last projected row, because that is where the session will

@@ -1,0 +1,5 @@
+{
+  "cli.network_sessions.next_page": "{kind, select, search {{peer}: {shown, number} of {total, number} matching shown — next page: {command}} other {{peer}: {shown, number} of {total, number} shown — next page: {command}}}",
+  "cli.network_sessions.paging_unsupported": "{kind, select, search {{peer}: its build predates remote search, so the search did not run there — no rows from it} other {{peer}: its build predates remote paging, so this is not its whole listing}}",
+  "cli.network_sessions.relay_unpaged": "this device's running relay predates remote paging and search, so no device was paged or searched — restart the relay to page or search"
+}

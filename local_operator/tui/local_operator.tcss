@@ -3850,3 +3850,126 @@ AskPickerScreen .ask-picker {
     height: 1;
     padding-top: 0;
 }
+
+/* ── /guard: Radient Guard (RFC v0.9 slice L2b) ─────────────────────────── *
+ *
+ * The `/move --to` confirmation's card family: content-sized over the dimmed
+ * transcript, one decision at a time. The body is the only part that gives up
+ * rows: `GuardScreen._fit` sets its `max-height` from the measured budget on
+ * mount, resize and every recompose (design round 1, D1: the old fixed
+ * `max-height: 30` painted every button off an 80x24 screen), and it scrolls
+ * beyond that, so the title and the buttons are always on screen. Opened only
+ * by `/guard`, never by a prompt's arrival, so it can never sit inside a
+ * running turn. */
+GuardScreen {
+    align: center middle;
+    background: $lo-sunken;
+}
+
+GuardScreen .guard-card {
+    width: 86;
+    max-width: 95%;
+    height: auto;
+    max-height: 90%;
+    background: $lo-overlay;
+    padding: 1 2;
+    layout: vertical;
+}
+
+#guard-title {
+    text-style: bold;
+    color: $lo-fg;
+}
+
+#guard-body {
+    width: 100%;
+    height: auto;
+    color: $lo-fg;
+    background: $lo-overlay;
+    scrollbar-size-vertical: 1;
+    /* The lop palette, not stock Textual blue (design round 2, D7). At 80x24
+     * this thumb is the main cue that the "Never sent" lines sit below the
+     * fold, so it must clear WCAG 1.4.11's 3:1 against its track. It is
+     * deliberately LOUDER than the transcript's `edge` thumb (1.55:1 there,
+     * fine for a gutter that is always present): measured dark `dim` on `bg`
+     * 4.55:1, paper `dim` on `paper` 3.77:1. Hover/grab step up neutrally,
+     * no accent (the transcript's D1 rule). */
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-dim;
+    scrollbar-color-hover: $lo-muted;
+    scrollbar-color-active: $lo-fg;
+}
+
+.guard-line {
+    width: 1fr;
+    height: auto;
+    color: $lo-fg;
+}
+
+/* A scope bullet: the mark in its own 2-cell column, so a wrapped line keeps
+ * its hanging indent instead of falling back under the bullet. */
+.guard-bullet {
+    width: 100%;
+    height: auto;
+}
+
+.guard-bullet-mark {
+    width: 2;
+    height: 1;
+    color: $lo-muted;
+}
+
+#guard-buttons {
+    width: 100%;
+    height: auto;
+    min-height: 3;
+    align-horizontal: right;
+}
+
+/* EQUAL WEIGHT (design round 1, D2/D3). Every answer has the same body from
+ * the lop palette (no stock `primary` fill on "Share"), and focus -- placed on
+ * the non-sharing choice -- is the only emphasis: a lighter body, a bright
+ * edge and bold. Measured WCAG ratios on the dark theme: label $lo-fg on
+ * $lo-raised 12.56:1, on the focused $lo-edge-hi 7.89:1. */
+#guard-buttons Button {
+    margin-left: 2;
+    min-width: 16;
+    background: $lo-raised;
+    color: $lo-fg;
+    border: tall $lo-edge;
+}
+
+#guard-buttons Button:focus {
+    background: $lo-edge-hi;
+    background-tint: $lo-fg 0%;
+    color: $lo-fg;
+    text-style: bold;
+    border: tall $lo-fg;
+}
+
+/* "Stop sharing": the one coloured action, and it only goes the safe way.
+ * $lo-danger on $lo-tint-danger 6.34:1 (the stock `error` variant was 4.47:1). */
+#guard-buttons Button.guard-danger,
+#guard-buttons Button.guard-danger:focus {
+    background: $lo-tint-danger;
+    color: $lo-danger;
+}
+
+#guard-buttons Button.guard-danger:focus {
+    border: tall $lo-danger;
+}
+
+/* The non-Team CTA (nothing leaves the computer from that card, so it may
+ * carry the accent): $lo-bg on $lo-accent 8.73:1. A FIXED width (D4), so
+ * "Checking…", "See Radient Team" and "Start 30-day free trial" share one slot
+ * and Close never moves when eligibility arrives. */
+#guard-buttons Button.guard-cta {
+    width: 28;
+    background: $lo-accent;
+    color: $lo-bg;
+}
+
+#guard-buttons Button.guard-cta:disabled {
+    background: $lo-raised;
+    color: $lo-muted;
+}

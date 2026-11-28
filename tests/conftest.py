@@ -59,6 +59,13 @@ _AMBIENT_VARS = (
     # serve test admit what it should refuse and the enforcement assertions
     # pass the waived path; tests that need a mode pass it explicitly.
     "LOCAL_OPERATOR_PEER_UID_CHECK",
+    # The Guard's host-can-answer capture (``guard/surface.py``,
+    # ``HOST_CAN_ANSWER_ENV``). ``serve_command`` writes it only as ``0`` so a
+    # ``--reload`` re-exec keeps a refusal; an inherited ``0`` (a test run from
+    # inside a served daemon's shell) would make every cell refuse share-again
+    # while looking like it tested the live-environment decision. The guard
+    # tests that need it set it themselves and pop it afterwards.
+    "LOCAL_OPERATOR_GUARD_HOST_CAN_ANSWER",
     # The remote-compute API override names the host that receives the
     # operator's Radient bearer. Inheriting a developer's staging value would
     # point the suite's remote-compute client at a real host; tests that cover
@@ -403,6 +410,10 @@ _AMBIENT_VARS = (
     # a live supervisor it is harmless on its own (no test process shares that
     # pid), but it belongs to the same live-machine state as the token.
     "LOP_WAKE_SUPERVISOR_PID",
+    # "The supervisor started this runtime" (``owned_runtimes.SUPERVISOR_STARTED_ENV``):
+    # inherited from a supervisor-started shell, every session a test loads would
+    # pull its wakes forward (``harness.wake.take_supervisor_started``).
+    "LOP_WAKE_SUPERVISOR_STARTED",
     # The team-bridge connector's supervision gate
     # (``team_bridge/connector/__main__._is_supervised``). All three decide
     # whether THIS process may exit and leave a service manager to restart it,
@@ -588,6 +599,10 @@ _AMBIENT_VARS = (
     "SERPAPI_API_KEY",
     "TAVILY_API_KEY",
     "FAL_API_KEY",
+    # FAL's own SDK env name, honoured by the FAL image rung after FAL_API_KEY:
+    # an inherited one would light the FAL rung in every cell that asserts
+    # which rungs exist.
+    "FAL_KEY",
     # The audio rungs' BYOK probes fall back to an exported key (the image
     # lane's FAL/OpenAI rule), so an inherited one would light the ElevenLabs
     # rung in every cell that asserts which rungs exist.

@@ -711,8 +711,8 @@ def test_the_session_move_contract_is_frozen() -> None:
     # The carry block's own shape: two halves, one per end of the move (the
     # destination's wake/supervisor half rides the ``done`` frame; the source's
     # monitors half is added where the count was read). ``total=False`` for the
-    # same reason as the queue's: an older peer sends none of it, and a move that
-    # carried nothing must print exactly the document it always did. The wake
+    # same reason as the queue's: an older peer sends none of it. New move
+    # receipts report skill routing explicitly even when no snapshot was carried. The wake
     # half is BOTH-OR since design round 1's D4: ``running_notice`` when the
     # supervisor verified running, ``notice`` when it did not — never both.
     assert set(mobility.MoveCarryBlock.__annotations__) == {
@@ -736,6 +736,9 @@ def test_the_session_move_contract_is_frozen() -> None:
         # team/agent and custom instructions on the destination before the move;
         # names the copy that may be stale. Absent when the refresh landed.
         "definitions_notice",
+        # An optional wire acknowledgement. Absence on old peers must not
+        # be mistaken for a verified pin (including the explicit empty pin).
+        "skill_selection",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

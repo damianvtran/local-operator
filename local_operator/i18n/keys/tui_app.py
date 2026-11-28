@@ -189,8 +189,24 @@ def skills_led_by(*, manager: str, count: int | float, shown: str) -> Msg:
     return Msg("tui.app.skills.led_by", {"manager": manager, "count": count, "shown": shown})
 
 
+def skills_member_count(*, count: int | float, shown: str) -> Msg:
+    return Msg("tui.app.skills.member_count", {"count": count, "shown": shown})
+
+
 def skills_send_agent() -> Msg:
     return Msg("tui.app.skills.send_agent", {})
+
+
+def skills_team_aliases(*, aliases: str) -> Msg:
+    return Msg("tui.app.skills.team_aliases", {"aliases": aliases})
+
+
+def skills_team_fallback_facts() -> Msg:
+    return Msg("tui.app.skills.team_fallback_facts", {})
+
+
+def skills_team_no_description() -> Msg:
+    return Msg("tui.app.skills.team_no_description", {})
 
 
 def skills_teams_heading() -> Msg:

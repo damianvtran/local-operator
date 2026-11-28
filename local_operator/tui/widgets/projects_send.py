@@ -456,6 +456,22 @@ class SendTargetCard(Container):
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 
+    def on_unmount(self) -> None:
+        # Leave the locale-refresh registry the moment the card leaves the DOM.
+        # ``_cards`` is a WeakSet, but a removed card can outlive its removal
+        # (the app, a closure or an uncollected cycle still holds it), and
+        # Textual never clears ``_is_mounted`` on removal -- so the next
+        # ``set_active_locale`` reached ``_refresh_copy`` on a card whose
+        # children were already gone and raised ``NoMatches`` for
+        # ``.projects-send-title``. In the app that can crash ``/language`` once
+        # the picker has been closed and not yet collected; in CI it surfaced as teardown
+        # errors in tests/unit/tui/test_provider_state.py whenever a
+        # tests/unit/tui/test_projects_send.py test ran earlier in the shard.
+        # A dead card has no chrome to repaint, and the registry must not
+        # outlive the app that owned it (see the attachment guard in
+        # ``_refresh_copy``, the backstop if a discard is ever missed).
+        _cards.discard(self)
+
     def on_resize(self) -> None:
         # The rule is cut to the card's measured width, which only exists once
         # layout has run; this repaint is where the first cut happens.
@@ -631,7 +647,13 @@ class SendTargetCard(Container):
         self._bindings = (
             merged if merged is not None else BindingsMap(SendTargetCard.BINDINGS)
         ).copy()
-        if not self.is_mounted:
+        # ``is_mounted`` alone is not enough: Textual never clears it on
+        # unmount, so a card whose app exited (or that was removed while
+        # something still holds it) reads as mounted with its children already
+        # pruned, and the query below raised ``NoMatches`` from inside an
+        # unrelated ``set_active_locale`` call (full-suite shard 5, PR #4555).
+        # Only a card still linked to a live DOM has chrome to repaint.
+        if not self.is_mounted or not self.is_attached:
             return
         self.query_one(".projects-send-title", Static).update(_t(copy.send_title()))
         self.query_one("#projects-send-filter", Input).placeholder = _t(copy.send_filter())

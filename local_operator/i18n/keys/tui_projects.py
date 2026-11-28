@@ -357,6 +357,13 @@ def start_more(*, count: str) -> Msg:
     return Msg("tui.projects.start.more", {"count": count})
 
 
+def start_team_detail(*, manager: str, count: int | float, shown: str) -> Msg:
+    return Msg(
+        "tui.projects.start.team_detail",
+        {"manager": manager, "count": count, "shown": shown},
+    )
+
+
 def start_title() -> Msg:
     return Msg("tui.projects.start.title", {})
 

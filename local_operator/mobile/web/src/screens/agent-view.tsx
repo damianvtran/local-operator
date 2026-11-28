@@ -866,6 +866,11 @@ export function AgentConversation({
 					Reconnecting. Showing saved agent activity.
 				</div>
 			) : null}
+			{/* Bottom-anchored like the parent's transcript (review round 1, m4 on
+			    PR #4584): this is the same chat-shaped `Transcript`, and a short
+			    child conversation that grows or pages older history should keep its
+			    newest row where the reader is looking. Kept deliberately, not
+			    opted out; the PR body lists it for design to judge. */}
 			<Transcript
 				pid={sessionId}
 				jobId={jobId}

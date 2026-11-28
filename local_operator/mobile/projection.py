@@ -28,9 +28,13 @@ import logging
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+from local_operator.compaction.cutpoint import is_preserved_replay
+from local_operator.compaction.marker import (
+    COMPACTION_MARKER_TYPE,
+    COMPACTION_REFUSED_TYPE,
+)
 from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
@@ -56,6 +60,7 @@ from local_operator.harness.message_types import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
 )
 
@@ -147,7 +152,15 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
     ACTIVITY_PHASE_THINKING,
 )
+from local_operator.session.inline_ui_text import (
+    INLINE_UI_V1,
+    InlineUiEnvelope,
+    project_inline_ui,
+)
 from local_operator.team_bridge.display_receipt import projected_display_receipt
+
+if TYPE_CHECKING:
+    from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +424,100 @@ def _live_call_map(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): item for key, item in value.items()}
+
+
+class LiveInlineUiEnvelope(InlineUiEnvelope):
+    # The runtime and phone repaint paths do not necessarily produce the same prose.
+    text: str
+
+
+def read_live_inline_ui(data: object) -> dict[str, LiveInlineUiEnvelope | None]:
+    """Read the shape of the authenticated runtime's already-validated sidecar."""
+    if not isinstance(data, dict) or type(data.get("version")) is not int or data["version"] != 1:
+        return {}
+    messages = data.get("messages")
+    if not isinstance(messages, dict):
+        return {}
+    decoded: dict[str, LiveInlineUiEnvelope | None] = {}
+    for message_id, envelope in messages.items():
+        if not isinstance(message_id, str) or not message_id:
+            continue
+        if envelope is None:
+            # A final event can supersede a streaming widget with plain prose.
+            # Tombstones are local runtime control frames, never HTTP overlays.
+            decoded[message_id] = None
+            continue
+        if (
+            not isinstance(envelope, dict)
+            or type(envelope.get("version")) is not int
+            or envelope["version"] != 1
+        ):
+            continue
+        text = envelope.get("text")
+        if not isinstance(text, str):
+            continue
+        # A valid UTF-16 position must also fall between Unicode code points.
+        # Build boundaries only for typed rows, never their unrelated prose.
+        boundaries = {0}
+        cursor = 0
+        for character in text:
+            cursor += 2 if ord(character) > 0xFFFF else 1
+            boundaries.add(cursor)
+        widgets = envelope.get("widgets")
+        if not isinstance(widgets, list) or not widgets:
+            continue
+        previous = 0
+        for widget in widgets:
+            if (
+                not isinstance(widget, dict)
+                or type(offset := widget.get("offset")) is not int
+                or offset < previous
+                or offset not in boundaries
+                or not isinstance(widget.get("payload"), dict)
+            ):
+                break
+            previous = offset
+        else:
+            decoded[message_id] = cast(LiveInlineUiEnvelope, envelope)
+    return decoded
+
+
+def project_live_inline_ui(
+    projection: SessionProjection, messages: Mapping[str, LiveInlineUiEnvelope | None]
+) -> dict[str, LiveInlineUiEnvelope]:
+    """Associate sidecars with visible assistant rows without mutating wire rows.
+
+    Offsets stay relative to the unchanged runtime basis. Legacy replay can
+    strip edge whitespace, but if the actual prose changed then the current
+    base row wins immediately, even before a queued retraction arrives.
+    """
+    if not messages:
+        return {}
+    return {
+        row.id: envelope
+        for row in projection.transcript
+        if row.kind == "assistant"
+        and (envelope := messages.get(row.id)) is not None
+        and row.text.strip() == envelope["text"].strip()
+    }
+
+
+def durable_inline_ui(rows: Iterable[TranscriptEntry]) -> dict[str, Any]:
+    """Build bounded overlays for visible durable rows, using their marked source."""
+    from local_operator.session.runtime.inline_ui_egress import _attach
+
+    frame: dict[str, Any] = {}
+    for row in rows:
+        if row.kind != "assistant" or row._inline_ui_source is None:
+            continue
+        projection = project_inline_ui(
+            row._inline_ui_source,
+            streaming=False,
+            source_version=1,
+            capabilities=frozenset({INLINE_UI_V1}),
+        )
+        _attach(frame, row.id, projection, include_text=True)
+    return frame
 
 
 def _message_text(message: AgentMessage) -> str:
@@ -1274,6 +1381,47 @@ def steer_journal_order_frame(frame: dict[str, Any], *, declared: bool) -> dict[
     return out
 
 
+def _opening_user_row(
+    rows: Sequence[Any], kind: Callable[[Any], str], custom_type: Callable[[Any], str]
+) -> tuple[Any | None, bool]:
+    """The row the 80-row cap (and the frame cap's tail tier) may pin as the
+    conversation's OPENING message, or ``None`` when these rows do not hold it.
+
+    The pin claims "this is how the conversation began" — the client shows it
+    detached above the seam and pages from the row after it. That claim is only
+    true when the first user row in the fold precedes every compaction. A render
+    that STARTS at a compaction (the durable fold and the attach seed both open
+    at the newest marker, ``DurableFoldState.keep_start_id``) holds no opener at
+    all: its first user row is the first prompt of the KEPT window. Pinning that
+    showed a mid-conversation prompt as the opener (PR #4521 review R1-1 / QA
+    Q1: ``req-120`` pinned where the real opener was ``req-0``). Before #4521
+    the carried preserved copies at the render's head hid this, because the
+    oldest copy usually WAS the opener; with the copies shed the rule has to
+    say what it means.
+
+    So the first user-or-marker row decides: a user row first is the opener; a
+    compaction marker first means no pin. Returns ``(opener, opens_at_marker)``;
+    the second value is what the caller must REMEMBER
+    (``SessionProjection.transcript_opener_absent``), because the trim that
+    follows drops the marker and the next call could no longer see it.
+
+    The journal's real first user row is NOT fetched instead: the live fold
+    (``fold_history`` in the session process) has no journal handle, and an
+    unpinned seed is already correct —
+    the client's first cursor is then the tail's oldest row, and paging serves
+    the real opener exactly once, at its journal position. The live fold's own
+    ``cx-`` row (``kind="compaction"``) counts too, for the same reason, though
+    a live opener painted before it still precedes it and stays pinned.
+    """
+    for row in rows:
+        row_kind = kind(row)
+        if row_kind == "user":
+            return row, False
+        if row_kind == "compaction" or custom_type(row) == COMPACTION_MARKER_TYPE:
+            return None, True
+    return None, False
+
+
 def cap_projection_frame(
     projection: SessionProjection, *, cap_bytes: int = PROJECTION_FRAME_SOFT_CAP_BYTES
 ) -> tuple[dict[str, Any], bool]:
@@ -1555,9 +1703,29 @@ def cap_projection_frame(
     # user message exactly like ``ProjectionFold._cap_tail`` does.
     entries = data.get("transcript") or []
     limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, PROJECTION_TRANSCRIPT_LIMIT // 2)
+    # Decided ONCE, before halving: the first halving can drop a compaction
+    # marker, and re-deciding on the shorter list would then pin a kept-window
+    # prompt as the opener (``_opening_user_row``). For an opener that exists
+    # this is the same row every iteration would have found.
+    first_user = (
+        None
+        if projection.transcript_opener_absent
+        else _opening_user_row(
+            entries,
+            lambda row: str(row.get("kind") or ""),
+            lambda row: str(row.get("custom_type") or ""),
+        )[0]
+    )
     while len(entries) > FRAME_CAP_TRANSCRIPT_FLOOR:
-        first_user = next((e for e in entries if e.get("kind") == "user"), None)
-        entries = entries[-limit:]
+        trimmed = entries[-limit:]
+        # A head this tier actually trims means older rows exist, even when the
+        # fold's own transcript was short enough to say nothing
+        # (``SessionProjection.transcript_has_older``).
+        head_cut = len(trimmed) < len(entries)
+        entries = trimmed
+        if head_cut and not data.get("transcript_has_older"):
+            data["transcript_has_older"] = True
+            dirty.add("transcript_has_older")
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
             # THE PINNED-HEAD FACT reaches the client here, because the client
@@ -1770,11 +1938,42 @@ def fold_messages_to_entries(
     # so the call it issues opens expanded exactly as the TUI's does.
     bang_pending = False
     for message in history:
+        if is_preserved_replay(message):
+            # A COMPACTION'S CARRIED COPY, not a transcript row (operator report
+            # 2026-11-23). The newest marker's ``preserved_user_turns`` — and the
+            # elision notice standing in for the ones its cap dropped — are
+            # re-injected after the marker so the MODEL keeps the operator's
+            # words; they reuse the ORIGINAL row ids, and the original rows sit
+            # in the journal below the cut, between the work that answered them.
+            # Painting the copies did two things on the phone: a wall of
+            # consecutive user bubbles with no agent rows or final answers (the
+            # reported session carried 126), and — because the seed's oldest row
+            # was then a copy — a ``?before=`` cursor at THAT prompt's journal
+            # position, so every row between it and the compaction was newer
+            # than the cursor and never served. The desktop pages the journal and
+            # never paints them, so neither does the phone: each prompt is served
+            # once, at its journal position, by the cursor pages
+            # (``durable.journal_rows_older_than``). Shed by PROVENANCE (the
+            # ``provider_payload`` stamp / elision id ``cutpoint`` mints), never
+            # by wording, so a genuine user row cannot match.
+            continue
         if isinstance(message, CustomMessage):
             # Session-state snapshots are agent context, not conversation. Drop
             # the typed metadata before row budgets/grouping; never match text,
             # since users and peers can legitimately quote its marker.
             if message.custom_type == "session_state":
+                continue
+            if message.custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                # The account-change notice ("[session credential] This session
+                # is now using …") is NOT a phone row — operator ruling
+                # 2026-11-23: irrelevant on the device the tunnel reaches, and
+                # hidden on a remote session too. Dropped by its typed
+                # ``custom_type`` here, in the ONE phone fold, so the attach
+                # seed (``ProjectionFold.fold_history``, the live arm — the
+                # notice arrives as a context message, never as an event) and
+                # every history page agree. TUI and desktop are unchanged; the
+                # surface list on the type in ``harness/message_types.py``
+                # records the exclusion.
                 continue
             if message.custom_type == HUB_MESSAGE_TYPE:
                 # The parent's own words (``body``), never the model-facing
@@ -2137,13 +2336,22 @@ def fold_messages_to_entries(
             # extra EMPTY row here that the TUI (which tests its stripped
             # text) never emits. Same rows plus one blank one is not the
             # same rows.
-            assistant_text = assistant_row_text(message.text)
-            if assistant_text:
+            source = message.text if message._inline_ui_source_version == 1 else None
+            text = (
+                message.text
+                if source is None
+                else project_inline_ui(
+                    source, streaming=False, source_version=1, capabilities=frozenset()
+                )["text"]
+            )
+            assistant_text = assistant_row_text(text)
+            if assistant_text or (source is not None and source.strip()):
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
                         kind="assistant",
                         text=assistant_text,
+                        _inline_ui_source=source,
                         # The condensation facts (types.TranscriptEntry): the
                         # provider's phase declaration and whether this row
                         # carried calls of its own. Both arms set them, and
@@ -2380,6 +2588,9 @@ class ProjectionFold:
 
     def __init__(self, projection: SessionProjection, *, queued_engine: bool = False) -> None:
         self.projection = projection
+        # Created only when a marked response actually streams. Normal turns
+        # continue to append provider deltas without parsing Markdown.
+        self._inline_ui_events: InlineUiEvents | None = None
         # Only an explicit owner-side source binding can negotiate this field;
         # reconstructing a projection with raw details is not authentication.
         projection.peer_cycles = None
@@ -2555,6 +2766,10 @@ class ProjectionFold:
         # The rebuilt transcript IS journal order; a delivery slot recorded
         # against the replaced rows has nothing left to describe.
         self.projection.steer_journal_order = {}
+        # A wholesale rebuild re-decides the opener — and whether older rows
+        # exist (the only reset of that sticky fact) — from the whole render.
+        self.projection.transcript_opener_absent = False
+        self.projection.transcript_has_older = False
         self.projection.transcript = self._cap_tail(entries)
         from local_operator.mobile.peer_cycles import retained_peer_graphs
 
@@ -2840,7 +3055,17 @@ class ProjectionFold:
                 if row is not None:
                     # Append the delta; never re-read the whole message — the
                     # delta contract is what makes 30 Hz streaming cheap.
-                    row.text += event.delta
+                    if (
+                        isinstance(event.message, Message)
+                        and event.message._inline_ui_source_version == 1
+                    ):
+                        if self._inline_ui_events is None:
+                            from local_operator.session.runtime import inline_ui_egress
+
+                            self._inline_ui_events = inline_ui_egress.InlineUiEvents()
+                        row.text += self._inline_ui_events.dump(event)["delta"]
+                    else:
+                        row.text += event.delta
         elif isinstance(event, ReasoningDeltaEvent):
             # The model's reasoning, streamed onto its own row. Display-only in
             # the same sense the event is: the row is not the assistant message,
@@ -2853,7 +3078,16 @@ class ProjectionFold:
         elif isinstance(event, MessageEndEvent):
             row = self._find(event.message.id)
             if row is not None:
-                row.text = _message_text(event.message)
+                text = _message_text(event.message)
+                if (
+                    isinstance(event.message, Message)
+                    and event.message.role == "assistant"
+                    and event.message._inline_ui_source_version == 1
+                ):
+                    text = project_inline_ui(
+                        text, streaming=False, source_version=1, capabilities=frozenset()
+                    )["text"]
+                row.text = text
                 row.final = True
                 # The provider's phase declaration arrives WITH the end frame,
                 # so it is stamped here rather than at start: a lead-in frame
@@ -2862,6 +3096,7 @@ class ProjectionFold:
                 # row.
                 row.stop_reason = _stop_reason_of(event.message)
                 row.calls_tools = _calls_tools_of(event.message)
+            self._inline_ui_events = None
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
@@ -3376,6 +3611,12 @@ class ProjectionFold:
         # Match the history fold: context snapshots must not become optimistic
         # delivery rows, consume the tail budget, or emit a changed frame.
         if custom_type == "session_state" or cross_session_hidden():
+            return
+        # The account-change notice is never a phone row (operator ruling
+        # 2026-11-23; see the history fold's arm). No producer delivers it as an
+        # event today, but this is the live fold's one custom-delivery entry, so
+        # it refuses the type here too rather than trusting that stays true.
+        if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return
@@ -4693,9 +4934,28 @@ class ProjectionFold:
         """
         if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
             self.projection.transcript_head_pinned = False
+            # A SHORT render can still have a past: one that opens at a
+            # compaction marker is the kept window, and every turn the
+            # compaction summarised sits older in the journal (PR #4521 QA Q3:
+            # a 3-turn kept window seeded 14 rows, and the relay SPA offered no
+            # way to reach the 120 turns behind it). Sticky: once true it stays
+            # true until ``fold_history`` re-seeds.
+            if not self.projection.transcript_has_older:
+                self.projection.transcript_has_older = _opening_user_row(
+                    entries, lambda row: row.kind, lambda row: row.custom_type or ""
+                )[1]
             return entries
+        # Past the cap rows are trimmed off the head, so older rows exist
+        # whether or not an opener gets pinned above them.
+        self.projection.transcript_has_older = True
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
-        first_user = next((e for e in entries if e.kind == "user"), None)
+        first_user: TranscriptEntry | None = None
+        if not self.projection.transcript_opener_absent:
+            first_user, opens_at_marker = _opening_user_row(
+                entries, lambda row: row.kind, lambda row: row.custom_type or ""
+            )
+            # Remembered past this trim, which drops the marker that told us.
+            self.projection.transcript_opener_absent = opens_at_marker
         if first_user is not None and first_user not in tail:
             # Pin the opener and make room by dropping the OLDEST tail row
             # (``tail[1:]``), never the newest (``tail[:-1]``). ``_cap_tail``

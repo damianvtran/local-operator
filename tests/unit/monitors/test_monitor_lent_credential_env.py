@@ -40,16 +40,13 @@ from local_operator.harness.types import (
 from local_operator.monitors import parked
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors import store as monitor_store
-from local_operator.monitors.diff import content_hash
-from local_operator.monitors.scheduler import normalize_result
-from local_operator.monitors.settings import read_monitor_settings
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.network.credentials import github as github_mod
 from local_operator.session.session import Session, _monitor_comparable_text
 from local_operator.session.transcript import Transcript
 from local_operator.tools.builtin import build_bash_tool
 from local_operator.variables import VariableStore
-from tests.unit.monitors.support import drain_checks
+from tests.unit.monitors.support import drain_checks, seed_session_baseline
 
 SID = "lentenv00001"
 NOW = 1_800_000_000_000
@@ -141,20 +138,16 @@ async def test_a_parked_tick_reaches_the_lent_login_and_stays_quiet(
     assert LOGGED_IN in reference.text, reference.text
     assert lent not in reference.text, "the baseline text leaked the lent token"
     comparable, _blind, _handle = _monitor_comparable_text(reference.text, reference.details)
-    baseline = content_hash(normalize_result(str(comparable), spec, read_monitor_settings()))
     monitor_store.write_entry(
         root, SID, cwd=str(tmp_path), monitors=[row], preserve={"parked_at": NOW - 10}
     )
-    monitor_state.write_counters(
+    # The (hash, blob) pair the session's scheduler commits for this baseline.
+    seed_session_baseline(
         root,
         SID,
-        "m1",
-        {
-            "schema": monitor_state.STATE_SCHEMA,
-            "content_hash": baseline,
-            "checks": 1,
-            "next_due_at": NOW - 1,
-        },
+        spec,
+        str(comparable),
+        {"schema": monitor_state.STATE_SCHEMA, "checks": 1, "next_due_at": NOW - 1},
     )
 
     outcome = await parked.probe_session(root, SID, now_ms=NOW)

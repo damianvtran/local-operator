@@ -1989,7 +1989,10 @@ def recovery_text(transcript: Any, marker: Any) -> str:
     head: list[str] = []
     tail: list[str] = []
     size = 0
-    for entry in transcript.entries():
+    # Streaming where available: the pre-cut rows are exactly the dropped
+    # prefix, read back one row at a time instead of as a list.
+    rows: Callable[[], Iterable[Any]] | None = getattr(transcript, "iter_entries", None)
+    for entry in rows() if callable(rows) else transcript.entries():
         if entry.id in (marker.id, kept):
             break
         payload = getattr(entry, "payload", {})

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "relay.chart",
+  "history_sha256": "9601966c30019a36dd6cbdf2c236761c654af8a9d3b9b4d1cd4b3c94225142cf",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "relay.chart",
+      "source_sha256": "d6a99a7256f33a0d4a8aaef57a6fd9c9875df6b6bee8291c0d0ecb43b3af157d",
+      "translator": {
+        "agent": "coder subagent for the relay chart redesign (feat/relay-inline-chart-polish lane)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-26"
+      },
+      "auditor": {
+        "agent": "reviewer agent, lopdev team (lop session 1f159c3f5307); separate agent from the translator, edited no catalogue",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-26",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of all 11 relay.chart keys against en source + context (maxCells via rich cell_len, all within budget), glossary and locale style guide: meaning, tooltip/button idiom, placeholder parity, NFC/no Cf controls, register, data_toggle byte-identical to the native app's audited mobile.session.inline_chart_data (local-operator-mobile origin/main), role read as an aria-roledescription noun. Translator and auditor ran on the same model id (no fallback observed); they are separate agent sessions; the auditor edited no catalogue. Round 1 FAILED (no receipt): position '{index}/{count}' is screen-reader-only and a bare slash has no reliable spoken reading (fraction/'slash', or read as a d/m date after the date in the announcement). Round 2 re-audit of the translator's fix: position 'Mục {index} trong số {count}' (17/24 at 2-digit count), plus optional minor share '{share} của tổng' (14/24). No other key changed (verified against round-1 values). no_data at 16/16 is exactly at budget."
+    }
+  ]
+}

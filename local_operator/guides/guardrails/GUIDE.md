@@ -17,6 +17,12 @@ no approval — that is not a reroute. A review-type child whose brief names a
 path because that role carries no `write`/`edit`; no other session gets it. Copying
 or importing the blocked material there by any route is still a reroute.
 
+**Clean up after yourself without asking** (operator directive 2026-11-24): remove
+your own finished worktrees, scratch and preview residue (branches, databases,
+deploys your task created) yourself; `ask` only about paths you did not create.
+After a guard upgrade, `preview_tool_call` a previously refused call before
+asking — ALLOW or WARN means re-issue it (exception 1 below), not ask.
+
 **Exactly two exceptions** let you re-issue the IDENTICAL call — same tool,
 byte-identical arguments — ONCE. Neither bypasses anything: the guard re-checks
 every call, so the re-issue runs only if the installed guard lets it.
@@ -222,8 +228,9 @@ session made. Everything CRITICAL is still refused.
   any other delete of it stays HIGH and names the creator. A raw `rm -rf` of
   an ancestor's tree still goes to the judge if it contains non-regenerable
   ignored files, such as an ignored `.env` you did not make. Exact plain
-  `git worktree remove` holds unverified ignored files even in a family-owned
-  tree: Git can delete them. An unrelated session's tree is never yours.
+  `git worktree remove` holds unverified ignored files in a sibling's or
+  cousin's tree: Git can delete them. In a tree you or your ancestors and
+  descendants created, ignored payload is yours (below). An unrelated session's tree is never yours.
   A later delete of exactly that path, or anything inside it, ranks LOW —
   unless another session's ledger row sits at or under the target, or the
   target is or holds a git work tree or repository this session's ledger does
@@ -288,9 +295,10 @@ session made. Everything CRITICAL is still refused.
   The hold names the condition that failed. Ignored files the guard cannot
   prove regenerable (the reason counts them, never lists them): there is
   nothing to commit, stash or push for that hold, and it is not the open-PR
-  refusal (that one is CRITICAL and says "has open PR"). Copy or move what
-  you need out of the checkout; whether the rest may be deleted is the
-  operator's decision. Ignored files that could not be read: the guard could
+  refusal (that one is CRITICAL and says "has open PR"). In your own tree it
+  means a nested Git repository: push or move it out, then remove the tree
+  yourself. In a tree you did not create, copy or move what you need out of
+  the checkout and ask only about those paths. Ignored files that could not be read: the guard could
   not verify them; check the path and registration. Otherwise (tracked or
   untracked changes, tracked deletions): preserve unknown files, commit or
   stash edits, push commits that must survive, and verify the canonical path
@@ -307,7 +315,12 @@ session made. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  or its family (above) is yours to maintain. Outside the exact removal
+  or its family (above) is yours to maintain. Its ignored payload (`.env`,
+  logs, local databases, any output directory, links) is yours too and goes
+  with it on plain and `--force` removal, with no ask: a recorded `git worktree
+  add` starts with zero ignored files, so every ignored byte came from your own
+  work. The one exception is an ignored entry holding a nested Git repository
+  (or one too large to walk), whose commits may exist nowhere else. Outside the exact removal
   routes above, the existing ranking also covers `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
   reaches only your own trees (up to 16 per command; their checks run in

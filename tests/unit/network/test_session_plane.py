@@ -841,6 +841,274 @@ def test_a_peer_can_create_a_session_on_this_device_and_prompt_it(
         _stop_all(served)
 
 
+def test_fresh_create_reports_unconfirmed_when_pin_readback_fails(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    link = _dial_to(server_a, record, host_b, port_b)
+    read_text = Path.read_text
+    failed_reads: list[Path] = []
+
+    def fail_first_pin_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        if (
+            not failed_reads
+            and path.parent.parent == server_b.root / "sessions"
+            and path.name == ATTACHMENT_SIDECAR_NAME
+        ):
+            # Inject the error only after the real read proves the write landed.
+            read_text(path, *args, **kwargs)
+            failed_reads.append(path)
+            raise OSError("synthetic one-shot pin readback failure")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_first_pin_read)
+    try:
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 7,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "prompt": "verify the create receipt",
+                "skill_manifest": {},
+            }
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        assert detail["admitted"] is True, detail
+        session_dir = server_b.root / "sessions" / detail["session_id"]
+        assert failed_reads == [session_dir / ATTACHMENT_SIDECAR_NAME]
+        stored = read_session_attachment(session_dir)
+        assert stored is not None and stored.skill_manifest_pinned and stored.skill_manifest == {}
+        assert detail["skill_selection"]["status"] == "unconfirmed"
+    finally:
+        _stop_all(served)
+        link.close("test")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["exact", "missing", "receiver_opt_out", "empty", "legacy", "old_sender", "old_receiver"],
+)
+def test_peer_spawn_pins_exact_source_skills_and_names_omissions(
+    peer_pair: Devices,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    case: str,
+) -> None:
+    """Source turn → real sessions tool/subprocess → mesh → receiving turn.
+
+    A CLI test that sets the process audit ID cannot catch the tool clearing
+    it. Keep that audit ID wrong on purpose and let the real factory, not a
+    test sidecar, derive the source snapshot from its rendered prompt. The
+    receiver can decline to auto-include a locally held skill; a manifest
+    neither grants nor removes explicit skill:// or operator access.
+    """
+    import hashlib
+    import re
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.analytics.recorder import reset_recorder_for_test
+    from local_operator.analytics.store import AnalyticsStore
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import ToolContext
+    from local_operator.resume import read_session_attachment
+    from local_operator.session.session import Session
+    from local_operator.session_factory import create_session
+    from local_operator.skills import api as skills_api
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+    from local_operator.tools.builtin import execute_sessions
+
+    source, receiver, _host, _port = peer_pair
+    recorder = reset_recorder_for_test(AnalyticsStore(source.root / "analytics-test.db"))
+    request.addfinalizer(recorder.close)
+    # Keep real filesystem discovery and routing, without a bundled skill
+    # whose presence changes the explicitly empty selection control.
+    monkeypatch.setattr(skills_api, "PACKAGED_SKILL_ROOT", source.root / "no-packaged-skills")
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host, port = _listen(receiver)
+    # Keep the real runtime RPC admission seam, then use the actual factory
+    # to render the admitted prompt in the peer-minted session directory.
+    served = _serve(monkeypatch, receiver.root)
+    query = "Use the alpha and beta source skills or a local extra skill."
+    team_name = "skill-parity"
+    team_brief = "Use the transfer team's release checklist."
+    source_skills = (
+        {}
+        if case == "empty"
+        else {
+            "carry-alpha": "Alpha source skill.",
+            "carry-beta": "Beta source skill.",
+        }
+    )
+    dest_skills = {**source_skills, "receiver-only": "A local extra skill."}
+    if case == "missing":
+        del dest_skills["carry-beta"]
+    # Define the team only on the origin so create reconciles that exact row
+    # instead of silently testing two unrelated locally installed definitions.
+    TeamRegistry(source.root).create_team(
+        TeamEditFields(
+            name=team_name,
+            description="Transfer regression fixture.",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions=team_brief,
+        )
+    )
+    private_body = "RECEIVER-ONLY BODY CANARY"
+    opted_out_path = None
+    for device, inventory in ((source, source_skills), (receiver, dest_skills)):
+        for name, text in inventory.items():
+            directory = device.root / ".local-operator" / "skills" / name
+            directory.mkdir(parents=True)
+            path = directory / "SKILL.md"
+            if case == "receiver_opt_out" and device is receiver and name == "carry-beta":
+                opted_out_path = path
+                path.write_text(
+                    f"---\nname: {name}\ndescription: {text}\n"
+                    f"disable-model-invocation: true\n---\n{private_body}\n"
+                )
+            else:
+                path.write_text(f"---\nname: {name}\ndescription: {text}\n---\nBody\n")
+
+    async def turn(device: relay.RelayServer, sid: str, *, origin: bool) -> str:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
+        monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+        session = await create_session(
+            argparse.Namespace(resume=sid, hosting="test", model="test"),
+            ConfigManager(device.root),
+            AgentRegistry(device.root),
+            cwd=str(device.root),
+            world_root=device.root,
+        )
+        try:
+            # This fixture renders a local runtime's prompt, not an attached proxy.
+            assert isinstance(session, Session)
+            if origin:
+                session.attach_team(TeamRegistry(device.root).get_team_by_name(team_name))
+                if case == "legacy":
+                    # A conversation attached before skill snapshots existed.
+                    return ""
+            await session.prompt(query)
+            assert session.active_team_name == team_name
+            blocks = session._last_system_blocks
+            assert blocks is not None, "prompt did not render any system blocks"
+            return "\n".join(blocks)
+        finally:
+            await session.dispose()
+
+    def rows(prompt: str) -> dict[str, str]:
+        # Packaged guides share this prompt block but are not transferable
+        # skills. Compare all fixture skills, including the receiver-only canary.
+        block = re.search(r"<skills>(.*?)</skills>", prompt, re.S)
+        if block is None:
+            return {}
+        return {
+            name: text
+            for name, text in re.findall(r"^- ([\w-]+): (.+)$", block[1], re.M)
+            if name in source_skills or name in dest_skills
+        }
+
+    link = _dial_to(source, record, host, port)
+    source_dir = source.root / "sessions" / SESSION
+    try:
+        source_prompt = asyncio.run(turn(source, SESSION, origin=True))
+        expected = {
+            name: hashlib.sha256(text.encode()).hexdigest() for name, text in source_skills.items()
+        }
+        if case != "legacy":
+            assert rows(source_prompt) == source_skills
+            assert "<team>" in source_prompt and team_brief in source_prompt
+            original = read_session_attachment(source_dir)
+            assert original is not None and original.skill_manifest == expected
+        if case == "old_receiver":
+            owner_create = receiver._op_session_create
+
+            def legacy_create(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+                # The base owner's behavior at the wire boundary: ignores the
+                # new manifest field and has no pin acknowledgement to return.
+                assert frame.get("skill_manifest") == expected
+                detail = owner_create(
+                    link, {k: v for k, v in frame.items() if k != "skill_manifest"}
+                )
+                return {k: v for k, v in detail.items() if k != "skill_selection"}
+
+            monkeypatch.setitem(receiver._handlers, "net_session_create", legacy_create)
+        monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "badbadbadbad")
+        # Omitting attribution reproduces the pre-feature sender's wire shape.
+        context = ToolContext(
+            cwd=str(source.root), session_dir=("" if case == "old_sender" else str(source_dir))
+        )
+        result = asyncio.run(
+            execute_sessions(
+                "skill-parity",
+                {
+                    "op": "spawn",
+                    "peer": receiver.identity.device_id,
+                    "team": team_name,
+                    "prompt": query,
+                },
+                context=context,
+            )
+        )
+        assert not result.is_error and result.details, result
+        minted = result.details["session_id"]
+        assert served[minted].handle.prompts() == [query]
+        delivered = read_session_attachment(receiver.root / "sessions" / minted)
+        assert delivered is not None and delivered.team == team_name
+        pinned = case not in {"legacy", "old_sender", "old_receiver"}
+        assert delivered.skill_manifest == (expected if pinned else None)
+        assert delivered.skill_manifest_pinned is pinned
+        receipt = result.details["mesh"]["skill_selection"]
+        expected_status, phrase = ("local_routing", "will select skills locally")
+        if pinned:
+            expected_status, phrase = ("pinned", "pinned the source's skill selection")
+        elif case == "old_receiver":
+            expected_status, phrase = ("unconfirmed", "did not confirm a skill snapshot")
+        assert receipt["status"] == expected_status
+        assert phrase in receipt["message"]
+        assert any(phrase in getattr(block, "text", "") for block in result.content)
+
+        _stop_all(served)
+        served.clear()
+        body_loads: list[str] = []
+        if opted_out_path is not None:
+            roots = skills_api.default_skill_roots(receiver.root, boundary=receiver.root)
+            discovered, _ = skills_api.discover_skills(roots, boundary=receiver.root)
+            local = next(skill for skill in discovered if skill.name == "carry-beta")
+            assert local.file_path == opted_out_path and local.hide
+            assert local.description == source_skills["carry-beta"]
+            resolve_skill = skills_api.resolve_skill_url
+
+            def track_skill_read(url: str, *args: Any, **kwargs: Any) -> str | None:
+                if url.startswith("skill://carry-beta"):
+                    body_loads.append(url)
+                return resolve_skill(url, *args, **kwargs)
+
+            monkeypatch.setattr(skills_api, "resolve_skill_url", track_skill_read)
+
+        dest_prompt = asyncio.run(turn(receiver, minted, origin=False))
+        assert "<team>" in dest_prompt and team_brief in dest_prompt
+        if case in {"missing", "receiver_opt_out"}:
+            assert rows(dest_prompt) == {"carry-alpha": rows(source_prompt)["carry-alpha"]}
+            assert "- Unavailable on this device: carry-beta" in dest_prompt
+            if case == "receiver_opt_out":
+                assert not body_loads
+                assert "skill://carry-beta" not in dest_prompt and private_body not in dest_prompt
+        elif pinned:
+            assert rows(dest_prompt) == rows(source_prompt)
+        else:
+            assert rows(dest_prompt) == dest_skills
+    finally:
+        _stop_all(served)
+        link.close("test")
+
+
 def test_a_promptless_create_is_still_a_row_on_both_devices(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4117,6 +4385,14 @@ def test_the_owner_answers_for_a_session_it_holds_and_refuses_one_it_does_not(
     host_b, port_b = _listen(server_b)
     _seed(server_b.root, SESSION)
     _dial_to(server_a, record, host_b, port_b)
+
+    def _no_fan_out() -> Any:
+        # A NAMED peer is asked alone over the real, negotiated link
+        # (``remote-catalog-session-id-v1``): the mesh-wide listing that made a
+        # live session read as unowned on a 232-row mesh (2026-11-25) never runs.
+        raise AssertionError("peer_session_facts for a named peer ran the full fan-out")
+
+    monkeypatch.setattr(server_a, "_fan_out_catalog", _no_fan_out)
     cold = _call(
         server_a.root,
         "peer_session_facts",

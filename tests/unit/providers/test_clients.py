@@ -1723,33 +1723,67 @@ async def test_responses_developer_instructions_are_scoped_to_official_models_an
 
 
 @pytest.mark.parametrize(
-    ("model_id", "base_url", "api_mode", "route", "developer_prefix", "cache_key"),
+    (
+        "model_id",
+        "discovered_only",
+        "base_url",
+        "api_mode",
+        "route",
+        "developer_prefix",
+        "cache_key",
+        "retention",
+    ),
     [
-        ("gpt-6.2-sol", None, "responses", "responses", True, False),
-        ("gpt-6.2-sol", None, "chat_completions", "chat/completions", False, False),
+        ("gpt-6.2-sol", True, None, "responses", "responses", True, False, None),
+        ("gpt-6.2-sol", True, None, "chat_completions", "chat/completions", False, False, None),
         (
             "gpt-6.2-sol",
+            True,
             "https://gateway.invalid/v1",
             "responses",
             "chat/completions",
             False,
             False,
+            None,
         ),
-        ("gpt-6.1-sol", None, "responses", "responses", False, True),
-        ("gpt-5.6-sol", None, "responses", "responses", False, True),
+        ("gpt-6.1-sol", True, None, "responses", "responses", False, True, None),
+        ("gpt-5.6-sol", False, None, "responses", "responses", False, True, None),
+        ("gpt-6.2-sol", False, None, "responses", "responses", True, True, None),
+        ("gpt-6.2-sol", False, None, "chat_completions", "chat/completions", False, True, None),
+        (
+            "gpt-6.2-sol",
+            False,
+            "https://gateway.invalid/v1",
+            "responses",
+            "responses",
+            False,
+            True,
+            "24h",
+        ),
     ],
-    ids=["default-responses", "explicit-chat", "custom-base", "older-discovered", "catalogue"],
+    ids=[
+        "default-responses",
+        "explicit-chat",
+        "custom-base",
+        "older-discovered",
+        "catalogue",
+        "curated-responses",
+        "curated-explicit-chat",
+        "curated-custom-base",
+    ],
 )
 async def test_openai_model_preserves_endpoint_and_cache_key_contract(
     model_id: str,
+    discovered_only: bool,
     base_url: str | None,
     api_mode: str,
     route: str,
     developer_prefix: bool,
     cache_key: bool,
+    retention: str | None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from local_operator.model import configure, discovery, prices
+    from local_operator.model import configure, discovery, prices, registry
 
     captured: dict[str, Any] = {}
 
@@ -1763,8 +1797,11 @@ async def test_openai_model_preserves_endpoint_and_cache_key_contract(
         )
         return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
 
-    # Public /v1/models can expose an ID before the pricing catalogue has a row.
-    # Exercise that path without allowing live catalogue data to mask the regression.
+    # Public /v1/models can expose an ID before either catalogue has a row.
+    # Hide the bundled row as well as live pricing for those cases, so curating
+    # the ID cannot mask the discovery-only fallback or change its assertions.
+    if discovered_only:
+        monkeypatch.delitem(registry.openai_models, model_id, raising=False)
     monkeypatch.setattr(configure, "_catalogue_credential", lambda *a, **kw: ("", False, None))
     monkeypatch.setattr(
         discovery,
@@ -1791,7 +1828,10 @@ async def test_openai_model_preserves_endpoint_and_cache_key_contract(
 
     assert captured["url"] == f"{base_url or 'https://api.openai.com/v1'}/{route}"
     body = captured["body"]
-    assert "prompt_cache_retention" not in body
+    if retention is None:
+        assert "prompt_cache_retention" not in body
+    else:
+        assert body["prompt_cache_retention"] == retention
     if cache_key:
         assert body["prompt_cache_key"] == "lineage-123"
     else:

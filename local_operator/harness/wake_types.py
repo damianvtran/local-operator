@@ -155,7 +155,12 @@ class WakeSchedule(BaseModel):
     #: ``extra="forbid"`` plus this Literal means an older build drops such a row
     #: on load, exactly as it does a patience row, and the queue then degrades to
     #: its in-runtime timer.
-    kind: Literal["scheduled", "patience", "ask_timeout"] = "scheduled"
+    #:
+    #: ``cache_keepalive`` is the prompt-cache keep-alive
+    #: (``compaction/keepalive.py``): hidden, filtered by the same predicate,
+    #: created only by the session at turn end. Same skew cost: an older build
+    #: drops the row on load, and that session simply goes cold as it did before.
+    kind: Literal["scheduled", "patience", "ask_timeout", "cache_keepalive"] = "scheduled"
     #: Hidden deliveries emit no receipt event and are skipped by replay — the
     #: requirement is "no wake line, no card, no badge, no timer notification"
     #: while the TEXT stays in the model's context (``harness/render.py`` turns
@@ -184,6 +189,18 @@ class WakeSchedule(BaseModel):
     #: turn knows what the wait was about (R38: the agent supplies judgement;
     #: the mechanism supplies defaults and bounds).
     note: str = ""
+
+    # ---- cache keep-alive fields (cache_keepalive rows only) ----------------
+    # ``attempt`` above doubles as the chain's ping count (0 = armed by a turn
+    # end, n = armed after the n-th consecutive ping).
+
+    #: Start of the request whose cache entry this row keeps warm (epoch ms):
+    #: the entry expires at ``cache_anchor_ms + 1 h``, and a fire past that
+    #: retires silently.
+    cache_anchor_ms: int = 0
+    #: ``compaction.keepalive.prefix_digest`` of the prefix at arm time; the
+    #: fire recomputes it and sends nothing when it differs.
+    prefix_digest: str = ""
 
     # ---- who WROTE ``message`` --------------------------------------------
     # ``message`` has two possible authors, and nothing else on this row says

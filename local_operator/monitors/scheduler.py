@@ -327,6 +327,51 @@ def advance_due(
     return candidate
 
 
+def check_hash(text: str, spec: MonitorSpec, settings: MonitorSettings) -> tuple[str, str]:
+    """``(normalized, content_hash)`` of one check's comparable text.
+
+    THE ONE EVALUATION both check paths run: the in-session scheduler's
+    :meth:`MonitorScheduler._apply_success` and the out-of-process probe
+    (:mod:`local_operator.monitors.parked`), which the wake supervisor now runs
+    for EVERY due monitor of a session with no live runtime, not only a parked
+    one. A quiet/changed decision that two spellings could disagree on would
+    either reopen a session for nothing or, worse, commit a quiet tick over a
+    real change; one function makes the decision identical by construction
+    (``tests/unit/monitors/test_probe_parity.py`` drives both paths).
+    """
+    normalized = normalize_result(text, spec, settings)
+    return normalized, content_hash(normalized)
+
+
+def commit_quiet_tick(
+    counters: dict[str, Any],
+    spec: MonitorSpec,
+    now: int,
+    *,
+    handle: str | None = None,
+    uniform: Callable[[float, float], float] = random.uniform,
+) -> None:
+    """Apply one UNCHANGED check to ``counters`` (in place) — the quiet tick.
+
+    Shared with the out-of-process probe for the reason given on
+    :func:`check_hash`: the probe commits this tick itself (the session is not
+    booted for a quiet check), so its counters must be exactly what the
+    session's own scheduler would have written — the same ``checks`` count,
+    ``last_check_at``, cleared failure state, recorded spill handle and next
+    due time. The baseline (``content_hash``/snapshot) is deliberately NOT
+    touched: an unchanged check has nothing to adopt.
+    """
+    counters["checks"] = int(counters.get("checks") or 0) + 1
+    counters["last_check_at"] = now
+    counters["consecutive_failures"] = 0
+    counters["last_error"] = ""
+    # A spilled result is recorded as the next diff's full baseline even on a
+    # quiet tick: the content is identical, so the handle addresses the same text.
+    if handle:
+        counters["last_handle"] = handle
+    counters["next_due_at"] = advance_due(spec, now, uniform)
+
+
 #: What :func:`apply_unavailable_tick` says the tick OWES beyond the counters:
 #: ``gone`` = the 24 h episode limit is reached and the monitor must be
 #: disabled with its notice; ``stalled`` = the 30-minute stall notice is due.
@@ -1249,8 +1294,7 @@ class MonitorScheduler:
         # ``_classify_change``). A source that changes shape mid-stream is
         # handled by the basis check below, not by this flag.
         record_view = is_record_log(text)
-        normalized = normalize_result(text, spec, self._settings)
-        new_hash = content_hash(normalized)
+        normalized, new_hash = check_hash(text, spec, self._settings)
         old_hash = str(counters.get("content_hash") or "")
         pure_addition = False
         # Set only by the rendered-diff branch below; every other path (loss
@@ -1258,24 +1302,22 @@ class MonitorScheduler:
         # preview to report.
         delta_hidden = False
 
-        counters["checks"] = int(counters.get("checks") or 0) + 1
-        counters["last_check_at"] = now
-        counters["consecutive_failures"] = 0
-        counters["last_error"] = ""
-
         if new_hash == old_hash:
-            # Quiet tick. One ≲1 KiB write is the whole cost; the blob is only
-            # probed so a blob-only loss heals for free (§7.2). A spilled result
-            # is recorded as the next diff's full baseline even here: the
-            # content is identical, so the handle addresses the same text.
-            if handle:
-                counters["last_handle"] = handle
+            # Quiet tick: the SHARED commit (see ``commit_quiet_tick``), so the
+            # out-of-process probe writes byte-identical counters. One ≲1 KiB
+            # write is the whole cost; the blob is only probed so a blob-only
+            # loss heals for free (§7.2).
+            commit_quiet_tick(counters, spec, now, handle=handle, uniform=self._uniform)
             if old_hash and not monitor_state.snapshot_exists(
                 self._config_dir, self._session_id, spec.id
             ):
                 self._write_snapshot(spec, normalized)
-            counters["next_due_at"] = self._advance(spec, now)
             return None
+
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["consecutive_failures"] = 0
+        counters["last_error"] = ""
 
         blob = monitor_state.read_snapshot(self._config_dir, self._session_id, spec.id)
         blob_text = ""

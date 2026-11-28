@@ -2570,6 +2570,32 @@ class AnalyticsStore:
             except Exception:  # noqa: BLE001
                 pass
 
+    def count_purpose_calls(self, session_id: str, purpose: str, since_ms: int) -> int | None:
+        """Ledger rows for ``session_id`` with ``purpose`` at or after ``since_ms``.
+
+        ``None`` when the ledger cannot be read, which is NOT zero: the cache
+        keep-alive's daily cap reads this and must refuse rather than assume an
+        empty day (``compaction/keepalive.py``). One indexed lookup
+        (``idx_calls_session``) over at most a day of one session's calls.
+        """
+        conn = self._read_connection()
+        if conn is None:
+            return None
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM calls WHERE session_id = ? AND purpose = ? AND ts_ms >= ?",
+                (session_id, purpose, int(since_ms)),
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+        except Exception:  # noqa: BLE001 — unreadable answers None, never a guess
+            logger.debug("analytics: purpose count read failed", exc_info=True)
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def session_names_map(self) -> dict[str, str]:
         """Every known ledger name, keyed by session id.
 

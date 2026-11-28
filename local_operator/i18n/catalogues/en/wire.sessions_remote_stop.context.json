@@ -1,0 +1,57 @@
+{
+  "wire.sessions_remote_stop.approval_stop_peer_force": {
+    "role": "approval prompt shown before the sessions tool is asked to FORCE-stop a session on another device (the call is refused before anything is sent)",
+    "tone": "plain, definitive",
+    "note": "{address} is the session id or name and {peer} the device name (keep both verbatim). Must not promise any stop: the call is always refused and nothing will be sent, because force never crosses devices."
+  },
+  "wire.sessions_remote_stop.approval_stop_peer_idle": {
+    "role": "approval prompt shown before the sessions tool asks another device to stop one of its sessions idle-only",
+    "tone": "plain, precise",
+    "note": "{address} is the session id or name and {peer} the device name (keep both verbatim). The promise is: the OTHER device decides, only an idle session ends, no signal is ever sent, a working session is refused. Keep the 'refused while it is working' tail."
+  },
+  "wire.sessions_remote_stop.dormant_hint": {
+    "role": "tool-result line appended after a remote stop that left the session's scheduled wakes and monitors dormant",
+    "tone": "plain, actionable",
+    "note": "{peer} is the device name, {address} the session id or name (keep verbatim). `sessions op=resume session={address} peer={peer}` is a tool call spelling: keep it verbatim in backticks. Do NOT suggest parking: parking a session on another device is refused."
+  },
+  "wire.sessions_remote_stop.force_refused": {
+    "role": "tool-result receipt when the agent asked to force-stop a session on another device",
+    "tone": "plain, definitive",
+    "note": "No placeholders. Force (the signalling escalation) is never sent across devices, so nothing was sent at all. The remedy is the operator acting on that device; do not name a command."
+  },
+  "wire.sessions_remote_stop.not_running": {
+    "role": "tool-result receipt when the other device reports the session is not running",
+    "tone": "calm, factual",
+    "note": "{name} is the session name or id, {peer} the device name (keep verbatim). Not an error: there was nothing to end."
+  },
+  "wire.sessions_remote_stop.not_served": {
+    "role": "tool-result receipt when the other device was sent the idle-only stop but did not run it (it does not know the operation)",
+    "tone": "plain, definitive",
+    "note": "{peer} is the device name (keep verbatim). The request WAS sent, so do not say nothing was sent; nothing was stopped. Two remedies: update that device, or have the operator stop it there."
+  },
+  "wire.sessions_remote_stop.pending": {
+    "role": "tool-result receipt when the other device accepted the idle-only stop but the session had not exited within the wait",
+    "tone": "careful, honest",
+    "note": "{name} is the session name, {peer} the device name, {seconds} a number (keep verbatim). `sessions op=list peer={peer}` is a tool call spelling: keep it verbatim in backticks. No signal was sent."
+  },
+  "wire.sessions_remote_stop.refused_unanswered": {
+    "role": "tool-result receipt when the session on the other device did not answer its owner, so the idle-only stop was refused",
+    "tone": "careful, honest",
+    "note": "{name} is the session name, {peer} the device name (keep verbatim). `sessions op=list peer={peer}` is a tool call spelling: keep it verbatim in backticks. No signal was sent; the session may already be gone."
+  },
+  "wire.sessions_remote_stop.relay_restart": {
+    "role": "tool-result receipt when this device's own mesh relay is an older build than the tool",
+    "tone": "plain, actionable",
+    "note": "No placeholders. 'lop' is the product's command name: keep it verbatim. `lop network restart` is a command: keep it verbatim in backticks. Nothing was sent to the other device and nothing was stopped."
+  },
+  "wire.sessions_remote_stop.unconfirmed": {
+    "role": "tool-result receipt when the stop request was sent but no answer came back",
+    "tone": "careful, honest",
+    "note": "{peer} is the device name (keep verbatim, both times). What is unknown is whether the SESSION WAS STOPPED — do not say the stop failed or succeeded, and do not make it about delivery. `sessions op=list peer={peer}` is a tool call spelling: keep it verbatim in backticks. Nothing was retried automatically."
+  },
+  "wire.sessions_remote_stop.unsupported": {
+    "role": "tool-result receipt when the other device's build does not offer the idle-only stop",
+    "tone": "plain, definitive",
+    "note": "{peer} is the device name (keep verbatim). Nothing was sent, so nothing can have stopped. Two remedies: update that device, or have the operator stop it there."
+  }
+}

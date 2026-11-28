@@ -178,7 +178,8 @@ class OwnerMentionedFileReader:
 
     Always call the real P1 adapter, never accept a truthy audit callback, cached
     subject, viewer path or caller-made verified context. The server's existing
-    AuditLog is the sole writer. This is preparation, NOT the final release fence.
+    AuditLog numbers and writes the row (other writers serialize on
+    ``audit.jsonl.lock``). This is preparation, NOT the final release fence.
     """
 
     def __init__(

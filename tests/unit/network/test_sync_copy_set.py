@@ -96,6 +96,7 @@ def _entry_owners() -> dict[str, str]:
     )
     from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
+    from local_operator.team_bridge.card_projection import EXCERPT_MEMO_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
 
@@ -141,6 +142,10 @@ def _entry_owners() -> dict[str, str]:
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.
         KERNEL_MARKER_NAME: "local_operator.tools.eval",
+        # The Team Bridge excerpt memo: excluded (device-local digests into this
+        # device's display-body store); listed so the round-trip test proves it
+        # does NOT arrive.
+        EXCERPT_MEMO_NAME: "team_bridge.card_projection",
         # The pending-voice markers (``session.channel_spend``): copied, so a
         # session moved while a voice charge is still unfoled arrives with the
         # fact the published object states (sync.COPY_SET_NAMES's comment has
@@ -306,6 +311,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "It is never an entry of a session directory, so nothing under this name "
         "belongs in the session copy set.",
     ),
+    "local_operator/team_bridge/responders/pinned_credentials.py": (
+        2,
+        "``RESPONDER_ROLE_NAME`` ('radient-responder-readonly') is an IAM role name and "
+        "``SOURCE_PROFILE`` ('radient-prod-admin') an AWS CLI profile name: identifiers "
+        "the pinned STS resolver passes to AWS, never files or session-directory entries.",
+    ),
+    "local_operator/team_bridge/responders/jail.py": (
+        1,
+        "``CA_BUNDLE_NAME`` ('ca-bundle.crt') names a file INSIDE a responder run's own "
+        "home, never a direct entry of a session directory. The file is a per-run copy "
+        "of the public system trust store, rewritten by ``prepare_home`` for every run, "
+        "so it must not travel with a session.",
+    ),
     "local_operator/session/row_clip.py": (
         1,
         "``_REF_PREFIX`` ('r1') is the version tag of an opaque history-row ref "
@@ -316,6 +334,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``TOOL_NAME`` ('integrations') identifies the registered provisioning tool, "
         "not a session-directory entry. Its consent records live in the existing "
         "ask queue, which already travels; credentials stay in the device secret store.",
+    ),
+    "local_operator/tools/guard_tool.py": (
+        1,
+        "``TOOL_NAME`` ('guard') identifies the registered Radient Guard tool, not a "
+        "session-directory entry. Guard's state lives in the config root "
+        "(``<config>/guard/``: the consent queue and report drafts), per install, and "
+        "must never travel with a session.",
     ),
     "local_operator/session/temporary.py": (
         3,
@@ -424,6 +449,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "root, <config>/diff-archive (``config_dir() / DIFF_ARCHIVE_DIRNAME``), a bounded "
         "LRU spill store shared by every session on this device -- never an entry of a "
         "session directory, so no session copy carries it.",
+    ),
+    # Radient Guard's install key is a per-MACHINE secret (one install's enrolment
+    # credential), like auth.db and the network identity keypair: a copy on another
+    # device would let it sign as this install, so it must never travel.
+    "local_operator/guard/install_key.py": (
+        1,
+        "``KEY_FILENAME`` ('install.key') is the per-DEVICE Radient Guard install-key "
+        "fallback file at <config>/guard/install.key (``key_file``), a secret bound to "
+        "this install's enrolment -- never an entry of a session directory, so no "
+        "session copy carries it.",
+    ),
+    "local_operator/guardrails/check.py": (
+        1,
+        "``KEY_FILE_NAME`` ('install.key') is the guardrail's literal copy of "
+        "``guard.install_key.KEY_FILENAME``, matched against command/path tokens under "
+        "<config>/guard/ to refuse reads of the per-DEVICE install key -- a match "
+        "pattern, never an entry of a session directory.",
     ),
     "local_operator/guardrails/classify.py": (
         6,
@@ -1218,9 +1260,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
-        1,
+        7,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
-        "``network/audit`` — a store file, never a session entry",
+        "``network/audit`` — a store file, never a session entry. "
+        "``AUDIT_LOCK_SUFFIX`` (``.lock``): the sibling ``network/audit.jsonl.lock`` "
+        "cross-process append lock — per-device store state beside the log, never a "
+        "session entry and never synced. ``AUDIT_PENDING_SUFFIX`` (``.pending``) and "
+        "``_PENDING_READY_SUFFIX``/``_PENDING_CLAIM_SUFFIX``/``_PENDING_TEMP_SUFFIX``/"
+        "``_PENDING_REJECTED_SUFFIX`` (``.rejected``, a parked entry set aside unread): "
+        "the ``network/audit.jsonl.pending/`` directory of rows a discarded writer parked "
+        "on a lock timeout, and its file suffixes — device-local, drained into this "
+        "device's own log, never a session entry and never synced",
     ),
     "local_operator/network/enrollment.py": (
         1,

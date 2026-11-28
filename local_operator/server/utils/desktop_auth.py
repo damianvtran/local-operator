@@ -250,6 +250,7 @@ def apply_desktop_login_defaults(
             manager.get_config_value("model_name"),
             oauth=oauth,
             accessible=accessible,
+            config_dir=manager.config_dir,
         )
         wrote = apply_login_defaults(manager, plan)
         if plan.receipt is None:
@@ -765,6 +766,12 @@ class DesktopAuth:
             )
             self._lingering.add(task)
             task.add_done_callback(self._lingering.discard)
+
+    def idle_update_busy(self) -> bool:
+        """A sign-in can still write credentials after its HTTP kickoff returns."""
+        return any(not task.done() for task in self._lingering) or any(
+            op.task is not None and not op.task.done() for op in self.operations.values()
+        )
 
     async def close(self) -> None:
         # Under the start lock (review round 2, MINOR 3): without it a start

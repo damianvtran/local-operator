@@ -771,6 +771,10 @@ _HARNESS_ADVISORY_LEADS = (
     "[scratch] The pad ",
     "[scratch] '",
     "[scratch] Your own scratch belongs in ",
+    # ``builtin.SELECTION_NOTE_LEAD``: a task/resume receipt's held-back
+    # tier/effort reason, whose remedy sat past the crop as the tail of the
+    # ``[selection: …]`` line (design review D1, measured at 100/150 columns).
+    "  selection not applied: ",
 )
 #: Per-ARGUMENT cap in the expansion. Much tighter than the output cap because
 #: a payload argument is unbounded by design — `write` carries a whole file in

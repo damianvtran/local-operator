@@ -843,18 +843,17 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channel_history",
                 blurb=(
-                    "A bounded page of one conversation (id or name). Bodies appear "
-                    "only for messages this agent admitted; the rest is metadata "
-                    "with `body: null` (no local body cache). A null body is NOT "
-                    "an empty message - do not infer its content. `body_state` "
-                    "says why: `delay: transient` = delayed admission on YOUR "
-                    "machine (receiver asleep, offline, or catching up) - retry "
-                    "later, never a hold on content, no time promised. A null body "
-                    "WITHOUT `delay` stays unknown: maybe not yet received, "
-                    "refused, or not for this machine. `receiver_last_active_s` = "
-                    "seconds since your receiver last did anything, so a large "
-                    "value on a quiet channel can just mean quiet. Neither field "
-                    "says anything about content or a claim."
+                    "A bounded page of one conversation (id or name). Bodies only for "
+                    "messages this agent admitted; the rest is metadata with `body: "
+                    "null` (no local body cache) - NOT an empty message; never infer "
+                    "its content. `body_state` says why: `delay: transient` = delayed "
+                    "admission on YOUR machine (asleep, offline, catching up) - retry "
+                    "later; no hold on content, no time promised. A null body WITHOUT "
+                    "`delay` is unknown: not yet received, refused, or not for this "
+                    "machine. `receiver_last_active_s` = seconds since your receiver "
+                    "last acted. Neither speaks to content or a claim. Roots only: a "
+                    "seq gap is usually a thread reply - read replies (`reply_count` "
+                    "> 0) with `channel_thread`; reply on the ROOT id."
                 ),
             ),
             ToolDocOp(
@@ -1112,9 +1111,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "Google, xAI and OpenRouter; the ChatGPT-plan rung skips "
             "explicitly — an edit never silently becomes a fresh image. On "
             "Radient an edit with no `model` resolves the hub's edit "
-            "default: GPT Image 2.5 sunburst edit (best single-edit "
-            "quality; it drifts across successive edits — NB2.1/flux-class "
-            "models suit multi-round revision). `model` picks a "
+            "default: GPT Image 2.6 sunburst edit (frontier single-edit "
+            "quality; it drifts across successive edits — Nano Banana Pro / "
+            "FLUX-class pins suit multi-round revision). `model` picks a "
             "provider model id — omit it and the provider's default runs; "
             "Radient model ids are read from its live list at call time.\n"
             "\n"

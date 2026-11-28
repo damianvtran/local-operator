@@ -33,5 +33,7 @@
   "wire.session_status.duration_seconds": "{count, number}s",
   "wire.session_status.duration_minutes": "{count, number}m",
   "wire.session_status.duration_hours_minutes": "{hours, number}h {minutes, number}m",
-  "wire.session_status.duration_days_hours": "{days}d {hours, number}h"
+  "wire.session_status.duration_days_hours": "{days}d {hours, number}h",
+  "wire.session_status.booting": "starting · {duration}",
+  "wire.session_status.booting_not_answering": "not answering · starting for {duration}"
 }

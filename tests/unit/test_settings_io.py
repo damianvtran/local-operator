@@ -180,6 +180,10 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_KEEP_ALIVE_MAX,
         DEFAULT_KEEP_ALIVE_SECONDS,
     )
+    from local_operator.session.runtime.runtime_memory import (
+        RUNTIME_MEMORY_ENABLED_DEFAULT,
+        RUNTIME_MEMORY_LIMIT_MB_DEFAULT,
+    )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
     from local_operator.session.temporary import (
         DEFAULT_IDLE_MINUTES as _TEMPORARY_DEFAULT_IDLE_MINUTES,
@@ -200,6 +204,11 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_ENABLED_DEFAULT,
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
+    )
+    from local_operator.tools.result_normalize import (
+        RESULT_NORMALIZATION_DEFAULT,
+        RESULT_TEXT_RENDERING_DEFAULT,
+        SEARCH_SNIPPET_CHARS_DEFAULT,
     )
     from local_operator.tui import settings as tui_settings
     from local_operator.tui import status_command
@@ -285,6 +294,9 @@ def _consumer_defaults() -> dict[str, object]:
         "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
         "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
         "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+        # The per-runtime guard's two keys; consumers in runtime_memory.py.
+        "session.runtime_memory.enabled": RUNTIME_MEMORY_ENABLED_DEFAULT,
+        "session.runtime_memory.limit_mb": RUNTIME_MEMORY_LIMIT_MB_DEFAULT,
         # The heavy-job queue switch; its consumer constant sits beside the
         # reader in heavy_lease.py.
         "bash.heavy_jobs.enabled": HEAVY_JOBS_ENABLED_DEFAULT,
@@ -293,6 +305,11 @@ def _consumer_defaults() -> dict[str, object]:
         # registry default and the code default drifting.
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         "tools.defer": DEFAULT_TOOL_DEFERRAL,
+        # Read by mcp.manager.read_result_normalization_mode; the constant
+        # lives beside the pure normalizer it configures.
+        "mcp.result_normalization": RESULT_NORMALIZATION_DEFAULT,
+        "mcp.search_snippet_chars": SEARCH_SNIPPET_CHARS_DEFAULT,
+        "mcp.result_text_rendering": RESULT_TEXT_RENDERING_DEFAULT,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
         # The guardrail keys; consumer constants live beside the reader in
@@ -4186,3 +4203,32 @@ def test_the_temporary_window_is_an_int_enum_typed_text_coerces_to_the_member() 
     assert settings_io.validate(setting, 120) is None
     assert settings_io.validate(setting, 45) is not None
     assert settings_io.validate(setting, "30") is not None
+
+
+def test_runtime_memory_rows_share_the_consumer_paths(tmp_path) -> None:
+    """The registry rows write exactly where the supervisor's guard reads.
+
+    A row whose ``path`` disagreed with ``runtime_memory.RUNTIME_MEMORY_*_PATH``
+    would look like a working off switch while the guard kept reading its
+    default — the failure "Adding a configuration key" in AGENTS.md describes.
+    Negative control: a value written through the row must change what
+    ``read_settings`` returns (it would not if the paths diverged).
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.session.runtime import runtime_memory
+
+    assert (
+        settings_io.BY_KEY["session.runtime_memory.enabled"].path
+        == runtime_memory.RUNTIME_MEMORY_ENABLED_PATH
+    )
+    assert (
+        settings_io.BY_KEY["session.runtime_memory.limit_mb"].path
+        == runtime_memory.RUNTIME_MEMORY_LIMIT_MB_PATH
+    )
+    manager = ConfigManager(tmp_path)
+    assert runtime_memory.read_settings(tmp_path).enabled is True
+    settings_io.write_setting(manager, settings_io.BY_KEY["session.runtime_memory.enabled"], False)
+    settings_io.write_setting(manager, settings_io.BY_KEY["session.runtime_memory.limit_mb"], 2048)
+    conf = runtime_memory.read_settings(tmp_path)
+    assert conf.enabled is False
+    assert conf.limit_mb == 2048

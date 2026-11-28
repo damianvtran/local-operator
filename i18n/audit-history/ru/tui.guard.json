@@ -1,0 +1,198 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tui.guard",
+  "history_sha256": "70116ed4d903d952c4b7b556b621b7acfab69c56f91e76d58282592805f8cc94",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "00dea523e00e1522e033c940758d7a4b3f4e4e0df0b775fe6a6923c1f82d2c4f",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "Translator-only receipt for the new 94-key tui.guard namespace (Russian), PR #4650 (Radient Guard L2b) at English head 47d837e8eb; independent audit NOT completed, so ru must not be treated as carrying an audited tui.guard until an independent i18n-auditor appends a passed receipt against this source hash. Translated target sha256 00dea523e00e1522e033c940758d7a4b3f4e4e0df0b775fe6a6923c1f82d2c4f. Glossary i18n/glossary.md and i18n/style-guides/ru.md. Placeholders ({org}, {reason}, {scopes}, {surface}, {kind}, {backup_days}, {trial_days}, {date}, {device}, {time}) and the literals /guard, lop, Console, Radient, Radient Guard, Radient Team, Guard preserved; screen_share_again quotes this locale's badge_waiting byte-for-byte. Privacy/consent copy (high-visibility): needs independent semantic audit of consent meaning (k-anonymity thresholds 5/20, retention 14/90/180 days, 'never sent' list, no-auto-send promise in report_confirmed). No rendered, pseudo, RTL-visual or native-speaker audit claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "5f0763c561a7b4fee11e53a38fe7faca3ef7ce087462b03bf829478bc1a1dae1",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": "radientdev copy-reviewer acting as independent i18n auditor #1 (PR #4650 Guard L2b), session d3661c1e5338",
+        "session": "d3661c1e5338",
+        "model": "anthropic/claude-opus-5-5",
+        "actual_model_source": "runtime model declaration in this session's system context",
+        "fallback": "none observed",
+        "date": "2026-11-27",
+        "independent_from_translator_session": "5bd246fcf195",
+        "independence_note": "Different session from the translator and from the English author; same model family as the translator (anthropic/claude-opus-5-5), disclosed rather than hidden.",
+        "result": "passed",
+        "findings_fixed": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "audit_instance": "first-independent",
+      "second_independent_audit_required": true,
+      "audit_scope": "translation_only",
+      "audit_date": "2026-11-27",
+      "key_count": 94,
+      "keys_read": 94,
+      "previous_receipt_target_sha256": "00dea523e00e1522e033c940758d7a4b3f4e4e0df0b775fe6a6923c1f82d2c4f",
+      "auditor_changes": [
+        {
+          "key": "tui.guard.scope_posture",
+          "before": "Каждый компьютер перемешивает свои ответы случайным образом перед отправкой,",
+          "after": "Каждый компьютер перед отправкой случайным образом искажает свои ответы,",
+          "reason": "C2 MINOR fixed: 'перемешивает … случайным образом' (shuffles) misdescribed randomised response; 'случайным образом искажает свои ответы' (randomly perturbs its answers) is what the English means and keeps 'admins see estimates'."
+        },
+        {
+          "key": "tui.guard.prompt_would_send",
+          "before": "С этого компьютера Guard будет отправлять:",
+          "after": "С этого компьютера Guard отправлял бы:",
+          "reason": "C3 MINOR fixed: indicative 'будет отправлять' (will send) on a consent card read as already decided; conditional 'отправлял бы' matches English 'would send' before the person answers."
+        }
+      ],
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.json",
+          "sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.context.json",
+          "sha256": "105858995d85c823fe9e159e745b7c3e50f5e27ccca435101d784f0720451106"
+        },
+        "glossary": {
+          "path": "i18n/glossary.md",
+          "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+        },
+        "style": {
+          "path": "i18n/style-guides/ru.md",
+          "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+        }
+      },
+      "safety_semantic_judgments": {
+        "k_anonymity_minimums": "5 present in scope_reports, prompt_visibility, prompt_visibility_posture, prompt_visibility_admin_share, prompt_visibility_admin_share_posture; 20 present in both *_posture visibility keys; each stated as a minimum ('at least') with the 'only when' restriction intact.",
+        "retentions": "14 days in scope_trace_detail ('kept'), 90 days stats and 180 days reports in revoke_retained, {backup_days} preserved in revoke_body_trace; none reworded into a different period or a deletion promise.",
+        "never_sent_list": "prompt_never_sent keeps all six items (file paths, commands, prompts, code, model output, tool arguments) under a 'never' negation.",
+        "card_footer": "'Guard collects nothing for {org}' kept org-scoped (not a global 'collects nothing').",
+        "report_confirmed_no_auto_send": "Every locale says saved on this computer, not sent, sending not live yet, and that Guard asks again before sending to {org}; no locale promises an automatic send.",
+        "other_consent_lines": "prompt_reason_widened (keeps sharing only what you agreed to), prompt_reason_reactivated/plan_gap (nothing shared until you choose), revoke_body/_trace, revoke_totals, scope_reports (no one at {org} can open; Radient staff only on request or legal requirement), readonly_agent ('may be driving', not 'is') checked in all seven locales."
+      },
+      "mechanical_checks": "94/94 keys; placeholder multiset identical to en for every key; literals /guard, lop, Console, Radient, Radient Guard, Radient Team preserved (scope_decisions translates the common noun 'Guardrail' per the shipped wire.guardrails rendering); screen_share_again quotes this locale's badge_waiting byte-for-byte; no bidi control characters; NFC; badge_waiting and badge_sharing within maxCells 28 by rich.cells.cell_len.",
+      "rendered_evidence_executed": false,
+      "note": "Independent audit 1 of 2 for tui.guard (ru), PR #4650 at worktree head 33c6f23fa2. All 94 values read against en + context. Auditor changed 2 value(s); see auditor_changes. вы register, «ёлочки» in screen_share_again; non-gating: surface_tui doubles as the {device} fallback in receipt_grant/widen (empty hostname only), where its nominative 'этот терминал' after 'с' would be the wrong case; a source-reuse observation, not fixable in ru without breaking answered_on. Consent copy is high-visibility: a SECOND independent audit is required before merge, recorded as a further appended receipt for this same source_sha256 with audit_instance 'second-independent' (precedent: i18n/audit-history/es/wire.teams.effective.json). No rendered, RTL-visual or native-speaker review claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.guard",
+      "source_sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a",
+      "target_sha256": "4a2bd49ed9c2e5dcdfcdc5b0fc5b3af75aa6290dc9caa23a9a158ec0ba352b73",
+      "translator": {
+        "agent": "radientdev coder (i18n translator-only brief for PR #4650 Guard L2b), session 5bd246fcf195; independent of the English author",
+        "session": "5bd246fcf195",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-27"
+      },
+      "auditor": {
+        "agent": "radientdev ux-reviewer (acting as second independent i18n auditor)",
+        "session": "e6ab8547b6b5",
+        "model": "openai/gpt-6.2-sol",
+        "actual_model_source": "Developer runtime declaration in this session",
+        "date": "2026-11-27",
+        "fallback_used": false,
+        "fallback_note": "No provider fallback observed.",
+        "independent_from_translator_session": "5bd246fcf195",
+        "independent_from_first_auditor_session": "d3661c1e5338",
+        "result": "passed",
+        "findings": 0,
+        "findings_fixed": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "audit_instance": "second-independent",
+      "second_independent_audit_required": true,
+      "second_independent_audit_completed": true,
+      "audit_scope": "translation_only",
+      "audit_date": "2026-11-27",
+      "key_count": 94,
+      "keys_read": 94,
+      "previous_receipt_target_sha256": "5f0763c561a7b4fee11e53a38fe7faca3ef7ce087462b03bf829478bc1a1dae1",
+      "auditor_changes": [
+        {
+          "key": "receipt_grant",
+          "before": "Guard начал передавать данные {org} с {device} в {time}. Это были не вы? Прекратите передачу в /guard.",
+          "after": "Guard начал передавать данные {org} с устройства «{device}» в {time}. Это были не вы? Прекратите передачу в /guard."
+        },
+        {
+          "key": "receipt_widen",
+          "before": "Guard начал передавать {org} больше данных с {device} в {time}. Это были не вы? Прекратите передачу в /guard.",
+          "after": "Guard начал передавать {org} больше данных с устройства «{device}» в {time}. Это были не вы? Прекратите передачу в /guard."
+        }
+      ],
+      "input_hashes": {
+        "en": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.json",
+          "sha256": "a6822c18ddb728f90d1105a5079cc99e9a4fd489ae1818754517335206a81d8a"
+        },
+        "context": {
+          "path": "local_operator/i18n/catalogues/en/tui.guard.context.json",
+          "sha256": "105858995d85c823fe9e159e745b7c3e50f5e27ccca435101d784f0720451106"
+        },
+        "glossary": {
+          "path": "i18n/glossary.md",
+          "sha256": "5de3929198c3f603ce14bf75fb992c0f5c7a1952c440b496386977f8c636fcc7"
+        },
+        "style": {
+          "path": "i18n/style-guides/ru.md",
+          "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+        },
+        "target": {
+          "path": "local_operator/i18n/catalogues/ru/tui.guard.json",
+          "sha256": "4a2bd49ed9c2e5dcdfcdc5b0fc5b3af75aa6290dc9caa23a9a158ec0ba352b73"
+        }
+      },
+      "safety_semantic_judgments": {
+        "minimums": "Visibility is restricted to at least 5 contributors for totals and 20 for setup-check estimates; report count is per kind and requires at least five senders that day.",
+        "retentions": "Step-by-step timing excludes contents and is kept 14 days. Already sent records retain the 90-day stats/180-day reports distinction; backup removal is within {backup_days} days.",
+        "never_sent": "All six categories remain inside the never-send clause: file paths, commands, prompts, code, model output, and tool arguments.",
+        "organization_scope": "The non-Team footer applies to the named {org}, not every organization, and neither organization admins nor other members can open the report.",
+        "report_confirmation": "Saved locally and not sent; sending is not live yet, and Guard asks the person again before sending to {org}. No automatic send is implied.",
+        "consent_condition": "Widening retains only prior scope until the person chooses; reactivation and lapsed plan require a fresh choice. The prospective sending list is not an unconditional claim."
+      },
+      "mechanical_checks": {
+        "key_and_parameter_parity": true,
+        "ordered_placeholder_parity": true,
+        "nfc": true,
+        "manual_bidi_controls": false,
+        "badge_widths": {
+          "badge_waiting": 22,
+          "badge_sharing": 24,
+          "badge_sharing_pending": 28
+        },
+        "badge_quote_matches": true
+      },
+      "rendered_evidence_executed": true,
+      "note": "Second independent audit of all 94 values against English catalogue and context, plus glossary and locale guide; PR #4650 starting head c3306301f1857d989ba7d33f533a3dc0cfd48ab0. Uses a quoted device label after «с устройства» so the receipt accepts both a hostname and the nominative fallback «этот терминал», without changing the shared surface label. No native-speaker review or native terminal shaping sign-off claimed. Scoped 80×24 OperatorApp consent-card walk, before/after; not a full visual test matrix."
+    }
+  ]
+}

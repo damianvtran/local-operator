@@ -397,9 +397,19 @@ class OutputContract:
         """The format's payload clause, shared by the system block and the
         retry instruction (review R-5)."""
         if self.format == "json":
+            # Compact and unfenced on purpose: the final answer is output
+            # tokens (the priciest kind) and is cache-written into the next
+            # turn, so indentation is pure cost. A paired cost run measured a
+            # fenced, indent-2 JSON answer at 11,591 tokens against 10,036 for
+            # the same values compact (~13%). The DECODER is deliberately not
+            # tightened: a fenced or pretty-printed answer still parses
+            # (``_iter_candidates`` tries fences first), so a model that ignores
+            # this costs tokens, never a retry. That tolerance is why the
+            # clause no longer advertises fences — advertising them invited the
+            # verbose shape. YAML/TOML keep theirs: they have no compact form.
             return (
-                "exactly one JSON value and nothing else; a fenced ```json "
-                "block is also accepted"
+                "exactly one JSON value, compact (no indentation, line breaks "
+                "or code fence), and nothing else"
             )
         if self.format == "yaml":
             return (

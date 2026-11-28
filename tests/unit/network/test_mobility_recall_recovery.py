@@ -206,7 +206,9 @@ def test_a_recall_lands_when_the_remnant_arrives_before_its_promote(
 
     original_verify = mobility._verify_staging  # noqa: SLF001 — the ordered step
 
-    def planting_verify(server: Any, session_id: str, staging: Path, ready: dict[str, Any]) -> str:
+    def planting_verify(
+        server: Any, session_id: str, staging: Path, ready: dict[str, Any]
+    ) -> tuple[str, str] | None:
         result = original_verify(server, session_id, staging, ready)
         # THE REMNANT LANDS HERE (the viewer's write, mid-flight).
         _plant_remnant(Path(server.root), session_id)

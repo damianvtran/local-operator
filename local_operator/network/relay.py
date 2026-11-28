@@ -57,6 +57,7 @@ five ``peer_*`` local ops a viewer's CLI drives."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
@@ -250,7 +251,8 @@ CATALOG_CACHE_S = 2.0
 #: frame on the reference fixture.
 FRAME_MEMO_ENTRIES = 8
 
-#: The audit log has one writer, and it is this process. The heartbeat reuses the
+#: The audit log's long-lived writer is this process (other writers append under
+#: ``audit.jsonl.lock``; see ``network/audit.py``). The heartbeat reuses the
 #: session runtime's interval so a reader needs ONE freshness rule for every record
 #: in the tree rather than one per namespace.
 HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
@@ -521,6 +523,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_sync",
         "net_file_get",
         "net_session_files",
+        "net_mentioned_file",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -771,6 +774,94 @@ class NetworkSettings:
 #: reports it as unreachable. Sized to cover a handshake (``HANDSHAKE_TIMEOUT_S``)
 #: on a couple of endpoints, not to wait out an unreachable fleet.
 LISTING_PROBE_BUDGET_S = 12.0
+
+#: The frame fields that turn ``net_catalog`` into the paged read
+#: (``RelayServer._catalog_page``). A frame carrying none of them gets the
+#: unpaged answer byte-for-byte, which is what keeps every poller unchanged.
+_CATALOG_PAGE_FIELDS = ("limit", "cursor", "query")
+#: A page's default and ceiling. 100 is the ``sessions`` tool's own ``limit``
+#: ceiling, so one tool call never needs more than one page per peer; the
+#: ceiling also bounds the per-page stamp/serialisation work an asker can buy.
+CATALOG_PAGE_DEFAULT_LIMIT = 100
+CATALOG_PAGE_MAX_LIMIT = 100
+#: Longest cursor or query accepted off the wire (``wire`` owns the number so
+#: the ``sessions`` tool can pre-check a query without importing this module).
+CATALOG_PAGE_MAX_TOKEN = wire.CATALOG_PAGE_MAX_TOKEN
+#: Refusal codes a paged ``net_catalog`` handler raises on the ASKER's input.
+#: The owner answered them, so the viewer reports an answered refusal
+#: (``reachable`` + ``refused``), never an unreachable device (QA Q1, #4592).
+CATALOG_PAGE_REFUSALS = frozenset({"bad_cursor", "bad_frame"})
+
+
+def _catalog_cursor_encode(offset: int, last_id: str) -> str:
+    """The position after a page: how many rows were handed out, and the last id.
+
+    Opaque and NOT signed, for the reason ``session.catalog.encode_cursor``
+    gives: it carries no authority (it is a position in a listing the viewer is
+    already authorised to read), so a forged one can only ask for a page the
+    viewer could ask for anyway. The id is what makes a resume survive rows
+    being added above the position between two pages (``_catalog_cursor_start``).
+    """
+    raw = json.dumps({"v": 1, "o": offset, "id": last_id}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _link_may_search_content(link: Any) -> bool:
+    """True ONLY when ``link`` positively holds ``view`` right now.
+
+    FAILS CLOSED (delegator condition on R1, #4592): the content search is the
+    one that can reveal transcript text through which rows match, so anything
+    short of a readable capability set that contains ``view`` — no link, a
+    lookup that raises, a value that is not a set of strings — gets the
+    names/ids search. Read per call (``PeerLink.role_capabilities`` re-reads
+    the member row), so a revoke narrows an open link at once.
+    """
+    if link is None:
+        return False
+    try:
+        capabilities = link.role_capabilities()
+    except Exception:  # noqa: BLE001 — unknown authority is no authority
+        return False
+    if not isinstance(capabilities, (set, frozenset)):
+        return False
+    return any(isinstance(item, str) and item == "view" for item in capabilities)
+
+
+def _catalog_cursor_start(token: str, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Where the page after ``token`` starts in ``rows``; refuses a token it did not mint.
+
+    The id wins over the offset: when the row the previous page ended on has
+    moved (a session started, or one was deleted, between pages) the walk
+    resumes right after it, so the common case — new rows arriving at the top
+    — neither repeats nor skips a row. When that row is gone entirely the offset
+    is the best position left. A cursor is a position, not a snapshot: a row
+    that re-ranks ACROSS the position between pages can still be seen twice or
+    not at all, the same promise ``catalogue_page`` makes.
+    """
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        offset = payload["o"]
+        last_id = payload["id"]
+        if payload.get("v") != 1 or not isinstance(last_id, str):
+            raise ValueError("version")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset")
+    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+        raise MeshRefusal("bad_cursor", "that cursor is not one this listing minted") from exc
+    if 0 < offset <= len(rows) and str(rows[offset - 1].get("session_id") or "") == last_id:
+        return offset
+    for index, row in enumerate(rows):
+        if str(row.get("session_id") or "") == last_id:
+            # Only a row that moved DOWN (rows arrived above it) is a better
+            # position than the offset. One that moved UP (that session went
+            # live, ranked first) would restart near the top and re-serve the
+            # whole previous page (agent review round 1, R2 on #4592).
+            if index + 1 >= offset:
+                return index + 1
+            break
+    return min(offset, len(rows))
+
 
 #: How long a CLIENT of the control socket should allow for a listing verb: the
 #: relay's own probe budget plus slack, because a client must OUTWAIT the server
@@ -6365,6 +6456,8 @@ class RelayServer:
             "net_session_create_lookup": self._op_session_create_lookup,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
+            # The idle-only stop: the owner's atomic idle latch, never the ladder.
+            "net_session_stop_idle": self._op_session_stop_idle,
             # The stored-journal read beside them: same session plane, same
             # ownership rule, and the ONE op here that neither starts nor stops
             # anything on this device (see the handler).
@@ -9593,7 +9686,25 @@ class RelayServer:
         second must not become a scan storm. The rows carry no transcript content:
         an id, a name, a cwd, a model label and liveness, which is what a listing
         needs and nothing more.
+
+        ``session_id`` (``wire.REMOTE_CATALOG_SESSION_ID_V1``) narrows the answer
+        to that one session's row; see ``_one_session_catalog``.
+
+        WITHOUT ``session_id``, A FRAME WITH NONE OF ``limit``/``cursor``/``query`` IS
+        ANSWERED EXACTLY AS BEFORE: the sidebar and desktop pollers adopt this answer as membership
+        every second, and they rely on its shape and on the stored half's
+        ``CATALOG_SCAN_LIMIT`` cap (one bounded hydrate per poll). Only a frame
+        that names one of them takes the paged read (``_catalog_page``), which a
+        viewer sends only to an owner advertising ``REMOTE_CATALOG_PAGE_V1``.
         """
+        if "session_id" in frame:
+            # BEFORE any other branch, and its own field: a paged listing
+            # (``limit``/``cursor``/``query``, PR #4592) is a different question,
+            # and folding the id into that vocabulary would make either merge
+            # order change what an existing pager receives.
+            return self._one_session_catalog(link, frame.get("session_id"))
+        if any(key in frame for key in _CATALOG_PAGE_FIELDS):
+            return self._catalog_page(link, frame)
         return {
             "complete": True,
             "device": {
@@ -9604,7 +9715,168 @@ class RelayServer:
             "sessions": self._rows_for_viewer(link),
         }
 
-    def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
+    def _one_session_catalog(self, link: PeerLink, raw_session_id: Any) -> dict[str, Any]:
+        """``net_catalog`` for ONE session: its row or none, same answer shape.
+
+        WHY: a viewer's ``peer_session_facts`` (``_ctl_peer_facts``) asks about
+        one session before every remote pilot bind, and answering it from the
+        full listing made the question cost the whole mesh — 232 rows took
+        11.56 s of the 12 s listing budget (2026-11-25), and one overrun made a
+        LIVE session read as unowned. The owner's own scan is cheap (233 rows in
+        0.47 s cold, 0.03 s warm, measured on the owner), so the rows are still
+        built by ``_rows_for_viewer`` — the SAME builder and the same per-viewer
+        attention stamping — and filtered: the one row is byte-identical to its
+        row in the full listing, so a viewer cannot tell which question it asked
+        from the row alone.
+
+        CONSTRAINT: a stored row beyond ``load_catalog``'s recency bound
+        (``CATALOG_SCAN_LIMIT``) is absent from the full listing and so absent
+        here too — the same reach ``_row_for`` has always had. Live rows are
+        never bounded, so a running session is always answerable.
+
+        THE AUTHORISER ANSWERS FIRST. A frame carrying ``session_id`` is
+        scope-checked like every session op (``authorizer`` ``_session_scope``):
+        an id this device does not own is refused ``not_authorised`` — and
+        audited as ``authorisation_refused`` — before this handler runs, which
+        the viewer's ``_peer_catalog_rows_for`` reads as no rows, i.e. the same
+        ``owned: False`` the full listing gave (traced on two real relays,
+        2026-11-25). So this handler only ever sees owned ids; the validation
+        below is defence in depth: an opaque storage component (no path syntax,
+        bounded length), else ``bad_frame`` like any malformed peer frame.
+        ``session_id`` is echoed so a reply can never be mistaken for an
+        unfiltered listing.
+        """
+        try:
+            session_id = store.safe_component(raw_session_id)
+        except MeshRefusal as exc:
+            raise MeshRefusal(
+                "bad_frame", "net_catalog session_id must be one bounded session id"
+            ) from exc
+        return {
+            "complete": True,
+            "device": {
+                "device_id": self.identity.device_id,
+                "name": self._own_label(),
+            },
+            "generated_at": time.time(),
+            "session_id": session_id,
+            "sessions": [
+                row for row in self._rows_for_viewer(link) if row.get("session_id") == session_id
+            ],
+        }
+
+    def _catalog_page(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """One page (or one search) of the viewer's rows, plus where the next starts.
+
+        WHY IT EXISTS: the unpaged answer stops at ~``CATALOG_SCAN_LIMIT`` stored
+        rows (a node with 417 session dirs listed 223: its live rows plus 200
+        stored), and a viewer had no way to reach the rest. So this read builds the
+        viewer's list WITHOUT that cap and hands it out ``limit`` rows at a time.
+
+        THE ROWS ARE THE UNPAGED ANSWER'S ROWS, NOTHING MORE (read-role
+        invariant): every row comes from ``local_session_rows`` and is stamped by
+        ``_rows_for_viewer``'s own stamp, so a paged or searched row has exactly
+        the keys and viewer-specific fields the unpaged row has. A ``query`` is
+        the local search (``session_search.search_store``, the matcher
+        ``sessions list query=`` uses) run against THIS device's store; only the
+        matched ids are used, to select and order rows the viewer already gets —
+        no snippet, digest or body-match flag leaves this device.
+
+        Inputs are bounded here, on the owner, because the frame comes off the
+        wire: a malformed one is refused with a sentence, never a crash.
+        """
+        limit = frame.get("limit", CATALOG_PAGE_DEFAULT_LIMIT)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= CATALOG_PAGE_MAX_LIMIT
+        ):
+            raise MeshRefusal(
+                "bad_frame", f"limit must be a whole number from 1 to {CATALOG_PAGE_MAX_LIMIT}"
+            )
+        cursor = frame.get("cursor")
+        if cursor is not None and (
+            not isinstance(cursor, str) or len(cursor) > CATALOG_PAGE_MAX_TOKEN
+        ):
+            raise MeshRefusal("bad_cursor", "that cursor is not one this listing minted")
+        query = frame.get("query")
+        if query is not None and (
+            not isinstance(query, str) or len(query) > CATALOG_PAGE_MAX_TOKEN
+        ):
+            raise MeshRefusal(
+                "bad_frame", f"query must be text of at most {CATALOG_PAGE_MAX_TOKEN} characters"
+            )
+        rows = self.local_session_rows(uncapped=True)
+        search: str | None = None
+        if query is not None and query.strip():
+            from local_operator.session.session_search import search_rows, search_store
+
+            # THE CONTENT SEARCH NEEDS THE CAPABILITY THAT READS CONTENT (agent
+            # review round 1, R1 on #4592). ``net_catalog`` needs only ``list``,
+            # but ``search_store`` also matches transcript digests, so a
+            # list-only member could test what a body contains, one prefix at a
+            # time, from which rows come back. Without ``view`` (what
+            # ``net_session_peek`` requires, ``types.OP_CAPABILITY``) the same
+            # matcher runs over what the row already shows: its name and id.
+            content = _link_may_search_content(link)
+            search = "content" if content else "names"
+            try:
+                if content:
+                    matches = search_store(self.root, query)
+                else:
+                    from local_operator.resume import SessionRow
+
+                    matches = search_rows(
+                        [
+                            SessionRow(
+                                str(row.get("session_id") or ""),
+                                0.0,
+                                str(row.get("conversation_name") or ""),
+                            )
+                            for row in rows
+                        ],
+                        query,
+                    )
+            except Exception:  # noqa: BLE001 — a listing is not an error path
+                matches = []
+            by_id = {str(row.get("session_id") or ""): row for row in rows}
+            ordered: list[dict[str, Any]] = []
+            for match in matches:
+                row = by_id.pop(str(match.row.id), None)
+                if row is not None:
+                    ordered.append(row)
+            rows = ordered
+        start = 0
+        if cursor:
+            start = _catalog_cursor_start(cursor, rows)
+        page = rows[start : start + limit]
+        end = start + len(page)
+        next_cursor = (
+            _catalog_cursor_encode(end, str(page[-1].get("session_id") or ""))
+            if page and end < len(rows)
+            else None
+        )
+        return {
+            "complete": True,
+            "device": {
+                "device_id": self.identity.device_id,
+                "name": self._own_label(),
+            },
+            "generated_at": time.time(),
+            # Stamped AFTER slicing: the stamp decides per row, so a page's rows
+            # get exactly the fields they would have in the whole list, and a
+            # page costs one stamp pass over ``limit`` rows rather than all.
+            "sessions": self._rows_for_viewer(link, rows=page),
+            "next_cursor": next_cursor,
+            "total": len(rows),
+            # Which search ran (``None`` for a plain page): peer-block metadata,
+            # not a row field, so the asker can say a search was names-only.
+            "search": search,
+        }
+
+    def _rows_for_viewer(
+        self, link: PeerLink, *, rows: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """The catalogue rows as THIS link's viewer may see them.
 
         ``local_session_rows`` stays viewer-blind (the federated listing, the
@@ -9615,8 +9887,12 @@ class RelayServer:
         older viewer gets the exact rows it always did), and the per-row origin
         match on ``link.device_id`` happens inside the stamp — so one member can
         never read another member's completions by asking.
+
+        ``rows`` is a page ``_catalog_page`` already cut from
+        ``local_session_rows``; omitted, the whole capped list is read.
         """
-        rows = self.local_session_rows()
+        if rows is None:
+            rows = self.local_session_rows()
         if wire.REMOTE_ATTENTION_V1 in link.capabilities:
             from local_operator.network.operator_binding import is_operator_link
             from local_operator.notifications.remote_attention import (
@@ -9636,8 +9912,35 @@ class RelayServer:
             )
         return rows
 
-    def local_session_rows(self) -> list[dict[str, Any]]:
+    def _queued_ask_pending(self, session_id: str) -> bool:
+        """Check a live record's QUEUED claim against the owner's durable fold.
+
+        A heartbeat can outlive the ask deadline (or a settle written before the
+        runtime republishes). Only a complete owner journal that folds to known,
+        settled asks clears the claim in this read. Never use viewer-filtered notices:
+        some viewers get no notices even while the queue is genuinely open.
+        """
+        from local_operator.asks import store as ask_store
+
+        try:
+            events = ask_store.read_complete_events(ask_store.session_dir(self.root, session_id))
+            if events is None:
+                return True
+            records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
+            return not records or any(
+                ask_store.is_outstanding(row.get("status")) for row in records
+            )
+        except Exception:  # noqa: BLE001 — an unknown read cannot disprove the live claim
+            logger.debug("catalogue: queued ask state unreadable for %s", session_id, exc_info=True)
+            return True
+
+    def local_session_rows(self, *, uncapped: bool = False) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.
+
+        The stored half is capped at the catalogue's own per-poll bound
+        (``CATALOG_SCAN_LIMIT``) for every existing caller; ``uncapped=True`` is
+        the paged read's whole store (``_catalog_page``).
+
 
         A COLD SESSION IS STILL A ROW, and that is not a listing convenience: a
         session that is idle on a peer must still list as remote (mobility §1.2 —
@@ -9666,6 +9969,11 @@ class RelayServer:
                 continue
             seen.add(record.session_id)
             stamp = read_stamp(self.root, record.session_id)
+            pending = record.pending if state == "live" else None
+            pending_queued = pending == "ask" and record.pending_queued
+            if pending_queued and not self._queued_ask_pending(record.session_id):
+                pending = None
+                pending_queued = False
             rows.append(
                 {
                     "session_id": record.session_id,
@@ -9677,14 +9985,10 @@ class RelayServer:
                     "subagents_running": record.subagents_running,
                     "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
-                    "pending": record.pending if state == "live" else None,
+                    "pending": pending,
                     # Only when TRUE: an older viewer ignores the key, and its
                     # absence means "a gate" (every older owner's meaning).
-                    **(
-                        {"pending_queued": True}
-                        if state == "live" and record.pending and record.pending_queued
-                        else {}
-                    ),
+                    **({"pending_queued": True} if pending_queued else {}),
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at
@@ -9713,7 +10017,7 @@ class RelayServer:
                     # catalogue order) runs on, never a minted epoch.
                     "last_user_at": (
                         last_user_at(self.root / "sessions" / record.session_id)
-                        if record.busy or state == "wedged" or record.pending
+                        if record.busy or state == "wedged" or pending
                         else None
                     ),
                     "pid": record.pid,
@@ -9740,7 +10044,7 @@ class RelayServer:
                     **self._row_avatar(record.session_id),
                 }
             )
-        for row in self._stored_rows():
+        for row in self._stored_rows(uncapped=uncapped):
             session_id = str(row.get("session_id") or "")
             if session_id in seen:
                 continue
@@ -9879,6 +10183,9 @@ class RelayServer:
                     "archived": None,
                     "binding": self._row_binding(entry.name),
                     **self._row_avatar(entry.name),
+                    # A mesh-created session is the commonest cold boot (the
+                    # first ``--send`` engages it), so this half asks too.
+                    **self._boot_row_state(entry.name),
                 }
             )
         return rows
@@ -9911,7 +10218,7 @@ class RelayServer:
 
         return stored_session_title(self.root / "sessions" / session_id)
 
-    def _stored_rows(self) -> list[dict[str, Any]]:
+    def _stored_rows(self, *, uncapped: bool = False) -> list[dict[str, Any]]:
         """Sessions with a directory and no live record — the idle half.
 
         Read through `session.catalog.load_catalog`, the same ranking the sidebar
@@ -9924,12 +10231,14 @@ class RelayServer:
         answer, and a device whose `sessions/` is unreadable is a device whose
         live sessions a viewer can still reach.
         """
-        from local_operator.session.catalog import load_catalog
+        from local_operator.session.catalog import CATALOG_SCAN_LIMIT, load_catalog
         from local_operator.session.placement import local_placement, read_stamp
 
         rows: list[dict[str, Any]] = []
         try:
-            entries = load_catalog(self.root)
+            # ``sys.maxsize`` for "uncapped": ``load_catalog`` slices its ranking
+            # with the limit, so this hydrates every stored row, in rank order.
+            entries = load_catalog(self.root, sys.maxsize if uncapped else CATALOG_SCAN_LIMIT)
         except Exception:  # noqa: BLE001 — a listing is not an error path
             return rows
         for entry in entries:
@@ -9989,9 +10298,75 @@ class RelayServer:
                     "archived": None,
                     "binding": self._row_binding(session_id),
                     **self._row_avatar(session_id),
+                    # Additive, and only while a runtime is being built.
+                    **self._boot_row_state(session_id),
                 }
             )
         return rows
+
+    def _boot_row_state(self, session_id: str) -> dict[str, Any]:
+        """``boot_state``/``boot_age_s`` for a cold row whose runtime is being built, else ``{}``.
+
+        WHY (PR #4572 QA Q6). After ``lop network sessions --send`` reported
+        "<session> is still starting on <peer>; message NOT queued", the sender's
+        listing showed that session ``stored``, pid 0, "not running" — identical
+        to one stopped on purpose — so the sender could not tell "an engage was
+        accepted and a runtime is booting" from "stopped" or "wedged".
+
+        THE SIGNAL ALREADY EXISTS, so no heartbeat is added: a process holding
+        the session's transcript lease (``.execution-lease``), alive AND
+        identity-verified by its birth token, with no run record published yet.
+        That is exactly what ``launch.engage_runtime``'s loop reads as "someone is
+        constructing a runtime but has not published yet", through the same probe
+        (``launch._lease_holder``), so the listing and the engage cannot disagree
+        about whether a boot is under way. A recycled pid fails the identity test
+        and the row carries no boot claim.
+
+        THE AGE COMES FROM ``launch.lease_claimed_at`` (the claim's acquisition
+        time; why that is the claim file's mtime is documented there). The relay
+        asks launch rather than statting the claim itself because it may not
+        import ``session_lease`` beyond ``lease_holder``
+        (``test_the_relay_never_becomes_a_session_owner``).
+
+        THE BUDGET IS THE SENDER'S (``types.REMOTE_COLD_BOOT_BUDGET_S``, read at
+        call time so a test can move it): past it the claim is ``not_responding``,
+        the same moment the sender stopped waiting for it.
+
+        ADDITIVE KEYS, ``state`` STAYS ``stored`` — and that is the mixed-version
+        contract, not timidity. A viewer on an older build that met an unknown
+        ``state`` would send it to ``live_state_from_flags`` (``peer_rows.
+        _live_state``), which reads this row's ``busy=False, detached=True`` as
+        ``idle`` — a resident runtime — in every older sidebar and sessions tool.
+        Keeping the token means every existing branch on it (``published``,
+        ``types.row_needs_claim``, the sidebar's Running filing, the stored-last
+        dedupe sort) keeps treating a booting session as COLD by construction:
+        there is still nothing to dial and no gate to answer. Only readers that
+        know ``boot_state`` say more (``resume.session_row_state_words``).
+        ``boot_age_s`` is its own key rather than the row's ``age_s``, which
+        readers treat as peer staleness and read 0 as unknown.
+
+        Only called for rows the LIVE half did not list, i.e. no live/wedged
+        record: a published runtime holds its lease for its whole life and keeps
+        its registry state. Best effort: any probe failure is no claim (``{}``).
+        A lease held briefly by a non-runtime writer (the browser-resource
+        cleanup) can read ``starting`` for that instant.
+        """
+        from local_operator.network import types as net_types
+        from local_operator.session.runtime.launch import lease_claimed_at
+
+        try:
+            claimed = lease_claimed_at(self.root, session_id)
+        except Exception:  # noqa: BLE001 — a listing is not an error path
+            return {}
+        if claimed is None:
+            return {}
+        age = max(0.0, time.time() - claimed)
+        state = (
+            net_types.ROW_STATE_STARTING
+            if age < net_types.REMOTE_COLD_BOOT_BUDGET_S
+            else net_types.ROW_STATE_NOT_RESPONDING
+        )
+        return {"boot_state": state, "boot_age_s": round(age, 3)}
 
     def _op_member_list(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
         record = self.store_view.network(link.network_id)
@@ -10807,6 +11182,18 @@ class RelayServer:
         if stale:
             raise MeshRefusal("definition_stale", stale)
 
+        from local_operator.skills.manifest import (
+            SkillTransferStatus,
+            parse_skill_manifest,
+            skill_transfer_receipt,
+        )
+
+        skill_manifest = parse_skill_manifest(frame.get("skill_manifest"))
+        if "skill_manifest" in frame and skill_manifest is None:
+            raise MeshRefusal(
+                "protocol_error", "the create frame carried an invalid skill manifest"
+            )
+
         wanted_model = _model_choice(frame.get("model"))
         credential_refusal = _model_credential_refusal(
             self.root, frame.get("model"), identity.birth
@@ -10948,20 +11335,43 @@ class RelayServer:
         # field. It is written BEFORE the engage below, because that is the runtime
         # whose construction reads it.
         #
-        # ONLY A NAMED, ATTACHABLE IDENTITY WRITES ONE. An unnamed create writes no
-        # file at all, which is what keeps today's create byte-for-byte identical; and
-        # an agent row that is not attachable (a legacy conversational row: see
+        # Only an attachable identity or an explicit skill pin writes one. An
+        # agent row that is not attachable (a legacy conversational row: see
         # ``definitions.resolve_create_identity``) is NOT written, because a name the
         # runtime cannot resolve would be reported as a failed restore. That half is
         # reported in the reply instead — silence about it is the one thing the
         # requirement rules out.
         attachment_agent = identity.agent_name if identity.instructions_attachable else ""
+        # Only a fresh create without an offer opts into local routing. A failed
+        # readback cannot tell us whether an offered pin actually landed.
+        skill_status: SkillTransferStatus = (
+            "local_routing" if skill_manifest is None else "unconfirmed"
+        )
         if attachment_agent or identity.team_name:
-            from local_operator.resume import write_session_attachment
+            from local_operator.resume import bind_session_attachment
 
-            write_session_attachment(
-                session_dir, team=identity.team_name, agent=attachment_agent, goal=""
+            if not bind_session_attachment(
+                session_dir, team=identity.team_name, agent=attachment_agent, root=self.root
+            ):
+                raise MeshRefusal(
+                    "session_create_failed", "the selected session attachment could not be saved"
+                )
+        if skill_manifest is not None:
+            from local_operator.resume import (
+                read_session_attachment,
+                record_session_skill_manifest,
             )
+
+            # AFTER the identity bind, never folded into it: ``bind_session_attachment``
+            # is main's fail-closed, root-aware CREATE contract (team authorization,
+            # readback of agent/team), and this pin rides on top of whatever it
+            # stored. The writer preserves the bound team/agent/goal.
+            record_session_skill_manifest(session_dir, skill_manifest, pinned=True)
+            # The general attachment writer is best effort. Do not attest to a
+            # pin just because it was offered in the frame: confirm it on disk.
+            stored = read_session_attachment(session_dir)
+            if stored and stored.skill_manifest_pinned and stored.skill_manifest == skill_manifest:
+                skill_status = "pinned"
         if name:
             # THROUGH ``resume.write_session_title``, never a hand-rolled
             # ``title.json`` of our own. This write used to build the payload
@@ -11019,6 +11429,7 @@ class RelayServer:
         # from its own registries — a claim about a store that does not hold this
         # session (the desktop route already makes that argument for its local half).
         identity_blocks: dict[str, Any] = {
+            "skill_selection": skill_transfer_receipt(skill_status),
             "agent": (
                 {
                     "name": identity.agent_name,
@@ -12270,6 +12681,76 @@ class RelayServer:
             "wakes_dormant": outcome.wakes_dormant,
             "detail": outcome.line,
         }
+
+    def _op_session_stop_idle(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """End one of THIS device's sessions only if its runtime latches itself idle.
+
+        WHY A SECOND OP BESIDE ``_op_session_stop``. That op is the human's kill
+        switch: its ladder SIGTERMs, and SIGKILLs, a socket-silent target, and its
+        ``immediate`` mode pushes past a turn in flight. An agent tool that
+        promises "idle-only, no signal" cannot borrow it. This op runs exactly one
+        ladder: ``control.stop_session(graceful_only=True)``, whose only rung is the
+        runtime socket's ``stop_if_idle`` — the owner's own atomic idle latch, taken
+        inside the runtime, so a turn, subagent or ask that starts between a
+        caller's read and this stop is refused rather than cut. Every non-ack shape
+        (busy, wake, an old runtime that answers ``unknown op``, a silent socket)
+        comes back ``refused`` with no signal sent; see ``control.stop_session``.
+
+        CONSTRAINTS. Authority is the existing ``stop`` capability (``types.
+        OP_CAPABILITY``) and the session-scope rule, both enforced by the
+        authoriser before this runs; nothing here widens either. The frame may
+        carry no escalation: a ``force`` or a ``mode`` other than ``graceful`` is a
+        forged or confused request and is REFUSED, never quietly downgraded, so a
+        caller can never believe it asked for more than it got. Not running is an
+        outcome (the legacy op's shape), not an error. The answer echoes
+        ``intent: stop_if_idle`` so the requester can prove which op answered.
+        """
+        from local_operator.session.runtime import control
+
+        session_id = str(frame.get("session_id") or "")
+        mode = str(frame.get("mode") or "graceful")
+        if frame.get("force") or mode != "graceful":
+            raise MeshRefusal(
+                "stop_idle_force_refused",
+                "an idle-only stop carries no force or escalation mode, so nothing was "
+                "stopped; the owner's full stop is the operator's, on that device",
+            )
+        record = self._session_record(session_id)
+        if record is None:
+            return {
+                "intent": "stop_if_idle",
+                "rung": "none",
+                "outcome": "not_running",
+                "pid": 0,
+                "session_id": session_id,
+                "detail": f"{session_id} is not running on {self._own_label()}.",
+            }
+        outcome = asyncio.run(
+            control.stop_session(
+                record,
+                force=False,
+                graceful_only=True,
+                _root=self.root,
+                _command="mesh net_session_stop_idle",
+            )
+        )
+        answer: dict[str, Any] = {
+            "intent": "stop_if_idle",
+            "rung": outcome.method,
+            "outcome": _STOP_OUTCOME_WORD.get(outcome.method, _STOP_OUTCOME_DEFAULT),
+            "method": outcome.method,
+            "pid": outcome.pid,
+            "session_id": session_id,
+            "name": outcome.name,
+            "wakes_dormant": outcome.wakes_dormant,
+            "monitors_dormant": outcome.monitors_dormant,
+            "detail": outcome.line,
+        }
+        if outcome.reason:
+            # The owner's closed token for WHY it refused (busy / wake / old_owner /
+            # unanswered), carried unchanged so the requester can pick its copy.
+            answer["reason"] = outcome.reason
+        return answer
 
     def _op_session_lifecycle(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Archive/restore/delete on a peer — REFUSED BY NAME in this build.
@@ -15279,11 +15760,12 @@ class RelayServer:
             ),
             "stream_send": self._ctl_stream_send,
             "stream_close": self._ctl_stream_close,
-            "peer_session_rows": lambda _frame: self.federated_rows(),
+            "peer_session_rows": self._ctl_peer_session_rows,
             "peer_session_facts": self._ctl_peer_facts,
             "peer_session_create": self._ctl_peer_create,
             "peer_session_engage": self._ctl_peer_engage,
             "peer_session_stop": self._ctl_peer_stop,
+            "peer_session_stop_idle": self._ctl_peer_stop_idle,
             "peer_session_history": self._ctl_peer_history,
         }
 
@@ -16682,8 +17164,8 @@ class RelayServer:
             }
         # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
         # on the session's FIRST turn rather than after the next cadence tick (up to
-        # a minute later). Unconditional — unlike definitions, nothing in the frame
-        # names which skills a session will read — and BOUNDED
+        # a minute later). The selection pin below is metadata, not a change to
+        # which bodies this existing unconditional push mirrors. It remains BOUNDED
         # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
         # background and the receipt says so, so it can never stall the create.
         # Best-effort: a peer that is unreachable or predates skill sync answers the
@@ -16734,6 +17216,15 @@ class RelayServer:
                 fields[key] = value
         if expect:
             fields["expect"] = expect
+        # Local tool/CLI attribution names the source session on THIS device;
+        # only its exact selection (no ID, paths or bodies) crosses the link.
+        from local_operator.network.approvals import filing_session
+        from local_operator.resume import read_session_attachment
+
+        if source_session := filing_session(frame.get("source_session")):
+            attachment = read_session_attachment(self.root / "sessions" / source_session)
+            if attachment is not None and attachment.skill_manifest is not None:
+                fields["skill_manifest"] = attachment.skill_manifest
         # THE CREATE KEY (``network/create_keys.py``): minted here unless the caller
         # brought one (a retry of a create whose reply was lost brings the key it
         # was told), so the owner can answer a replay with the session it already
@@ -16758,7 +17249,17 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
-        extra: dict[str, Any] = {}
+        from local_operator.skills.manifest import (
+            skill_transfer_receipt,
+            skill_transfer_status,
+        )
+
+        # Only a fresh owner acknowledgement can report a routing decision.
+        # Older owners may omit it; lookup or replay only confirms existence.
+        reported = skill_transfer_status(detail.get("skill_selection"))
+        if reported is None or detail.get("create_unconfirmed") or detail.get("replayed"):
+            reported = "unconfirmed"
+        extra: dict[str, Any] = {"skill_selection": skill_transfer_receipt(reported)}
         if instructions_notice:
             extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:
@@ -16792,6 +17293,83 @@ class RelayServer:
             # default budget.
             timeout=forced_stop_deadline_s() if mode == "immediate" else None,
         )
+
+    def _ctl_peer_stop_idle(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Ask a peer for its idle-only stop — and only if its link negotiated one.
+
+        THE ORDER IS THE GUARANTEE. The link is resolved FIRST and its negotiated
+        capabilities read before any frame is built: a peer that did not advertise
+        ``wire.SESSION_STOP_IDLE_V1`` is refused here with nothing sent
+        (``stop_idle_unsupported``), because the only stop such an owner knows is
+        the signalling ladder. No link is ``peer_unreachable`` — not asked.
+
+        NEVER A FALLBACK. Whatever happens after the frame leaves — a refusal, a
+        lost reply, a timeout, an exception — this never sends ``net_session_stop``
+        and never retries: a second request could stop a session that has since
+        become busy, and the legacy op could signal it. A reply that never came
+        back is ``stop_idle_unconfirmed`` (the owner may or may not have acted),
+        distinct from "never asked", so the caller says so honestly. An owner that
+        answers ``unknown_op`` despite advertising (a build race across a
+        re-dial) is ``stop_idle_not_served``: the frame left, the op did not run.
+
+        The hop uses the default budget (``engage_hop_bound_s``), well above the
+        owner's own ``control.DEFAULT_TIMEOUT_S`` wait for the idle exit; there is
+        no forced mode to outlast, unlike ``_ctl_peer_stop``.
+        """
+        if frame.get("force") or str(frame.get("mode") or "graceful") != "graceful":
+            raise MeshRefusal(
+                "stop_idle_force_refused",
+                "an idle-only stop carries no force or escalation mode, so nothing was sent",
+            )
+        peer = str(frame.get("peer") or "")
+        session_id = str(frame.get("session_id") or "")
+        link = self._ensure_link(self._resolve_peer(peer))
+        if link is None:
+            raise MeshRefusal(
+                "peer_unreachable",
+                f"{self._peer_label(peer)} cannot be reached from this device right now, "
+                "so it was not asked and nothing was stopped",
+            )
+        if wire.SESSION_STOP_IDLE_V1 not in link.capabilities:
+            raise MeshRefusal(
+                "stop_idle_unsupported",
+                f"{self._peer_label(peer)} runs a build without the idle-only stop, so "
+                "nothing was sent and nothing was stopped",
+            )
+        # SENT ON THE LINK THAT WAS CHECKED. ``_local_peer_call`` resolves the link
+        # again, and a re-dial between the two resolutions could hand it one that
+        # never negotiated the feature (agent review round 1 R1), so the frame is
+        # built here and goes out on ``link`` itself — the same frame shape and
+        # hop budget ``_local_peer_call`` uses, with one ``request`` and no retry.
+        reply = link.request(
+            {
+                "op": "net_session_stop_idle",
+                "req": self._next_relay_req(),
+                "locality": "remote",
+                "session_id": session_id,
+            },
+            timeout=engage_hop_bound_s(self.settings.op_wait_s),
+        )
+        if reply is None:
+            raise MeshRefusal(
+                "stop_idle_unconfirmed",
+                f"{self._peer_label(peer)} stopped answering after the idle-only stop was "
+                "sent, so whether it acted is unknown; nothing was retried",
+            )
+        if reply.get("op") == "error":
+            code = str(reply.get("code") or "peer_refused")
+            if code == "unknown_op":
+                # SENT, BUT NOT SERVED — its own code, never ``stop_idle_unsupported``:
+                # that one promises nothing left this device, and here the frame did
+                # (agent review round 1 R2). The owner ran nothing, so nothing stopped.
+                raise MeshRefusal(
+                    "stop_idle_not_served",
+                    f"{self._peer_label(peer)} did not run the idle-only stop it was "
+                    "sent, so nothing was stopped",
+                )
+            raise MeshRefusal(code, str(reply.get("message") or "that device refused"))
+        detail = reply.get("detail")
+        return detail if isinstance(detail, dict) else {"value": detail}
 
     def _ctl_peer_history(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Fetch one page of a peer's STORED journal, for this device's own viewer.
@@ -16945,14 +17523,23 @@ class RelayServer:
         """
         peer = str(frame.get("peer") or "")
         session_id = str(frame.get("session_id") or "")
+        resolved = ""
         try:
             # The resolver takes an id OR a name, like every other entry point a
             # person drives; an unresolvable target is not an error here because
             # this op's answer is ``owned: false`` either way.
-            peer = self._resolve_peer(peer) if peer else ""
+            resolved = peer = self._resolve_peer(peer) if peer else ""
         except MeshRefusal:
             pass
-        _peers, sessions = self._fan_out_catalog()
+        if resolved:
+            # A NAMED OWNER IS ASKED ALONE. The full fan-out below dials every
+            # member and lists every row to answer about ONE session; on a
+            # 232-row mesh it took 11.56 s of its 12 s budget, and one overrun
+            # made a live session "unowned" — the 2026-11-25 live-slash failure.
+            sessions = self._peer_catalog_rows_for(peer, session_id)
+        else:
+            # No (resolvable) peer: today's mesh-wide search, unchanged.
+            _peers, sessions = self._fan_out_catalog()
         row = next(
             (
                 item
@@ -16971,6 +17558,80 @@ class RelayServer:
             "pid": pid or None,
             "record": row,
         }
+
+    def _peer_catalog_rows_for(self, device_id: str, session_id: str) -> list[dict[str, Any]]:
+        """``device_id``'s catalogue rows for ``session_id`` alone (0 or 1).
+
+        The targeted half of ``_ctl_peer_facts``: one membership, one link, one
+        ``net_catalog``, under the same ``LISTING_PROBE_BUDGET_S`` the fan-out
+        uses — so it can only be faster, never slower, than the answer it
+        replaces. The rows are stamped ``locality``/``peer`` with the SAME peer
+        block shape ``_fan_out_catalog`` builds, because ``_ctl_peer_facts``
+        returns the row verbatim as ``record`` and its readers expect that shape.
+
+        CAPABILITY-GATED: ``session_id`` rides only on a link advertising
+        ``wire.REMOTE_CATALOG_SESSION_ID_V1``. An older owner gets today's exact
+        frame and answers with all its rows; the filter below runs in BOTH cases,
+        so an owner that ignored the field can never put another session's row
+        into this answer. Any failure (no shared network, unreachable, no reply,
+        a refusal — including the owner's ``not_authorised`` for an id it does
+        not hold) is no rows — ``owned: False``, exactly what the fan-out said
+        for an unreachable owner or an absent row. ``_fan_out_catalog`` is deliberately left
+        untouched (PR #4592 pages it).
+        """
+        if not session_id:
+            # Nothing can match an empty id; never put a frame the owner would
+            # refuse as ``bad_frame`` on the wire for an answer already known.
+            return []
+        deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
+        for record in store.list_networks(self.root):
+            member = next(
+                (m for m in record.active_members() if m.device_id == device_id),
+                None,
+            )
+            if member is None or member.device_id == self.identity.device_id:
+                continue
+            # The first shared network only, as the fan-out does: the rows are
+            # the device's, not the network's.
+            link, unreachable_reason = self._ensure_link_with_reason(
+                device_id, probe_timeout_s=LISTING_PROBE_BUDGET_S
+            )
+            block = {
+                "device_id": member.device_id,
+                "name": member.name,
+                "network_id": record.network_id,
+                "reachable": link is not None,
+                "age_s": 0.0,
+                "endpoints": list(member.endpoints),
+                "reason": unreachable_reason,
+            }
+            if link is None:
+                return []
+            request: dict[str, Any] = {
+                "op": "net_catalog",
+                "req": self._next_relay_req(),
+                "locality": "remote",
+            }
+            if wire.REMOTE_CATALOG_SESSION_ID_V1 in link.capabilities:
+                request["session_id"] = session_id
+            reply = link.request(
+                request,
+                timeout=max(0.5, min(self.settings.op_wait_s, deadline - time.monotonic())),
+            )
+            if reply is None or reply.get("op") != "ack":
+                return []
+            raw_detail = reply.get("detail")
+            detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+            rows: list[dict[str, Any]] = []
+            for row in detail.get("sessions") or ():
+                if not isinstance(row, dict) or row.get("session_id") != session_id:
+                    continue
+                item = dict(row)
+                item["locality"] = "remote"
+                item["peer"] = block
+                rows.append(item)
+            return rows
+        return []
 
     def _ctl_stream_send(self, frame: dict[str, Any]) -> dict[str, Any]:
         """The multiplexed form: one frame on one opened stream (§2.5).
@@ -16997,8 +17658,20 @@ class RelayServer:
         self._close_stream(stream_id, cause="viewer-requested")
         return {"stream": stream_id, "closed": existed}
 
-    def _fan_out_catalog(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    def _fan_out_catalog(
+        self, page: Mapping[str, Any] | None = None, only_device: str = ""
+    ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
         """Ask every peer for its rows, once. Returns ``(peers, sessions)``.
+
+        ``page`` (the paged read's ``limit``/``cursor``/``query``) rides the
+        ``net_catalog`` frame ONLY to an owner advertising
+        ``REMOTE_CATALOG_PAGE_V1``; its ``next_cursor``/``total`` land on that
+        peer's block. An older owner would ignore the fields and answer its
+        capped list, so it is not sent them: with a ``cursor`` or ``query`` it
+        contributes NO rows (a capped list is not the page or the search that was
+        asked for), with only a ``limit`` its unpaged rows stand; either way its
+        block says ``paging: "unsupported"`` so no surface calls it complete.
+        ``only_device`` asks just that member (a cursor is one device's position).
 
         A LIVE read rather than the transport's cached fan-out (§9.4): that cache,
         its TTL and its delta op belong to the transport slice, and a second
@@ -17027,6 +17700,8 @@ class RelayServer:
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == self.identity.device_id:
+                    continue
+                if only_device and member.device_id != only_device:
                     continue
                 if peers.get(member.device_id, {}).get("reachable"):
                     # THE SAME DEVICE, ASKED ONCE. Every later shared network would
@@ -17062,14 +17737,34 @@ class RelayServer:
                 if link is None:
                     peers.setdefault(member.device_id, block)
                     continue
+                ask: dict[str, Any] = {
+                    "op": "net_catalog",
+                    "req": self._next_relay_req(),
+                    "locality": "remote",
+                }
+                pages = bool(page) and wire.REMOTE_CATALOG_PAGE_V1 in link.capabilities
+                if pages and page is not None:
+                    ask.update(page)
                 reply = link.request(
-                    {"op": "net_catalog", "req": self._next_relay_req(), "locality": "remote"},
+                    ask,
                     timeout=max(0.5, min(self.settings.op_wait_s, deadline - time.monotonic())),
                 )
                 if reply is None:
                     block["reachable"] = False
                     block["reason"] = "asked, and it did not answer"
                     peers.setdefault(member.device_id, block)
+                    continue
+                if (
+                    reply.get("op") != "ack"
+                    and pages
+                    and reply.get("code") in CATALOG_PAGE_REFUSALS
+                ):
+                    # THE OWNER ANSWERED, refusing the asker's cursor/limit/query
+                    # (QA round 1, Q1 on #4592): ``reachable: false`` would be a
+                    # false fact about a device that just replied.
+                    block["refused"] = str(reply.get("message") or "the page was refused")[:200]
+                    block["refused_code"] = str(reply.get("code"))
+                    peers[member.device_id] = block
                     continue
                 if reply.get("op") != "ack":
                     # THE PEER'S OWN SENTENCE, not a shrug. A refusal frame carries a
@@ -17085,6 +17780,21 @@ class RelayServer:
                 peers[member.device_id] = block
                 raw_detail = reply.get("detail")
                 detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
+                if page and not pages:
+                    block["paging"] = "unsupported"
+                    if page.get("cursor") is not None or page.get("query") is not None:
+                        continue
+                elif pages:
+                    block["paging"] = "paged"
+                    next_cursor = detail.get("next_cursor")
+                    block["next_cursor"] = next_cursor if isinstance(next_cursor, str) else None
+                    total = detail.get("total")
+                    block["total"] = (
+                        total if isinstance(total, int) and not isinstance(total, bool) else None
+                    )
+                    search = detail.get("search")
+                    if search in ("names", "content"):
+                        block["search"] = search
                 for row in detail.get("sessions") or ():
                     if not isinstance(row, dict):
                         continue
@@ -17093,6 +17803,42 @@ class RelayServer:
                     item["peer"] = block
                     sessions.append(item)
         return peers, sessions
+
+    def _ctl_peer_session_rows(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """``peer_session_rows``: the federated listing, or a PAGED read of peers.
+
+        A frame with no ``limit``/``cursor``/``query`` is the federated listing
+        exactly as before. With any of them it is the paged read: only OTHER
+        devices' rows (this device's own listing is ``lop sessions``, which
+        pages and searches its store already), each peer asked with the same
+        fields, and ``peer`` narrowing the ask to that one device — required
+        with a ``cursor``, because a cursor is a position in ONE owner's list.
+        """
+        page = {key: frame[key] for key in _CATALOG_PAGE_FIELDS if frame.get(key) is not None}
+        if not page:
+            return self.federated_rows()
+        peer = str(frame.get("peer") or "")
+        if "cursor" in page and not peer:
+            raise MeshRefusal(
+                "peer_required", "a cursor is one device's position: name that device"
+            )
+        only_device = self._resolve_peer(peer) if peer else ""
+        reports = self.refresh_membership()
+        peers, sessions = self._fan_out_catalog(page, only_device)
+        return {
+            "ok": True,
+            # The client's proof that THIS relay paged: an older relay ignores
+            # the fields and answers the federated listing without this key,
+            # which the CLI must not present as a page or a search result.
+            "paged": True,
+            "sessions": sessions,
+            "peers": peers,
+            "membership": {
+                network_id: report.to_json() for network_id, report in sorted(reports.items())
+            },
+            "device_id": self.identity.device_id,
+            "device_name": self._own_label(),
+        }
 
     def federated_rows(self) -> dict[str, Any]:
         """The federated listing: this device's rows plus every peer's (R6, §9).
@@ -17855,6 +18601,7 @@ def _owning_document(op: str) -> str:
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
         "net_file_get": "mesh-file-transfer.md (S1)",
+        "net_mentioned_file": "mesh-account-binding.md (§5, P3 serving)",
         "net_session_files": "remote-files-parity.md (§2)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",

@@ -1,0 +1,6 @@
+{
+  "network.skill_transfer.receipt.local_routing": "No se fijó ninguna instantánea de habilidades. El dispositivo de destino elegirá las habilidades localmente.",
+  "network.skill_transfer.receipt.pinned": "El dispositivo de destino fijó la selección de habilidades del dispositivo de origen. Solo cargará las habilidades locales que coincidan.",
+  "network.skill_transfer.receipt.unconfirmed": "El dispositivo de destino no confirmó la instantánea de habilidades. No des por hecho que utiliza la selección del dispositivo de origen.",
+  "network.skill_transfer.receipt.write_failed": "El dispositivo de destino no pudo guardar la instantánea de habilidades. Se conservó la copia provisional sin publicarla."
+}

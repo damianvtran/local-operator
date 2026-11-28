@@ -529,7 +529,7 @@ async def test_approval_prompt_resolves_from_a_keystroke() -> None:
         assert app.screen.focused is prompt  # else the keys go to the composer
         # The three answers are offered as a LIST, not only as letters to aim
         # at a focused widget, and the session-wide one names its scope.
-        assert any("Allow all" in row for row in rows(app))
+        assert any("Auto-approve" in row for row in rows(app))
         # And the question is anchored in the dock, above the composer, rather
         # than in the transcript where a busy turn scrolls it out of reach.
         assert prompt.region.y > app.query_one(TranscriptView).region.y
@@ -749,7 +749,7 @@ async def test_allow_all_is_seen_by_an_already_queued_ask() -> None:
 
 @pytest.mark.asyncio
 async def test_lowercase_a_does_not_disarm_the_gate() -> None:
-    """ "Allow all" needs Shift: the card holds focus, and ``a`` is a letter.
+    """ "Auto-approve" needs Shift: the card holds focus, and ``a`` is a letter.
 
     A user who did not notice focus moved and kept typing their next instruction
     would otherwise hit the most common letter in English and disable the
@@ -800,12 +800,12 @@ async def test_approvals_command_restores_prompting() -> None:
         assert app._approve_all is True
         # The band's alarm is a bare `!` in the trailing cell now — the session
         # name took the words that used to be there.
-        assert any(row.rstrip().endswith("!") for row in rows(app))
+        assert any(row.rstrip().endswith("! auto") for row in rows(app))
 
         app._run_slash_command("/approvals ask")
         await pilot.pause()
         assert app._approve_all is False
-        assert not any(row.rstrip().endswith("!") for row in rows(app))
+        assert not any(row.rstrip().endswith("! auto") for row in rows(app))
         # And the gate really asks again.
         pending = asyncio.ensure_future(_approval_gate(session)("bash", "run: x"))
         await pilot.pause()
@@ -2005,7 +2005,7 @@ async def test_a_narrow_card_still_names_what_it_is_authorising() -> None:
         # property D9's `esc deny`-only frame failed.
         assert "y.Allow" in text, lines
         assert "n.Deny" in text, lines
-        assert "A.Allow all" in text, lines
+        assert "A.Allow + auto-approve" in text, lines
         # ...and both setting destinations are named, so the row that used to
         # carry the hint still carries an actionable sentence.
         assert "[S]session" in lines[-1] and "[G]all sessions" in lines[-1], lines

@@ -67,7 +67,6 @@ def test_a_queued_moves_consent_rides_the_record_into_the_resume_invite(
     monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
     monkeypatch.setattr(mobility, "_resolve_typed_peer", lambda *_a: ("d_b", "device-b"))
     monkeypatch.setattr(mobility, "_link_for_move", lambda *_a: SimpleNamespace(device_id="d_b"))
-    monkeypatch.setattr(mobility, "_push_move_definitions", lambda *_a: None)
     monkeypatch.setattr(mobility, "reconcile", lambda *_a, **_k: [])
     server = SimpleNamespace(root=tmp_path)
 

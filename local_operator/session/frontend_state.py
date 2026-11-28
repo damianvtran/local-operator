@@ -84,6 +84,7 @@ from local_operator.session.channel_spend import (
     combine,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
+from local_operator.session.runtime.inline_ui_egress import InlineUiEvents
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
     SessionSpend,
@@ -1390,6 +1391,19 @@ _FRONTEND_LOCAL_SLASHES = {
     # also what keeps it out of `serving.py::_slash_result`, exactly as the
     # `/notifications` clause above states the rule.
     "aida",
+    # FRONTEND-LOCAL because `/guard` is a MODAL SCREEN this terminal draws and
+    # answers (consent prompt, draft-report send/discard, the Team card), and
+    # every fact on it is read from THIS machine's config root
+    # (`guard.surface.org_states(config_dir())`, `GuardReports(root)`). Routed to
+    # a runtime there is no screen to open, and it would describe the runtime
+    # host's consent state while the badge beside the composer paints this one.
+    # The BACKEND enforces consent regardless of surface; the desktop and phone
+    # reach the same state through the settings API (the desktop's entry is the
+    # approvals panel), so withholding the command from the phone's sheet loses
+    # no capability. Also what keeps it out of `serving.py::_slash_result`: an
+    # entry not in this set is advertised `authoritative_session`, which
+    # `test_capability_surface.py` fails unless the runtime dispatches it.
+    "guard",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the
@@ -3792,6 +3806,9 @@ class FrontendSessionState(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # Owned by the same immutable cut as live_events; never in a generic dump.
+    _live_inline_ui: dict[str, Any] | None = PrivateAttr(default=None)
+
     state_version: int = FRONTEND_STATE_VERSION
     session_id: str
     epoch: str
@@ -3891,6 +3908,16 @@ class FrontendSessionState(BaseModel):
     #: refused and OFF for one it served (review M3 / UX U3), so the field now
     #: carries the setting the user sees, from ``command.saver_state``.
     saver_on: bool = False
+    #: The LIVE tool-approval gate of the owning runtime: ``"auto"``, ``"ask"``,
+    #: or ``""`` when no runtime gate has stated one (a facade with no serving
+    #: handle, an old owner). Canonical rather than derived because the gate
+    #: (``ServingSessionHandle._auto_approve``) lives in the owner process: the
+    #: desktop's ``/approvals`` picker and composer mode chip read it through
+    #: ``command-entities?command=approvals`` and had nothing to show (PR #4558
+    #: review X1). Published from the handle's ``_notify`` seam, which follows
+    #: every gate mutation, so it cannot lag a switch. Empty means UNKNOWN —
+    #: never read it as ``ask``.
+    approval_mode: str = ""
     #: The session's own tri-state override (``None`` follows the global setting
     #: and the agent's pin), so a surface can say WHY Saver is on or off.
     last_usage: FrontendUsage | None = None
@@ -4625,7 +4652,7 @@ def job_trajectory_wire_value(rows: Any) -> list[dict[str, Any]]:
     return [_wire_value(row) for row in (rows or ())]
 
 
-def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
+def sync_wire_payload(sync: FrontendSync, *, inline_ui_capable: bool = False) -> dict[str, Any]:
     """Serialize one attach snapshot with job trajectories left OUT.
 
     The runtime's socket refuses a line over ``server._MAX_LINE_BYTES`` (1 MiB),
@@ -4744,6 +4771,26 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # remote ask instead of the Asks panel.
         _bound_usage_diagnostics_in_place(payload, snapshot)
         _yield_asks_when_the_frame_has_no_room(snapshot, payload)
+        # The inline UI sidecar attaches LAST, after every yield above: it is
+        # an optional enrichment of a live row whose prose already rides the
+        # frame, so it may only spend the room the frame has left. Attaching it
+        # before the ask yield would let a widget payload push an ask the user
+        # must answer off the frame. If it does not fit, it is dropped and the
+        # client renders the prose fallback until the final message carries it.
+        sidecar = sync.snapshot._live_inline_ui if inline_ui_capable else None
+        if sidecar:
+            for event in snapshot.get("live_events", []):
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "message_update"
+                    and isinstance(message := event.get("message"), dict)
+                    and isinstance(message_id := message.get("id"), str)
+                    and message_id in sidecar["messages"]
+                ):
+                    event["inline_ui"] = copy.deepcopy(sidecar)
+                    if _frame_line_bytes(payload) > _MODEL_CATALOGUE_LINE_LIMIT:
+                        event.pop("inline_ui")
+                    break
     return payload
 
 
@@ -6974,6 +7021,7 @@ class FrontendStateStore:
         # of a large session, where this copy-and-freeze of a 2,000-job roster
         # was ~0.5 s held on the serving loop (PR #4012, QA round 1, Q1).
         self._state = frozen if frozen is not None else freeze_new_store_state(state)
+        self._inline_ui_seed = InlineUiEvents(sidecars=True)
         self._peer_display_fold: Any = None
         self._peer_display_pending: list[dict[str, Any]] = []
         self._subscribers: list[Callable[[FrontendUpdate], None]] = []
@@ -8598,7 +8646,10 @@ class FrontendStateStore:
         transcript = getattr(session, "_transcript", None)
         if transcript is not None:
             try:
-                entries = transcript.entries()
+                from local_operator.session.transcript import resident_entries
+
+                # Only the newest id is read: never a full-history re-read.
+                entries = resident_entries(transcript)
                 history_cursor = entries[-1].id if entries else None
             except Exception:
                 pass
@@ -9613,7 +9664,8 @@ class FrontendStateStore:
         the accumulated assistant/tool state without flooding every peer with a
         second frame for every token.
         """
-        data = event.model_dump(mode="json")
+        data = self._inline_ui_seed.dump(event, reconnect_seed=True)
+        sidecar = data.pop("inline_ui", None)
         kind = str(data.get("type", ""))
         live = list(self._state.live_events)
         if kind in {"agent_start", "agent_end"}:
@@ -9714,7 +9766,10 @@ class FrontendStateStore:
         #
         # Silent replacement: no delta and no sequence move, so only the pointer
         # needs installing against a reader.
-        self._install(self._state.model_copy(update={"live_events": live}))
+        state = self._state.model_copy(update={"live_events": live})
+        if kind in {"agent_start", "agent_end", "message_start", "message_update", "message_end"}:
+            state._live_inline_ui = sidecar if kind == "message_update" else None
+        self._install(state)
 
     def _refuse_peer_cycle_display(
         self, error: Exception, stage: str, event_type: str = ""

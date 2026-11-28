@@ -243,6 +243,17 @@ HOLD_CLOCK_REVIEW = "review"
 HOLD_CLOCK_OWNER_ACTION = "owner_action"
 
 
+def channel_name_key(name: str) -> str:
+    """The comparison form of a room name: trimmed, ``str.lower()``-folded.
+
+    The ONE definition shared by the channel-alias table and the tool's name
+    lookup (``tool._room_name_key`` builds on it); see there for why simple
+    lowering rather than ``casefold``.
+    """
+
+    return name.strip().lower()
+
+
 def state_db_path(config_dir: Path) -> Path:
     """The one database path: ``<config_dir>/team_bridge/state.sqlite3``."""
 
@@ -251,9 +262,11 @@ def state_db_path(config_dir: Path) -> Path:
 
 #: The ``owner_releases.outcome`` of a signed Discard settled on THIS machine
 #: only (:meth:`Store.record_owner_release_local_terminal`): the hub could not
-#: confirm the message, so nothing was posted, delivered or sent to anyone. A
-#: sibling of the connector's ``admitted``/``rejected``, deliberately named so
-#: it can never be read as a hub or sender outcome.
+#: confirm the message, or the connector could never apply the Discard (a
+#: write-once conflict; ``hold_release.LOCAL_DISCARD_HOLD_CODES``), so nothing
+#: was posted, delivered or sent to anyone. The audit row's ``reason`` says
+#: which. A sibling of the connector's ``admitted``/``rejected``, deliberately
+#: named so it can never be read as a hub or sender outcome.
 OWNER_RELEASE_LOCAL_TERMINAL = "discarded_local_unconfirmed"
 
 #: The same-account credential heal's audit receipt (``team_bridge.heal``): one
@@ -653,6 +666,175 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+#: The ``screening_receipts`` columns a history row copies VERBATIM, in one
+#: fixed order shared by the DDL and the ``INSERT ... SELECT`` that fills it.
+_RECEIPT_HISTORY_COPIED = (
+    "body_sha256",
+    "template_sha256",
+    "prompt_version",
+    "model",
+    "verdict",
+    "categories",
+    "envelope_digest",
+    "admission_revision",
+    "policy_epoch",
+    "creator_generation",
+    "created_at",
+    "rendered_template_sha256",
+    "screener_preferred",
+)
+
+#: The closed set of reasons a receipt head may move (write-once fix, PR-2).
+RECEIPT_SUPERSEDED_LIVE_ALLOW = "live_allow_supersedes_stale_allow"
+RECEIPT_SUPERSEDED_OWNER_DELIVER = "owner_release_deliver"
+
+
+def _ensure_receipt_history_table(conn: sqlite3.Connection) -> None:
+    """Create the append-only ``screening_receipt_history`` on a store that predates it.
+
+    WHY (write-once fix PR-2, diagnosis 2026-11-24). ``screening_receipts`` is
+    write-once per message, but two transitions must be able to move its head:
+    a STALE screener allow superseded by a fully-current preferred allow (the
+    screening model failed over between two approved ids and the admission
+    revision moved, so the old row can never satisfy the live fences again),
+    and a screener allow agreed with by the owner's verified Deliver. Both are
+    allow -> allow; a reject is never superseded. The audit promise "a
+    receipt is never rewritten" is kept by copying the prior row here
+    VERBATIM, inside the same write transaction, before the head moves.
+
+    APPEND-ONLY BY CONSTRUCTION. Triggers abort any UPDATE or DELETE, and any
+    INSERT naming a ``history_id`` that already exists. The INSERT one is
+    needed because ``INSERT OR REPLACE`` / ``REPLACE INTO`` resolves the key
+    conflict by an implicit delete that does NOT fire DELETE triggers
+    (``recursive_triggers`` is off), so without it a REPLACE rewrote a row in
+    place (PR #4533 round 1, S-1 / Q-1). The only shipped writer,
+    :func:`_supersede_receipt`, never names a ``history_id``. Within SQL these
+    are the statements that can change a row; removing a trigger takes a
+    deliberate migration. They bind statements, not the file: anyone who can
+    write the database file can still rewrite it.
+
+    LIFETIME. No purge or re-enrolment sweep deletes ``screening_receipts``
+    (re-enrolment invalidates receipts through ``creator_generation``). The one
+    ``DELETE FROM screening_receipts`` is :meth:`Store.retire_unsent_fallback_allow`,
+    a targeted retirement of a NON-preferred allow whose template is not the
+    owner-release template, and only while no handoff exists. A head that has
+    history was put there by a supersession, which writes only a
+    ``screener_preferred = 1`` allow or the owner-release template, so that
+    retirement can never delete a head with history and orphan its rows.
+
+    ADDITIVE, NOT IN ``_V3_TABLES``. Registering it there would make every
+    existing stamped store "damaged" (the V3 floor refuses before any DDL) and
+    lock the operator out of their own state. Like the answer cache, it is
+    created ``IF NOT EXISTS`` inside the caller's write transaction; a store
+    without it simply has no supersession history yet. It holds no authority:
+    nothing reads it to admit or refuse.
+    """
+
+    copied = ", ".join(
+        f"{name} {kind}"
+        for name, kind in zip(
+            _RECEIPT_HISTORY_COPIED,
+            (
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL",
+                "INTEGER NOT NULL",
+                "REAL NOT NULL",
+                "TEXT",
+                "INTEGER",
+            ),
+        )
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_receipt_history ("
+        "history_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        f"{copied}, "
+        "reason TEXT NOT NULL, attempt_id TEXT, "
+        "new_model TEXT NOT NULL, new_template_sha256 TEXT NOT NULL, "
+        "new_admission_revision TEXT NOT NULL, new_policy_epoch INTEGER NOT NULL, "
+        "superseded_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_screening_receipt_history_message "
+        "ON screening_receipt_history (owner_key, message_id)"
+    )
+    for verb in ("UPDATE", "DELETE"):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS screening_receipt_history_no_{verb.lower()} "
+            f"BEFORE {verb} ON screening_receipt_history "
+            "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
+        )
+    # ``IF NOT EXISTS`` on its own statement, so a table created by an earlier
+    # head of this PR (UPDATE/DELETE triggers only) gains it on the next call.
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS screening_receipt_history_no_replace "
+        "BEFORE INSERT ON screening_receipt_history "
+        "WHEN NEW.history_id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM screening_receipt_history WHERE history_id = NEW.history_id) "
+        "BEGIN SELECT RAISE(ABORT, 'screening_receipt_history is append-only'); END"
+    )
+
+
+def _supersede_receipt(
+    conn: sqlite3.Connection,
+    *,
+    key: str,
+    message_id: str,
+    reason: str,
+    attempt_id: str | None,
+    head: Mapping[str, Any],
+) -> None:
+    """Copy the current head to history VERBATIM, then move the head to ``head``.
+
+    The copy is an ``INSERT ... SELECT`` from the live row, so its bytes are
+    the row's own (no Python round-trip can coerce a value). Caller holds the
+    write transaction and has already decided the transition is allowed.
+    """
+
+    _ensure_receipt_history_table(conn)
+    columns = ", ".join(_RECEIPT_HISTORY_COPIED)
+    copied = conn.execute(
+        f"INSERT INTO screening_receipt_history (owner_key, message_id, {columns}, "
+        "reason, attempt_id, new_model, new_template_sha256, new_admission_revision, "
+        "new_policy_epoch, superseded_at) "
+        f"SELECT owner_key, message_id, {columns}, ?, ?, ?, ?, ?, ?, ? "
+        "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+        (
+            reason,
+            attempt_id,
+            head["model"],
+            head["template_sha256"],
+            head["admission_revision"],
+            int(head["policy_epoch"]),
+            time.time(),
+            key,
+            message_id,
+        ),
+    ).rowcount
+    if copied != 1:
+        raise StoreRefused("state_unavailable", "receipt head vanished before supersession")
+    conn.execute(
+        "UPDATE screening_receipts SET body_sha256 = ?, template_sha256 = ?, "
+        "prompt_version = ?, model = ?, verdict = ?, categories = ?, envelope_digest = ?, "
+        "admission_revision = ?, policy_epoch = ?, creator_generation = ?, created_at = ?, "
+        "rendered_template_sha256 = ?, screener_preferred = ? "
+        "WHERE owner_key = ? AND message_id = ?",
+        (*(head[name] for name in _RECEIPT_HISTORY_COPIED), key, message_id),
+    )
+    logger.info(
+        "team bridge receipt superseded: row_ref=%s reason=%s",
+        hashlib.sha256(str(message_id).encode("utf-8")).hexdigest()[:12],
+        reason,
+    )
 
 
 def _ensure_aged_hold_table(conn: sqlite3.Connection) -> None:
@@ -1312,6 +1494,50 @@ def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: s
     )
 
 
+def receipt_integrity(receipt: Mapping[str, Any]) -> tuple[list[str] | None, str]:
+    """The INTEGRITY half of :func:`receipt_authority`, independent of currency.
+
+    ``(decoded_categories, "")`` for a row whose own bytes are well formed, or
+    ``(None, note)`` for damage: a non-numeric epoch or creator generation,
+    categories that do not decode to a list from the closed set, an unknown
+    verdict, or an ``allow`` carrying categories.
+
+    WHY SEPARATE (PR #4533 round 1, m2). ``receipt_authority`` answers STALE
+    before it reaches these checks, which is right for admission (a stale row
+    admits nothing either way) but wrong for the two write-once supersession
+    paths, whose subject IS a stale row: "a damaged row never supersedes"
+    needs the damage checks on a stale row too. ``receipt_authority`` calls
+    this for its own tail, so there is ONE copy of the checks.
+    """
+
+    if (
+        _receipt_int(receipt.get("policy_epoch"), -1) is None
+        or _receipt_int(receipt.get("creator_generation"), -1) is None
+    ):
+        return None, "epoch or creator generation is not a number"
+    try:
+        decoded = _decode_categories_text(receipt.get("categories"))
+    except StoreRefused as refusal:
+        # The decoder's own sentence ("empty categories text" / "categories
+        # decode failed" / "categories not a list"): unchanged from before the
+        # refactor, when it propagated straight out of the consume path.
+        return None, str(refusal)
+    if (
+        not isinstance(decoded, list)
+        or not all(isinstance(item, str) for item in decoded)
+        or not set(decoded) <= _CLOSED_CATEGORIES
+    ):
+        # Unknown category strings (or wrong shapes) can never be handed to a
+        # receipt: typed uncertainty, zero spend.
+        return None, "categories failed validation"
+    verdict = receipt.get("verdict")
+    if verdict not in ("allow", "reject"):
+        return None, "unknown verdict"
+    if verdict == "allow" and decoded:
+        return None, "allow verdict with categories"
+    return decoded, ""
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
@@ -1422,26 +1648,10 @@ def receipt_authority(
         epoch_bound and policy_epoch != receipt_epoch
     ) or creator_generation != owner.enrollment_generation:
         return None, RECEIPT_STALE, ""
-    try:
-        decoded = _decode_categories_text(receipt.get("categories"))
-    except StoreRefused as refusal:
-        # The decoder's own sentence ("empty categories text" / "categories
-        # decode failed" / "categories not a list"): unchanged from before the
-        # refactor, when it propagated straight out of the consume path.
-        return None, RECEIPT_CORRUPT, str(refusal)
-    if (
-        not isinstance(decoded, list)
-        or not all(isinstance(item, str) for item in decoded)
-        or not set(decoded) <= _CLOSED_CATEGORIES
-    ):
-        # Unknown category strings (or wrong shapes) can never be handed to a
-        # receipt: typed uncertainty, zero spend.
-        return None, RECEIPT_CORRUPT, "categories failed validation"
+    decoded, note = receipt_integrity(receipt)
+    if decoded is None:
+        return None, RECEIPT_CORRUPT, note
     verdict = receipt.get("verdict")
-    if verdict not in ("allow", "reject"):
-        return None, RECEIPT_CORRUPT, "unknown verdict"
-    if verdict == "allow" and decoded:
-        return None, RECEIPT_CORRUPT, "allow verdict with categories"
     return (
         {
             "verdict": verdict,
@@ -1803,8 +2013,17 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
 #: resolver keeps is one whose committed verdict the LIVE policy no longer
 #: supports, and no retry can clear it. Publishing it as ``delivery_pending``
 #: would tell readers the delay is transient. It falls to ``awaiting_review``,
-#: the conservative class for a terminal hold only the owner can move. An
-#: owner-review release for it is a recorded follow-up.
+#: the conservative class for a terminal hold only the owner can move.
+#:
+#: The owner CAN now move it (the S-4 follow-up): a conflict whose committed
+#: receipt is a screener allow gets a review decision row and is a Deliver
+#: item in the owner's holds list (``hold_release.owner_reviewable``,
+#: ``WRITE_ONCE_CONFLICT_HOLD``), which #4533's owner Deliver commits. A
+#: reject-backed or damaged conflict is NOT offered (no Deliver could commit)
+#: and still publishes ``awaiting_review``: the class is per CODE (a reader
+#: must not learn which verdict was committed), and such a row IS one of the
+#: terminal fail-closed holds below: the one class that promises no clearing
+#: time, so it tells no reader the delay is transient.
 #:
 #: Also here (holds trace 2026-11-18), each a delivery-side wait that clears
 #: without anyone reviewing the content:
@@ -2026,6 +2245,86 @@ def _quarantine_feed_ref(conn: sqlite3.Connection, owner_key: str, raw: str) -> 
             None,
             time.time(),
         ),
+    )
+
+
+def _log_write_once_conflict(
+    message_id: str,
+    existing: Any,
+    receipt: Any,
+    *,
+    envelope_digest: str | None,
+    admission_revision: str | None,
+    path: str = "screening",
+) -> None:
+    """Log WHICH replay-tuple fields differ on a ``write_once_conflict``.
+
+    WHY (diagnosis 2026-11-24). The refusal said only "conflict": telling a
+    served-model failover (the committed receipt names the model that
+    actually answered, the re-screen the live default) from a moved envelope
+    or a real verdict flip took a manual SQL spot check. Field NAMES are
+    enough to tell those apart and carry nothing a log reader should see.
+
+    NEVER VALUES: no model id, digest, hash, category, verdict, body or
+    message text is written — only the closed set of field names below and a
+    short one-way hash of the message id to correlate lines. Diagnostic
+    only: called just before the refusal is raised, it decides nothing.
+
+    ``admission_revision`` is not part of the replay comparison; it is
+    reported apart (``revision_moved``) because a stale revision is what
+    keeps the committed receipt from resolving the conflict on its own.
+
+    ``receipt`` is a :class:`ScreeningReceipt` or a stored row mapping (the
+    cached-adoption source); categories are compared decoded either way.
+
+    NEVER CHANGES THE REFUSAL (PR #4517 review m1/S-1). It runs on rows that may
+    be damaged — a corrupt ``categories`` text made the unconditional decode
+    raise ``proof_corrupt`` here, which turned the caller's
+    ``write_once_conflict`` into ``retry_later``. Any failure while computing
+    the diff logs ``differing=unreadable`` and returns; the caller raises its
+    own code regardless.
+    """
+
+    def field(source: Any, name: str) -> Any:
+        if isinstance(source, Mapping) or hasattr(source, "keys"):
+            return source[name]
+        return getattr(source, name)
+
+    def categories(source: Any) -> tuple[str, ...]:
+        raw = field(source, "categories")
+        return tuple(sorted(_decode_categories_text(raw) if isinstance(raw, str) else raw))
+
+    try:
+        differing = [
+            name
+            for name, column in (
+                ("verdict", "verdict"),
+                ("model", "model"),
+                ("prompt_version", "prompt_version"),
+                ("template", "template_sha256"),
+                ("body_sha256", "body_sha256"),
+            )
+            if field(existing, column) != field(receipt, column)
+        ]
+        if categories(existing) != categories(receipt):
+            differing.append("categories")
+        if field(existing, "envelope_digest") != envelope_digest:
+            differing.append("envelope_digest")
+        summary = ",".join(differing) or "none"
+        revision_moved = (
+            "yes"
+            if admission_revision is not None
+            and field(existing, "admission_revision") != admission_revision
+            else "no"
+        )
+    except Exception:  # noqa: BLE001 — a diagnostic must never decide the refusal
+        summary, revision_moved = "unreadable", "unknown"
+    logger.info(
+        "team bridge write_once_conflict: row_ref=%s path=%s differing=%s revision_moved=%s",
+        hashlib.sha256(str(message_id).encode("utf-8")).hexdigest()[:12],
+        path,
+        summary,
+        revision_moved,
     )
 
 
@@ -7078,6 +7377,14 @@ class Store:
                     )
                 )
                 if not same:
+                    _log_write_once_conflict(
+                        str(message_id),
+                        existing,
+                        source,
+                        envelope_digest=source["envelope_digest"],
+                        admission_revision=source["admission_revision"],
+                        path="cached_adoption",
+                    )
                     raise StoreRefused("write_once_conflict", "this message has another verdict")
             else:
                 conn.execute(
@@ -8908,6 +9215,101 @@ class Store:
         except StoreRefused:
             raise
 
+    @staticmethod
+    def _write_once_transition(
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        *,
+        existing: Mapping[str, Any],
+        receipt: ScreeningReceipt,
+        envelope_digest: str | None,
+        fresh_revision: str,
+        expected_epoch: int,
+    ) -> str | None:
+        """How a fresh receipt that does NOT replay the committed one exactly may proceed.
+
+        WHY (write-once fix PR-2, diagnosis 2026-11-24). 27 messages screening
+        ALLOWED sat in ``write_once_conflict``: the committed receipt names the
+        model that served it (``anthropic/claude-sonnet-5.5``), a re-screen is
+        served by the other approved, preferred id (``claude-sonnet-5-5``), and
+        the exact replay tuple demands equal models. The committed rows are also
+        at an old admission revision, which every later fence
+        (:meth:`write_screened_request_delivery`'s ``stale_proof``,
+        :meth:`verify_original_envelope_current`) re-checks against the live
+        one — so tolerating the model alone would still deliver nothing.
+
+        Returns, for the caller holding the write transaction:
+
+        * ``"replay"`` — the committed receipt is CURRENT under the live policy
+          (``receipt_authority``, epoch waived as in
+          :meth:`write_once_resolution`) and equal in every field but the
+          served model, and both models are in the published serving set. Two
+          approved hops agreeing is the same verdict; nothing is written.
+        * ``"supersede"`` — the committed receipt is a STALE ``allow`` (not
+          damaged) and the fresh one is a PREFERRED ``allow`` that is fully
+          current: live revision, the epoch the caller already fenced, the live
+          template, an approved serving model, the live enrollment generation,
+          and the privacy proof ``finish_screening`` demanded before this
+          point. Same body and envelope. The old row goes to history.
+        * ``None`` — a conflict, exactly as before: any reject on either side
+          (a reject is never overridden), a non-preferred allow, another
+          envelope or body, an unapproved model, a damaged committed row.
+
+        ALLOW -> ALLOW ONLY. This is the invariant reviewers should check
+        first: nothing here can turn a recorded reject into a delivery.
+        """
+
+        policy = conn.execute(
+            "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+        ).fetchone()
+        if policy is None:
+            return None
+        policy_row = dict(policy)
+        serving = policy_serving_models(policy_row)
+        if (
+            envelope_digest is None
+            or existing["body_sha256"] != receipt.body_sha256
+            or existing["envelope_digest"] != envelope_digest
+            or receipt.model not in serving
+        ):
+            return None
+        decoded, damage, _note = receipt_authority(
+            owner, policy_row, dict(existing), epoch_bound=False
+        )
+        if damage == RECEIPT_CORRUPT:
+            return None
+        if decoded is not None:
+            if (
+                decoded["verdict"] == receipt.verdict
+                and decoded["prompt_version"] == receipt.prompt_version
+                and decoded["template_sha256"] == receipt.template_sha256
+                and tuple(sorted(decoded["categories"])) == tuple(sorted(receipt.categories))
+                and decoded["model"] in serving
+            ):
+                return "replay"
+            return None
+        # STALE. Integrity of the committed row still matters: receipt_authority
+        # answers STALE before its damage checks, so run them here (all of
+        # them, m2 — not only categories): a damaged "allow" is never
+        # something to supersede quietly.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories is None:
+            return None
+        if (
+            existing["verdict"] == "allow"
+            and committed_categories == []
+            and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
+            and receipt.verdict == "allow"
+            and not receipt.categories
+            and receipt.screener_preferred is True
+            and receipt.template_sha256 == policy_row.get("template_sha256")
+            and fresh_revision == policy_row.get("revision")
+            and int(policy_row.get("epoch") or -1) == int(expected_epoch)
+        ):
+            return "supersede"
+        return None
+
     def finish_screening(
         self,
         owner: OwnerSnapshot,
@@ -9146,12 +9548,18 @@ class Store:
                 # A policy published after dispatch invalidates this proof.
                 raise StoreRefused("policy_stale", "accepted policy changed during the run")
             if receipt is not None:
+                self._ensure_receipt_rendered_template_column(conn)
                 existing = conn.execute(
-                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision "
-                    "FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
                     (key, message_id),
                 ).fetchone()
+                fresh_revision = admission_revision or _fingerprint_revision(fingerprint)
+                fresh_rendered = (
+                    rendered_template_sha256
+                    if isinstance(rendered_template_sha256, str)
+                    and _HEX64.fullmatch(rendered_template_sha256)
+                    else None
+                )
                 if existing is not None:
                     same = (
                         existing["verdict"] == receipt.verdict
@@ -9163,12 +9571,56 @@ class Store:
                         == tuple(sorted(receipt.categories))
                         and existing["envelope_digest"] == envelope_digest
                     )
-                    if not same:
+                    # Classified even when the replay tuple matches: that tuple
+                    # omits the admission revision, so an identical allow under
+                    # a MOVED revision used to "replay" onto a row every later
+                    # fence refuses as stale_proof. A damaged row that matches
+                    # still replays exactly as before (``transition`` None).
+                    transition = self._write_once_transition(
+                        conn,
+                        owner,
+                        key,
+                        existing=existing,
+                        receipt=receipt,
+                        envelope_digest=envelope_digest,
+                        fresh_revision=fresh_revision,
+                        expected_epoch=expected_epoch,
+                    )
+                    if transition == "supersede":
+                        _supersede_receipt(
+                            conn,
+                            key=key,
+                            message_id=message_id,
+                            reason=RECEIPT_SUPERSEDED_LIVE_ALLOW,
+                            attempt_id=attempt_id,
+                            head={
+                                "body_sha256": receipt.body_sha256,
+                                "template_sha256": receipt.template_sha256,
+                                "prompt_version": receipt.prompt_version,
+                                "model": receipt.model,
+                                "verdict": receipt.verdict,
+                                "categories": json.dumps(sorted(receipt.categories)),
+                                "envelope_digest": envelope_digest,
+                                "admission_revision": fresh_revision,
+                                "policy_epoch": expected_epoch,
+                                "creator_generation": owner.enrollment_generation,
+                                "created_at": time.time(),
+                                "rendered_template_sha256": fresh_rendered,
+                                "screener_preferred": 1,
+                            },
+                        )
+                    elif not same and transition != "replay":
                         # Write-once: a committed allow is never replaced by a
                         # reject (or any rewrite) through this path.
+                        _log_write_once_conflict(
+                            message_id,
+                            existing,
+                            receipt,
+                            envelope_digest=envelope_digest,
+                            admission_revision=admission_revision,
+                        )
                         raise StoreRefused("write_once_conflict", message_id)
                 else:
-                    self._ensure_receipt_rendered_template_column(conn)
                     conn.execute(
                         "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                         "template_sha256, prompt_version, model, verdict, categories, "
@@ -9192,16 +9644,11 @@ class Store:
                             # parse (R5), and a receipt must store the
                             # snapshot's own revision so cache consumption
                             # matches on it.
-                            admission_revision or _fingerprint_revision(fingerprint),
+                            fresh_revision,
                             expected_epoch,
                             owner.enrollment_generation,
                             time.time(),
-                            (
-                                rendered_template_sha256
-                                if isinstance(rendered_template_sha256, str)
-                                and _HEX64.fullmatch(rendered_template_sha256)
-                                else None
-                            ),
+                            fresh_rendered,
                             1 if receipt.screener_preferred is True else 0,
                         ),
                     )
@@ -9699,6 +10146,92 @@ class Store:
                 )
         except (sqlite3.Error, StoreRefused):
             return
+
+    #: Bounded retries of the one-statement conditional drop under ``busy``.
+    #: Each attempt already waits up to ``_BUSY_TIMEOUT_MS`` (2 s), so three
+    #: bound the stall a screening pass can take here at about 6 s.
+    _UNDECIDED_DROP_ATTEMPTS = 3
+
+    def drop_undecided_review_decision(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        hold_code: str,
+        require_verdict: str | None = None,
+    ) -> bool:
+        """Drop ONE message's review decision row only while the owner has given
+        no word on it; return whether a row was dropped. Never raises.
+
+        WHY (#4546 security review S-4). The conflict paths used to read
+        ``owner_release(...) is None`` on one connection and then call
+        ``drop_review_decision`` in a second transaction, which deletes the
+        release row too. An owner Discard committed between the two was erased:
+        the owner was told "Discarded", and the next current preferred allow
+        delivered the message. Here the "undecided" test and the delete are ONE
+        ``BEGIN IMMEDIATE`` statement (``NOT EXISTS`` over ``owner_releases``),
+        so a concurrent Discard either commits first (nothing is dropped) or
+        waits for this write. A Discard that waits was signed over the row
+        this deletes, so its own write re-checks the CURRENT row
+        (:meth:`_require_release_matches_decision`) and is refused
+        ``snapshot_stale`` instead of recording a word for a row that no longer
+        exists (#4570 security S-1). Between this delete and the caller's
+        ``record_work_scope_decision`` there is briefly NO decision row; a
+        Discard landing in that gap is refused for lack of one, which fails
+        closed (the owner re-reads and decides the new row).
+
+        BUSY (#4570 security S-2). Under write contention the statement is
+        retried ``_UNDECIDED_DROP_ATTEMPTS`` times (each attempt already waits
+        up to the store's busy timeout), then a content-free warning is logged
+        and ``False`` returned. The caller cannot reschedule the hold sooner
+        from inside the pass: the connector re-writes a ``write_once_conflict``
+        hold a day out by its code after the pass returns. So the bounded
+        retry is what keeps a Deliver-able row from outliving a current bounce,
+        and the warning is what makes a residual failure visible.
+
+        CONSTRAINTS: it never touches ``owner_releases`` — a signed word is
+        never deleted on this path. Any release row for the message counts as
+        decided, whatever its generation, because erring towards "decided" only
+        leaves a stale row in place, while erring the other way loses a word.
+        ``hold_code`` (and ``require_verdict`` when given) must still match
+        inside the same statement, so a row another pass already replaced is
+        left alone. The unscreened-rescreen drop (round 3, Q3) deliberately
+        removes a refused release and keeps using ``drop_review_decision``.
+        """
+
+        key = _owner_key(owner)
+        sql = (
+            "DELETE FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND hold_code = ? "
+            "AND NOT EXISTS (SELECT 1 FROM owner_releases r "
+            "WHERE r.owner_key = ? AND r.message_id = ?)"
+        )
+        params: list[Any] = [key, message_id, hold_code, key, message_id]
+        if require_verdict is not None:
+            sql += " AND screener_verdict = ?"
+            params.append(require_verdict)
+        for _attempt in range(self._UNDECIDED_DROP_ATTEMPTS):
+            try:
+                with self._connect() as conn:
+                    self._init(conn)
+                    self._begin_write(conn)
+                    self._require_live(conn, owner)
+                    self._ensure_work_scope_tables(conn)
+                    return conn.execute(sql, params).rowcount > 0
+            except StoreRefused as refused:
+                if refused.code != "busy":
+                    return False
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error) and "busy" not in str(error):
+                    return False
+            except sqlite3.Error:
+                return False
+        # Closed words only: no id, owner or content (DESIGN §2.2).
+        logger.warning(
+            "bridge: undecided review drop refused code=busy attempts=%d",
+            self._UNDECIDED_DROP_ATTEMPTS,
+        )
+        return False
 
     def retire_due_bare_conversation_holds(self, owner: OwnerSnapshot, *, now: float) -> list[str]:
         """Delete every DUE bare ``bcmsg_`` hold row; return the ids deleted.
@@ -10330,6 +10863,163 @@ class Store:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    # -- channel rename aliases (tool._resolve_channel_name) ------------------
+    #
+    # WHY. When a hub channel is renamed (``aws-ai-build-day`` -> ``pergamon``)
+    # agents keep addressing it by the old name and got a bare "not found". The
+    # hub deliberately keeps NO rename history and no names in its audit, so
+    # the only place an old name can be remembered is here, on the client,
+    # from what this machine has already been shown: the tenant's open
+    # conversation list, and only its TENANT-VISIBLE channels. (An inbound
+    # message's display name is deliberately NOT a writer: the body read
+    # carries no visibility, so it would make a private room's name durable
+    # and turn the "renamed or closed" refusal into an existence oracle.)
+    #
+    # CONSTRAINTS.
+    # * NAMES AND IDS ONLY. No body, sender, label or message id ever lands
+    #   here; a row is "conversation X was called N between first_seen and
+    #   last_seen". This is a deliberate, narrow exception to #2856 (durable
+    #   refs carry no display labels): the label is kept in its own table,
+    #   never in a ref or a queue key, and only for CHANNELS.
+    # * ADVISORY, NEVER AUTHORITY. A row only proposes a candidate id; the
+    #   tool re-checks that id against the LIVE list (open and tenant-visible)
+    #   before using it, so a stale or private row can never redirect a post.
+    # * TENANT-SCOPED. Every read and write names the tenant; an alias learnt
+    #   under one tenant is never consulted for another.
+    # * ADDITIVE (the ``_ensure_*`` rule, forward-only): created on first use
+    #   under the caller's write lock, no schema stamp moves, and an older
+    #   binary sharing the file simply never names the table. An absent table
+    #   reads as "no aliases known" — the state every store had before.
+    #
+    # A rename is inferred, not told: the same id seen under a NEW name key
+    # gets a new row whose ``first_seen`` is the first sighting of that name,
+    # which is when this machine learnt of the rename (an approximation of
+    # when it happened: the list is only read when a lookup runs).
+
+    _CHANNEL_ALIAS_DDL = (
+        "CREATE TABLE IF NOT EXISTS channel_aliases ("
+        "tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL, "
+        "name_key TEXT NOT NULL, display_name TEXT NOT NULL, "
+        "first_seen REAL NOT NULL, last_seen REAL NOT NULL, "
+        "PRIMARY KEY (tenant_id, conversation_id, name_key))",
+        "CREATE INDEX IF NOT EXISTS channel_aliases_by_name "
+        "ON channel_aliases (tenant_id, name_key)",
+    )
+
+    #: Bound on the rows one tenant's alias table returns to the near-match
+    #: scan. Each row is a (channel, name) pair this machine has seen, so even a
+    #: large organization with a rename history stays far below it; the bound
+    #: exists so a pathological table cannot turn a lookup into a full scan.
+    CHANNEL_ALIAS_SCAN_MAX = 2000
+
+    @classmethod
+    def _ensure_channel_alias_table(cls, conn: sqlite3.Connection) -> None:
+        for statement in cls._CHANNEL_ALIAS_DDL:
+            conn.execute(statement)
+
+    def record_channel_names(
+        self,
+        tenant_id: str,
+        sightings: Iterable[tuple[str, str]],
+        *,
+        now: float | None = None,
+    ) -> int:
+        """Remember ``(conversation_id, display_name)`` sightings of channels.
+
+        The key is :func:`channel_name_key` of the name, computed HERE so the
+        writer (the tool's tenant-visible listing) and the reader
+        (``tool._room_name_key``) cannot drift apart.
+
+        An existing (tenant, id, key) row only moves ``last_seen`` (and keeps
+        the freshest spelling); a new key for a known id is the rename record.
+        Returns the number of sightings written. Raises :class:`StoreRefused`
+        like every writer; callers treat this as best-effort.
+        """
+
+        rows = [
+            (tenant_id, cid, channel_name_key(display), display.strip())
+            for cid, display in sightings
+            if tenant_id and cid and isinstance(display, str) and channel_name_key(display)
+        ]
+        if not rows:
+            return 0
+        stamp = time.time() if now is None else now
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_channel_alias_table(conn)
+            conn.executemany(
+                "INSERT INTO channel_aliases "
+                "(tenant_id, conversation_id, name_key, display_name, first_seen, last_seen) "
+                "VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT (tenant_id, conversation_id, name_key) DO UPDATE SET "
+                "display_name = excluded.display_name, "
+                # A RETURN to an earlier name (b -> a -> b): another name of
+                # this id was seen after this row's last sighting, so the
+                # current run under this name starts now. Without the reset
+                # ``first_seen`` would keep the FIRST run's stamp and the
+                # rename would be dated before the old name was ever seen.
+                # (SQLite evaluates every SET term against the OLD row.)
+                "first_seen = CASE WHEN EXISTS (SELECT 1 FROM channel_aliases AS other "
+                "WHERE other.tenant_id = excluded.tenant_id "
+                "AND other.conversation_id = excluded.conversation_id "
+                "AND other.name_key <> excluded.name_key "
+                "AND other.last_seen > channel_aliases.last_seen) "
+                "THEN excluded.first_seen ELSE first_seen END, "
+                "last_seen = MAX(last_seen, excluded.last_seen)",
+                [(*row, stamp, stamp) for row in rows],
+            )
+        return len(rows)
+
+    def channel_alias_rows_readonly(
+        self,
+        tenant_id: str,
+        *,
+        name_key: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Alias rows of ONE tenant, read-only, newest ``last_seen`` first.
+
+        ``name_key`` narrows to every row of every id that EVER held that name
+        (the holders plus their other names, which the resolver needs to tell
+        the most recent holder and date the rename), through the
+        ``(tenant_id, name_key)`` index. That is the resolver's query on
+        purpose: an old name stops being seen at the rename, so it is the
+        OLDEST row by ``last_seen`` and the first a tenant-wide newest-first
+        scan would drop past :data:`CHANNEL_ALIAS_SCAN_MAX`.
+        ``conversation_id`` narrows to one id (the primary key's prefix).
+        Neither: the bounded tenant-wide scan, for near-match suggestions only.
+
+        Read-only on purpose: a name lookup must not create a store or the
+        table. An absent file or table is "no aliases known", not an error.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            present = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'channel_aliases'"
+            ).fetchone()
+            if present is None:
+                return []
+            where, args = "tenant_id = ?", [tenant_id]
+            if name_key is not None:
+                where += (
+                    " AND conversation_id IN (SELECT conversation_id FROM channel_aliases "
+                    "WHERE tenant_id = ? AND name_key = ?)"
+                )
+                args += [tenant_id, name_key]
+            if conversation_id is not None:
+                where += " AND conversation_id = ?"
+                args.append(conversation_id)
+            rows = conn.execute(
+                "SELECT conversation_id, name_key, display_name, first_seen, last_seen "
+                f"FROM channel_aliases WHERE {where} "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (*args, self.CHANNEL_ALIAS_SCAN_MAX),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     # -- B4b owner release (hold_release.py; DESIGN §3.3, DECISIONS D4/D7) -----
     #
     # Two ADDITIVE tables, created on first use like the answer cache and the
@@ -10675,6 +11365,39 @@ class Store:
         row["owner_key"] = _owner_key(owner)
         return row
 
+    def owner_release_history(
+        self, owner: OwnerSnapshot, *, limit: int, live_decision_ids: tuple[str, ...]
+    ) -> list[dict[str, Any]]:
+        """Recent clicks for this exact live owner, even when the hold disappears.
+
+        Connector settlement (including refusal) or a retry can retire the
+        conversation-shaped hold without erasing the signed click. Skip pending
+        clicks already presented by live items before LIMIT, so they neither
+        duplicate those items nor crowd out history. Keep the enrollment fence
+        inside the query so stale owner snapshots cannot read prior generations.
+        """
+
+        return self._work_scope_rows(
+            "SELECT r.* FROM owner_releases r WHERE r.owner_key = ? "
+            "AND r.creator_generation = ? AND (r.outcome IN ('admitted', 'rejected', ?) "
+            "OR r.outcome GLOB 'refused:?*' OR (r.outcome = 'pending' "
+            "AND r.message_id NOT IN (SELECT value FROM json_each(?)))) "
+            "AND EXISTS (SELECT 1 FROM enrollments e WHERE e.owner_key = r.owner_key "
+            "AND e.credential_id = ? AND e.tenant_id = ? AND e.endpoint_id = ? "
+            "AND e.enrollment_generation = r.creator_generation AND e.state = 'committed') "
+            "ORDER BY r.decided_at DESC, r.message_id LIMIT ?",
+            (
+                _owner_key(owner),
+                owner.enrollment_generation,
+                OWNER_RELEASE_LOCAL_TERMINAL,
+                json.dumps(live_decision_ids),
+                owner.credential_id,
+                owner.tenant_id,
+                owner.endpoint_id,
+                limit,
+            ),
+        )
+
     def record_owner_release(self, owner: OwnerSnapshot, row: Mapping[str, Any]) -> dict[str, Any]:
         """WRITE-ONCE per (owner, message). Same word again → the existing row;
         the other word → ``already_decided``. The caller verified the signature."""
@@ -10685,9 +11408,76 @@ class Store:
             self._require_live(conn, owner)
             self._ensure_work_scope_tables(conn)
             existing = self._existing_owner_release(conn, owner, row)
+            if row.get("word") == "deliver":
+                self._rearm_write_once_conflict(conn, _owner_key(owner), str(row["message_id"]))
             if existing is not None:
                 return existing
+            self._require_release_matches_decision(conn, owner, row)
             return self._insert_owner_release(conn, owner, row, outcome="pending", outcome_at=None)
+
+    @staticmethod
+    def _require_release_matches_decision(
+        conn: sqlite3.Connection, owner: OwnerSnapshot, row: Mapping[str, Any]
+    ) -> None:
+        """Refuse ``snapshot_stale`` unless the CURRENT decision row is the one signed.
+
+        WHY (#4570 security S-1, the reverse race). The desktop route reads the
+        decision row and signs over it OUTSIDE any transaction, and signing can
+        prompt the operator for seconds. A connector re-drive can replace that
+        row meanwhile (narrow an allow conflict to a Discard-only bounce, or
+        swap a conflict for a ``model_hold``). Writing the release anyway told
+        the owner "Discarded" for a row that no longer existed; the next pass
+        refused the mismatched release and screened on, and a current allow
+        delivered. Re-reading under this write lock makes sign-then-write a
+        check-and-write: the route answers 409 ``snapshot_stale``, the renderer
+        re-reads, and nothing false is reported. The match is the connector's
+        own consume-time test (``hold_release.release_matches_decision``), so
+        the two can never disagree about what "the same decision" means.
+        """
+
+        from local_operator.team_bridge import hold_release as hr
+
+        decision = conn.execute(
+            "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND creator_generation = ?",
+            (_owner_key(owner), row["message_id"], owner.enrollment_generation),
+        ).fetchone()
+        if decision is None or not hr.release_matches_decision(row, dict(decision)):
+            raise StoreRefused("snapshot_stale", "the decision changed since it was signed")
+
+    @staticmethod
+    def _rearm_write_once_conflict(conn: sqlite3.Connection, key: str, message_id: str) -> None:
+        """Make this message's ``write_once_conflict`` hold due NOW after an owner Deliver.
+
+        WHY (PR #4517 review n2, write-once fix PR-2). That code is re-driven a
+        fixed day out, and the connector's ``_hold_due`` deliberately ignores
+        any caller ``retry_at`` for it (a restart must not pull the day back to
+        a minute). An owner Deliver is exactly the event that can now commit
+        (:meth:`_owner_deliver_supersedes`), so the person should not wait up
+        to 24 h to see it go out. The re-arm writes the ROW's ``retry_at``,
+        which is what ``due_screening_holds`` reads — not ``_hold_due``'s
+        input — so that rule stays intact: if the commit still conflicts the
+        re-hold is scheduled a day out again. Only this code is touched, and
+        both spellings of the hold key (bare id and composite feed ref).
+        """
+
+        rows = conn.execute(
+            "SELECT message_id FROM screening_holds WHERE owner_key = ? AND hold_code = ?",
+            (key, "write_once_conflict"),
+        ).fetchall()
+        now = time.time()
+        for held in rows:
+            stored = str(held["message_id"])
+            try:
+                bare = screening_hold_message_id(stored)
+            except Exception:  # noqa: BLE001 — a malformed key matches its raw spelling only
+                bare = stored
+            if message_id in (stored, bare):
+                conn.execute(
+                    "UPDATE screening_holds SET retry_at = ? WHERE owner_key = ? "
+                    "AND message_id = ? AND hold_code = ?",
+                    (now, key, stored, "write_once_conflict"),
+                )
 
     def record_owner_release_local_terminal(
         self,
@@ -10751,6 +11541,9 @@ class Store:
                 raise StoreRefused(
                     "state_unavailable", "local terminal audit row already recorded"
                 ) from error
+            # #4570 security S-1: checked last so a duplicate audit row keeps
+            # its own typed refusal; raising here still rolls back both rows.
+            self._require_release_matches_decision(conn, owner, row)
             return written
 
     def _insert_local_terminal_audit(
@@ -10870,6 +11663,129 @@ class Store:
                 ),
             )
 
+    def _owner_deliver_supersedes(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        message_id: str,
+        existing: Mapping[str, Any],
+        receipt: ScreeningReceipt,
+        envelope_digest: str,
+    ) -> bool:
+        """May the owner's Deliver move a committed SCREENER allow's head?
+
+        WHY (write-once fix PR-2, Group B). An owner-release receipt carries
+        :data:`hold_release.OWNER_RELEASE_SHA256` as its template, which no
+        screener receipt can ever equal, so a Deliver on a message that already
+        had a screener allow was refused ``write_once_conflict`` forever — the
+        person agreed with the screener and still nothing went out.
+
+        Allowed only when the two AGREE (allow -> allow, same body), the
+        committed row is an ordinary screener allow (not an owner-principal or
+        owner-release one) with readable empty categories, and the signed
+        release is re-verified HERE, in this write transaction, against the
+        operator anchor — never a stored flag. The committed envelope may
+        differ (an old ref shape): the person approved the exact body and
+        envelope this commit names, which is what the signature binds. A
+        release that does not verify refuses ``proof_corrupt``: a row claiming
+        to be the owner's decision without the owner's signature is damage.
+        A reject on either side stays a conflict.
+        """
+
+        if not (
+            receipt.verdict == "allow"
+            and receipt.template_sha256 == _owner_release_sha256()
+            and self._owner_deliver_could_supersede(
+                conn, owner, key, existing, body_sha256=receipt.body_sha256
+            )
+        ):
+            return False
+        self._ensure_work_scope_tables(conn)
+        release = self._verified_release(conn, key, message_id)
+        if not (
+            release is not None
+            and release.get("verified") is True
+            and release.get("word") == "deliver"
+            and release.get("body_sha256") == receipt.body_sha256
+            and release.get("envelope_digest") == envelope_digest
+            and _receipt_int(release.get("creator_generation"), -1) == owner.enrollment_generation
+        ):
+            raise StoreRefused("proof_corrupt", "owner Deliver without a verified release")
+        return True
+
+    @staticmethod
+    def _owner_deliver_could_supersede(
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        key: str,
+        existing: Mapping[str, Any],
+        *,
+        body_sha256: str,
+    ) -> bool:
+        """The committed-row half of :meth:`_owner_deliver_supersedes` (no release read).
+
+        Shared with :meth:`write_once_conflict_deliverable`, which decides
+        whether a ``write_once_conflict`` hold is offered for owner review at
+        all, so "listed" and "a Deliver can commit" are ONE rule.
+        """
+
+        if not (
+            existing["verdict"] == "allow"
+            and existing["body_sha256"] == body_sha256
+            and existing["template_sha256"] not in (_owner_release_sha256(), OWNER_PRINCIPAL_SHA256)
+        ):
+            return False
+        # A DAMAGED committed row never supersedes (PR #4533 round 1, m2): the
+        # same two checks the screener path makes (``_write_once_transition``):
+        # ``receipt_authority`` (epoch waived) must not say CORRUPT, and, since
+        # it answers STALE before its damage checks, ``receipt_integrity`` on
+        # the row itself. Categories alone missed a malformed generation or
+        # epoch. STALE is fine: the owner's verified Deliver is exactly what
+        # replaces a stale allow.
+        committed_categories, _damage_note = receipt_integrity(dict(existing))
+        if committed_categories != []:
+            return False
+        policy = conn.execute(
+            "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
+        ).fetchone()
+        if policy is None:
+            return False
+        _decoded, damage, _note = receipt_authority(
+            owner, dict(policy), dict(existing), epoch_bound=False
+        )
+        return damage != RECEIPT_CORRUPT
+
+    def write_once_conflict_deliverable(
+        self, owner: OwnerSnapshot, message_id: str, *, body_sha256: str
+    ) -> bool:
+        """May an owner Deliver commit over this message's committed receipt?
+
+        ``hold_release.owner_reviewable`` reads this to decide whether a
+        ``write_once_conflict`` hold becomes an owner-review item: only a
+        readable SCREENER allow for exactly ``body_sha256`` qualifies (the
+        case :meth:`_owner_deliver_supersedes` lets a verified Deliver move).
+        A reject, an owner-release or owner-principal head, a damaged row, a
+        different body or no row at all answers ``False``. Read-only; any
+        store error is ``False`` (fail closed: not offered).
+        """
+
+        key = _owner_key(owner)
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                existing = conn.execute(
+                    "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
+                    (key, str(message_id)),
+                ).fetchone()
+                if existing is None:
+                    return False
+                return self._owner_deliver_could_supersede(
+                    conn, owner, key, existing, body_sha256=str(body_sha256)
+                )
+        except (sqlite3.Error, StoreRefused):
+            return False
+
     def commit_owner_release(
         self,
         owner: OwnerSnapshot,
@@ -10904,9 +11820,9 @@ class Store:
             ).fetchone()
             if policy is None or int(policy["epoch"]) != int(expected_epoch):
                 raise StoreRefused("policy_stale", "accepted policy changed before the release")
+            self._ensure_receipt_rendered_template_column(conn)
             existing = conn.execute(
-                "SELECT verdict, template_sha256, body_sha256 FROM screening_receipts "
-                "WHERE owner_key = ? AND message_id = ?",
+                "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ?",
                 (key, message_id),
             ).fetchone()
             if existing is not None:
@@ -10915,7 +11831,42 @@ class Store:
                     or existing["template_sha256"] != receipt.template_sha256
                     or existing["body_sha256"] != receipt.body_sha256
                 ):
-                    raise StoreRefused("write_once_conflict", message_id)
+                    if not self._owner_deliver_supersedes(
+                        conn, owner, key, message_id, existing, receipt, envelope_digest
+                    ):
+                        _log_write_once_conflict(
+                            message_id,
+                            existing,
+                            receipt,
+                            envelope_digest=envelope_digest,
+                            admission_revision=str(policy["revision"]),
+                            path="owner_release",
+                        )
+                        raise StoreRefused("write_once_conflict", message_id)
+                    _supersede_receipt(
+                        conn,
+                        key=key,
+                        message_id=message_id,
+                        reason=RECEIPT_SUPERSEDED_OWNER_DELIVER,
+                        attempt_id=None,
+                        head={
+                            "body_sha256": receipt.body_sha256,
+                            "template_sha256": receipt.template_sha256,
+                            "prompt_version": receipt.prompt_version,
+                            "model": receipt.model,
+                            "verdict": receipt.verdict,
+                            "categories": json.dumps(sorted(receipt.categories)),
+                            "envelope_digest": envelope_digest,
+                            "admission_revision": str(policy["revision"]),
+                            "policy_epoch": int(expected_epoch),
+                            "creator_generation": owner.enrollment_generation,
+                            "created_at": time.time(),
+                            # As a first-time owner-release INSERT writes them:
+                            # no prompt was rendered and no model answered.
+                            "rendered_template_sha256": None,
+                            "screener_preferred": None,
+                        },
+                    )
             else:
                 conn.execute(
                     "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "

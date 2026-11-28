@@ -83,8 +83,44 @@ def session_cwd(session: Any) -> str:
 
 async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
     from local_operator.headless_print import run_print_mode
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
     from local_operator.session.runtime.exec_control import start_exec_control
 
+    # An exec run's calls follow each other within seconds and it ends at the
+    # turn's end, so its main thread keeps the 5m prompt-cache TTL (see
+    # ``AUTOMATION_LONG_GAP_1H_THRESHOLD_S``). Covers the foreground run and the
+    # ``--background`` worker, which both land here.
+    #
+    # NOT a ``--workstream`` run: that is a long-lived, listed session an agent
+    # manages and the operator engages later, so it idles like a main thread.
+    # Replayed on this machine's ledger (600 agent-workstream sessions, 128,990
+    # turn calls): the first >= 240 s gap is a median 834 s and 283 sessions hit
+    # one, so 5m-until-the-gap saves ~33.8M base-equivalent tokens of 1h writes
+    # but costs ~44.9M in rewrites at the gap. The foreground, solo QA runs
+    # measured for this rule (56 ledgers, max start-to-start gap 28 s) never
+    # latched.
+    #
+    # NOT a run with a ``team`` attached either: its manager's turn ends while
+    # its subagents work and a wake opens the next turn minutes later, which is
+    # the idle gap the main thread's 1h exists for. Replayed on this machine's
+    # exec-jobs ledger (agent review round 1, MAJOR-1), team-led exec runs
+    # netted -1.66M base-equivalent under 5m-until-the-gap (57 jobs, median
+    # first long gap 638 s) while solo runs were roughly neutral to positive.
+    #
+    # The team may be the SESSION'S, not the argument's: ``Session.__init__``
+    # -> ``_restore_attachment`` re-attaches a stored team on resume, and
+    # ``exec --resume <id>`` without ``--team`` (how the ``sessions`` tool
+    # resumes) passes ``team=None``. A restore waiting on its definition
+    # (``_unresolved_team``) attaches on the next turn, so it counts as a team
+    # too. Replayed (agent review round 2): resumed team-restored jobs netted
+    # -3.89M base-equivalent when marked (594 jobs); resumed solo +2.69M (128).
+    if (
+        not getattr(args, "workstream", False)
+        and team is None
+        and getattr(session, "active_team", None) is None
+        and not getattr(session, "_unresolved_team", "")
+    ):
+        mark_automation_session(session)
     control = None
     try:
         apply_startup(session, args, team)

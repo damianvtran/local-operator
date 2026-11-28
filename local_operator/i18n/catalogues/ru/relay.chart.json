@@ -1,0 +1,13 @@
+{
+  "relay.chart.also": "Также: {items}",
+  "relay.chart.axis_value": "{label}: {value}",
+  "relay.chart.data_toggle": "Данные диаграммы",
+  "relay.chart.more": "ещё {count}",
+  "relay.chart.no_data": "Нет данных",
+  "relay.chart.other": "Другое ({count})",
+  "relay.chart.position": "{index} из {count}",
+  "relay.chart.right_axis": "{label} · правая ось",
+  "relay.chart.role": "диаграмма",
+  "relay.chart.share": "{share} от общего",
+  "relay.chart.total": "Итого"
+}

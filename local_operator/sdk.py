@@ -106,6 +106,10 @@ if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     )
     from local_operator.i18n.messages import Msg
     from local_operator.output_contract import MarkdownSchema, decode_output
+    from local_operator.research_evidence import (
+        AuxiliaryUsageReceipt,
+        PublicResearchPolicy,
+    )
     from local_operator.session.protocol import (
         OwningSessionProtocol,
         SessionProtocol,
@@ -124,6 +128,10 @@ if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
 __all__ = [
     "AgentEvent",
     "ApprovalPolicy",
+    "AuxiliaryUsageReceipt",
+    "PublicResearchPolicy",
+    "auxiliary_usage",
+    "raw_public_evidence",
     "EngageOutcome",
     "Errand",
     "EventHandler",
@@ -162,6 +170,8 @@ __all__ = [
 #: every name here resolves and that ``import local_operator.sdk`` leaves the
 #: heavy set absent.
 _LAZY_REEXPORTS: dict[str, str] = {
+    "AuxiliaryUsageReceipt": "local_operator.research_evidence",
+    "PublicResearchPolicy": "local_operator.research_evidence",
     "PromptErrand": "local_operator.session.runtime.launch",
     "SteerErrand": "local_operator.session.runtime.launch",
     "PeerMessageErrand": "local_operator.session.runtime.launch",
@@ -753,6 +763,27 @@ async def _build_session(
             )
         return session
 
+    # A programmatically driven session: same TTL reasoning as exec
+    # (``exec_session.run_session``). A caller that idles between deliveries
+    # trips the long-gap rule once and is back on the main-thread 1h. A
+    # ``workstream`` spec, and a session with a team attached (its manager idles
+    # while subagents work), are excluded for the same measured reasons as
+    # exec's. Only this in-process owner is marked: ``spawn_session`` /
+    # ``deliver`` sessions run in a runtime process and keep the normal rules.
+    from local_operator.providers.anthropic_cache_ttl import mark_automation_session
+
+    #
+    # A ``SessionSpec(resume=…)`` carries no ``team``, but the constructor's
+    # attachment restore has already re-attached the session's stored team
+    # (or recorded it as ``_unresolved_team`` until its definition lands), so
+    # the live session is checked too (agent review round 2, MAJOR-1).
+    if (
+        not spec.workstream
+        and team is None
+        and getattr(session, "active_team", None) is None
+        and not getattr(session, "_unresolved_team", "")
+    ):
+        mark_automation_session(session)
     if team is not None:
         session.attach_team(team)
     if spec.profile:
@@ -822,6 +853,8 @@ async def _build_session(
     # (``session/declared_mcp_ready.py``); this tells it an SDK owner wants
     # every configured server, not just declared ones, or (None) no wait.
     session.set_first_turn_mcp_wait(spec.mcp_ready_timeout_s)
+    if spec.public_research is not None:
+        session.set_public_research(spec.public_research)
     _install_approval_policy(session, spec.approvals)
     return session
 
@@ -1098,6 +1131,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
             ("goal", spec.goal),
             ("birth_effort", spec.birth_effort),
             ("world_root", spec.world_root),
+            ("public_research", spec.public_research),
         )
         if value is not None
     ]
@@ -1165,6 +1199,7 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
             ("name", spec.name),
             ("goal", spec.goal),
             ("world_root", spec.world_root),
+            ("public_research", spec.public_research),
         )
         if value not in (None, False)
     ]
@@ -1360,6 +1395,34 @@ async def deliver(
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
+
+
+async def auxiliary_usage(session: Any) -> list[AuxiliaryUsageReceipt]:
+    """Read the owning session's durable auxiliary receipts, once per request ID.
+
+    Add these to ordinary assistant usage, not to a total from the request
+    ledger (which already counts them). ``usage is None`` is unknown, not zero.
+    ``journal_error`` identifies a live-only completion; after restart its
+    durable start reads as unknown. An unreadable journal raises, not [].
+    """
+    from local_operator.research_evidence import read_receipts
+
+    receipts = {row.request_id: row for row in await read_receipts(session.transcript)}
+    conditioner = getattr(session, "_public_evidence", None)
+    if conditioner is not None:
+        receipts.update(conditioner.unpersisted_receipts)
+    return list(receipts.values())
+
+
+async def raw_public_evidence(session: Any, tool_call_id: str) -> str | None:
+    """Recover the exact redacted tool text replaced by an accepted selection.
+
+    This does not fetch again or bypass upstream pagination. None means no
+    selected result was retained for this tool call.
+    """
+    from local_operator.research_evidence import read_original
+
+    return await read_original(session.transcript, tool_call_id)
 
 
 class SessionEventStream:

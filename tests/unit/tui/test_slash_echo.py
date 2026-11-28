@@ -50,6 +50,7 @@ ECHO_POLICY = {
     # refused by the handler rather than run, so no user row is ever owed.
     "keys": False,
     "mobile": False,  # infrastructure status is its own receipt, never model input
+    "guard": False,  # opens the Radient Guard screen; a person's choice, never model input
     # Same rule, one noun over: the listing or the receipt IS the answer, and the
     # family's output goes to a block (a multi-line receipt) or a notice (one
     # sentence), never into a prompt.
@@ -233,6 +234,7 @@ PROMPT_POLICY = {
     "mobile": False,
     # A selector: the id names a row of the ask list, never words a model is told.
     "ask": False,
+    "guard": False,
     # Not a prompt: the argument is a peer's name (or `remote <peer>`), and the
     # trailing text of the remote form becomes the REMOTE session's first prompt —
     # it is never consumed as this terminal's own prompt, so engaging `/new`

@@ -40,11 +40,57 @@ def _wake_rows(session: Session):
 @pytest.mark.asyncio
 async def test_wake_right_after_operator_turn_is_parked_not_delivered(tmp_path, monkeypatch):
     """Cell (c): prompt(q) then deliver wake -> only 1 request, no wake row
-    before W; after W the wake IS delivered (idle guarantee)."""
+    before W; after W the wake IS delivered (idle guarantee).
+
+    THE QUIET WINDOW IS DRIVEN BY THE TEST, NOT THE WALL CLOCK, for the reason
+    spelled out on ``test_parked_wake_emits_no_receipt_until_delivery`` below:
+    this cell parked or not depending on how long the host took between the
+    operator turn ending and the park predicate reading ``time.time()``. That
+    gap is unbounded — it contains the rest of the turn-end ``finally``, the
+    ``prompt()`` return, and ``_deliver_wake``'s own preamble (dirty-mark,
+    lazy imports, text formatting) — so a 0.3 s window was a bet on load, not
+    a property of the code: under shard contention the wake delivered instead
+    of parking and this assertion read ``assert {}``. So W here is a hang
+    ceiling (no runner stalls an hour), and the deadline's own sleep toward
+    ``last_end + W`` is held on an event the test sets: "the window has
+    elapsed" is a step the test takes, never a race it hopes to win. The
+    parked assertions are read while the deadline is PROVEN armed and holding
+    the batch, which is strictly stronger than sampling 0.05 s after the fire.
+
+    That hold is what makes the negative control matter, and it was run when
+    this was fixed: a held deadline could in principle hide a lost assertion,
+    so parking was forced off (``_operator_active`` -> False, the real
+    delivery path) and this test was shown to fail — it still fails when
+    parking is gone.
+    """
+    import sys
+
     import local_operator.session.session as sess_mod
 
-    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 0.3)
-    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+    quiet_s = 3600.0
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", quiet_s)
+    # Cap well past the window so the deadline's target is the quiet window.
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 2 * quiet_s)
+
+    window_elapsed = asyncio.Event()
+    deadline_armed = asyncio.Event()
+    held_delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _hold_until_window_elapses(delay: float) -> None:
+        held_delays.append(delay)
+        deadline_armed.set()
+        await window_elapsed.wait()
+
+    def _sleep(delay: float, *args, **kwargs):
+        # Only the parked-wake deadline's sleep is held, identified by its
+        # caller frame so the session's other sleeps (and this test's) keep
+        # real timing. A plain function, so frame 1 IS the awaiting coroutine.
+        if sys._getframe(1).f_code.co_name == "_parked_wake_deadline":
+            return _hold_until_window_elapses(delay)
+        return real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
 
     stream = ScriptedStream(
         [
@@ -56,20 +102,25 @@ async def test_wake_right_after_operator_turn_is_parked_not_delivered(tmp_path, 
 
     await session.prompt("q")
     assert len(stream.requests) == 1
+    assert (
+        session._last_operator_turn_end is not None
+    ), "the operator turn did not open the quiet window — parking keys on it"
 
     await session._deliver_wake(_due())
-    # Parked: no second turn, no wake row, still only one request.
-    # Event-driven, not a sleep race: the deadline fires at last_end + W,
-    # deadlines are cancelled on dispose, so count requests from the loop
-    # itself — no request may appear before the deadline fires.
-    await asyncio.sleep(0.05)
+    # Parked: the deadline is armed and HOLDING the batch, so "no second turn,
+    # no wake row" is read while delivery is provably not due.
     assert session._parked_wakes, "expected the wake to park"
+    await asyncio.wait_for(deadline_armed.wait(), timeout=10.0)
+    # Aimed at last_end + W (the cap is 2W away), not at the cap.
+    assert quiet_s - 60 < held_delays[0] <= quiet_s, held_delays
     assert len(stream.requests) == 1, f"parked wake spawned a turn early: {len(stream.requests)}"
     assert _wake_rows(session) == [], f"wake row persisted before W: {_wake_rows(session)}"
 
     # After W the deadline fires and the wake is delivered as its own turn.
+    window_elapsed.set()
     await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
     assert _wake_rows(session), "wake row never persisted after W"
+    assert not session._parked_wakes, "parked batch left behind after delivery"
     await session.dispose()
 
 

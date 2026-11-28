@@ -260,7 +260,7 @@ def test_slim_keeps_names_and_imperatives_and_drops_furniture() -> None:
     # Names and the protocol imperatives survive byte-identically...
     assert "- repository-testing: " in slim
     assert "- minerva-router: " in slim
-    assert "MUST read `guide://<name>` before acting" in slim
+    assert "you MUST read an applicable guide via `guide://<name>`" in slim
     assert "skills are virtual resources" in slim
     # ...and the repeated furniture is gone.
     assert "<mcps>" not in slim

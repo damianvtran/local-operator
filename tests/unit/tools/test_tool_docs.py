@@ -369,7 +369,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # ask_withdraw 378 -> 389 (+11, PR #4326 QA Q-F2): the two moot examples
     # system.md does not carry ("you found the answer yourself or the work moved
     # on") return to the description; same printed table, nothing else moved.
-    "ask": 1222,
+    # RE-MEASURED (pending sign-in handoff, session a64fec9430f3): 1222 -> 1253
+    # (+31), the `browser_handoff` field that keys a tab hold to one ask.
+    # Measured through this test's own printed table; no other entry moved.
+    "ask": 1253,
     "ask_withdraw": 389,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
@@ -497,7 +500,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # "teammates use bridge" (restated by the ONE-channel sentence) and the
     # ``to`` hint's "or substring" (implied by WHOLE), paying for the emoji hint.
     # File-read admission guidance, paid for by deduplicating existing prose.
-    "bridge": 1992,
+    # channel_history says replies are excluded and names channel_thread (+9).
+    "bridge": 2001,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -621,7 +625,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 157, schema 2,270 -> 2,259 chars) so this doc's growth is paid for on the
     # always-loaded arm, which is why ``bench_context_budget.py`` was re-measured
     # to a PASS at 97,038 chars / 34,906 billed (29 headroom) rather than raised.
-    "generate_image": 984,
+    "generate_image": 985,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
@@ -683,6 +687,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ratchet and their detail moved here, to the on-demand doc.
     "glob": 224,
     "grep": 472,
+    "guard": 205,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
     # actions plus the preview-first/confirm/selection contract. Measured with
     # this test's canonical isolated renderer; no existing entry moved. Round-1
@@ -705,7 +710,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``model_choice=model`` a tier needs (+), net of trimming the ``model``
     # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
     # budget (-). Re-measured.
-    "hub": 875,
+    # 875 -> 876 (PR #4566): the ``peek`` range blurb now spells the bare
+    # ``'start[-]'`` form the parser accepts. Re-measured via this test's print.
+    "hub": 876,
     "integrations": 501,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
@@ -769,7 +776,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
     # "ask with a short summary plus the proposal id" sentence.
     "profile_proposal": 131,
-    "read": 345,
+    # 345 -> 344 (PR #4566): the ``range`` blurb names the bare ``'start[-]'``
+    # form and drops "read". Re-measured via this test's print.
+    "read": 344,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
     # it exists to avoid a bypass, not to be a second file browser.
@@ -831,7 +840,23 @@ MEASURED_TOKENS: dict[str, int] = {
     # on the merged tree; it is the ONLY entry that moved, and the soft-cap
     # assertion above it still holds. The schema-side cost of the same op is
     # the context-budget bench's ledger, not this one.
-    "sessions": 890,
+    # RE-MEASURED 2026-11-23 (stop `force`, runtime memory-runaway incident):
+    # 890 -> 915. The delta is the `force` input in `stop`'s row plus its
+    # summary/refusal clauses naming when the escalation is legitimate — the
+    # reference is where that contract belongs (the schema field stays one
+    # clause). Measured through this test's own printed table; the ONLY entry
+    # that moved.
+    # RE-MEASURED for that PR's round-1 remediation (#4519, R2/U8): 915 -> 906.
+    # The stop row's `force` clause and refusal were tightened, and the
+    # `force`/`peer`/`include_stored` field clauses shortened (same meaning) to
+    # bring `scripts/bench_context_budget.py` back under its budget. The ONLY
+    # entry that moved.
+    # RE-MEASURED 2026-11-25 (remote list paging): 906 -> 924. `list` gains the
+    # `cursor` input and its refusal clause (a remote `query` is forwarded, a
+    # `cursor` needs `peer`). Round-1 remediation trimmed the `sessions` field
+    # clauses to bring `context-budget` back under budget: 924 -> 905, measured
+    # through this test's own printed table; the ONLY entry that moved.
+    "sessions": 905,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -904,7 +929,23 @@ MEASURED_TOKENS: dict[str, int] = {
     "web_read": 221,
     # RE-MEASURED (web-research-speed): 189 -> 193 — "with `query`" steers the
     # follow-up fetch of a result toward a passage preview.
-    "web_search": 193,
+    # RE-MEASURED (radient native search chain, PR #4553): 193 -> 196 — the
+    # ``radient`` provider id joins the rendered ``provider`` enum. The only
+    # entry that moved; measured through this test's own printed table.
+    # RE-MEASURED (native search vendors, PR #4569): 196 -> 208 — the
+    # ``provider`` enum gains openai/anthropic/xai/alibaba. Deliberate: a
+    # native vendor the model cannot force is not selectable at all.
+    # RE-MEASURED (native-search family, PR2 part B): 208 -> 222 (+14) — the
+    # enum gains google/kimi/zai/mistral/openrouter, for the same reason.
+    # RE-MEASURED (PR #4569 context-budget offset): 222 -> 208 (-14) — the
+    # description drops its "Use provider only for a specific enabled source"
+    # sentence, which repeated the ``provider`` parameter's own description,
+    # and tightens the parallel-batching line; pays for the enum growth above.
+    # RE-MEASURED (PR #4569 second offset, after main grew +14 chars of
+    # instructions): 208 -> 201 (-7) — "load balancing" kept only in the
+    # ``provider`` description, ``max_results`` drops "Maximum" (the schema
+    # carries the bound), tighter fetch/parallel wording. Enum unchanged.
+    "web_search": 201,
     "write": 137,
 }
 

@@ -26,6 +26,7 @@ from local_operator.team_bridge import screening
 from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V2_SHA256,
     SCREENING_VERSION_V2,
+    TeamBridgeClient,
 )
 from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
 from local_operator.team_bridge.types import OwnerSnapshot
@@ -957,6 +958,243 @@ def api(rig, monkeypatch):
     return config_dir, store, owner, call
 
 
+@pytest.mark.parametrize(("word", "outcome"), [("deliver", "admitted"), ("discard", "rejected")])
+def test_routes_keep_verified_closed_holds_in_history(api, monkeypatch, word, outcome) -> None:
+    config_dir, store, owner, call = api
+    server, wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    params = {"expected_account_id": "acc_recv"}
+    path = "/v1/desktop/team-bridge/holds"
+    before = call("GET", path, params=params).json()["result"]
+    (live,) = before["items"]
+    assert live["actionable"] is True
+
+    assert call("POST", f"{path}/{MESSAGE_ID}/{word}", json=_body()).status_code == 200
+    pending = call("GET", path, params=params).json()["result"]
+    assert pending.get("history", []) == []
+    assert run()["action"] == ("delivered" if word == "deliver" else "rejected")
+    assert len(server.admits) == 1 and len(wakes) == (word == "deliver")
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == outcome
+    closed = call("GET", path, params=params)
+    assert closed.status_code == 200
+    assert closed.json()["result"]["items"] == []
+    (item,) = closed.json()["result"].get("history", [])
+    assert item["message_id"] == MESSAGE_ID and item["conversation_id"] == CONVERSATION_ID
+    assert item["decision"]["word"] == word and item["decision"]["outcome"] == outcome
+    assert item["seq"] is None and item["thread_root_id"] is None
+    no_controls = ("actionable", "releasable", "can_deliver", "can_discard")
+    assert all(item[key] is False for key in no_controls)
+    assert item.get("discard_receipt") is None and item["deliver_until"] is None
+    assert not {"body", "body_sha256", "signature", "envelope_digest", "categories"} & item.keys()
+    assert call("GET", path, params=params, auth=False).status_code == 401
+    assert call("GET", path, params={"expected_account_id": "acc_other"}).status_code == 409
+
+    # Changing even metadata covered by the signature must remove the row, not
+    # leave a forged conversation link or borrow it from an unsigned source.
+    with store._connect() as conn:
+        conn.execute("UPDATE owner_releases SET conversation_id = 'bcv_forged12'")
+    assert call("GET", path, params=params).json()["result"]["history"] == []
+
+
+@pytest.mark.parametrize("outcome", ["refused", "pending"])
+def test_routes_keep_a_signed_click_when_its_hold_disappears(api, monkeypatch, outcome) -> None:
+    from local_operator.team_bridge.client import BridgeRefusal
+    from tests.unit.team_bridge.test_conversation_delivery import FakeWire
+
+    config_dir, store, owner, call = api
+    server, wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    path = "/v1/desktop/team-bridge/holds"
+    params = {"expected_account_id": owner.account_id}
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    assert call("POST", f"{path}/{MESSAGE_ID}/deliver", json=_body()).status_code == 200
+    before = call("GET", path, params=params).json()["result"]
+    (live,) = before["items"]
+    assert live["decision"]["outcome"] == "pending" and not live["actionable"]
+    assert before["history"] == []  # A still-visible click does not take a history slot.
+
+    async def unavailable(*_a, **_kw):
+        raise BridgeRefusal("unavailable", "synthetic admission outage", http_status=503)
+
+    with monkeypatch.context() as transient:
+        if outcome == "pending":
+            transient.setattr(FakeWire, "conversation_admit", unavailable)
+            result = run()
+            assert (result["action"], result["code"]) == ("hold", "conversation_failed")
+            assert not server.admits
+        else:
+            _setting(config_dir, False)
+            assert run()["action"] == "rejected"
+            assert [r["verdict"] for r in server.admits] == ["reject"]
+    assert not wakes
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert release["outcome"] == ("refused:hold_release_off" if outcome == "refused" else outcome)
+    assert hr.verify_row(release, hr.anchor_spki(config_dir)[0])
+
+    response = call("GET", path, params=params)
+    assert response.status_code == 200
+    payload = response.json()["result"]
+    assert payload["items"] == []
+    (item,) = payload["history"]
+    assert (item["message_id"], item["conversation_id"]) == (MESSAGE_ID, CONVERSATION_ID)
+    assert set(item["decision"]) == {"word", "decided_at", "outcome"}
+    assert (item["decision"]["word"], item["decision"]["outcome"]) == ("deliver", outcome)
+    assert all(not item[k] for k in ("releasable", "actionable", "can_deliver", "can_discard"))
+    assert item["deliver_until"] is None and "discard_receipt" not in item
+
+    if outcome == "pending":
+        assert run()["action"] == "delivered"
+        assert [r["verdict"] for r in server.admits] == ["allow"]
+        later = call("GET", path, params=params).json()["result"]["history"]
+        assert [r["decision"]["outcome"] for r in later] == ["admitted"]
+    else:
+        # The history fallback does not bypass verification for a refused click.
+        with store._connect() as conn:
+            conn.execute("UPDATE owner_releases SET conversation_id = 'bcv_forged12'")
+        assert call("GET", path, params=params).json()["result"]["history"] == []
+
+
+def test_routes_prefer_verified_refusal_settled_after_the_live_scan(api, monkeypatch) -> None:
+    config_dir, store, owner, call = api
+    server, wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    params = {"expected_account_id": owner.account_id}
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    assert call("POST", f"{HOLDS}/{MESSAGE_ID}/deliver", json=_body()).status_code == 200
+    before = call("GET", HOLDS, params=params).json()["result"]
+    assert [(r["message_id"], r["decision"]["outcome"]) for r in before["items"]] == [
+        (MESSAGE_ID, "pending")
+    ]
+    assert before["history"] == []
+
+    read_history = Store.owner_release_history
+
+    def settle_then_read(self, owner, **kwargs):
+        # The production query receives IDs from the live scan. Settle only
+        # once that scan demonstrably saw this click as still pending.
+        assert kwargs["live_decision_ids"] == (MESSAGE_ID,)
+        _setting(config_dir, False)
+        assert run()["action"] == "rejected"
+        assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "refused:hold_release_off"
+        return read_history(self, owner, **kwargs)
+
+    with monkeypatch.context() as race:
+        race.setattr(Store, "owner_release_history", settle_then_read)
+        response = call("GET", HOLDS, params=params)
+    assert response.status_code == 200
+    during = response.json()["result"]
+    assert [(r["message_id"], r["decision"]["outcome"]) for r in during["history"]] == [
+        (MESSAGE_ID, "refused")
+    ]
+    assert during["items"] == []
+    assert [r["verdict"] for r in server.admits] == ["reject"] and not wakes
+    after = call("GET", HOLDS, params=params).json()["result"]
+    assert (after["items"], after["history"]) == ([], during["history"])
+
+
+@pytest.mark.parametrize("during_read", [False, True], ids=["at-entry", "during-read"])
+def test_routes_refuse_a_reused_oauth_pin_for_another_account(
+    api, monkeypatch, during_read
+) -> None:
+    from contextlib import closing
+
+    from httpx import MockTransport
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.team_bridge import client as tb_client
+
+    config_dir, store, owner, call = api
+    _, _, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    path = "/v1/desktop/team-bridge/holds"
+    current = {"expected_account_id": owner.account_id}
+    reused = {"expected_account_id": "acc_other"}
+    auth_db = config_dir / "auth.db"
+
+    def no_hub(_request):
+        raise AssertionError("local hold routes must not call the hub")
+
+    with closing(AuthStore(db_path=auth_db, config_dir=config_dir)) as auth:
+        data = {
+            "type": "oauth",
+            "access": "synthetic-access",
+            "expires": int((time.time() + 3600) * 1000),
+            "account_id": owner.account_id,
+            "org_id": owner.tenant_id,
+            "api_endpoint": owner.canonical_base_url,
+        }
+        row = auth._upsert_credential_metadata("radient", data, _notify=False)
+        with closing(sqlite3.connect(auth_db)) as conn, conn:
+            conn.execute(
+                "UPDATE auth_credentials SET id = ? WHERE id = ?", (owner.credential_id, row.id)
+            )
+
+        def new_wire(config_dir):
+            return TeamBridgeClient(config_dir, store=auth, transport=MockTransport(no_hub))
+
+        monkeypatch.setattr(tb_client, "TeamBridgeClient", new_wire)
+
+        def sign_in(account_id):
+            # Model a restored auth DB by changing the OAuth identity in place
+            # without changing the Bridge enrollment or the reused numeric pin.
+            with closing(sqlite3.connect(auth_db)) as conn, conn:
+                conn.execute(
+                    "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                    (json.dumps(dict(data, account_id=account_id)), owner.credential_id),
+                )
+            access = asyncio.run(new_wire(config_dir).current_access())
+            assert (access.account_id, access.credential_id) == (account_id, owner.credential_id)
+
+        assert run()["code"] == hr.WORK_SCOPE_HOLD
+        assert call("POST", f"{path}/{MESSAGE_ID}/discard", json=_body()).status_code == 200
+        assert run()["action"] == "rejected"
+        before = call("GET", path, params=current)
+        assert before.status_code == 200
+        assert [r["message_id"] for r in before.json()["result"]["history"]] == [MESSAGE_ID]
+
+        if during_read:
+            from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+            worker_read = holds.list_holds
+            worker_history = []
+
+            def read_then_swap(config_dir, captured_owner):
+                payload = worker_read(config_dir, captured_owner)
+                worker_history.extend(r["message_id"] for r in payload["history"])
+                sign_in("acc_other")
+                assert store.active_owner_readonly() == owner
+                return payload
+
+            with monkeypatch.context() as race:
+                race.setattr(holds, "list_holds", read_then_swap)
+                refused = call("GET", path, params=current)
+            assert worker_history == [MESSAGE_ID]
+            assert refused.status_code == 409 and "result" not in refused.json()
+            assert MESSAGE_ID not in refused.text
+            assert refused.json()["detail"]["code"] == "history_context_unavailable"
+            sign_in(owner.account_id)
+            restored = call("GET", path, params=current)
+            assert restored.status_code == 200
+            assert restored.json()["result"]["history"] == before.json()["result"]["history"]
+            return
+
+        active = "bcmsg_abcdef02"
+        _screen(config_dir, owner, Runner(NEW_WORK), item=_item(message_id=active))
+        sign_in("acc_other")
+        assert call("GET", path, params=current).json()["detail"]["code"] == "account_mismatch"
+        refused = call("GET", path, params=reused)
+        assert refused.status_code == 409 and "result" not in refused.json()
+        assert refused.json()["detail"]["code"] == "history_context_unavailable"
+        for word in ("deliver", "discard"):
+            refused = call("POST", f"{path}/{active}/{word}", json=_body(**reused))
+            assert refused.status_code == 409
+            assert refused.json()["detail"]["code"] == "history_context_unavailable"
+            assert store.owner_release(owner, active) is None
+        sign_in(owner.account_id)
+        assert (
+            call("GET", path, params=current).json()["result"]["history"]
+            == before.json()["result"]["history"]
+        )
+        assert call("POST", f"{path}/{active}/deliver", json=_body()).status_code == 200
+
+
 def _body(**overrides: Any) -> dict[str, Any]:
     body = {
         "expected_account_id": "acc_recv",
@@ -1653,6 +1891,14 @@ def test_an_expired_unconfirmable_discard_settles_locally_with_an_audit_row(
     (after,) = _listed(call)
     assert after["actionable"] is False and after["discard_receipt"] is None
     assert after["decision"]["outcome"] == LOCAL_TERMINAL
+    # The local-only result is already history even if its old hold has not
+    # been cleared by the connector. The additive listing does not change it.
+    (history,) = call("GET", HOLDS, params={"expected_account_id": "acc_recv"}).json()["result"][
+        "history"
+    ]
+    assert history["message_id"] == MESSAGE_ID and history["actionable"] is False
+    assert history["decision"]["outcome"] == LOCAL_TERMINAL
+    assert "discard_receipt" not in history
     # Idempotent: the same Discard answers the same row; one audit row.
     again = call(
         "POST", f"{HOLDS}/{MESSAGE_ID}/discard", json=_receipt_body(item["discard_receipt"])

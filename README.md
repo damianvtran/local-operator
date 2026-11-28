@@ -76,9 +76,13 @@ your chief of staff, says hello and helps you set up your first agents and
 teams. `esc` stops the agent, `/help` lists commands, `lop update` upgrades.
 
 <p align="center">
-  <img src="./static/ui-desktop-app.png" alt="The Local Operator desktop app: a navigation rail with chats, agents and teams, a session transcript with tool receipts, and a run pane with subagents and a to-do list" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./static/team-run-hero-2x-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="./static/team-run-hero-2x-light.webp">
+    <img src="./static/team-run-hero-2x-light.webp" alt="Local Operator desktop demo: the sidebar lists the Product team and its agents, the manager coordinates checkout recovery, and a draft is open in the inset composer." width="720">
+  </picture>
 </p>
-<p align="center"><i>Desktop app</i></p>
+<p align="center"><i>Staged desktop UI demo: the Product team’s manager splits checkout recovery work among UX, design, and coding agents.</i></p>
 
 <p align="center">
   <img src="./static/tui-welcome.png" alt="The Local Operator terminal UI welcome screen with tips and the composer ready for a first prompt" width="860">

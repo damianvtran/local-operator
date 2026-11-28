@@ -634,6 +634,9 @@ class Config:
             model_name (str): Name of the AI model to use
             rag_enabled (bool): Whether RAG is enabled
             auto_save_conversation (bool): Whether to automatically save the conversation
+            mentioned_file_serving (bool): Whether this device's relay serves
+                ``net_mentioned_file`` (files a transcript names, outside the
+                scratchpad) to approved peers; off by default
             tool_approval_mode (str): Interactive tool-approval default, ask or auto
             shell_environment (Dict): What a child process the MODEL asks for may
                 see of this process's own environment. mode is inherit (the
@@ -772,6 +775,14 @@ DEFAULT_CONFIG = Config(
             # conversation's own stored selection outranks it.
             "model_effort": "",
             "auto_save_conversation": False,
+            # Serve files a TRANSCRIPT names (outside the session scratchpad) to
+            # a peer holding this owner's live file-device approval
+            # (``network/mentioned_file_serve.py``). OFF by default because it
+            # widens what leaves this device beyond ``net_file_get``'s PAD and
+            # attachments; with it off ``files.install`` registers no op and never
+            # imports the serving primitive. Read once, when the relay installs its
+            # slices: changing it takes a relay restart.
+            "mentioned_file_serving": False,
             # The tool-approval mode a NEW interactive session opens in, written
             # by ``/approvals default <mode>`` and read by the TUI at mount.
             # ``ask`` (prompt before write/exec tools) or ``auto`` (run them
@@ -825,7 +836,11 @@ DEFAULT_CONFIG = Config(
             # moves to 1h after one of its turns streamed >= 240 s, because
             # that call outlived its own 5m prefix; see
             # `SUBAGENT_LONG_CALL_1H_THRESHOLD_S`). An explicit subagent size
-            # opt-in (the key below) still applies.
+            # opt-in (the key below) still applies. A `lop exec` / SDK main
+            # thread is 5m on every credential until two of its turn requests
+            # are >= 240 s apart, then follows these rules; workstream and
+            # team-led runs are not marked. Measured solo runs' calls follow
+            # within seconds (`AUTOMATION_LONG_GAP_1H_THRESHOLD_S`).
             #
             # `providers.anthropic.subagent_cache_ttl_1h_min_context_tokens`:
             # the same size gate for DELEGATED turns (subagents), on any

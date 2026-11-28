@@ -5975,6 +5975,161 @@ async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_settings_team_rows_route_every_word_through_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The team facts/summary words are catalogue copy, never English literals.
+
+    zh-CN frames (2026-11-23) showed `6 members · alias: lop` and `no description`
+    in English on the settings pane: the member count was a hand-rolled plural and
+    the alias label and empty summary were literals. With the resolver swapped for
+    one that echoes the message id, every word must come back as an id, and the
+    user-typed alias names must pass through untouched. English is pinned too.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from local_operator.tui import app as app_module
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(name="solo", description="", manager="manager", aliases=["s1", "s2"])
+    )
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        assert await _settle(pilot, lambda: app._session is session), "session never bound"
+        english = app._settings_team_rows()
+        monkeypatch.setattr(
+            app_module, "_t", lambda msg: f"<{msg.code}:{msg.params.get('aliases', '')}>"
+        )
+        keyed = app._settings_team_rows()
+
+    assert english == [("solo", "0 members · alias: s1, s2", "no description")]
+    assert keyed == [
+        (
+            "solo",
+            "<tui.app.skills.member_count:> · <tui.app.skills.team_aliases:s1, s2>",
+            "<tui.app.skills.team_no_description:>",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locale", "counts", "facts", "summary"),
+    [
+        # zh-CN is the reported locale: `名` classifier, no digit/CJK space,
+        # full-width colon straight onto the Latin alias list.
+        ("zh-CN", (3, 3), "6名成员 · 别名：s1, s2", "暂无描述"),
+        # fr pins both plural arms that real rosters reach (one / other) and the
+        # NNBSP (U+202F) the fr catalogue puts before a colon.
+        ("fr", (1,), "1 membre · alias\u202f: s1, s2", "aucune description"),
+        ("fr", (3, 3), "6 membres · alias\u202f: s1, s2", "aucune description"),
+    ],
+)
+async def test_settings_team_rows_render_translated_facts(
+    tmp_path: Path, locale: str, counts: tuple[int, ...], facts: str, summary: str
+) -> None:
+    """The keyed team facts resolve to the shipped translations, not English.
+
+    Regression for the 2026-11-23 zh-CN frames that painted `6 members · alias:
+    lop` / `no description`: the keys alone (pinned above with an echo
+    resolver) do not prove a locale carries the copy — a key missing from the
+    locale's catalogue silently falls back to English. This reads the real
+    catalogues through the live `/language` path.
+    """
+    from local_operator.i18n import text
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="solo",
+            description="",
+            manager="manager",
+            aliases=["s1", "s2"],
+            members=[TeamMember(role=f"r{i}", count=c) for i, c in enumerate(counts)],
+        )
+    )
+    session.team_registry = registry
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            assert await _settle(pilot, lambda: app._session is session), "session never bound"
+            # After boot: on_mount resolves the config language and would
+            # overwrite an earlier switch with English.
+            text.set_active_locale(locale)
+            assert text.active_locale() == locale
+            rows = app._settings_team_rows()
+    finally:
+        text.set_active_locale(previous)
+
+    assert rows == [("solo", facts, summary)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["apply_language", "settings_row"])
+async def test_open_settings_team_rows_follow_a_live_language_switch(
+    tmp_path: Path, route: str
+) -> None:
+    """An OPEN /settings page re-resolves its team rows on a language switch.
+
+    Regression for PR #4508 R1/Q1: team rows are resolved to finished strings
+    when the page opens, and `_apply_language` only repainted them, so the
+    Teams pane kept `6 members · alias: s1, s2` / `no description` after a
+    switch to zh-CN. Driven through the product paths — the shared apply hook,
+    and the page's own language row (`write_setting` through the page's
+    manager, whose change notice reaches the app's local-config handler) —
+    and asserted on the rows the open view holds, not on a fresh resolve.
+    """
+    from local_operator.i18n import text
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="solo",
+            description="",
+            manager="manager",
+            aliases=["s1", "s2"],
+            members=[TeamMember(role="r0", count=3), TeamMember(role="r1", count=3)],
+        )
+    )
+    session.team_registry = registry
+
+    previous = text.active_locale()
+    app = OperatorApp(lambda: _factory(session))
+    try:
+        async with app.run_test(size=(120, 32)) as pilot:
+            assert await _settle(pilot, lambda: app._session is session), "session never bound"
+            app._open_settings_view()
+            await pilot.pause()
+            view = app._settings_view
+            assert view is not None
+            english = list(view._teams)
+            if route == "apply_language":
+                app._apply_language("zh-CN")
+            else:
+                settings_io.write_setting(view._manager, settings_io.BY_KEY["language"], "zh-CN")
+            assert await _settle(pilot, lambda: text.active_locale() == "zh-CN"), "no switch"
+            await pilot.pause()
+            # Same widget: the switch must update the open page, not rely on
+            # a reopen to rebuild it.
+            assert app._settings_view is view
+            switched = list(view._teams)
+    finally:
+        text.set_active_locale(previous)
+
+    assert english == [("solo", "6 members · alias: s1, s2", "no description")]
+    assert switched == [("solo", "6名成员 · 别名：s1, s2", "暂无描述")]
+
+
+@pytest.mark.asyncio
 async def test_the_two_cleanup_classes_are_two_titled_groups_with_their_own_scope_tag(
     tmp_path: Path,
 ) -> None:

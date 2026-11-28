@@ -136,6 +136,31 @@ GUARD_TESTS: tuple[str, ...] = (
     # Generated-file freshness, incl. extension/ui-vendor/** (escape:
     # fix/browser-ax-value regenerated a bundle the PR never touched).
     "tests/unit/browser_bridge/test_protocol.py::test_generated_types_are_current",
+    # GATE R3-HASH tripwire: a tree-wide AST scan, so ANY module that starts
+    # wiring the responder runner fails it -- exactly the "change anywhere"
+    # shape this list exists for. Its parametrised negative control rides
+    # along so the guard cannot silently become a probe that cannot fail.
+    "tests/unit/team_bridge/test_responders.py"
+    "::test_nothing_wires_the_responder_runner_before_gate_r3_hash",
+    "tests/unit/team_bridge/test_responders.py::test_the_gate_r3_hash_tripwire_fires",
+    # GATE S17-UID (PR #4549 security round 2), PERMANENT until its own removal
+    # condition holds: a seatbelt jail under the operator's uid exposes every
+    # same-uid process's argv and environment (KERN_PROCARGS2, measured, not
+    # closable in the profile). Remove these two only in the PR that runs
+    # responder children under a distinct uid AND adds the macOS kernel test
+    # proving a jailed child reads no canary from an operator-uid non-platform
+    # process, with its own security round. Removing GATE R3-HASH, or the
+    # TEMPORARY whole-file entry below, does not lift this gate.
+    "tests/unit/team_bridge/test_responders.py"
+    "::test_nothing_uses_the_responder_jail_before_gate_s17_uid",
+    "tests/unit/team_bridge/test_responders.py::test_the_gate_s17_uid_tripwire_fires",
+    # TEMPORARY, behavioural (an exception to the membership rule above, ~12 s
+    # measured on a Linux node): the responder jail/credential/materializer
+    # pins for an UNWIRED security boundary (PR #4549, QA r1 Q-1). Nothing
+    # imports these modules yet, so no PR but their own would select them, and
+    # PR CI runs only this list. Slice C2 wires them and removes this entry.
+    # The macOS kernel cases skip here (Linux); real-path probes cover them.
+    "tests/unit/team_bridge/test_responder_jail.py",
 )
 
 #: Above this many selected FILES the helper warns (and still runs them all).

@@ -49,7 +49,11 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 # every existing caller and test stays put; there is ONE definition, in the
 # host-free module (see its docstring).
 from local_operator.harness.rows import visible_transcript_rows  # noqa: F401
-from local_operator.harness.types import ModelSpec, SupplementProgressEvent
+from local_operator.harness.types import (
+    HistoryDeltaEvent,
+    ModelSpec,
+    SupplementProgressEvent,
+)
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.resume import (
     ORIGIN_AGENT_CONFIG,
@@ -128,6 +132,7 @@ from local_operator.session.frontend_state import (
     job_trajectory_wire_value,
     sync_wire_payload,
 )
+from local_operator.session.inline_ui import inline_ui_opt_in
 from local_operator.session.last_user import last_user_at
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.open_frame import (
@@ -165,6 +170,11 @@ from local_operator.session.row_clip import (
     row_range,
 )
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.inline_ui_egress import (
+    InlineUiEvents,
+    attach_journal_inline_ui,
+    without_desktop_inline_ui,
+)
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.temporary import RowProjector as _TemporaryRows
@@ -259,6 +269,14 @@ RESYNC_MARKER = "resync"
 MERGE_CAP_BYTES = 1 << 20
 SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
+#: How long a BACKGROUND read that would cold-build a bridge yields to an
+#: interactive ``/events`` open still building its first frame, before it runs
+#: anyway. See :meth:`DesktopSessions.hold_interactive_open` for the measurement.
+#: The bound exists so a nonstop run of clicks (or a leaked hold) can only
+#: DELAY a background reader, never starve it: the 12 traced opens on v0.113.1
+#: took 7-2889 ms entry->snapshot (median 643), so 2 s covers all but the one
+#: open that was itself stretched by the contention this removes.
+INTERACTIVE_ADMISSION_WAIT_S = 2.0
 
 #: How long a READ waits for its attach when the conversation is ANOTHER DEVICE'S.
 #:
@@ -2238,6 +2256,11 @@ class DesktopSessionBridge:
         """
         tracing = open_trace.enabled()
         trace_id = uuid.uuid4().hex if tracing else None
+        owner_lookup_trace = (
+            open_trace.ReadAttachOwnerLookupTrace(trace_id)
+            if read and ingress_trace is not None and trace_id is not None
+            else None
+        )
         if ingress_trace is not None:
             # Join the existing acquisition diagnostics without copying their
             # session field into the new, payload-free request trace. Keep this
@@ -2260,6 +2283,7 @@ class DesktopSessionBridge:
             loop_handle = asyncio.get_running_loop().call_soon(witness)
             open_trace.mark("a.acquire.start", session=self.session_id, acquire_id=trace_id)
         task: asyncio.Task[bool] | None = None
+        draft_bridge: bool | None = None
         attach_landed: bool | None = None
         completed = False
         try:
@@ -2285,7 +2309,15 @@ class DesktopSessionBridge:
                         await self._detach()
                     raise
                 if read:
-                    task = self._start_read_attach(remote)
+                    if owner_lookup_trace is not None:
+                        # Materialization can clear this marker after we yield
+                        # to the flight; report the bridge scope at scheduling.
+                        draft_bridge = self.draft is not None
+                        task = self._start_read_attach(
+                            remote, owner_lookup_trace=owner_lookup_trace
+                        )
+                    else:
+                        task = self._start_read_attach(remote)
                 if phases is not None:
                     phases["lock_held_ms"] = (time.monotonic() - lock_at) * 1000
             try:
@@ -2354,6 +2386,17 @@ class DesktopSessionBridge:
                 loop_handle.cancel()
                 # Keep attach_landed's historical completion meaning. Never read
                 # task.result(): failure/cancellation belongs to the existing path.
+                lookup_fields: dict[str, object] = {}
+                if owner_lookup_trace is not None:
+                    # This cutoff is acquire exit, not first snapshot. Missing,
+                    # shared, skipped, or cancelled attempts stay unknown here.
+                    lookup_result = owner_lookup_trace.finish_acquire()
+                    if not completed or (task is not None and task.cancelled()):
+                        lookup_result = open_trace.OwnerLookupResult.UNKNOWN
+                    lookup_fields = {
+                        "owner_lookup_result_at_acquire": lookup_result,
+                        "draft_bridge": draft_bridge,
+                    }
                 open_trace.mark(
                     "a.acquire",
                     (time.monotonic() - trace_at) * 1000,
@@ -2368,23 +2411,35 @@ class DesktopSessionBridge:
                     loop_witness_ran=loop_delay_ms is not None,
                     loop_queue_delay_ms=loop_delay_ms,
                     **(phases or {}),
+                    **lookup_fields,
                 )
 
-    def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
+    def _start_read_attach(
+        self,
+        remote: AttachedSession,
+        *,
+        owner_lookup_trace: open_trace.ReadAttachOwnerLookupTrace | None = None,
+    ) -> asyncio.Task[bool] | None:
         """The bridge's one read-envelope attach attempt, started if none is live.
 
-        ``None`` when there is nothing to wait for: a facade that is already
-        attached (every read of a live conversation), or one whose attempt is
-        already running — the second reader joins it rather than dialling again,
-        which is what used to serialise two reads into 4 s. Called under
-        ``self.lock`` so two readers cannot both find no task.
+        ``None`` when the facade is already attached. If an attempt is
+        already running, the second reader joins it without lending it a new
+        trace identity or dialling again. Called under ``self.lock`` so two
+        readers cannot both find no task.
         """
         running = self.read_attach_task
         if running is not None and not running.done():
             return running
         if not remote.is_cold:
             return None
-        task = asyncio.create_task(remote.attach_existing(budget=READ_ATTACH_BUDGET_S))
+        attach = (
+            remote.attach_existing(
+                budget=READ_ATTACH_BUDGET_S, _owner_lookup_trace=owner_lookup_trace
+            )
+            if owner_lookup_trace is not None
+            else remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+        )
+        task = asyncio.create_task(attach)
         self.read_attach_task = task
         task.add_done_callback(lambda settled: self._read_attach_settled(remote, settled))
         return task
@@ -3314,7 +3369,13 @@ class DesktopSessionBridge:
         return True
 
     def _event(self, event: Any) -> None:
-        self.publish("event", event.model_dump(mode="json"))
+        if isinstance(event, HistoryDeltaEvent):
+            # The facade can synthesize a catch-up delta from the journal in
+            # this process, bypassing the owner's already projected event relay.
+            payload = InlineUiEvents(sidecars=True).dump(event)
+        else:
+            payload = event.model_dump(mode="json")
+        self.publish("event", payload)
 
     @property
     def watched_trajectory_jobs(self) -> frozenset[str]:
@@ -4247,6 +4308,8 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         on_capture: Callable[[int], None] | None = None,
+        inline_ui: bool = False,
+        trace_open_id: str | None = None,
     ) -> dict[str, Any]:
         """The authoritative snapshot frame.
 
@@ -4259,6 +4322,9 @@ class DesktopSessionBridge:
         # canonical state) is time the renderer pays for too, so it comes out of
         # the same budget rather than being spent on top of it.
         started = time.monotonic()
+        # Local to this snapshot, even when its attention refresh or history
+        # read shares work with a concurrent open of the same bridge.
+        trace_fields = {} if trace_open_id is None else {"open_id": trace_open_id}
         # Decorative, so a busy or damaged receipt sidecar cannot stop a
         # conversation from OPENING. Before this field existed the snapshot
         # never touched `attention.db`; letting it raise here turned routine
@@ -4287,7 +4353,10 @@ class DesktopSessionBridge:
             pass
         if open_trace.enabled():
             open_trace.mark(
-                "a.snap.attention", (time.monotonic() - started) * 1000, session=self.session_id
+                "a.snap.attention",
+                (time.monotonic() - started) * 1000,
+                session=self.session_id,
+                **trace_fields,
             )
         # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
         # the clone is now taken LAST (see the watermark note above the return).
@@ -4380,10 +4449,14 @@ class DesktopSessionBridge:
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
                 # why the renderer's own paint time is the reason for it.
                 deadline=started + OPEN_FRAME_SNAPSHOT_BUDGET_S,
+                **inline_ui_opt_in(inline_ui),
             )
             if open_trace.enabled():
                 open_trace.mark(
-                    "a.snap.history", (time.monotonic() - started) * 1000, session=self.session_id
+                    "a.snap.history",
+                    (time.monotonic() - started) * 1000,
+                    session=self.session_id,
+                    **trace_fields,
                 )
         # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
         # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
@@ -4433,6 +4506,7 @@ class DesktopSessionBridge:
         # is empty, and a runtime that never ran the engine must keep reading as a
         # host that cannot answer (``asks_open`` absent).
         cold_asks = await self._cold_ask_rows()
+        stored_title = await self._stored_title_fallback()
         capture = self._capture_wire_state()
         # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
         # The read above yields the loop twice, and a facade can finish a resync
@@ -4470,11 +4544,26 @@ class DesktopSessionBridge:
                 # the rows this frame carries.
                 snapshot.pop("asks_truncated", None)
                 bound_ask_snapshot_in_place(snapshot)
+        # THE LIVE TITLE WINS; THE STORED ONE FILLS A BLANK (UI #2099 Q1C-F1).
+        # Applied to the BUILT frame, not the canonical state: the canonical
+        # object is never mutated (``FrontendStateStore.state_reference``), and
+        # a blank there is the runtime's honest "I have no name", which only
+        # this frame needs to paper over. Re-checked against the captured
+        # state because a rename may have landed between the read and the
+        # capture -- the live name is the newer one (it reaches frontend state
+        # before ``title.json``).
+        if stored_title:
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict) and not snapshot.get("conversation_title"):
+                snapshot["conversation_title"] = stored_title
         if open_trace.enabled():
             open_trace.mark(
-                "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
+                "a.snap.total",
+                (time.monotonic() - started) * 1000,
+                session=self.session_id,
+                **trace_fields,
             )
-        return {
+        frame = {
             "session_id": self.session_id,
             "epoch": epoch,
             "seq": seq,
@@ -4485,6 +4574,48 @@ class DesktopSessionBridge:
                 **cold_fields,
             },
         }
+        return frame if inline_ui else without_desktop_inline_ui(frame)
+
+    async def _stored_title_fallback(self) -> str:
+        """The persisted title, for a frame whose state carries none; else ``""``.
+
+        WHY (UI #2099 Q1C-F1): a session that is not running and was not
+        restored with a durable checkpoint title (an older session, or one never
+        on a loaded catalogue page) opens on a facade whose
+        ``conversation_title`` is ``""``. The desktop header and tab read that
+        field, so they said "Untitled chat" / "New chat" while the sidebar row
+        for the SAME session showed its name.
+
+        THE CATALOGUE'S RESOLVER, not a second one: the row title comes from
+        ``resume.session_name``, whose stored-title half is
+        ``stored_session_title`` (``title.json`` first, then the journalled
+        ``conversation_name`` rows), so list and snapshot agree by
+        construction. Deliberately NOT ``session_name`` itself: its last
+        fallback is the opening message, which is a row LABEL, not a title --
+        putting it in ``conversation_title`` would tell the client the
+        conversation has been named when it has not.
+
+        Skipped when the live state already has a title (the common, attached
+        case costs nothing), and run off the loop because a miss on the
+        stat-keyed memo scans two transcript windows. Best-effort: a title is
+        decoration and must never cost the open.
+        """
+        remote = self.remote
+        if remote is not None:
+            try:
+                if getattr(self._canonical_state(), "conversation_title", ""):
+                    return ""
+            except Exception:  # noqa: BLE001 -- fall through to the stored read
+                pass
+        from local_operator.resume import stored_session_title
+
+        try:
+            return await asyncio.to_thread(
+                stored_session_title, self.root / "sessions" / self.session_id
+            )
+        except Exception:  # noqa: BLE001 -- decoration must not cost the open
+            logger.debug("stored title read failed for %s", self.session_id, exc_info=True)
+            return ""
 
     def _can_paint_supplements(self, declared: bool) -> bool:
         """Cold history has no attach socket; negotiate its reader, not another viewer.
@@ -4519,6 +4650,7 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         deadline: float | None = None,
+        inline_ui: bool = False,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -4666,6 +4798,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     entry_times=entry_times,
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    **inline_ui_opt_in(inline_ui),
                 )
                 return {**page, "runs": [], "runs_state": "unsupported", "head_cut": False}
             return await self._open_frame_history(
@@ -4683,6 +4816,7 @@ class DesktopSessionBridge:
                 # the strip re-validates against THIS session; the viewer's
                 # declaration is the only input.
                 diff_bindings=diff_bindings,
+                inline_ui=inline_ui,
                 # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
                 # join: that is the snapshot's first frame. A standalone
                 # ``/history`` page keeps waiting for the join, because it is
@@ -4770,6 +4904,8 @@ class DesktopSessionBridge:
             "cursor_missing": page.reconciled,
             "has_newer": True if capped_newer else page.has_newer,
         }
+        if inline_ui:
+            attach_journal_inline_ui(answer, page.entries)
         answer = await self._with_peer_cycle_records(answer, [page])
         return (
             await self._journal_order_page(answer, [page], order_ids or [])
@@ -4831,6 +4967,7 @@ class DesktopSessionBridge:
         supplements: bool = False,
         diff_bindings: bool = False,
         paint_deadline: float | None = None,
+        inline_ui: bool = False,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -4930,6 +5067,8 @@ class DesktopSessionBridge:
                 ),
             )
             answer = self._frame_answer(result)
+            if inline_ui:
+                attach_journal_inline_ui(answer, page.entries)
             # ONLY the older side (review round 3, F15): a cut on the newer side
             # leaves older rows untouched, so folding it here made ``has_more``
             # true on a page whose oldest row is the journal's first.
@@ -5167,6 +5306,10 @@ class DesktopSessionBridge:
             ),
         )
         answer = self._frame_answer(result)
+        if inline_ui:
+            attach_journal_inline_ui(
+                answer, (entry for page in order_pages for entry in page.entries)
+            )
         # A cut that DROPPED rows the read had already fetched still owes the
         # client a "there is more above this page": ``has_more`` describes the
         # page served, never the reads behind it, and a reader that trimmed rows
@@ -7496,8 +7639,11 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
+        inline_ui: bool = False,
+        trace_open_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         gen_at = time.monotonic()
+        trace_fields = {} if trace_open_id is None else {"open_id": trace_open_id}
         try:
             cutoff = self.sequence
             first = self.replay[0][0]["seq"] if self.replay else cutoff + 1
@@ -7579,30 +7725,34 @@ class DesktopSessionBridge:
                 drain(watermark)
                 sub.captured = True
 
-            async def cut_snapshot() -> dict[str, Any]:
+            async def cut_snapshot(trace_id: str | None = None) -> dict[str, Any]:
                 # ONE argument list for the open snapshot and every in-band
                 # resync snapshot (``RESYNC_MARKER``), so a resync restates the
                 # world in exactly the shape this subscriber negotiated at open.
+                # Only the initial snapshot belongs to the first-paint trace.
                 return await self.snapshot(
                     entry_times=entry_times,
                     open_frame=open_frame,
                     **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                     peer_journal_source=peer_journal_source,
                     **supplement_read_options(sub.supplements),
+                    **inline_ui_opt_in(inline_ui),
                     **cast(
                         "DiffBindingReadOptions",
                         {"diff_bindings": True} if sub.diff_bindings else {},
                     ),
                     on_capture=captured,
+                    trace_open_id=trace_id,
                 )
 
-            snapshot = await cut_snapshot()
+            snapshot = await cut_snapshot(trace_open_id)
             if open_trace.enabled():
                 open_trace.mark(
                     "a.gen.snapshot",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
                     open_frame=open_frame,
+                    **trace_fields,
                 )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
             # ``snapshot()`` captures its state and sequence with nothing
@@ -7651,6 +7801,7 @@ class DesktopSessionBridge:
                     "a.gen.open_yield",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
+                    **trace_fields,
                 )
             yield {
                 "session_id": self.session_id,
@@ -7669,6 +7820,7 @@ class DesktopSessionBridge:
                     "a.gen.snapshot_yield",
                     (time.monotonic() - gen_at) * 1000,
                     session=self.session_id,
+                    **trace_fields,
                 )
             yield snapshot
             # Frames still to deliver, in queue order. A deque rather than the
@@ -8860,6 +9012,14 @@ class DesktopSessions:
         #: makes a cancelled LEADER harmless — the task itself is never cancelled
         #: by a waiter (``asyncio.shield``), so it still settles and still
         #: publishes.
+        #: INTERACTIVE-FIRST ADMISSION: how many ``/events`` opens are between
+        #: their route entry and their snapshot frame (see
+        #: :meth:`hold_interactive_open`), plus the event set whenever that count
+        #: is zero. The event is keyed with its loop, as ``_locate_flights`` is,
+        #: so a torn-down test loop's event reads as absent rather than as a
+        #: future bound to a dead loop. Loop-only mutation, never across an await.
+        self._interactive_opens = 0
+        self._interactive_idle: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self._locate_flights: dict[
             str, tuple[asyncio.AbstractEventLoop, asyncio.Task[_LocatedSession]]
         ] = {}
@@ -9088,7 +9248,11 @@ class DesktopSessions:
                 )
                 continue
             if detail.startswith("rehomed: "):
-                moved.append((expected, f"{provider}/{model_id}"))
+                # Read the landed ID from the owner: the requested ID can be
+                # omitted, and the receipt must show what actually switched.
+                _, _, landed = detail.partition(" → ")
+                if landed.startswith(f"{provider}/"):
+                    moved.append((expected, landed))
             elif detail == REHOME_BUSY_REPLY:
                 # The owner has already told the conversation itself; this is
                 # the count the sign-in's receipt names.
@@ -10206,7 +10370,9 @@ class DesktopSessions:
             if target:
                 # Shared with the relay's start route (``resume.bind_session_attachment``)
                 # so the two creators cannot disagree on what a bound session is.
-                if not bind_session_attachment(path, agent=binding["agent"], team=binding["team"]):
+                if not bind_session_attachment(
+                    path, agent=binding["agent"], team=binding["team"], root=self.root
+                ):
                     # Never publish desktop.json after a best-effort writer lost
                     # the attachment. No possibly admitted work is deleted.
                     raise ValueError(
@@ -10542,6 +10708,8 @@ class DesktopSessions:
         limit: int,
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
+        workspace_rest_ids: frozenset[str] = frozenset(),
+        workspace_rest_epoch: str | None = None,
         include_archived: bool = False,
         include_temporary: bool = False,
         include_peers: bool = False,
@@ -10629,6 +10797,16 @@ class DesktopSessions:
             # not ask for peers must not pay for it (the same rule ``routes/auth.py``
             # states for its own lazy imports).
             from local_operator.server.utils.desktop_mesh import remote_session_rows
+
+            rest_fence = None
+            if workspace_rest_ids and workspace_rest_epoch:
+                from local_operator.server.utils.workspace_rest import (
+                    capture_veto_fence,
+                )
+
+                # Capture generations, not contents, before any permissive
+                # projection. Only an eligible on-page row justifies proof I/O.
+                rest_fence = capture_veto_fence(self.root)
 
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
@@ -10869,6 +11047,23 @@ class DesktopSessions:
                         row["status_epoch"] = epoch
                         row["status_revision"] = revision
                 projected[entry.id] = row
+            if rest_fence is not None and workspace_rest_epoch:
+                from local_operator.server.utils.workspace_rest import (
+                    decorate_workspace_rest,
+                )
+
+                # Probe only page rows: a caller-supplied id cannot widen the
+                # existing archive, draft, scope, pagination or peer policies.
+                decorate_workspace_rest(
+                    self.root,
+                    [
+                        projected[entry.id]
+                        for entry in page_entries
+                        if entry.id in workspace_rest_ids
+                    ],
+                    workspace_rest_epoch,
+                    rest_fence,
+                )
             return SessionPage(
                 rows=[projected[entry.id] for entry in page_entries],
                 off_page=[projected[entry.id] for entry in extra_entries],
@@ -11376,6 +11571,90 @@ class DesktopSessions:
             dedupe_key=f"failed:{request_id}",
         )
 
+    def _idle_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        held = self._interactive_idle
+        if held is None or held[0] is not loop:
+            event = asyncio.Event()
+            if self._interactive_opens == 0:
+                event.set()
+            held = self._interactive_idle = (loop, event)
+        return held[1]
+
+    def hold_interactive_open(self) -> Callable[[], None]:
+        """Mark one interactive ``/events`` open in flight; returns its idempotent release.
+
+        WHY (interactive-first admission, 2026-11-25). A sidebar click waited on
+        a DIFFERENT session's cold build. Trace on v0.113.1 (12 real opens,
+        median 643 ms, 6/12 under 500, max 2889): the worst opens overlapped a
+        background ``GET .../history?limit=100`` of a non-resident 218 MB / 11 MB
+        roster session -- the renderer's held-send sweep at app mount, most
+        likely -- whose cold build (roster ``json.load`` on the loop, then
+        ``install_prepare``'s GIL-holding copy in a thread) took 1.2-1.5 s. A
+        thread does not help: the build holds the GIL, so the click's loop work
+        stretches by the build's share. The paint hold
+        (``transcript_index.hold_paint``) only makes index SCANS give way; a
+        whole cold build started by another route did not.
+
+        THE RULE. While any hold taken here is live, a ``read=True`` acquire that
+        is not itself an ``/events`` open and whose bridge has no facade yet --
+        i.e. one that would cold-build -- waits (at most
+        :data:`INTERACTIVE_ADMISSION_WAIT_S`) before it builds. A resident read
+        is a dict lookup plus a page and is never delayed, an ``/events`` open
+        never waits on another, and writes are never delayed (a user action must
+        not queue behind a paint).
+
+        The caller (the ``/events`` route) takes this at entry and releases it
+        once the snapshot frame is written, and on every other exit (refusal,
+        error, disconnect, a body never iterated); the release is idempotent so
+        each exit may call it, and the bounded wait caps the cost of a leak.
+        """
+        self._interactive_opens += 1
+        self._idle_event().clear()
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self._interactive_opens = max(0, self._interactive_opens - 1)
+            held = self._interactive_idle
+            if self._interactive_opens == 0 and held is not None:
+                held[1].set()
+
+        return release
+
+    async def _yield_to_interactive_opens(self, session_id: str) -> None:
+        """Wait (bounded) for in-flight ``/events`` opens before a cold background build.
+
+        See :meth:`hold_interactive_open`. Asked before the pool lock, so a held
+        reader holds nothing anyone else needs. "Resident" means a bridge whose
+        facade is built (``remote``): a pooled bridge that detached at
+        ``users == 0`` rebuilds its facade on the next acquire, which is exactly
+        the cold cost this rule defers.
+        """
+        if self._interactive_opens <= 0:
+            return
+        bridge = self.bridges.get(session_id)
+        if bridge is not None and bridge.remote is not None:
+            return
+        started = time.monotonic()
+        opens = self._interactive_opens
+        timed_out = False
+        try:
+            await asyncio.wait_for(self._idle_event().wait(), INTERACTIVE_ADMISSION_WAIT_S)
+        except TimeoutError:
+            timed_out = True  # proceed regardless: delay, never starve
+        if open_trace.enabled():
+            open_trace.mark(
+                "a.admission.held",
+                (time.monotonic() - started) * 1000,
+                session=session_id,
+                opens=opens,
+                timed_out=timed_out,
+            )
+
     async def _resident_bridge(self, session_id: str) -> DesktopSessionBridge | None:
         """The bridge this session ALREADY has, or ``None`` — never a new one.
 
@@ -11399,6 +11678,7 @@ class DesktopSessions:
         allow_draft: bool = False,
         control_only: bool = False,
         ingress_trace: open_trace.DesktopEventsIngressTrace | None = None,
+        interactive_open: bool = False,
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
 
@@ -11496,6 +11776,12 @@ class DesktopSessions:
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         await self._refuse_deleted_temporary(session_id)
+        # INTERACTIVE-FIRST ADMISSION (``hold_interactive_open``): a background
+        # read that would cold-build yields to an /events open's first frame.
+        # Keyed on ``interactive_open`` -- the flag the /events route passes --
+        # never on ``ingress_trace``, which exists only when tracing is on.
+        if read and not interactive_open:
+            await self._yield_to_interactive_opens(session_id)
         bridge: DesktopSessionBridge | None = None
         flight: asyncio.Task[_LocatedSession] | None = None
         # ``taken`` rather than an unconditional release in the ``finally``: a

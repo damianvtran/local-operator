@@ -3140,7 +3140,10 @@ def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
 
 
 _ARTIFACT_MAX_BYTES = 128 * 1024 * 1024
-_ARTIFACT_DOWNLOAD_S = 30.0
+# A 19.2 MiB macOS wheel took ~65s from PyPI on the affected connection.
+# Leave room for slow, progressing transfers within the desktop's 15-minute
+# install budget; the separate 5s read timeout still cuts off stalled reads.
+_ARTIFACT_DOWNLOAD_S = 240.0
 
 
 def _candidate_artifact(generation: Path, built: PublicationEvidence) -> Path:
@@ -11005,6 +11008,85 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     }
 
 
+def _incomplete_daemons(report: StageReport) -> list[dict[str, str]]:
+    """Every daemon the stage left short of the new build, with its remedy.
+
+    WHY THIS EXISTS (2026-11-25, updater daemon freshness): the closing report
+    could read as a clean success while ``_reconcile_with_processes`` had just
+    proven a supervised daemon still ran a superseded generation. That row is
+    ``pending``, and ``pending`` rows are deliberately left out of
+    ``daemons[]`` — so the frozen line carried no trace of it, ``ok`` was
+    ``true``, and no sentence named what to run.
+
+    THE REMEDY IS THE CENSUS'S, NEVER A SECOND TABLE: a row's own ``reason``
+    when it has one (the reconciliation folds ``services._DAEMON_MODULES``'s
+    sentence in there, a deferral keeps its own); else, for a ``failed`` row
+    ONLY, the census sentence for that display name (``services.daemon_remedy``);
+    else ``""`` — which the human half renders as "see ``lop services status``"
+    (or, for ``unsupervised``, omits: its warning already named the fix).
+    Adding a command list here would let this output disagree with ``lop
+    services status``.
+
+    WHY ONLY ``failed`` (merge gate run 45523620065): the census sentence is
+    the fix for a supervised daemon that did not move. An ``unsupervised``
+    row's refresher already printed its own warning naming the right command
+    (``lop mobile serve``); the census's ``lop mobile restart`` is launchd-only
+    and wrong there, and ``test_update_command_unsupervised_warns`` pins that
+    it never appears. A reasonless ``pending`` row (reconciliation always gives
+    one a reason) is likewise not proven to need that command, so it gets the
+    generic pointer rather than a guess.
+
+    Disclosure only: nothing here restarts, signals or re-reads a daemon.
+    """
+    from local_operator.services import daemon_remedy
+
+    rows: list[dict[str, str]] = []
+    for status in report.daemons:
+        if status.status in ("refreshed", "already"):
+            continue
+        rows.append(
+            {
+                "name": status.name,
+                "status": status.status,
+                "remedy": status.reason
+                or (daemon_remedy(status.name) if status.status == "failed" else ""),
+            }
+        )
+    return rows
+
+
+def _print_incomplete_daemons(rows: Sequence[dict[str, str]]) -> None:
+    """The human half of an incomplete daemon stage: a heading plus one row each.
+
+    On STDERR, not stdout: the frozen report must stay stdout's last line and
+    the existing one-line stdout contracts must not grow a line; stderr is
+    where every other "the install is in, but…" warning of this command goes.
+    Printed nowhere on a fully refreshed run, so that output is byte-identical
+    to the pre-change one.
+    """
+    from local_operator.i18n.keys import cli_update_daemons as _k
+    from local_operator.i18n.text import tr
+
+    # MACHINE TRUTH KEPT, HUMAN REPEAT DROPPED (owner, PR #4562): a reasonless
+    # ``unsupervised`` row stays in ``daemons_incomplete`` with ``remedy: ""`` so
+    # ``daemons_complete`` never claims completeness over it — but its refresher
+    # already printed a warning naming the fix (``lop mobile serve``). A per-daemon
+    # line here would be a THIRD instruction (the generic ``lop services status``
+    # pointer), and the census's ``lop mobile restart`` is launchd-only and wrong.
+    # So the human channel prints no row for it. Other empty-remedy rows (a
+    # reasonless ``failed``/``pending``) had no earlier warning, so they keep the
+    # generic pointer. The heading prints only above a row, so an unsupervised-
+    # only stage shows the warning and nothing extra.
+    printed = [row for row in rows if row["remedy"] or row.get("status") != "unsupervised"]
+    if not printed:
+        return
+    _t = tr("cli.update_daemons")
+    print(_t(_k.incomplete_heading()), file=sys.stderr)
+    for row in printed:
+        remedy = row["remedy"] or _t(_k.remedy_fallback())
+        print(_t(_k.incomplete_row(name=row["name"], remedy=remedy)), file=sys.stderr)
+
+
 def _emit_update_report(
     *,
     install_version: str,
@@ -11057,6 +11139,17 @@ def _emit_update_report(
             "daemons": daemons,
         }
     }
+    incomplete = _incomplete_daemons(report)
+    if incomplete:
+        # ADDITIVE, AND ONLY WHEN TRUE (frozen ``update.report.v1``): ``ok`` keeps
+        # meaning "the install succeeded" — it did — so it is NOT flipped; these
+        # two keys are how a consumer tells "installed, daemons incomplete" from
+        # "clean". Absent on a complete run, so a healthy line stays
+        # byte-identical; a reader must treat absence as complete. Do not move
+        # ``ok`` or the status words to carry this: that is a schema bump.
+        payload["update_report"]["daemons_complete"] = False
+        payload["update_report"]["daemons_incomplete"] = incomplete
+        _print_incomplete_daemons(incomplete)
     if _is_generation_install() or promoted_generation is not None:
         # Keep the legacy FOUR-status vocabulary. New callers require the rolling
         # contract; empty legacy rows cannot prove central-services completion.

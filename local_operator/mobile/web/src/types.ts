@@ -1,3 +1,4 @@
+import type { InlineUiMessages } from "./inline-ui-parts";
 import type { SettingsResultWire } from "./lib/settings-defer";
 import type { SupplementBeat } from "./lib/supplement";
 
@@ -603,6 +604,14 @@ export interface SessionProjection {
 	queued_count: number;
 	/** Process gone; history still resumable. */
 	ended: boolean;
+	/** Set ONLY on the terminal frame the relay publishes when a cold prompt's
+	    wake failed after it was answered `waking` (`daemon._publish_failed_wake`):
+	    the failed command's id. The composer's ONE failure signal for that
+	    pending send (agent review round 2, R2-1) — a cold session's health reads
+	    `ended` from its pid-0 disk rebuild before, during and after a wake, so
+	    health cannot say which boot failed. Absent on every other frame and from
+	    an older relay. */
+	wake_failed?: string;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
 	/** The relay's "owner has gone quiet" verdict (`SessionProjection.
@@ -619,7 +628,15 @@ export interface SessionProjection {
 	    projection, both of which mean false. Length is not a proxy — the frame
 	    cap can publish a pinned tail of 16 rows. */
 	transcript_head_pinned?: boolean;
+	/** Rows OLDER than this transcript's oldest row exist in the journal
+	    (`SessionProjection.transcript_has_older`): the render opens at a
+	    compaction marker, or a cap trimmed its head. Independent of the pin —
+	    a short compacted seed has older rows and no opener. OPTIONAL and
+	    sparse: absent on an older daemon and on a complete transcript. */
+	transcript_has_older?: boolean;
 	transcript: TranscriptEntry[];
+	/** Decoded from the negotiated sidecar, only for this snapshot's assistant rows. */
+	inline_ui?: InlineUiMessages;
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */
 	todos: TodoPhase[];
@@ -1064,6 +1081,11 @@ export type CommandOp =
 			    exists. Part of the retry envelope's bytes: a replay asks for the
 			    same expansion the first attempt asked for. */
 			expand_skills?: boolean;
+			/** The prompt-wake opt-in (capability `prompt_wake.request_flag`):
+			    "answer a cold prompt `waking` once a runtime is booting; I keep
+			    my retry envelope until the stream carries this id or `ended`".
+			    A transport flag the relay pops, NOT part of the envelope. */
+			accept_waking?: boolean;
 		}
 	| { op: "abort" }
 	/* `defer_ok` + `request_id` (both optional): a busy session answers

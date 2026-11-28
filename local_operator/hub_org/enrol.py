@@ -154,10 +154,32 @@ def run_boundary(
             # daemon start, the 6 h timer): it is meaningful only for a
             # team-plan account, and its own TTL keeps this a no-op most ticks.
             _refresh_vault_gate(Path(config_dir), boundary, force=force)
+        # Radient Guard's admission point (Guard RFC v0.9 §5.2.1) rides the same
+        # boundaries. Deliberately OUTSIDE ``if orgs`` (L2a QA Q4): a member who
+        # lapsed after a failed revoke still needs that revoke retried, and
+        # revoke has no membership precondition (§5.4). ``check_point`` re-gates
+        # itself: with no Team org it touches nothing unless a consent store
+        # already exists, so a never-Team install still makes zero calls.
+        _guard_check_point(Path(config_dir), boundary)
         if orgs and auto_enrol_enabled(Path(config_dir)):
             sync_new_items(Path(config_dir), orgs)
     except Exception:  # noqa: BLE001 - see module docstring
         logger.debug("org hub enrol failed (%s)", boundary, exc_info=True)
+
+
+def _guard_check_point(config_dir: Path, boundary: str) -> None:
+    """Queue any Guard consent prompt the org raised. Never raises, never prompts.
+
+    ``guard.consent.check_point`` re-reads the same zero-network gate itself,
+    so a caller that reaches it for a non-Team account still sends nothing.
+    """
+
+    try:
+        from local_operator.guard import consent as guard_consent
+
+        guard_consent.check_point(config_dir, boundary=boundary)
+    except Exception:  # noqa: BLE001 - a Guard read never fails a boundary
+        logger.debug("guard consent check point failed (%s)", boundary, exc_info=True)
 
 
 def _refresh_vault_gate(config_dir: Path, boundary: str, *, force: bool) -> None:

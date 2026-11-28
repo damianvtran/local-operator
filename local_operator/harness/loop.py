@@ -40,7 +40,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypedDict, TypeVar, cast
 
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
@@ -118,6 +118,7 @@ from local_operator.harness.types import (
     ReasoningDeltaEvent,
     RenderedStreamError,
     StaleAside,
+    StreamAttemptReceipt,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
@@ -194,6 +195,17 @@ def _notice(
         kind=kind,
         headline=headline,
     )
+
+
+class _SystemCacheLayout(TypedDict):
+    """``ChatRequest`` marker-placement kwargs splatted at the request site.
+
+    Typed so pyright still checks each key against ``ChatRequest``'s fields
+    through the ``**`` splat (a ``dict[str, Any]`` would hide a renamed field).
+    """
+
+    system_blocks_frozen: bool
+    system_stable_head_blocks: int
 
 
 class _ToolDone:
@@ -1389,6 +1401,14 @@ class LoopContext:
     # Sticky until the run boundary even if every lease expires earlier: the raw
     # executor-argument map must not become a subsequent-turn back channel.
     one_turn_secret_run_active: bool = False
+    # SDK-owned; never checkpointed, replayed or copied to a delegated child.
+    condition_public_evidence: (
+        Callable[
+            [ToolResult, list[Content], dict[str, Any], Callable[[str], str], AbortSignal | None],
+            Awaitable[list[Content]],
+        ]
+        | None
+    ) = None
     # Invocation-local dispatch evidence, NEVER reconstructed from eval repr,
     # persisted details or peer display certificates. Session owns acceptance.
     quiet_request_roots: set[str] = field(default_factory=set)
@@ -1737,6 +1757,44 @@ class _NoProgressGuard:
         self.history.clear()
         self.matches = [0] * NO_PROGRESS_MAX_PERIOD
         self.warned = False
+
+
+# ``AgentLoop._model_turn`` sits at pyright's code-flow complexity ceiling
+# (``reportGeneralTypeIssues``: "Code is too complex to analyze"). Every inline
+# conditional and short-circuit adds a flow branch inside its stream loop, and
+# once the function crosses the ceiling pyright stops type-checking it at all.
+# The two inline-UI decisions below were inlined there at first; together with
+# an unrelated ``except`` clause added on main they tipped it over. They live
+# here so the function's own branch count stays put. Prefer this pattern for any
+# new per-call decision in ``_model_turn`` rather than adding another branch.
+
+
+def _inline_ui_hint_for(config: LoopConfig, model: "ModelSpec") -> str | None:
+    """This call's request-only discovery hint, re-resolved per provider call.
+
+    Resolved per call, not per run: a folded steer can change the input
+    surface between requests (see ``LoopConfig.get_inline_ui_hint``). Resolved
+    for ``model``, the spec the request is built with, so head-row placement
+    (bound into signed thinking on Anthropic) cannot tear from the request.
+    """
+    return config.get_inline_ui_hint(model) if config.get_inline_ui_hint else None
+
+
+def _provider_turn_start(
+    request: ChatRequest, event: StreamStartEvent, model: ModelSpec
+) -> ProviderTurnStartEvent:
+    """The harness "on the wire" boundary for one provider stream start.
+
+    A native continuation names the selector it actually reached, which can
+    differ from the run's resolved model; fall back to that model otherwise.
+    Every field passes the one-turn-secret public-text boundary.
+    """
+    provider, model_id = event._native_selector or (model.provider, model.model_id)
+    return ProviderTurnStartEvent(
+        response_id=one_turn_public_text(request, event.response_id),
+        provider=one_turn_public_text(request, provider),
+        model_id=one_turn_public_text(request, model_id),
+    )
 
 
 async def _abortable_stream(
@@ -3972,6 +4030,8 @@ class AgentLoop:
                             new_messages,
                             redact=config.redact_tool_result,
                             file_provenance=config.file_provenance,
+                            evidence_signal=signal,
+                            condition_evidence=True,
                         )
                     elif (
                         config.recover_wordless_stop
@@ -4484,6 +4544,35 @@ class AgentLoop:
     # (``_abortable_stream`` is a module-level helper; see below the class.)
 
     @staticmethod
+    def _host_system_blocks_frozen(config: LoopConfig) -> bool:
+        """Whether the host reports its resolved system blocks as epoch-frozen."""
+        reader = config.get_system_blocks_frozen
+        if reader is None:
+            return False
+        return bool(reader())
+
+    @staticmethod
+    def _host_system_stable_head_blocks(config: LoopConfig) -> int:
+        """Leading session-agnostic system blocks the host reports (0 = none)."""
+        reader = config.get_system_stable_head_blocks
+        if reader is None:
+            return 0
+        return max(0, int(reader()))
+
+    @classmethod
+    def _host_system_cache_layout(cls, config: LoopConfig) -> _SystemCacheLayout:
+        """The ``ChatRequest`` system marker-placement fields, read per call.
+
+        One splat at the request site rather than one kwarg per field: the
+        request builder already sits at pyright's flow-analysis complexity
+        limit, and each extra call expression there tipped it over.
+        """
+        return {
+            "system_blocks_frozen": cls._host_system_blocks_frozen(config),
+            "system_stable_head_blocks": cls._host_system_stable_head_blocks(config),
+        }
+
+    @staticmethod
     def _host_context_tokens_hint(config: LoopConfig) -> int | None:
         """The host's cross-turn context-size seed, or ``None`` when it has
         none — a zero is treated as "nothing reported" because a provider
@@ -4894,6 +4983,7 @@ class AgentLoop:
             request = ChatRequest(
                 model=model,
                 system_blocks=system_blocks,
+                **self._host_system_cache_layout(config),
                 messages=list(converted),
                 tools=(
                     list(config.get_tools())
@@ -4904,6 +4994,7 @@ class AgentLoop:
                 context_tokens_hint=context_tokens_hint,
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
                 same_route_retry=same_route_retry,
+                inline_ui_hint=_inline_ui_hint_for(config, model),
             )
             request = self._arm_one_turn_secrets(context, request)
             secret_active = request.has_one_turn_secrets
@@ -4925,7 +5016,8 @@ class AgentLoop:
             # call's spend as an ESTIMATE rather than as unknown (review m3; see
             # ``ChatRequest._consumer_cut``).
             cut_receipt = request.arm_consumer_cut()
-            stream = _abortable_stream(config.stream_fn(request, signal), signal, degeneration_cut)
+            provider_stream = config.stream_fn(request, signal)
+            stream = _abortable_stream(provider_stream, signal, degeneration_cut)
             from local_operator.providers.failover import _one_turn_scrub_stream_event
 
             async for event in stream:
@@ -4946,17 +5038,18 @@ class AgentLoop:
                         context_metadata=True,
                         context_metadata_resolved=model.context_metadata_resolved,
                     )
+                elif isinstance(event, StreamAttemptReceipt):
+                    # Set before output without telling supervisors that this
+                    # private wire fact is provider acceptance. In particular a
+                    # retry with a hint-free body must clear the previous mark.
+                    assistant._inline_ui_source_version = event.inline_ui_source_version
                 elif isinstance(event, StreamStartEvent):
                     # The provider is generating for THIS request. Republish it
                     # as a harness event so supervisors get a boundary that
                     # means "on the wire" — ``MessageStartEvent`` above is
                     # yielded from a placeholder before the request is even
                     # built, so it cannot carry that meaning.
-                    yield ProviderTurnStartEvent(
-                        response_id=one_turn_public_text(request, event.response_id),
-                        provider=one_turn_public_text(request, model.provider),
-                        model_id=one_turn_public_text(request, model.model_id),
-                    )
+                    yield _provider_turn_start(request, event, model)
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     if not secret_active:
@@ -7851,13 +7944,23 @@ class AgentLoop:
             logger.error("guardrail checkpoint raised for %s", tool.name, exc_info=True)
             if tool.name != "bash":
                 # Narrow on purpose: only a call that edits the guard's own
-                # policy (or whose own check cannot be completed) closes.
+                # policy, reaches for Radient Guard key material or a Guard
+                # consent route (guard-credential is pure and needs no setup,
+                # so a setup fault must not open it), or whose own check
+                # cannot be completed, closes.
                 try:
                     cwd = (tool_context.cwd if tool_context is not None else None) or os.getcwd()
-                    if not self._policy_hits(tool.name, item.args, cwd, settings, scratchpad):
+                    if guard_check.guard_credential_hit(
+                        tool.name, item.args
+                    ) is None and not self._policy_hits(
+                        tool.name, item.args, cwd, settings, scratchpad
+                    ):
                         return None
                 except Exception:  # noqa: BLE001 — an unanswerable check closes
                     logger.error("guard-policy check raised for %s", tool.name, exc_info=True)
+            # The fail-closed refusal is a Guard decision too (L1 QA Q1, folded
+            # into L2a): record it as block/guard_error before returning it.
+            guard_check._record_decision(guard_check.GUARD_ERROR_RULE, "error", "block")
             return guard_check.GuardOutcome(
                 blocked=True,
                 text=f"{guard_check.BLOCK_MARKER} (error): the safety check failed, so this "
@@ -7913,6 +8016,9 @@ class AgentLoop:
         new_messages: list[AgentMessage],
         redact: Callable[[str], str] | None = None,
         file_provenance: Callable[[str, Any, Any], Awaitable[None]] | None = None,
+        *,
+        evidence_signal: AbortSignal | None = None,
+        condition_evidence: bool = False,
     ) -> None:
         for result in results:
             # Idempotent backstop for a path that skipped the runner's step:
@@ -7924,11 +8030,12 @@ class AgentLoop:
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
+                args = _call_arguments(context, result.tool_call_id)
                 content = await self._redact_content(
                     content,
                     redact,
                     result.tool_name,
-                    _call_arguments(context, result.tool_call_id),
+                    args,
                     _session_cwd(context),
                     _exempt_source_verdict(context, result.tool_call_id),
                 )
@@ -7946,6 +8053,24 @@ class AgentLoop:
                     _session_cwd(context),
                     _exempt_source_verdict(context, result.tool_call_id),
                 )
+                if (
+                    condition_evidence
+                    and context.condition_public_evidence is not None
+                    and not context.one_turn_secret_run_active
+                    and not context.one_turn_secret_leases
+                    and not result.is_error
+                    # A result containing any newly masked value does not
+                    # belong to a public evidence scope, even after masking.
+                    and content == result.content
+                    and details == result.details
+                ):
+                    content = await context.condition_public_evidence(
+                        result.model_copy(update={"content": content, "details": details}),
+                        content,
+                        args,
+                        redact,
+                        evidence_signal,
+                    )
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results

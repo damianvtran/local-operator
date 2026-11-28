@@ -1119,7 +1119,9 @@ _READS = [
     ),
     (f"cd ~/.local-operator/sessions/{CHILD} && npm test", Risk.HIGH),
     (f"git -C ~/.local-operator/sessions/{CHILD} status", Risk.LOW),
-    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.HIGH),
+    # Field case 0.113.2: a -readonly open with only read statements is a
+    # proven read (``resolve._sqlite_read_only``), LOW like ``cat``.
+    ("sqlite3 -readonly ~/.local-operator/guardrails/created.sqlite 'select 1'", Risk.LOW),
     ("cat ~/.local-operator/guardrails/lineage.jsonl", Risk.LOW),
     ("python3 rig.py --out=~/.local-operator/sessions/newid", Risk.HIGH),
 ]
@@ -2463,3 +2465,72 @@ async def test_a_name_only_match_goes_to_the_judge_with_its_evidence(home: Path)
     citing = _Judge("ALLOW evidence=e1")
     outcome = await _check(home, "rm -rf ~/build", citing)
     assert len(citing.prompts) == 1 and outcome is not None and not outcome.blocked
+
+
+# --- lineage registry where ``os.O_NOFOLLOW`` does not exist (Windows) -------
+#
+# Windows' ``os`` module has no ``O_NOFOLLOW``. The bare attribute raised
+# ``AttributeError``, which escaped ``record_lineage``'s ``OSError`` handler and
+# failed every subagent launch (observed on a windows-latest runner). Deleting
+# the attribute here reproduces that platform on any host; the ``lstat``
+# fallback must still refuse a symlinked registry.
+
+
+def _without_nofollow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    assert not hasattr(os, "O_NOFOLLOW")
+
+
+def _symlink_or_skip(target: Path, link: Path) -> None:
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as exc:  # unprivileged Windows
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+
+def test_record_lineage_writes_without_o_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_nofollow(monkeypatch)
+    prov.record_lineage("cccccccccc90", origin="subagent", parent=SID, state_root=tmp_path)
+    rows = prov.lineage_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(r)["child"] for r in rows] == ["cccccccccc90"]
+
+
+def test_registry_create_and_read_without_o_nofollow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without_nofollow(monkeypatch)
+    assert prov.ensure_lineage_registry(tmp_path) is not None
+    assert prov.lineage_path(tmp_path).is_file()
+    prov.record_lineage("cccccccccc91", origin="subagent", parent=SID, state_root=tmp_path)
+    assert prov.read_lineage(tmp_path)["cccccccccc91"]["parent"] == SID
+
+
+@pytest.mark.parametrize("flag_present", [False, True], ids=["no-o_nofollow", "o_nofollow"])
+def test_symlinked_registry_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag_present: bool
+) -> None:
+    if not flag_present:
+        _without_nofollow(monkeypatch)
+    elif not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("platform has no O_NOFOLLOW")
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(json.dumps({"child": "cccccccccc92", "parent": "forged000000"}) + "\n")
+    path = prov.lineage_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    _symlink_or_skip(outside, path)
+    before = outside.read_bytes()
+
+    prov.record_lineage("cccccccccc93", origin="subagent", parent=SID, state_root=tmp_path)
+    assert outside.read_bytes() == before  # no row written through the link
+    assert prov.ensure_lineage_registry(tmp_path) is None
+    assert prov.read_lineage(tmp_path) == {}  # forged rows behind the link are not read
+
+    # A dangling link must not be followed into creating its target either.
+    path.unlink()
+    dangling = tmp_path / "dangling.jsonl"
+    _symlink_or_skip(dangling, path)
+    prov.record_lineage("cccccccccc94", origin="subagent", parent=SID, state_root=tmp_path)
+    assert prov.ensure_lineage_registry(tmp_path) is None
+    assert not dangling.exists()

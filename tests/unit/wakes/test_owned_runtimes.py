@@ -373,11 +373,14 @@ def test_a_restart_probe_that_fails_still_sweeps(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 #: Every marker variable, spelled out so this cell runs unchanged on the
-#: pre-r4 tree (which has no ``MARKER_ENVS``) and fails there for the real reason.
+#: pre-r4 tree (which has no ``MARKER_ENVS``) and fails there for the real
+#: reason. The started flag is looked up by name: it is introduced together
+#: with the stamp it pins, so there is no earlier tree to stay runnable on.
 _MARKERS = (
     owned_runtimes.OWNER_ENV,
     "LOP_WAKE_SUPERVISOR_PID",
     "LOP_WAKE_SUPERVISOR_ACTIVE",
+    owned_runtimes.SUPERVISOR_STARTED_ENV,
 )
 
 #: Runs inside hop 1 (a real separate process, so ``os.getpid()`` differs from
@@ -501,7 +504,13 @@ def test_a_wake_runtimes_grandchild_is_never_swept_by_a_later_stop(
             f"marker={hop_two_env.get(owned_runtimes.OWNER_ENV)!r}"
         )
         assert owned_runtimes.OWNER_ENV not in hop_two_env
+        # The started flag IS stamped into hop 1 by design (the boot reads it
+        # once, ``harness.wake.take_supervisor_started``), so it is the one
+        # marker hop 1 may carry; it must still stop there like the others.
+        assert owned_runtimes.SUPERVISOR_STARTED_ENV not in hop_two_env
         for name in _MARKERS[1:]:
+            if name == owned_runtimes.SUPERVISOR_STARTED_ENV:
+                continue
             assert name not in hop_one_env, f"{name} must not be passed on"
     finally:
         for child in children:
@@ -516,13 +525,23 @@ def test_only_the_supervisor_process_itself_stamps(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(owned_runtimes.OWNER_ENV, "tok")
     monkeypatch.setenv(owned_runtimes.SUPERVISOR_PID_ENV, str(os.getpid() + 1))
-    child = {owned_runtimes.OWNER_ENV: "tok", owned_runtimes.SUPERVISOR_PID_ENV: "1"}
+    child = {
+        owned_runtimes.OWNER_ENV: "tok",
+        owned_runtimes.SUPERVISOR_PID_ENV: "1",
+        # An inherited claim: a non-supervisor must drop it too, or the child
+        # boots believing a supervisor already pulled its wakes forward and
+        # skips the boot it actually needs.
+        owned_runtimes.SUPERVISOR_STARTED_ENV: "1",
+    }
     owned_runtimes.stamp_child_env(child)
     assert child == {}
 
     monkeypatch.setenv(owned_runtimes.SUPERVISOR_PID_ENV, str(os.getpid()))
     owned_runtimes.stamp_child_env(child)
-    assert child == {owned_runtimes.OWNER_ENV: "tok"}
+    assert child == {
+        owned_runtimes.OWNER_ENV: "tok",
+        owned_runtimes.SUPERVISOR_STARTED_ENV: "1",
+    }
 
 
 # ---------------------------------------------------------------------------

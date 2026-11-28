@@ -840,7 +840,8 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
         # the tiebreak for those: it sits in the session-transition family, which
         # is registered after `/usage`, so it lands third rather than second.
         ("u", ["update", "unarchive", "usage", "unread"]),
-        ("g", ["goal"]),
+        # `/guard` (Radient Guard, slice L2b) is registered after `/goal`.
+        ("g", ["goal", "guard"]),
         # `settings` and its `config` alias join these two prefixes; both are
         # ranked ahead of their neighbours because a prefix match on a longer
         # word still beats one that starts later in the name.

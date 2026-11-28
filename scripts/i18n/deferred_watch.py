@@ -211,9 +211,15 @@ def new_references(
 #: ``network/cli.py``, ``network/readiness.py``, ``network/credentials/github.py``
 #: and ``network/credentials/messages.py``, named for its namespace the way
 #: ``_sessions_copy`` is (PR #4052 deferred ``wire.github``).
+#: ``_runtime_memory_copy`` is ``tools/builtin.py``'s ``tr("wire.runtime_memory")``
+#: (the sessions tool's force-stop copy), named the ``_sessions_copy`` way.
+#: ``_sessions_remote_stop_copy`` is its ``tr("wire.sessions_remote_stop")`` (the
+#: sessions tool's idle-only remote stop copy), named the same way.
 RENDER_WRAPPERS = frozenset(
     {
         "_sessions_copy",
+        "_runtime_memory_copy",
+        "_sessions_remote_stop_copy",
         "_t",
         "_tr",
         "_desc",

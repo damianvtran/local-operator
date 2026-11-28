@@ -513,12 +513,19 @@ def decision_lock(approval_id: str, root: Path | None) -> Iterator[None]:
 
 
 def _association(intent: FileIntent) -> str:
+    return _association_of(intent.owner, intent.requester, intent.network_id)
+
+
+def _association_of(owner: MeshKey, requester: MeshKey, network_id: str) -> str:
+    # ONE hash for the slot key and for the owner-side serving accessor, which
+    # recomputes it from link-authenticated identities (never a stored key).
+    # Forking this encoding would make the two silently disagree.
     return hashlib.sha256(
         json.dumps(
             {
-                "owner": intent.owner.model_dump(),
-                "requester": intent.requester.model_dump(),
-                "network_id": intent.network_id,
+                "owner": owner.model_dump(),
+                "requester": requester.model_dump(),
+                "network_id": network_id,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1267,6 +1274,93 @@ async def authorized_context(link: Any, auth: AuthStore, credential_id: int) -> 
         "generation": context.generation,
         "request_digest": context.request_digest,
     }
+
+
+@dataclass(frozen=True)
+class _OwnerServingAccount:
+    """The OWNER's own current native account, as serving must constrain it.
+
+    Inputs to ``account_binding.verify_live`` only; holding one grants nothing.
+    ``login_incarnation`` is retained so a relogin during the request is caught.
+    """
+
+    credential_id: int
+    login_incarnation: str
+    issuer: str
+    opaque_id: str
+    association: str
+
+    def require_unchanged(self, auth: AuthStore, root: Path) -> None:
+        """Fail closed if the owner's login moved on while this request ran."""
+        try:
+            native = _native(auth, self.credential_id, root)
+        except MeshRefusal as error:
+            raise _refuse("mentioned_file_owner_relogin") from error
+        if (native.login_incarnation, native.hub, native.account_id) != (
+            self.login_incarnation,
+            self.issuer,
+            self.opaque_id,
+        ):
+            raise _refuse("mentioned_file_owner_relogin")
+
+
+def _owner_serving_account(link: Any, auth: AuthStore, root: Path) -> _OwnerServingAccount:
+    """Derive verify_live's account inputs from the OWNER, never from a slot.
+
+    MODULE-PRIVATE, with exactly one external caller (``mentioned_file_serve``).
+
+    THE TRAP THIS AVOIDS. ``_verified_context`` finds the approval slot whose
+    intent matches the link's mesh identities and the native account it is
+    given. Taking the credential, subject or association FROM THAT SLOT would
+    make ``account_binding_subject_mismatch`` and
+    ``account_binding_evidence_mismatch`` compare the slot with itself: they
+    could never fire, and an owner who has since logged in as another account
+    would keep serving under the stale one. So each input has an owner-side
+    source instead:
+
+    * credential: the ONE enabled native radient OAuth row with a login
+      incarnation and no ``mesh_origin`` (a borrowed row is not the owner).
+      Several is a refusal, NOT "the latest": picking the latest is the
+      onboarding courtesy rule, not an authority rule;
+    * subject: that row's own hub/account, read through ``_native``;
+    * association: RECOMPUTED by ``_association_of`` from link-authenticated
+      identities (``_mesh``), the same hash the slot key uses.
+
+    Read-only: the inventory reads no credential material.
+    """
+    if Path(root).resolve() != _link_root(link):
+        raise _refuse("file_approval_listener_required")
+    mesh = _mesh(link, root)
+    inventory = AuthStore.native_oauth_inventory(root / "auth.db")
+    if inventory is None:
+        raise _refuse("mentioned_file_owner_account_unknown")
+    # (provider, id, login_incarnation, account, email, org, mesh_origin_type,
+    # credential_type); the query itself already keeps only ENABLED rows.
+    owned = [
+        row
+        for row in inventory
+        if row[0] == "radient" and row[7] == "oauth" and row[6] is None and row[2]
+    ]
+    if not owned:
+        raise _refuse("mentioned_file_owner_account_required")
+    if len(owned) > 1:
+        raise _refuse("mentioned_file_owner_account_ambiguous")
+    credential_id, incarnation = int(owned[0][1]), str(owned[0][2])
+    try:
+        native = _native(auth, credential_id, root)
+    except MeshRefusal as error:
+        if error.code == "file_approval_native_account_changed":
+            raise _refuse("mentioned_file_owner_relogin") from error
+        raise
+    if native.login_incarnation != incarnation:
+        raise _refuse("mentioned_file_owner_relogin")
+    return _OwnerServingAccount(
+        credential_id=native.credential_id,
+        login_incarnation=native.login_incarnation,
+        issuer=native.hub,
+        opaque_id=native.account_id,
+        association=_association_of(mesh["owner"], mesh["requester"], mesh["network_id"]),
+    )
 
 
 class FileDeviceApprovalOp:

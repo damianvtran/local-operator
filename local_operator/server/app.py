@@ -60,6 +60,7 @@ from local_operator.server.routes import (
     desktop_code_requests,
     desktop_community,
     desktop_credentials,
+    desktop_guard,
     desktop_hub,
     desktop_imports,
     desktop_librarian,
@@ -289,6 +290,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_cross_platform_environment()
 
     app.state.config_manager = ConfigManager(config_dir=config_dir)
+    # Whether this daemon was started by a person (Guard's person-only gate). Taken from the
+    # capture ``lop serve`` made BEFORE it dropped the agent-shell markers; a per-request
+    # read of ``os.environ`` would always see the cleaned environment.
+    from local_operator.guard.surface import served_host_can_answer
+
+    app.state.guard_host_can_answer = served_host_can_answer()
+    # The receipt ids ``GET /guard/notices`` has listed (``notices/{id}/shown``'s allow-list).
+    # Created here, once, on the loop: the routes run on worker threads, and a lazy
+    # create-on-first-use there could hand two concurrent first requests two different sets.
+    app.state.guard_notices_listed = set()
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
@@ -442,7 +453,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         from local_operator.network import pairing_attest
 
-        app.state.mesh_pairing_attest = await pairing_attest.start_service(config_dir)
+        if hasattr(app.state, "desktop_idle_update_control"):
+            from local_operator.server.desktop_idle_update import stopping
+
+            # Ordinary rolling reload can hold its HTTP fence across awaits and
+            # then roll back. Only a committed private stop closes pairing.
+            app.state.mesh_pairing_attest = await pairing_attest.start_service(
+                config_dir, admitting=lambda: not stopping(app)
+            )
+        else:
+            app.state.mesh_pairing_attest = await pairing_attest.start_service(config_dir)
     except Exception:  # noqa: BLE001 — additive, never a boot gate
         logger.warning("mesh pairing attest listener not started", exc_info=True)
     # An announcer is what makes this process a DAEMON rather than merely an app
@@ -667,6 +687,35 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
         logger.warning("temporary-chat sweeper could not start", exc_info=True)
 
+    # THE ORPHAN SWEEP (``asks/orphans.py``): settles inbox rows and ask-index
+    # entries whose conversation left this device by a path that did not
+    # cascade (a manual rm, a crash mid-move), so a "Waiting on you" row can
+    # never outlive its conversation for more than one interval. One pass shortly
+    # after boot, then every ``SWEEP_INTERVAL_S``; index-driven and bounded, so
+    # a pass costs O(sessions with asks or inbox rows), never a store scan.
+    orphan_sweep_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.asks.orphans import run_forever as run_orphan_sweep
+
+        orphan_sweep_task = asyncio.create_task(run_orphan_sweep(config_dir))
+    except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
+        logger.warning("orphan sweep could not start", exc_info=True)
+
+    # RADIENT GUARD BACKGROUND PRODUCERS (slice L3). The loop's every tick
+    # first stats ``guard/consent.sqlite3`` and returns when it is absent, so a
+    # non-Team install (or a member who never consented) makes zero network
+    # calls and writes no file; see ``guard/producers.py``.
+    guard_producers_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.guard.producers import run_forever as run_guard_producers
+
+        guard_producers_task = asyncio.create_task(
+            run_guard_producers(app.state.config_manager.config_dir),
+            name="guard-producers",
+        )
+    except Exception:  # noqa: BLE001 - Guard telemetry never fails the daemon
+        logger.debug("guard producers could not start", exc_info=True)
+
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
@@ -682,6 +731,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     except Exception:  # noqa: BLE001 - the org hub is optional; the daemon is not
         logger.debug("org hub gate refresh could not start", exc_info=True)
+    app.state.org_hub_boot_thread = org_hub_thread
 
     # The record was created before the autonomous hub producer. Publish safety
     # only AFTER every real hook exists; absent/failed hub startup stays unknown.
@@ -731,7 +781,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     from local_operator.team_bridge.http_pool import bind_hub_pool, unbind_hub_pool
 
     bind_hub_pool()
+    idle_update_task: asyncio.Task[None] | None = None
+    if hasattr(app.state, "desktop_idle_update_control"):
+        from local_operator.server import desktop_idle_update
+
+        idle_update_task = asyncio.create_task(
+            desktop_idle_update.run(app, settings_intents_resume), name="desktop-idle-update"
+        )
     yield
+    if idle_update_task is not None:
+        idle_update_task.cancel()
+        await asyncio.gather(idle_update_task, return_exceptions=True)
     if remote_attention_task is not None:
         remote_attention_task.cancel()
         await asyncio.gather(remote_attention_task, return_exceptions=True)
@@ -754,6 +814,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        if orphan_sweep_task is not None:
+            orphan_sweep_task.cancel()
+            await asyncio.gather(orphan_sweep_task, return_exceptions=True)
+        if guard_producers_task is not None:
+            guard_producers_task.cancel()
+            await asyncio.gather(guard_producers_task, return_exceptions=True)
         if temporary_sweeper_started:
             try:
                 from local_operator.session.cleanup import stop_temporary_sweeper
@@ -1448,6 +1514,10 @@ app.include_router(desktop_mesh.router)
 # template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
 # path nothing else declares).
 app.include_router(desktop_approvals.router)
+# The GUARD surface (`features.guard`): the TUI's `/guard` screen over HTTP (status, stop
+# sharing, share again, the non-Team card, receipts). Device-local and additive; every
+# template sits under `/v1/desktop/guard`, which no router above declares.
+app.include_router(desktop_guard.router)
 # The op-generic TYPED approval routes (`{id}/approve-operation`, `{id}/apply-operation`):
 # their own router because `desktop_approvals.router`'s route set is a pinned contract.
 # Two-segment children of the same template family, so they collide with nothing above.

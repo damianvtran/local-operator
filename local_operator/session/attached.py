@@ -29,7 +29,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, cast
+from typing import Any, Awaitable, Callable, Literal, TypedDict, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     AgentEndEvent,
     AgentEvent,
+    AgentMessage,
     AgentStartEvent,
     AskOption,
     AskQuestion,
@@ -857,6 +858,18 @@ def resolve_frame_attachments(data: dict[str, Any], store: AttachmentStore) -> d
     return resolved if moved else data
 
 
+def _keep_inline_ui_overlay(messages: Sequence[AgentMessage], envelope: object) -> None:
+    if not isinstance(envelope, dict) or envelope.get("version") != 1:
+        return
+    overlays = envelope.get("messages")
+    if not isinstance(overlays, dict):
+        return
+    for message in messages:
+        if isinstance(message, Message) and isinstance(row := overlays.get(message.id), dict):
+            # Do not repeat the whole page in each Message's private snapshot.
+            message._inline_ui_overlay = {"version": 1, "messages": {message.id: row}}
+
+
 def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     """Rehydrate one relayed event into its concrete pydantic subclass.
 
@@ -865,7 +878,13 @@ def deserialize_event(data: dict[str, Any]) -> AgentEvent[Any]:
     owner can relay through an older follower without killing its stream.
     """
     cls = _EVENT_TYPES.get(str(data.get("type", "")), AgentEvent)
-    return cls.model_validate(data)
+    event = cls.model_validate(data)
+    if overlay := data.get("inline_ui"):
+        if isinstance(event, (AgentEndEvent, HistoryDeltaEvent)):
+            _keep_inline_ui_overlay(event.messages, overlay)
+        elif isinstance(event, MessageEndEvent):
+            _keep_inline_ui_overlay([event.message], overlay)
+    return event
 
 
 def _ask_question_from_pending(pending: PendingRequest) -> AskQuestion:
@@ -1303,6 +1322,10 @@ def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
     # (review R2-2).
     update.update(_inherited_identity_fixups(state, session_id))
     return update
+
+
+class _ColdOpenTraceKwargs(TypedDict, total=False):
+    _trace: open_trace.ColdOpenTrace
 
 
 class AttachedSession:
@@ -2382,6 +2405,110 @@ class AttachedSession:
             return ""
         return str(getattr(team, "manager", "") or "")
 
+    def _cold_attachment_slots(
+        self, active_agent: str, team_name: str
+    ) -> tuple[str, str, dict[str, str]]:
+        """``(active_agent, active_team, effective_identity)`` for a COLD frame.
+
+        NO NAME-ONLY RECOVERY, on the cold side too. The checkpoint's
+        ``active_team`` is a NAME the last owner wrote (possibly another device,
+        possibly before a move or fork completed its binding). The warm restore
+        (``Session._restore_attachment``) refuses exactly that: with no
+        completed local binding (``move_team.needs_reauthorization``) the stored
+        team is kept only as an unresolved hint, ``active_team_name`` and
+        ``active_agent`` stay empty, and the warm frame publishes
+        ``active_team=""`` with the explicit empty identity
+        (``FrontendStateStore.refresh_from_session`` reads ``active_team_name``,
+        never the hint). The cold frame must say the same thing in all three cells:
+        painting the checkpoint's team would show an authority the runtime is
+        about to refuse, and the pane would flip when it engaged (the #2014
+        flip, inverted). ``effective_identity_for``'s own contract says the
+        same: ``team`` is the team in force, never merely a name on disk.
+
+        SAME SOURCE AS WARM, not just the same gate. The warm restore attaches
+        the team named by the session's attachment sidecar, and only when the
+        completed binding names that same team (``_verify_name``,
+        case-insensitive). So the team cells come from exactly there
+        (:meth:`_cold_bound_team`), never from the checkpoint's name: a
+        checkpoint that lags or was written elsewhere (naming ``admins`` beside a
+        ``lopdev`` binding) would otherwise paint ``admins`` while the runtime
+        attaches ``lopdev``. The checkpoint's ``active_agent`` is kept only where
+        it describes the same state — the same team (its manager slot), or no
+        team at all (a plain profile); beside a different or refused team it is
+        that team's manager slot, so it is replaced or dropped with it.
+
+        WHY THE BINDING CHECK IS ENOUGH HERE, without the warm attach's full
+        definition comparison. The binding is written only on this machine: by
+        an explicit local attach (which IS the authorization), by a fork
+        inheriting its parent's binding, or by a verified arrival after its
+        comparison succeeded (``check_arrival``); it is never admitted from a
+        peer's copy set, and the gate also requires it to name THIS team
+        (case-insensitive, as the warm ``_verify_name`` does) — so "bound" means
+        "locally authorized for this team when recorded". This frame is ownerless
+        display: it starts no runtime, publishes no tools and executes nothing.
+
+        The only place the authority is EXERCISED is the warm attach, which
+        re-runs the full comparison (``restoring=True``) before any team is in
+        force and, on a mismatch, refuses with a notice or raises — never runs
+        under a drifted definition. Definition drift since binding can therefore change what the
+        pane names for one frame, never what the runtime is allowed to do.
+
+        Any failure reading the binding is treated as unbound: fail-closed
+        display matches what the runtime will do.
+        """
+        bound = self._cold_bound_team()
+        if not bound:
+            if team_name:
+                # A team on the checkpoint with nothing bound: a name-only hint,
+                # and its manager slot falls with it.
+                return "", "", effective_identity_for(active_agent="", team="")
+            return active_agent, "", effective_identity_for(active_agent=active_agent, team="")
+        manager = self._cold_team_manager(bound)
+        if bound.casefold() != team_name.casefold():
+            active_agent = manager
+        return (
+            active_agent,
+            bound,
+            effective_identity_for(
+                active_agent=active_agent, team=bound, manager=manager, team_in_force=True
+            ),
+        )
+
+    def _cold_bound_team(self) -> str:
+        """The team the warm restore would attach, or ``""`` (best-effort).
+
+        The attachment sidecar's team, but only when the session's completed
+        local binding names that same team — the two checks the warm restore
+        makes before any team is in force. Any failure reading either is
+        treated as unbound: this is display, and fail-closed display matches
+        what the runtime will do.
+        """
+        from local_operator.agents import AgentRegistry
+        from local_operator.network.move_team import (
+            has_local_authority,
+            legacy_local_team,
+            read_local_attachment,
+        )
+        from local_operator.teams import TeamRegistry
+
+        directory = self._config_dir / "sessions" / self._session_id
+        try:
+            stored = read_local_attachment(directory)
+            team = stored.team if stored is not None else ""
+            if not team:
+                return ""
+            if has_local_authority(directory, team):
+                return team
+            # A legacy-local session the warm restore will grandfather: same
+            # read-only predicate, nothing written from a cold preview. The
+            # warm path refuses on an incomplete registry first, so must this
+            # (it raises ProfileRegistryUnavailable, caught below as no team).
+            AgentRegistry(self._config_dir).require_complete_metadata()
+            resolved = legacy_local_team(directory, team, TeamRegistry(self._config_dir))
+            return team if resolved is not None else ""
+        except Exception:  # noqa: BLE001 — unreadable evidence is no authority
+            return ""
+
     async def _restore_cold_details(self, state: FrontendSessionState) -> FrontendSessionState:
         """Fold the durable turn-end checkpoint over synthesised cold state.
 
@@ -2430,7 +2557,15 @@ class AttachedSession:
             # allocations trigger landed on the loop too). ``raw`` is this
             # facade's own parsed row and validation only reads it, so a
             # worker may.
-            durable = await asyncio.to_thread(FrontendSessionState.model_validate, raw)
+            trace = getattr(self, "_cold_open_trace", None)
+            if trace is None:
+                durable = await asyncio.to_thread(FrontendSessionState.model_validate, raw)
+            else:
+                durable = await trace.worker(
+                    open_trace.ColdWorkerPhase.DURABLE_VALIDATE,
+                    FrontendSessionState.model_validate,
+                    raw,
+                )
         except Exception as error:  # noqa: BLE001 — a bad row must not stop the open
             # LOUDLY. Falling back leaves exactly the pre-fix experience — an
             # empty roster and no todos — and at DEBUG that is indistinguishable
@@ -2456,6 +2591,13 @@ class AttachedSession:
         # (``frontend_state._inherited_identity_fixups``), so the cold frame
         # and the attached frame agree on what the fork has.
         inherited = durable.session_id != self._session_id
+        # Threaded: it reads the session's local binding and the machine's team
+        # registry (directory + brief files), and every other read this open
+        # makes is off the loop for the same reason (agent review round 1,
+        # MINOR-3). Best-effort either way.
+        cold_agent, cold_team, cold_identity = await asyncio.to_thread(
+            self._cold_attachment_slots, durable.active_agent, durable.active_team
+        )
         restored = state.model_copy(
             update={
                 # Everything the last runtime knew and this process cannot
@@ -2495,8 +2637,10 @@ class AttachedSession:
                 # bound rather than empty: restoring the list without it would
                 # re-create the lie it exists to prevent.
                 "goal_history_truncated": durable.goal_history_truncated,
-                "active_agent": durable.active_agent,
-                "active_team": durable.active_team,
+                # Gated with the identity below, and for the same reason: see
+                # ``_cold_attachment_slots``.
+                "active_agent": cold_agent,
+                "active_team": cold_team,
                 # Issue #2014: the identity triple is DERIVED here, never copied
                 # from the checkpoint. Every checkpoint written before this field
                 # existed has no key for it, so a copy would hand the frame the
@@ -2509,19 +2653,9 @@ class AttachedSession:
                 # The manager's name is not on the checkpoint either, so it is
                 # resolved best-effort from THIS machine's registry (the same one
                 # the warm session reads) and falls back to the team name exactly
-                # as the shared rule does. Carried unconditionally, like the two
-                # slots above: identity survives a fork, so ``inherited`` does not
-                # gate it.
-                "effective_identity": effective_identity_for(
-                    active_agent=durable.active_agent,
-                    team=durable.active_team,
-                    # Threaded: it reads the machine's team registry (directory
-                    # + brief files), and every other read this open makes is
-                    # off the loop for the same reason (agent review round 1,
-                    # MINOR-3). Best-effort either way.
-                    manager=await asyncio.to_thread(self._cold_team_manager, durable.active_team),
-                    team_in_force=bool(durable.active_team),
-                ),
+                # as the shared rule does. Carried like the two slots above:
+                # identity survives a fork, so ``inherited`` does not gate it.
+                "effective_identity": cold_identity,
                 # Spend and occupancy are the conversation's history, not this
                 # process's: a resumed session that already cost money must not
                 # open reading zero (the same argument as
@@ -3178,6 +3312,10 @@ class AttachedSession:
         it to attribute a receipt that predates the serving-identity stamp,
         without a second scan of a transcript that reaches 103 MB.
         """
+        trace = getattr(self, "_cold_open_trace", None)
+        # Trace instrumentation is opt-in; the off path keeps both helpers'
+        # original call contracts, not a new keyword with a null value.
+        trace_kwargs: _ColdOpenTraceKwargs = {"_trace": trace} if trace is not None else {}
         state = await synthesise_cold_state(
             config_dir=self._config_dir,
             session_id=self._session_id,
@@ -3190,16 +3328,19 @@ class AttachedSession:
             # A deferred HIT's record-proved reading, or ``None`` to read the
             # journal (see ``cold_model.resolve_conversation_model``).
             selection=selection,
+            **trace_kwargs,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":
             # Resolve the account metadata the runtime would, so the band does
             # not divide a real reading by a stale denominator. Metadata must
             # never prevent viewing saved work.
             try:
-                trace = getattr(self, "_cold_open_trace", None)
                 with trace.phase("account_context") if trace else contextlib.nullcontext():
                     model = await resolve_context_metadata(
-                        self._config_dir, state.selected_model, stickiness_key=self._session_id
+                        self._config_dir,
+                        state.selected_model,
+                        stickiness_key=self._session_id,
+                        **trace_kwargs,
                     )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
@@ -3497,7 +3638,11 @@ class AttachedSession:
         )
 
     async def attach_existing(
-        self, *, budget: float | None = None, control_budget: float | None = None
+        self,
+        *,
+        budget: float | None = None,
+        control_budget: float | None = None,
+        _owner_lookup_trace: open_trace.ReadAttachOwnerLookupTrace | None = None,
     ) -> bool:
         """Attach if an owner exists, without turning a history read into work.
 
@@ -3614,6 +3759,11 @@ class AttachedSession:
             # UNCHANGED, and a remote owner asks the peer and reproduces both of
             # its states ("no owner" and "an owner that published no record").
             record, owner = await asyncio.to_thread(self._owner.locate)
+            if _owner_lookup_trace is not None:
+                # Observe the existing result before local recovery can turn
+                # PID-only into a record. Memo/retained/cancelled reads that
+                # never reach this line have no observed lookup for this flight.
+                _owner_lookup_trace.record(has_record=record is not None, has_pid=owner is not None)
             if record is None and owner is not None and self._owner.placement.is_local:
                 # AN owner EXISTS but published no LIVE record: an older binary, a
                 # registrant that failed, or — the case a read must not call "no
@@ -3754,6 +3904,7 @@ class AttachedSession:
         audio: list[dict[str, str]] | None = None,
         files: list[dict[str, Any]] | None = None,
         delivery: str | None = None,
+        inline_ui: bool = False,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3841,6 +3992,8 @@ class AttachedSession:
             fields["files"] = files
         if delivery and delivery != "steer":
             fields["delivery"] = delivery
+        if inline_ui is True:
+            fields["inline_ui"] = True
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(
@@ -5358,8 +5511,9 @@ class AttachedSession:
             # published no live record" (§3.4).
             record, owner = await asyncio.to_thread(self._owner.locate)
             if wait_for_publication is not None and not self._disposed:
-                # Only the send caller opts in, only after a successful engage,
-                # and only once. This can read the published record; it must
+                # Only the publication-waiting callers opt in (every remote
+                # pilot verb since 2026-11-25), only after a successful engage, and
+                # only once. This can read the published record; it must
                 # neither engage again nor attempt to deliver the pending act.
                 wait, wait_for_publication = wait_for_publication, None
                 if record is None:
@@ -6028,6 +6182,7 @@ class AttachedSession:
             lambda _projection: None,
             on_disconnected,
             events=True,
+            inline_ui=True,
             on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
@@ -6498,6 +6653,7 @@ class AttachedSession:
             return
         self._validate_display_window(window, frontend.epoch, frontend.live_cursor)
         rows = list(window.messages)
+        _keep_inline_ui_overlay(rows, window.inline_ui)
         # THE OWNER'S ENTRY TIMES FOR THE ROWS IT JUST SHIPPED. Tracked beside
         # ``rows`` as the window and any older pages are prepended, so the map
         # covers exactly the loaded interval: a row the owner could not stamp is
@@ -6587,6 +6743,7 @@ class AttachedSession:
         if client is None:
             raise ConnectionError("history owner is disconnected")
         page = DisplayHistoryWindow.model_validate(await client.history_page(before, anchor))
+        _keep_inline_ui_overlay(page.messages, page.inline_ui)
         if page.status != "reset":
             self._validate_display_window(page, epoch, cursor)
         return page
@@ -7392,12 +7549,11 @@ class AttachedSession:
         if trace is not None:
             trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
-            # ``stats`` names which proof a MISS paid (incremental after growth,
-            # full after a rewrite) in the open trace, so a slow open can be
-            # attributed without re-instrumenting.
-            stats: dict[str, Any] = {}
+            # A traced MISS records only the proof's fixed reasons, counts
+            # and times. No stats allocation or lookup clock on untraced opens.
+            stats: dict[str, Any] | None = {} if trace is not None else None
             record = await asyncio.to_thread(build_cold_tail_metadata, witness, path, stats)
-            if trace is not None:
+            if trace is not None and stats is not None:
                 trace.fields.update(stats)
         if record is None:
             return None
@@ -10765,6 +10921,15 @@ class AttachedSession:
         else:
             self._switch_on_owner(client, model, announce=True)
 
+    async def rehome_to_auth_default(self, expected: str, provider: str) -> None:
+        """Use the owner's guarded re-home, not the explicit set-model RPC."""
+        client = self._client
+        if client is not None:
+            try:
+                await client.rehome_if_current(expected, provider, "")
+            except Exception:  # noqa: BLE001 — an older/unreachable owner keeps its selection
+                logger.debug("automatic viewer re-home failed", exc_info=True)
+
     def _consume_settings_result(self, state: FrontendSessionState | PublicStateView) -> None:
         """Render OUR switch outcomes once: a refusal as an error, success silently.
 
@@ -11513,9 +11678,9 @@ class AttachedSession:
             raise ConnectionError("owner connection lost")
         images_wire = [_image_to_wire(image) for image in (images or [])]
         command = (
-            ContinuationCommand(message_id, self._session_id, text, images_wire)
+            ContinuationCommand(message_id, self._session_id, text, images_wire, inline_ui=True)
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         # `self.epoch` is the copy-free read of the same field; this is the
         # captured baseline the observer below compares each event against.
@@ -11693,9 +11858,10 @@ class AttachedSession:
                 session_id=self._session_id,
                 text=text,
                 images=images_wire,
+                inline_ui=True,
             )
             if message_id
-            else ContinuationCommand.create(self._session_id, text, images_wire)
+            else ContinuationCommand.create(self._session_id, text, images_wire, inline_ui=True)
         )
         return await client.send_command(command, streaming=self._streaming)
 
@@ -11779,6 +11945,7 @@ class AttachedSession:
             session_id=self._session_id,
             text=message.text,
             delivery=delivery or "",
+            inline_ui=True,
             images=[
                 _image_to_wire(block)
                 for block in message.content

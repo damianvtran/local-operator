@@ -107,7 +107,12 @@ from local_operator.harness.jobs import (
     effort_fallback_clause,
     is_model_fallback,
 )
-from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
+from local_operator.harness.loop import (
+    FAULT_DENIED,
+    AgentLoop,
+    LoopContext,
+    _materialize_asides,
+)
 
 # The custom-message markers this session journals, renders and allow-lists,
 # imported from their one neutral home: the renderer that turns them back into
@@ -157,6 +162,8 @@ from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.request_admission import RequestAdmission
 from local_operator.harness.rows import is_harness_injection
 from local_operator.harness.subagent import (
+    TeamLaunchError,
+    inherits_bound_team_authority,
     is_inherit_tier_sentinel,
     resolve_launch_target,
     run_subagent,
@@ -200,6 +207,7 @@ from local_operator.harness.types import (
     PeerMessageDeliveredEvent,
     ReasoningDeltaEvent,
     SteeringDeliveredEvent,
+    StreamEndEvent,
     StreamEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -227,6 +235,7 @@ from local_operator.harness.wake import (
     format_duration,
     format_wake_delivery_text,
 )
+from local_operator.i18n.keys import session_attachment as _attach_copy
 from local_operator.i18n.keys import tui_notices as _nt
 from local_operator.i18n.messages import Msg
 from local_operator.imaging import rebound_oversize_image
@@ -292,6 +301,7 @@ from local_operator.session.credential_binding import (
     CredentialBinding,
 )
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
+from local_operator.session.inline_ui import instructions_for as inline_ui_instructions
 from local_operator.session.mcp_status import MCP_DISCOVERY_KEY, McpStartupOutcome
 
 # ONE implementation of "what dial does this row state", shared with the
@@ -346,6 +356,7 @@ from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
+    INLINE_UI_HEAD_LATCH_CUSTOM_TYPE,
     PROFILE_TRUST_CUSTOM_TYPE,
     Transcript,
     context_cut_index,
@@ -365,9 +376,10 @@ from local_operator.supplements.trigger import (
     snapshot_messages,
 )
 from local_operator.tools.builtin import (
-    blocked_todos,
-    open_todos,
+    TODO_BLOCK_REF,
     restore_todos,
+    todo_block_condition,
+    todo_condition_phrase,
     todo_fingerprint,
     todo_snapshot,
 )
@@ -389,15 +401,17 @@ if TYPE_CHECKING:
     from local_operator.harness.verifier_evidence import VerifierEvidence
     from local_operator.mcp.manager import McpManager
 
-    # Type-only: the contract itself is built by the host that installs it
-    # (``exec_startup`` / ``sdk._build_session``), and the session holds the
-    # object without ever constructing one.
-    from local_operator.output_contract import OutputContract
-
     # Type-only for the same reason ``resume`` is imported lazily at its two
     # call sites below: ``cli.py``'s startup path is guarded by a test that
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
     # in the other direction too.
+    from local_operator.network.move_team import PendingMovedTeam
+
+    # Type-only: the contract itself is built by the host that installs it
+    # (``exec_startup`` / ``sdk._build_session``), and the session holds the
+    # object without ever constructing one.
+    from local_operator.output_contract import OutputContract
+    from local_operator.research_evidence import AuxiliaryUsageReceipt
     from local_operator.resume import SessionAttachment
 
     # Type-only: ``session_factory`` builds sessions, so a runtime import
@@ -425,6 +439,24 @@ BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
 #: owner typing at this machine, so it never authorizes a card-free account
 #: profile save (operator: "a peer ... request never authorizes an edit").
 REMOTE_PROMPT_KEY = "lop_remote_prompt"
+
+
+#: The remedy a refused team restore names in ``attachment_restore_notice``.
+_TEAM_REMEDY = "re-attach via /team"
+
+
+def _with_team_remedy(refusal: BaseException) -> str:
+    """The restore notice for a refused team: the refusal, then the remedy ONCE.
+
+    Some refusals already carry it (``role definition ... differs from the
+    recorded one; re-attach via /team``, ``recorded delegation does not match;
+    re-attach via /team``) because the same text crosses the relay protocol on a
+    move, where the remedy has to travel with it. Appending unconditionally read
+    ``...; re-attach via /team; re-attach via /team`` -- in text quoted as gate
+    evidence -- so the remedy is added only when the refusal does not end with it.
+    """
+    text = str(refusal)
+    return text if text.endswith(_TEAM_REMEDY) else f"{text}; {_TEAM_REMEDY}"
 
 
 def _stamp_remote_prompt(message: Any) -> None:
@@ -473,6 +505,13 @@ INPUT_SURFACE_KEY = "lop_input_surface"
 #: non-mobile, which errs quiet on the phone.
 INPUT_SURFACES = frozenset({"mobile", "remote", "desktop", "tui", "unknown"})
 
+#: ``INLINE_UI_HEAD_LATCH_CUSTOM_TYPE`` (imported from the transcript module, so
+#: ``fork_snapshot`` can see it) is the custom entry holding the conversation's
+#: latched inline-UI head row (``Session._settle_inline_ui_head_latch``). A full
+#: snapshot per change, like ``system_prefix``: ``latest_custom`` restores it on
+#: resume. Small by design: the hint text plus the compaction marker it was
+#: decided under.
+
 
 def _input_surface(value: object, default: str = "tui") -> str:
     """Clamp a surface to :data:`INPUT_SURFACES` (anything else is ``default``)."""
@@ -485,6 +524,12 @@ def _stamp_input_surface(message: Any, surface: str) -> None:
     message.provider_payload = payload
 
 
+def stamp_tui_composer_steer(message: Message) -> None:
+    """Only the actual local composer can give Message-shaped steering this default."""
+    _stamp_input_surface(message, "tui")
+    message._inline_ui_viewer_capable = True
+
+
 def spooled_input_surface(line: Any) -> str:
     """The surface a SPOOLED owner line carries (``serving._owner_sender``).
 
@@ -495,6 +540,13 @@ def spooled_input_surface(line: Any) -> str:
     sender = getattr(line, "sender", None)
     value = sender.get("input_surface") if isinstance(sender, Mapping) else None
     return _input_surface(value, default="unknown")
+
+
+def spooled_inline_ui(line: Any) -> bool:
+    """Restore only the exact declaration on a pending owner admission."""
+    from local_operator.session.runtime.inbox import SOURCE_USER
+
+    return getattr(line, "source", None) == SOURCE_USER and getattr(line, "inline_ui", None) is True
 
 
 def _noop_answer_surface_undo() -> None:
@@ -614,6 +666,37 @@ def _notice(
         kind=kind,
         headline=headline,
     )
+
+
+#: The shape a team name (``teams._NAME_RE``) or agent id
+#: (``agents._AGENT_ID_RE``) is held to on every write path, so a stored name
+#: matching it is safe to place verbatim inside the ``<attachment-notice>``
+#: section. The union (128 characters) is used because the notice only needs
+#: "cannot break out of its section", not each registry's exact bound.
+_NOTICE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+#: How much of an invalid name the escaped fallback shows: enough to recognise
+#: it, never an unbounded paste billed on every turn.
+_NOTICE_NAME_MAX_CHARS = 64
+
+
+def _notice_name(name: str) -> str:
+    """``name`` as it may appear inside the model-facing ``<attachment-notice>``.
+
+    WHY (PR #4583 review R1-2): the name comes from ``attachment.json``, a file
+    that can arrive from another device or be hand-edited, and it is
+    interpolated into a section the model reads every turn. A newline or a
+    literal ``</attachment-notice>`` would end the section early and let the
+    rest of the string pose as harness text. A name every registry would
+    accept passes through unchanged (the common case, and what ``/team <name>``
+    needs to be typed back); anything else is shown as a bounded ``ascii()``
+    repr with angle brackets escaped, so it can neither carry a control
+    character nor open or close a tag, and the raw string is never emitted.
+    """
+    if _NOTICE_NAME_RE.fullmatch(name):
+        return name
+    shown = ascii(name[:_NOTICE_NAME_MAX_CHARS])
+    return shown.replace("<", "\\x3c").replace(">", "\\x3e")
 
 
 def _text(message: Msg) -> str:
@@ -1309,7 +1392,29 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "generate_music",
     "modify_music",
     "music_status",
+    # Team Integrations provisioning (RFC "Radient Team Integrations" §8.1) is
+    # gated on THREE session-owned things: the ask hook, the consent seam
+    # (``_integration_consent_seam``: None for a child and under the blocking
+    # ask arm) and a Radient OAuth row. The first is installed by the front end
+    # AFTER ``__init__`` — so this entry alone is not enough, and
+    # ``ASK_HOOK_CAPABILITY_TOOLS`` below is what makes ``set_ask_handler``
+    # re-run it. Before it joined both lists the tool was built nowhere a live
+    # session looked: ``read tool://integrations`` answered "Unknown tool" in
+    # every interactive session while the stub-context QA passed. Appended last
+    # for the same prefix reason as ``sessions``.
+    "integrations",
 )
+
+#: The subset of :data:`SESSION_CAPABILITY_TOOLS` whose createIf reads the
+#: host's ask hook (``ToolContext.ask_user``), directly or through the queue and
+#: consent seam it creates. :meth:`Session.set_ask_handler` re-runs exactly
+#: these on install and drops exactly these on uninstall — one tuple for both
+#: arms so a tool cannot be rescued on install and then orphaned on uninstall.
+#: A SUBSET, not the whole merge set, so installing a question surface can never
+#: resurrect a ``wake``/``task`` that ``_build_child_session`` pruned. Every
+#: createIf condition stays in each builder: this only decides WHEN they re-run,
+#: so it widens nothing a child, headless responder or exec session can reach.
+ASK_HOOK_CAPABILITY_TOOLS: tuple[str, ...] = ("ask", "ask_withdraw", "integrations")
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
 #: a second pass over the same tool object cannot wrap it again. A double wrap is
@@ -1777,6 +1882,109 @@ def _state_section_text(body: Any, heading: str) -> str:
     return f"{heading}\n{text}"
 
 
+_TodoKey = tuple[str, str, int]  # phase, text, same-text occurrence (ignores status)
+_TodoBlock = tuple[str, str | None, bool]  # reason, bound incarnation, currently covered
+_TodoPending = tuple[_TodoKey, ...]
+
+
+def _todo_rows(phases: list[dict[str, Any]]) -> Iterator[tuple[_TodoKey, dict[str, Any]]]:
+    # The todo tool can hold two identical texts in one phase; count every
+    # occurrence, including resolved rows, so blocking one cannot alias another.
+    counts: dict[tuple[str, str], int] = {}
+    for phase in phases:
+        for item in phase["items"]:
+            name_text = (phase["name"], item["text"])
+            occurrence = counts[name_text] = counts.get(name_text, 0) + 1
+            yield (*name_text, occurrence), item
+
+
+_TODO_TITLE_QUOTE = re.compile(r'\\[\\"“”]|(?P<open>(?<!\w)(?:“|"(?=\S)))|["“”]')
+_TODO_TITLE_UNESCAPE = {'"': re.compile(r'\\([\\"])'), "”": re.compile(r"\\([\\“”])")}
+_TODO_STRAIGHT_QUOTES = str.maketrans("“”", '""')
+
+
+def _todo_quoted_titles(body: str) -> Iterator[tuple[str, tuple[int, int]]]:
+    # Scan from the outside in: the other quote family is literal within a
+    # title and nested quotes must not supply independent titles. Outside a
+    # pair, a straight quote stuck to the end of a word (e.g. 3") cannot open.
+    start = None
+    close = ""
+    depth = 0
+    for mark in _TODO_TITLE_QUOTE.finditer(body):
+        quote = mark[0]
+        if start is None:
+            if mark["open"]:
+                start = mark.start()
+                close = "”" if quote == "“" else '"'
+            continue
+        after = body[mark.end() : mark.end() + 1]
+        followed_by_word = after.isalnum() or after == "_"
+        # A straight quote before a word cannot close the outer title; the
+        # same goes for a quote between whitespace and an opening bracket.
+        # Track these nested pairs rather than accepting them in isolation.
+        before = body[mark.start() - 1]
+        nested_straight = mark["open"] and (
+            followed_by_word or (before.isspace() and after in {"(", "[", "{"})
+        )
+        if (close == "”" and quote == "“") or (close == quote == '"' and nested_straight):
+            depth += 1
+        elif quote == close:
+            if depth:
+                depth -= 1
+                continue
+            if not followed_by_word:
+                title = _TODO_TITLE_UNESCAPE[close].sub(r"\1", body[start + 1 : mark.start()])
+                yield title.strip(), (start, mark.end())
+            start = None
+
+
+def _todo_purpose_matches(purposes: tuple[str, ...], task: str, condition: str) -> bool:
+    # Word boundaries alone make "deploy schema" a prefix of another title
+    # and let a word inside the blocker stand in for a task mention. Require a
+    # whole title in ordinary paired double quotes (straight or curly), and the
+    # literal blocker at a separate span in the same field (one Ask question).
+    # Ignore case and whitespace in both phrases, and quote typography and
+    # terminal sentence punctuation in the blocker. Title punctuation is exact.
+    task = " ".join(task.casefold().split())
+    condition = todo_condition_phrase(condition).translate(_TODO_STRAIGHT_QUOTES)
+    if not task or not condition or task == condition:
+        return False
+    condition_phrase = re.compile(rf"(?<!\w)(?=({re.escape(condition)})(?!\w))")
+    for purpose in purposes:
+        body = " ".join(purpose.casefold().split())
+        # Normalize blocker typography without changing offsets. Lookahead
+        # finds even overlapping occurrences so a repeated blocker cannot
+        # supply a title delimiter inside any occurrence of that blocker.
+        blockers = [
+            match.span(1)
+            for match in condition_phrase.finditer(body.translate(_TODO_STRAIGHT_QUOTES))
+        ]
+        for title, (start, end) in _todo_quoted_titles(body):
+            if title != task:
+                continue
+            if any(left <= start < right or left < end <= right for left, right in blockers):
+                continue
+            if any(right <= start or end <= left for left, right in blockers):
+                return True
+    return False
+
+
+def _todo_binding_for_condition(incarnation: str, condition: str) -> str:
+    from hashlib import sha256
+
+    # A phase-wide block may replace a row's reason without attributing a new
+    # receipt to it. Keep the incarnation prefix for reuse detection, but do
+    # not let a retained binding prove coverage of a different condition.
+    prefix, purpose_digest = incarnation.rsplit(":", 1)
+    digest = sha256(f"{purpose_digest}:{todo_condition_phrase(condition)}".encode()).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _todo_block_ref(reason: str) -> tuple[str, str] | None:
+    match = TODO_BLOCK_REF.match(reason.strip())
+    return (match[1], match[2]) if match else None
+
+
 def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, str]]) -> str:
     """The nudge the continuation guardrail injects (``_todo_continuation``).
 
@@ -1829,17 +2037,27 @@ def _todo_reminder_text(pending: list[dict[str, str]], blocked: list[dict[str, s
             "finished, `todo block` with a reason when it needs a user decision "
             "or an external service, `todo drop` when it is no longer needed. "
             "If the decision is the user's to make, put it to them with the "
-            "`ask` tool."
+            "`ask` tool when available. Never retry a refused action or resume work "
+            "the user asked to hold. If no safe next action exists, say what remains "
+            "unresolved in your own words instead of claiming completion."
         )
     if blocked:
         paragraphs.append(
             # i18n: ignore model-facing system reminder (not shown to the user)
             "Before you finish, account for each blocked item: check whether "
-            "its condition still holds. If it has cleared, resume the work; if "
-            "the decision is the user's, raise it with the `ask` tool; if it "
-            "waits on an external condition, make sure a wake or monitor is "
-            "armed to revisit it. Do not leave a blocked item that nothing is "
-            "watching."
+            "its condition still holds. Resume only if it has cleared and the work is "
+            "still authorized. Never retry a refused action or resume an intentional hold. "
+            "If the decision is the user's, use `ask` when available; for an external "
+            "condition, use a relevant wake or monitor when appropriate. When safe to share, "
+            "quote the exact task title in paired straight or curly double quotation marks "
+            "(use the other style, or escape matching quotes with a backslash) and state the "
+            "exact blocker separately in the same natural question, wake message, or monitor "
+            "description. Do not copy this reminder, private data, IDs, or harness bookkeeping "
+            "into that prose. Link only a receipt created for that task and condition: "
+            "re-block with `[ask:<id>]`, "
+            "`[wake:<id>]`, or `[monitor:<id>]` followed by the exact blocker. If there is "
+            "no safe next action, leave the item blocked and "
+            "explain what remains unresolved in your own words if a reply is appropriate."
         )
     body = "\n".join([*rows, *paragraphs])
     return (
@@ -2858,7 +3076,11 @@ def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]
             declined = value
     if marker is None:
         return 0, declined, marker_id
-    entries = transcript.entries()
+    from local_operator.session.transcript import resident_entries
+
+    # The newest compaction row is always resident (suffix-only load), and the
+    # readings after it are too.
+    entries = resident_entries(transcript)
     position = next(
         (index for index in range(len(entries) - 1, -1, -1) if entries[index].id == marker_id),
         None,
@@ -3019,9 +3241,14 @@ def _resumed_cache_diagnostics_id(transcript: Transcript) -> str | None:
     both telemetry-only outcomes.
     """
     from local_operator.fork import fork_instant
-    from local_operator.session.transcript import newest_cache_diagnostics_id
+    from local_operator.session.transcript import (
+        newest_cache_diagnostics_id,
+        projection_entries,
+    )
 
-    entries = transcript.entries()
+    # Newest usage row wins, uncut by compaction: prefix money skeletons keep
+    # ``usage`` (and its diagnostics id), so the projection answers exactly.
+    entries = projection_entries(transcript)
     try:
         forked_at = fork_instant(transcript.directory)
     except Exception:  # noqa: BLE001 — an unreadable marker must not fail construction
@@ -3539,6 +3766,37 @@ def _compact_subagent_record(record: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+# Bounded retry for the roster sidecar's ``os.replace`` on non-POSIX hosts.
+# Windows refuses to replace a destination another process (an indexer, an
+# antivirus scanner, a concurrent reader) holds open without
+# FILE_SHARE_DELETE, surfacing a transient PermissionError (sharing
+# violation). These numbers are not a measured distribution: they are a short
+# ceiling (5 attempts, ~0.15 s of total sleep) chosen so a roster write — which
+# runs on a worker thread on every roster move — never stalls noticeably, and a
+# persistent refusal still raises exactly as before.
+_ROSTER_REPLACE_ATTEMPTS = 5
+_ROSTER_REPLACE_BACKOFF_S = 0.01
+
+
+def _replace_roster_sidecar(temp: Any, path: Any) -> None:
+    """``os.replace`` that rides out a transient Windows sharing violation.
+
+    POSIX ``rename(2)`` has no such transient failure, so a PermissionError
+    there is real and propagates on the first attempt — the retry is gated to
+    ``os.name != "posix"`` and to PermissionError only.
+    """
+    attempt = 1
+    while True:
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if os.name == "posix" or attempt >= _ROSTER_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_ROSTER_REPLACE_BACKOFF_S * (2 ** (attempt - 1)))
+            attempt += 1
+
+
 def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
     """Replace current roster state durably without exposing a partial JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3549,12 +3807,21 @@ def _write_roster_sidecar(path: Any, payload: dict[str, Any]) -> None:
             json.dump(payload, handle, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _replace_roster_sidecar(temp, path)
+        # Fsyncing the parent directory makes the rename itself durable, but
+        # only POSIX can open a directory as a file descriptor: on Windows
+        # ``os.open(dir, O_RDONLY)`` raises PermissionError (observed on a
+        # windows-latest runner, once per roster write), and NTFS journals the
+        # rename itself. Same platform gate as ``_fsync_directory`` in
+        # ``session/index_read_model.py``; unlike that helper, a POSIX failure
+        # here still raises, because the roster write has always treated a
+        # refused directory sync as a failed durable write.
+        if os.name == "posix":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         with contextlib.suppress(FileNotFoundError):
             temp.unlink()
@@ -4101,6 +4368,7 @@ class Session:
         #: "fall through" value, which is what every non-child session holds.
         self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        self._public_evidence: Any = None
         saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
         if callable(saver_bridge):
             saver_bridge(self)
@@ -4197,6 +4465,13 @@ class Session:
                 exc_info=True,
             )
         self._session_id = session_id or transcript.directory.name
+        # The delegating session as ``origin.json`` records it, read ONCE here.
+        # A child resumed by id has no live parent handle (``_parent_session_id``
+        # is ``""``), yet it is still a child: the divergence judge and
+        # ``_integration_consent_seam`` both need the durable marker, and reading
+        # it in one place keeps the two from disagreeing about who is a child.
+        self._origin_parent_session_id = origin_parent_session_id(transcript.directory)
+
         # The divergence observer (``local_operator/divergence.py``) is
         # SESSION-scoped, and that is the whole reason it is built here: "fire
         # once per novel root" and "escalate on a second turn" are facts about a
@@ -4213,7 +4488,7 @@ class Session:
             # marker on disk: a child resumed by id has no live parent handle,
             # and ``origin.json`` is written once by whoever created the
             # directory — the only place that knows.
-            parent_session_id=parent_session_id or origin_parent_session_id(transcript.directory),
+            parent_session_id=parent_session_id or self._origin_parent_session_id,
             on_notice=self._record_divergence_notice,
         )
         from local_operator.profile_actions import ProfileActions
@@ -4358,6 +4633,7 @@ class Session:
         #: approval or picker answer), or ``None`` for a run with none so far.
         #: Reset at every pipeline head beside ``_run_started_at``.
         self._run_input_surface: str | None = None
+        self._run_inline_ui_viewer_capable = False
         #: The conversation's LAST DRIVER, which a run with no human input (a
         #: wake, a job result, a peer or channel message) inherits. ``None`` means
         #: "not rebuilt yet"; the first run end rebuilds it from the transcript
@@ -4762,6 +5038,14 @@ class Session:
         #: :meth:`_persist_attachment`.
         self._unresolved_team: str = ""
         self._unresolved_agent: str = ""
+        #: Why ``_unresolved_team`` is set: ``"authority"`` when the authority
+        #: gate refused the stored name, ``""`` for any other miss (definition
+        #: not landed, registry unreadable). Only selects the notice's reason
+        #: clause; it never decides whether a brief is granted.
+        self._unresolved_team_reason: str = ""
+        self._pending_moved_team: PendingMovedTeam | None = None
+        self._pending_move_apply_seen: tuple[int, int, int, int] | None = None
+        self._pending_move_retry: tuple[tuple[int, int, int, int], float] | None = None
         #: Monotonic time of the last re-resolve attempt for those names (see
         #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
         self._attachment_reresolved_at: float | None = None
@@ -4851,6 +5135,14 @@ class Session:
         #: ``cache_read``/``cache_write`` on activation turns shows the resumed
         #: case paying more than that single turn.
         self._deferral_pins: frozenset[str] = frozenset()
+        #: Generic tool ceiling a team-bound subagent inherits from its parent
+        #: (set by ``harness/subagent.py`` at child build). ``None`` = unbounded.
+        #: Declared here, not only assigned there, so the type checker knows
+        #: the attribute and its value type at every reader below; the readers
+        #: keep their ``getattr`` default for reduced hosts that skip __init__.
+        self._team_generic_tool_ceiling: frozenset[str] | None = None
+        #: The pins (schema-published names) that same ceiling allows.
+        self._team_generic_pin_ceiling: frozenset[str] | None = None
         self._activated_tools: set[str] = set()
         self._tool_deferral = tool_deferral_enabled()
         #: True while a mid-session model selection has not reached the
@@ -4910,7 +5202,11 @@ class Session:
             if saved_prefix and isinstance(saved_prefix.get("blocks"), list):
                 self._frozen_system_blocks = list(saved_prefix["blocks"])
                 self._last_system_blocks = list(self._frozen_system_blocks)
-                for entry in transcript.entries():
+                from local_operator.session.transcript import projection_entries
+
+                # session_state is a keep-set type: every prefix row survives in
+                # the projection, in order, so the fold is identical.
+                for entry in projection_entries(transcript):
                     payload = entry.payload
                     if payload.get("custom_type") != "session_state":
                         continue
@@ -4919,6 +5215,20 @@ class Session:
                     )
                     self._system_state_message_id = entry.id
         self._state_baseline_from_replay = self._system_state_message_id is not None
+        # The inline-UI head-row latch (see ``_settle_inline_ui_head_latch``).
+        # Persisted with the conversation, because a resumed or restarted
+        # runtime replays the SAME signed thinking blocks and must send the
+        # head row they were signed under.
+        saved_latch = transcript.latest_custom(INLINE_UI_HEAD_LATCH_CUSTOM_TYPE) or {}
+        # (A full snapshot per change, so the newest row is the whole state.)
+        latched_text = saved_latch.get("text")
+        self._inline_ui_head_latch: str | None = (
+            latched_text if isinstance(latched_text, str) else None
+        )
+        latched_compaction = saved_latch.get("compaction_id")
+        self._inline_ui_head_latch_compaction_id: str | None = (
+            latched_compaction if isinstance(latched_compaction, str) else None
+        )
         # Whether the block provider accepts the live ``model_label`` argument.
         # Computed once here rather than per call: the factory and subagent
         # providers do, a bare zero-arg callable (some hosts, most tests) does
@@ -5144,8 +5454,13 @@ class Session:
         # its lineage warning exists only at the live context tail and is
         # consumed once, so resume never accumulates synthetic transcript rows.
         from local_operator.fork import consume_fork_boundary
+        from local_operator.network.move_team import seal_unbound_arrival
 
-        fork_boundary = consume_fork_boundary(transcript.directory)
+        # Before the consume below erases the only marker that this unbound
+        # session arrived (fork/recovery), so legacy grandfathering refuses it.
+        # A failed seal keeps the boundary: it is then the only refusal left.
+        sealed = seal_unbound_arrival(transcript.directory)
+        fork_boundary = consume_fork_boundary(transcript.directory) if sealed else ""
         if fork_boundary:
             replayed_messages.append(
                 CustomMessage(
@@ -5315,6 +5630,8 @@ class Session:
         #: not call it a broken attach invariant (review R1-6). One-shot, cleared
         #: on every write, so a later unexplained decrease still warns.
         self._spend_downward_correction = False
+        self._auxiliary_spend_ids: set[str] = set()
+        self._restored_auxiliary_receipts = self._restore_auxiliary_spend()
         # -- the channel-spend ledger (design: docs/design/spend-channels.md) --
         # Folded from the journal's ``session_channel_spend.v1`` rows in ONE
         # construction pass, keyed by ``record_id`` with the highest ``rev``
@@ -5405,10 +5722,21 @@ class Session:
         #: a resumed session has none, so a resumed turn simply gets no note.
         self._voice_note_for: str | None = None
         #: Team Bridge card excerpt decisions, frozen at each card's first render
-        #: in this process (``card_projection.attach_history_excerpts``): keeps
+        #: (``card_projection.attach_history_excerpts``): keeps
         #: already-cached card bytes stable. Cleared whenever standing fails and
-        #: at every compaction commit (``_finish_compaction``).
-        self._bridge_excerpt_memo: dict[str, Any] = {}
+        #: at every compaction commit (``_finish_compaction``). Persisted in the
+        #: session directory and reloaded here, because a runtime that idle-exits
+        #: and resumes inside the provider's cache TTL still has a warm cache
+        #: (``card_projection.ExcerptMemo`` has the measurement).
+        from local_operator.team_bridge.card_projection import (
+            EXCERPT_MEMO_NAME,
+            ExcerptMemo,
+        )
+
+        session_dir = self._session_dir()
+        self._bridge_excerpt_memo: ExcerptMemo = ExcerptMemo.load(
+            None if session_dir is None else Path(session_dir) / EXCERPT_MEMO_NAME
+        )
         # The body turn whose answer was already seen at a terminal step, so
         # it is never cut afterwards (``_body_turn_cut_for_person``).
         self._body_answered_turn: Any | None = None
@@ -5583,6 +5911,12 @@ class Session:
         self._advisor_calls = 0  # against settings.advisor_max_calls
         self._advisor_last_turn = -(10**9)  # turn index of the last call, for every_n_turns
         self._advisor_cooldown_until = -1  # turn index the cooldown expires at
+        # Cache keep-alive (``compaction/keepalive.py``). The turn-end count
+        # lets a ping's late write tell that a turn ended while it streamed
+        # (that turn's arm owns the row then); the Team Bridge half of the
+        # mode is resolved once per session, not per turn end (review R1-4).
+        self._keepalive_turn_ends = 0
+        self._keepalive_bridge_covered: bool | None = None
         # Kill switch. An advisor-triggered pass that fails to clear the
         # recovery band proved the advice was not merely early but wrong about
         # there being headroom to reclaim, and repeating it is a compaction
@@ -5668,33 +6002,24 @@ class Session:
         #: is always above it, because ``_run_turn`` bumps the raw counter first.
         self._turn_generation = 0
         self._fallback_tool_resolver: Callable[[str], AgentTool | None] | None = None
-        # Todo-continuation latch: the full todo fingerprint captured at the
-        # last guardrail nudge in THIS user turn, so a model that yields twice
-        # with a byte-identical list is not nudged a second time. Reset per user
-        # turn in _run_turn_pipeline; see :meth:`_todo_continuation`.
-        # Both fingerprints are the phase-aware 4-tuple form
-        # ``(phase_name, text, status, reason)`` that ``builtin.todo_fingerprint``
-        # now emits (phased-todos change; the reason joined in the blocked-reason
-        # remediation): the reminder latch and the persistence
-        # latch both compare against that source, so their annotations must match
-        # its arity or a comparison silently degrades.
-        self._todo_reminder_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
-        #: The blocked group's IDENTITY latch: (phase, text, status) per blocked item,
-        #: WITHOUT the reason. Deliberately NOT reset per turn (see
-        #: ``_run_turn_pipeline``): a parked set earns exactly ONE reconciliation per
-        #: identity change, across turns, so an unchanged parked set is not re-asserted
-        #: on every wake or quiet end. An empty identity is a change too: it is recorded
-        #: on the silent returns, so an identical re-park is a new identity that earns
-        #: its pass. A reason-only rewrite is bookkeeping, not a new ask — it refreshes
-        #: the rendered assertion's expiry (the full fingerprint rides ``details``) but
-        #: never re-fires one. In-memory on purpose: a process restart re-asks once per
-        #: current set, which is the accepted limit.
-        self._blocked_reminder_fingerprint: tuple[tuple[str, str, str], ...] | None = None
-        # The todo fingerprint that was last WRITTEN to the transcript, so the
+        # Distinguish an offered nudge from one that reached the provider and
+        # from a pass that reached the clean terminal boundary. A shed follow-up,
+        # dropped render, cancellation or output failure must not buy silence on
+        # the next turn. Only the completed per-item checks carry across turns.
+        self._todo_pending_seen: set[_TodoPending] = set()
+        self._todo_accounted_pending: _TodoPending = ()
+        self._todo_projections: dict[str, tuple[_TodoPending, dict[_TodoKey, _TodoBlock]]] = {}
+        self._todo_offer_id = ""
+        self._todo_presented: dict[_TodoKey, _TodoBlock] = {}
+        self._todo_accounted: dict[_TodoKey, _TodoBlock] = {}
+        self._todo_continuation_discarded = False
+        self._todo_terminal_guard_refused = False
+        self._todo_terminal_parked = False
+        # The todo snapshot that was last WRITTEN to the transcript, so the
         # post-turn snapshot only appends when the list actually moved. Seeded
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
-        self._persisted_todo_fingerprint: tuple[tuple[str, str, str, str], ...] | None = None
+        self._persisted_todo_snapshot: list[dict[str, Any]] | None = None
         # Project-continuation latch: the stale-set fingerprint captured at the
         # last project nudge in THIS user turn — the sorted
         # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
@@ -6735,14 +7060,41 @@ class Session:
         """
         if not any(_is_todo_reminder(message) for message in messages):
             return messages
-        current = todo_fingerprint(self._session_id)
-
-        def expired(message: AgentMessage) -> bool:
-            return (
-                _is_todo_reminder(message) and _stamped_todo_fingerprint(message.details) != current
-            )
-
-        return [message for message in messages if not expired(message)]
+        projection = self._todo_projections.get(self._todo_offer_id)
+        rendered: list[AgentMessage] = []
+        for message in messages:
+            if not _is_todo_reminder(message):
+                rendered.append(message)
+                continue
+            if "blocks" not in message.details:
+                # Historical/synthetic stamps predate per-item offers.
+                if _stamped_todo_fingerprint(message.details) == todo_fingerprint(self._session_id):
+                    rendered.append(message)
+                continue
+            if (
+                projection is None
+                or message.id != self._todo_offer_id
+                or self._todo_retry_forbidden()
+            ):
+                continue
+            pending, blocks = projection
+            current_pending, current_blocks = self._todo_state()
+            kept_pending = tuple(key for key in pending if key in current_pending)
+            kept_blocks = {
+                key: row for key, row in blocks.items() if current_blocks.get(key) == row
+            }
+            if not (kept_pending or kept_blocks):
+                continue
+            if kept_pending == pending and kept_blocks == blocks:
+                rendered.append(message)
+                continue
+            # The wire retains the message ID, not its CustomMessage details.
+            # Give a trimmed projection its own ID so dispatch charges exactly
+            # the rows it carried, even if another render ran in between.
+            trimmed = self._make_todo_reminder(kept_pending, kept_blocks)
+            self._todo_projections[trimmed.id] = (kept_pending, kept_blocks)
+            rendered.append(trimmed)
+        return rendered
 
     def _live_project_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
         """``messages`` without project reminders the stale set has since outrun.
@@ -7711,6 +8063,19 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
+        # WHY (session 32deb1ecf45b, a team manager that went silent): a stored
+        # team the runtime refused to restore was reported ONLY through
+        # ``attachment_restore_notice``, which only the TUI reads. A
+        # relay-hosted runtime has no TUI, so every turn reached the model with
+        # neither the ``[team: X]`` brief nor any word that it was missing. The
+        # notice rides the tail as its own section while the miss lasts, so the
+        # prefix/delta machinery below carries it on every request and retracts
+        # it (an ordinary "" section) once a re-attach resolves the slot.
+        notice = self._attachment_state_notice()
+        if notice and len(desired) >= 4:
+            desired = list(desired)
+            block = desired[3]
+            desired[3] = f"{block}\n\n{notice}" if block else notice
         # Live memory belongs in tail deltas, never block zero. Checking at each
         # provider boundary harvests late captures without opening another turn.
         from local_operator.memory_capture import session_tail
@@ -7732,6 +8097,9 @@ class Session:
         # that will actually be advertised. Reconciling afterwards would make
         # the frozen prefix and the delta disagree with the request.
         desired = self._reconcile_tool_inventory(list(desired))
+        # Same boundary as the prefix epoch: before this call's request is
+        # built, so the loop's per-call hint read sees the settled latch.
+        await self._settle_inline_ui_head_latch(model or self._model)
         if not getattr(self._system_blocks_provider, "append_only_state", False):
             return desired
         if self._frozen_system_blocks is None:
@@ -7765,6 +8133,114 @@ class Session:
         # normally (see the open-asks replay rule in ``_system_state_delta``).
         self._state_baseline_from_replay = False
         return list(self._frozen_system_blocks)
+
+    def _live_inline_ui_hint(self) -> str | None:
+        """This run's discovery hint as the input surface decides it right now."""
+        if self._output_contract is not None:
+            return None
+        return inline_ui_instructions(
+            self._run_input_surface, viewer_capable=self._run_inline_ui_viewer_capable
+        )
+
+    async def _settle_inline_ui_head_latch(self, model: ModelSpec) -> None:
+        """Decide the conversation's inline-UI head row before a main-turn call.
+
+        WHY: with thinking on, the Anthropic Messages body (first party and
+        Bedrock invoke) pins the hint at ``messages[0]`` (``AnthropicClient.
+        _build_body``), and every signed thinking block is bound to ALL content
+        before it. The live hint is decided per run and even per call (a wake
+        or peer run has none, a TUI steer turns it on, a live answer from
+        another surface turns it off), so following it would add or drop the
+        head row under already-signed blocks: an HTTP 400 ("Content that
+        preceded this block when it was created is missing") plus a miss of the
+        whole message-level cache. So the head row belongs to the conversation:
+
+        - Unlatched, the first call whose live hint is present latches it, but
+          only while the history holds no signed thinking (those blocks were
+          signed WITHOUT the row; adding it would shift their prefix). No live
+          hint means no head row and no latch.
+        - Latched, every later Anthropic thinking request for this
+          conversation sends the same bytes: later runs, wakes, steers, other
+          surfaces, resumes and asides. A surface that cannot render widgets
+          still gets prose: inline-UI output projects to text for viewers
+          without the capability (``inline_ui_text.project_inline_ui``).
+        - Re-decided only at a compaction boundary, where history is rewritten
+          anyway, and only once no signed thinking survives it (turns kept
+          verbatim may still carry blocks signed under the old row).
+
+        Other wires and non-thinking requests keep following the live hint
+        (tail placement, nothing signed), so this is a no-op for them.
+        """
+        # Local import: the provider clients module is heavy and session.py keeps
+        # it off its import path (same as ``audio_format_refusal``).
+        from local_operator.providers.clients import (
+            carries_signed_thinking,
+            inline_ui_hint_binds_head,
+        )
+
+        if not inline_ui_hint_binds_head(model):
+            return
+        live = self._live_inline_ui_hint()
+        marker = self._transcript.latest_entry("compaction")
+        compaction_id = marker.id if marker is not None else None
+        if self._inline_ui_head_latch is None:
+            if live is None or carries_signed_thinking(self._context.messages):
+                return
+            decided = live
+        elif compaction_id != self._inline_ui_head_latch_compaction_id:
+            if carries_signed_thinking(self._context.messages):
+                return
+            decided = live
+        else:
+            return
+        if (decided, compaction_id) == (
+            self._inline_ui_head_latch,
+            self._inline_ui_head_latch_compaction_id,
+        ):
+            return
+        # Durable before the request that first carries it, like the prefix
+        # epoch: a crash after dispatch must not resume without the row.
+        await self._transcript.append_custom(
+            INLINE_UI_HEAD_LATCH_CUSTOM_TYPE, {"text": decided, "compaction_id": compaction_id}
+        )
+        self._inline_ui_head_latch = decided
+        self._inline_ui_head_latch_compaction_id = compaction_id
+
+    def _inline_ui_head_hint(self, model: ModelSpec, live: str | None) -> str | None:
+        """The hint a request for ``model`` carries: the latch where it binds."""
+        from local_operator.providers.clients import inline_ui_hint_binds_head
+
+        if inline_ui_hint_binds_head(model):
+            return self._inline_ui_head_latch
+        return live
+
+    def _system_blocks_are_frozen(self) -> bool:
+        """Whether this session's system blocks are currently epoch-frozen.
+
+        True only when the system-blocks provider opted into append-only state
+        AND an epoch has been frozen (either persisted on turn 1 or replayed
+        from the transcript). Standalone / non-append-only providers keep
+        returning ``False`` so trailing volatile blocks remain unmarked.
+        """
+        return bool(
+            getattr(getattr(self, "_system_blocks_provider", None), "append_only_state", False)
+            and getattr(self, "_frozen_system_blocks", None) is not None
+        )
+
+    def _system_stable_head_blocks(self) -> int:
+        """Leading frozen system blocks that are identical across sessions.
+
+        The provider declares the count (``stable_head_blocks``, stamped by
+        ``session_factory`` / the subagent builder from
+        ``prompts_api.STABLE_HEAD_BLOCK_COUNT``) because only the builder knows
+        where its volatile env block starts. Reported only while the epoch is
+        frozen: an unfrozen or host-supplied provider promises no byte-stable
+        head, so it gets 0 and the wire keeps its historical marker layout.
+        """
+        if not self._system_blocks_are_frozen():
+            return 0
+        count = getattr(self._system_blocks_provider, "stable_head_blocks", 0)
+        return count if isinstance(count, int) and count > 0 else 0
 
     def _system_state_delta(
         self, desired: list[str]
@@ -8010,6 +8486,27 @@ class Session:
             details={"text": text, "blocks": changes},
         )
 
+    async def _read_only_system_blocks(self) -> tuple[list[str], list[str]]:
+        """``(desired, sent)`` system blocks for a read-only request.
+
+        ``sent`` is what goes on the wire (the frozen epoch unless the head
+        block moved); ``desired`` is the fresh render the state delta compares.
+        Split out of :meth:`_read_only_prompt` so the cache keep-alive's prefix
+        digest hashes exactly the blocks its ping would send.
+        """
+        desired = self._system_blocks()
+        if inspect.isawaitable(desired):
+            desired = await desired
+        # An aside runs against the same tools as the turn beside it, so it
+        # gets the same reconciled inventory (it just never journals one).
+        desired = self._reconcile_tool_inventory(list(desired))
+        blocks = list(self._frozen_system_blocks or desired)
+        if desired[:1] != blocks[:1]:
+            # Helpers do not journal, but they must obey a new standing rule
+            # immediately too. The real turn commits this epoch independently.
+            blocks = list(desired)
+        return desired, blocks
+
     async def _read_only_prompt(
         self, turns: Sequence[AgentMessage]
     ) -> tuple[list[str], list[Message]]:
@@ -8019,18 +8516,8 @@ class Session:
         state newer than the last committed snapshot is appended only to this
         request. The next real turn still performs its own durable publication.
         """
-        desired = self._system_blocks()
-        if inspect.isawaitable(desired):
-            desired = await desired
-        # An aside runs against the same tools as the turn beside it, so it
-        # gets the same reconciled inventory (it just never journals one).
-        desired = self._reconcile_tool_inventory(list(desired))
+        desired, blocks = await self._read_only_system_blocks()
         history = self._wire_legal_snapshot()
-        blocks = list(self._frozen_system_blocks or desired)
-        if desired[:1] != blocks[:1]:
-            # Helpers do not journal, but they must obey a new standing rule
-            # immediately too. The real turn commits this epoch independently.
-            blocks = list(desired)
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))
@@ -8643,6 +9130,8 @@ class Session:
         if (
             previous.reasoning_effort == model.reasoning_effort
             and previous.fast_mode == model.fast_mode
+            # Picking the already displayed automatic ID is a real pin.
+            and previous.auth_route_default == model.auth_route_default
             and previous_choice == self._chosen_effort
         ):
             return
@@ -9048,7 +9537,13 @@ class Session:
             return ""
         return str(getattr(team, "name", "") or "")
 
-    def attach_team(self, team: Any) -> str | None:
+    def attach_team(
+        self,
+        team: Any,
+        *,
+        _verified_bound: bool = False,
+        _pending_move: PendingMovedTeam | None = None,
+    ) -> str | None:
         """Bind this session as the manager of ``team``.
 
         The team's collaboration and project briefs ride the volatile tail
@@ -9078,6 +9573,36 @@ class Session:
         actually IN FORCE, or a bare ``/team clear`` would quietly drop an
         attached profile the user never asked to lose.
         """
+        manager_name = getattr(team, "manager", "") or ""
+        from local_operator.network.move_team import bind_runtime_authority
+        from local_operator.teams import Team
+
+        kind, profile, specialist_prompt = None, None, ""
+        authority = None
+        if isinstance(team, Team) or _verified_bound:
+            # Journal before exposing the attachment and use exactly the
+            # checked profiles and rosters, not another live registry lookup.
+            authority = bind_runtime_authority(
+                getattr(self._transcript, "directory", None),
+                team,
+                self.team_registry,
+                self.agent_registry,
+                restoring=_verified_bound,
+                readonly_shell=self._readonly_shell,
+                pending_move=_pending_move,
+            )
+            team = authority.team
+            manager, profile, specialist_prompt = authority.manager
+            kind = manager["kind"]
+            if kind == "role" and profile is not None:
+                from local_operator.agent_profiles import with_delivery_pointer
+
+                profile = with_delivery_pointer(profile)
+        elif manager_name and self.agent_registry is not None:
+            # Reduced, non-Team hosts have no durable attachment authority.
+            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
+        manager_pins = tuple(profile.tools or ()) if profile is not None else ()
+        self._team_authority = authority
         # Read BEFORE the assignment below: the detach branch needs to know
         # whether a team was in force, and this is the only place that is still
         # true. Review round 1 caught a bare ``/team clear`` (no team attached)
@@ -9106,37 +9631,20 @@ class Session:
             self.refresh_frontend_state()
             return None
         preamble = getattr(team, "manager_preamble", lambda: "")()
-        # The manager's own profile instructions (the reusable BASE) sit in
-        # front of the team brief so a custom manager keeps its voice when
-        # this session was not launched with --agent. A packaged starter
-        # resolved by name is enough; a missing profile costs nothing.
-        manager_name = getattr(team, "manager", "") or ""
-        if manager_name and self.agent_registry is not None:
-            # Same resolution ORDER as ``/agent`` attach, via the ONE shared
-            # resolver: own role, then own specialist (BEFORE a same-named
-            # packaged seed), then the seed. This closes the twin of A1 — a
-            # team whose manager is the operator's own specialist named after a
-            # seed word (reviewer/coder/…) previously layered the SEED here,
-            # because ``resolve_profile`` was consulted before the specialist
-            # path. Both call sites share ``_resolve_profile_or_specialist`` so
-            # the order cannot drift between them again.
-            kind, profile, specialist_prompt, _ = self._resolve_profile_or_specialist(manager_name)
-            if kind in ("role", "seed") and profile is not None:
-                # The manager's ``tools:`` list pins those schemas published,
-                # exactly as an ``/agent`` attach of the same role would.
-                self.set_tool_deferral(pins=tuple(profile.tools or ()))
-            if kind in ("role", "seed") and profile is not None and profile.preamble:
+        if kind in ("role", "seed") and profile is not None:
+            # The profile's tools pin published schemas, just as /agent does.
+            self.set_tool_deferral(pins=manager_pins)
+            if profile.preamble:
                 preamble = profile.preamble + (preamble or "")
-            elif kind == "specialist" and specialist_prompt:
-                # A specialist has no role preamble header; wrap it so the model
-                # can tell the manager's own base voice apart from the team brief
-                # layered after it.
-                preamble = (
-                    "<manager-profile>\n"
-                    + specialist_prompt
-                    + "\n</manager-profile>\n\n"
-                    + (preamble or "")
-                )
+        elif kind == "specialist" and specialist_prompt:
+            # Specialists have no role header: keep their voice distinct from
+            # the team collaboration brief layered after it.
+            preamble = (
+                "<manager-profile>\n"
+                + specialist_prompt
+                + "\n</manager-profile>\n\n"
+                + (preamble or "")
+            )
         self._goal_state.team_brief = preamble or ""
         # Read BEFORE the claim, because the claim blanks it: this is the
         # profile the team is about to replace, and the caller's notice names it.
@@ -9146,7 +9654,10 @@ class Session:
         self._claim_agent_slot_for_team()
         # A team whose MANAGER is a read-only shell role makes this session
         # that role: the same confinement ``attach_agent_profile`` applies.
-        self._apply_readonly_shell_role(self._team_manager_name())
+        self._apply_readonly_shell_role(
+            self._team_manager_name(),
+            force=authority is not None and authority.manager[0]["readonly_shell"],
+        )
         # Journal the NAME so a resume can rebuild this tail. On change only:
         # the roster moves a handful of times per session, and the brief itself
         # is deliberately not stored (see ``SessionAttachment``).
@@ -9408,7 +9919,16 @@ class Session:
         nothing about whether the stored team is still wanted.
         """
         if slot == "team":
+            if self._pending_moved_team is not None:
+                # A pending move is not a new draft eligible for first-turn
+                # adoption. In particular, a best-effort detach write failing
+                # must not let the provider boundary re-adopt the stale sidecar.
+                self._attachment_adoption_attempted = True
+            self._pending_moved_team = None
+            self._pending_move_apply_seen = None
+            self._pending_move_retry = None
             self._unresolved_team = ""
+            self._unresolved_team_reason = ""
         else:
             self._unresolved_agent = ""
 
@@ -9445,11 +9965,30 @@ class Session:
         (:attr:`attachment_restore_notice`) rather than raised: a team the user
         renamed or deleted must not make a conversation unopenable.
         """
-        from local_operator.resume import read_session_attachment
+        from local_operator.network.move_team import (
+            TeamIdentityRefused,
+            UnboundAttachmentUnreadable,
+            needs_reauthorization,
+            read_local_attachment,
+        )
 
+        # The reason describes THIS pass's miss (PR #4583 review R1-1). Only the
+        # authority branch below sets it, so it must start empty every pass:
+        # otherwise a session first refused for authority whose definition later
+        # went missing (a re-resolve landing on another miss site) would keep
+        # telling the model "authority could not be verified" — the wrong cause
+        # and the wrong remedy. Empty reads as the neutral "unavailable" reason.
+        self._unresolved_team_reason = ""
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        # Known bindings with lost evidence must fail before any authority can
+        # enter the runtime. For a never-bound conversation, keep the history
+        # open but report that attachment restoration was refused.
         try:
-            stored = read_session_attachment(self._transcript.directory)
-        except Exception:  # noqa: BLE001 — a resume must always open
+            stored = read_local_attachment(directory)
+        except UnboundAttachmentUnreadable as error:
+            self.attachment_restore_notice = str(error)
             return
         if stored is None:
             return
@@ -9470,6 +10009,34 @@ class Session:
         live_goal = self._goal_state.text
         if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
+        if (
+            stored.team
+            and not self.active_agent
+            and not self.active_team_name
+            and needs_reauthorization(directory)
+            # Pre-binding sessions created HERE are stamped on first load
+            # (see move_team "Legacy-local grandfathering"); anything that
+            # arrived, or whose team does not resolve exactly, still refuses.
+            and not self._grandfather_legacy_team(directory, stored.team)
+        ):
+            # Recovery preserves the attachment bytes as a hint, not a grant.
+            # Leave the journal intact so merely setting a goal cannot certify it.
+            self._unresolved_team = stored.team
+            self._unresolved_agent = stored.agent
+            # The GHSA-wmg2-rrrj-p599 authority gate refused this name (no
+            # binding, no mesh team record, grandfather declined): say WHY in
+            # the per-turn notice, because it is the one cause the re-resolve
+            # loop can never cure on its own — only an explicit attach can.
+            self._unresolved_team_reason = "authority"
+            # The TUI line keeps its terse one-line form (96-cell budget, D3);
+            # the full keyed sentence reaches the model via
+            # :meth:`_attachment_state_notice` instead.
+            self.attachment_restore_notice = str(
+                TeamIdentityRefused(
+                    stored.team, "recorded authority is unavailable; re-attach via /team"
+                )
+            )
+            return
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
 
@@ -9490,6 +10057,25 @@ class Session:
             self._apply_stored_attachment(stored)
         finally:
             self._restoring_attachment = False
+
+    def _grandfather_legacy_team(self, directory: Path, team: str) -> bool:
+        """Stamp a pre-binding local team session on first load, or refuse.
+
+        The registry completeness check runs FIRST: a binding written while an
+        installed definition was skipped as corrupt would journal a seed
+        fallback as this session's authority. See move_team's
+        "Legacy-local grandfathering" for the threat analysis and residual.
+        """
+        from local_operator.network.move_team import grandfather_legacy_local
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        complete = getattr(self.agent_registry, "require_complete_metadata", None)
+        try:
+            if complete is not None:
+                complete()
+        except ProfileRegistryUnavailable:
+            return False
+        return grandfather_legacy_local(directory, team, self.team_registry, self.agent_registry)
 
     def _apply_stored_attachment(self, stored: "SessionAttachment") -> None:
         """Re-apply one parsed attachment; see :meth:`_restore_attachment`.
@@ -9539,25 +10125,45 @@ class Session:
         # the revert F1 forbids. "The live state wins" is per SESSION here, not
         # per slot, wherever the two slots are mutually exclusive.
         if stored.team and not live_agent and (not live_team or live_team == stored.team):
-            team = None
-            registry = self.team_registry
-            if registry is None:
-                looked_up_and_absent = False
-            else:
-                try:
-                    team = registry.get_team_by_name(stored.team)
-                except Exception:  # noqa: BLE001 — a bad registry row is not fatal
-                    team = None
-                    looked_up_and_absent = False
-            if team is None:
-                missing.append((f"team {stored.team!r}", "/team"))
-                # Carried so the next mutation cannot erase it (R1).
+            from local_operator.network.move_team import (
+                TeamIdentityRefused,
+                is_pending_definition,
+                pending_moved_team,
+                restore_bound,
+                was_authorized_locally,
+            )
+
+            # No name-only recovery: an interrupted copy, old local journal
+            # or fork without a completed binding cannot grant authority.
+            directory = self._transcript.directory
+            try:
+                team = restore_bound(directory, stored.team, self.team_registry)
+                self.attach_team(team, _verified_bound=True)
+            except TeamIdentityRefused as refusal:
+                if is_pending_definition(refusal):
+                    # THE RECORD IS INTACT; ONLY THE DEFINITION IS IN FLIGHT
+                    # (Q-R5-1). Definitions reconciliation runs independently of a
+                    # move, so a missing row is a WAIT: keep the recorded name (the
+                    # next turn re-resolves it and attaches once the row lands) and
+                    # report it — but never raise, which lost the recorded team and,
+                    # on the moved shape, made the conversation unopenable. The
+                    # recorded team is what the retry attaches UNDER, so waiting
+                    # grants nothing; a RECORD that does not match still raises
+                    # below, exactly as before.
+                    self._unresolved_team = stored.team
+                    if self.team_registry is not None and self._pending_moved_team is None:
+                        root = getattr(self.team_registry, "config_dir", None)
+                        if root is not None:
+                            self._pending_moved_team = pending_moved_team(
+                                root, directory, stored.team, refusal
+                            )
+                    self.attachment_restore_notice = _with_team_remedy(refusal)
+                    return
+                if not was_authorized_locally(directory):
+                    raise
                 self._unresolved_team = stored.team
-            else:
-                # Through ``attach_team`` rather than by setting the brief, so
-                # ``active_team`` (what subagents inherit) is restored too, not
-                # just the prompt text.
-                self.attach_team(team)
+                self.attachment_restore_notice = _with_team_remedy(refusal)
+                return
         # A stored agent name is SUPERSEDED, not missing, when the same sidecar
         # named a team (issue #2014): the team owns the agent slot, so the
         # manager ``attach_team`` just claimed IS this session's speaker.
@@ -9617,6 +10223,43 @@ class Session:
                 f"could not restore {what}{cause}. Run {commands} to re-attach."
             )
 
+    def _attachment_state_notice(self) -> str:
+        """The model-facing ``<attachment-notice>`` section, or ``""``.
+
+        Present exactly while a stored team/agent is recorded as unresolved
+        and nothing attached in its place — the same test
+        :meth:`_reresolve_unresolved_attachment` uses, so the notice and the
+        retry cannot disagree about whether the slot is still missing. It
+        grants nothing: it names the miss and the remedy, never the brief.
+
+        The sentence is the keyed ``session.attachment`` copy pinned to
+        English (model-facing; see :func:`_text`), so the model, the TUI line
+        and the admission refusal a peer decodes all say the same thing.
+        """
+        lines: list[str] = []
+        if self._unresolved_team and self.active_team is None:
+            reason = (
+                _attach_copy.reason_authority()
+                if self._unresolved_team_reason == "authority"
+                else _attach_copy.reason_unavailable()
+            )
+            lines.append(
+                _text(
+                    _attach_copy.team_unrestored(
+                        team=_notice_name(self._unresolved_team), reason=_text(reason)
+                    )
+                )
+            )
+        elif self._unresolved_agent and not self._goal_state.agent_name:
+            # A team owns the agent slot (issue #2014), so a stored agent beside
+            # a missing team is superseded, not separately missing.
+            lines.append(
+                _text(_attach_copy.agent_unrestored(agent=_notice_name(self._unresolved_agent)))
+            )
+        if not lines:
+            return ""
+        return "<attachment-notice>\n" + "\n".join(lines) + "\n</attachment-notice>"
+
     def _adopt_stored_attachment(self) -> None:
         """Adopt a stored attachment that landed AFTER construction, before turn one.
 
@@ -9665,10 +10308,81 @@ class Session:
             return
         self._restore_attachment()
 
-    #: Minimum seconds between two re-resolve attempts of an unresolved stored
-    #: attachment when the registries expose no root to fingerprint.
-    #: ``_prepare_system_blocks`` runs at every provider step, and a team that is
-    #: genuinely gone would otherwise force a registry rescan per step.
+    def _retry_bound_team_for_admission(self) -> None:
+        """Consume a completed local definitions apply, not a new authorization."""
+        pending = self._pending_moved_team
+        teams = self.team_registry
+        if (
+            pending is None
+            or teams is None
+            or self._unresolved_team != pending.team
+            or self.active_team is not None
+            or self.active_agent
+        ):
+            return
+        from local_operator.network.definitions import index_path
+        from local_operator.network.move_team import TeamIdentityRefused, restore_bound
+        from local_operator.session.errors import ProfileRegistryUnavailable
+        from local_operator.types import TeamRegistryRecoveryError
+
+        try:
+            # Ordinary definitions apply atomically replaces the index AFTER
+            # writing its rows. A root-directory mtime misses in-place updates
+            # of an installed team/role. The token is only a scan throttle;
+            # the bound restore below independently proves identity/ceilings.
+            stat = index_path(teams.config_dir).stat()
+        except OSError:
+            return  # No readable apply signal; no registry scan or authority write.
+        applied = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns)
+        if applied == self._pending_move_apply_seen:
+            return
+        now = time.monotonic()
+        retry = self._pending_move_retry
+        if retry is not None and retry[0] == applied:
+            if now < retry[1]:
+                return
+            # Spend the one delayed retry before refreshing: a second transient
+            # failure must not leave this unchanged generation eligible again.
+            self._pending_move_apply_seen = applied
+            self._pending_move_retry = None
+        else:
+            # A new apply gets an immediate attempt and, if it fails transiently,
+            # one later send can retry it at the existing attachment refresh floor.
+            self._pending_move_retry = (applied, now + self._ATTACHMENT_RERESOLVE_INTERVAL_S)
+        try:
+            teams.refresh()
+            agents = self.agent_registry
+            if agents is not None:
+                agents.refresh_now()
+                agents.require_complete_metadata()
+            team = restore_bound(
+                self._transcript.directory, pending.team, teams, pending_move=pending
+            )
+            self._restoring_attachment = True
+            try:
+                self.attach_team(team, _verified_bound=True, _pending_move=pending)
+            finally:
+                self._restoring_attachment = False
+        except ProfileRegistryUnavailable:
+            raise  # The owner already has a separate typed registry refusal.
+        except (OSError, TypeError, ValueError, TeamRegistryRecoveryError) as error:
+            # The authority helpers wrap unreadable team/role rows as identity
+            # refusals. Only actual read/recovery failures are retryable; a
+            # completed mismatch (or still-missing row) waits for another apply.
+            transient = (OSError, ProfileRegistryUnavailable, TeamRegistryRecoveryError)
+            if not isinstance(error, transient) and not (
+                isinstance(error, TeamIdentityRefused) and isinstance(error.__cause__, transient)
+            ):
+                self._pending_move_apply_seen = applied
+            # Existing owner admission still returns AttachmentUnavailable. No
+            # name-only fallback, grandfathering or sync request from this path.
+            logger.debug("bound attachment still unavailable at admission", exc_info=True)
+            return
+        self.attachment_restore_notice = ""
+
+    #: Minimum seconds between re-resolves without a change signal, including
+    #: a transiently failed scan of one definitions generation. Without a
+    #: floor, every provider step or refused send could force a registry scan.
     _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
 
     def _reresolve_unresolved_attachment(self) -> None:
@@ -9757,6 +10471,7 @@ class Session:
         )
         if team_done and pending_team:
             self._unresolved_team = ""
+            self._unresolved_team_reason = ""
         if agent_done and pending_agent:
             self._unresolved_agent = ""
         if team_done and agent_done:
@@ -9778,11 +10493,18 @@ class Session:
         opening it: adoption is an enhancement, and a host without a readable
         journal must not have its turn fail over it.
         """
+        from local_operator.session.transcript import (
+            resident_entries,
+            transcript_prefix_flag,
+        )
+
         try:
-            entries = self._transcript.entries()
+            entries = resident_entries(self._transcript)
         except Exception:  # noqa: BLE001 — adoption must never fail a turn
             return True
-        return any(
+        # Dropped prefix rows answer through the flag the open computed with the
+        # same predicate.
+        return transcript_prefix_flag(self._transcript, "has_assistant") or any(
             entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "assistant"
             for entry in entries
         )
@@ -9919,7 +10641,7 @@ class Session:
             return self._stamp_agent_brief(body, display_name)
         return None
 
-    def _apply_readonly_shell_role(self, role: str) -> None:
+    def _apply_readonly_shell_role(self, role: str, *, force: bool = False) -> None:
         """Confine this session's shell when ``role`` is a read-only shell role.
 
         WHY HERE. ``harness.subagent`` confines a DELEGATED scout, but a scout
@@ -9957,7 +10679,7 @@ class Session:
             readonly_shell_write_root,
         )
 
-        if not is_readonly_shell_role(role):
+        if not force and not is_readonly_shell_role(role):
             return
         self._readonly_shell = True
         if self._shell_write_root is None:
@@ -10917,6 +11639,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -11180,6 +11903,8 @@ class Session:
             # the run inherits the conversation's last driver.
             if not harness_injected:
                 _stamp_input_surface(user, input_surface)
+                if inline_ui is True or (inline_ui is None and input_surface == "tui"):
+                    user._inline_ui_viewer_capable = True
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -11307,6 +12032,7 @@ class Session:
         mesh_origin: Mapping[str, Any] | None = None,
         _file_capture: Any = ...,
         input_surface: str = "tui",
+        inline_ui: bool | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -11395,6 +12121,8 @@ class Session:
         # phone steer into a desk-started run makes that run mobile-origin).
         if not harness_injected:
             _stamp_input_surface(message, input_surface)
+            if inline_ui is True or (inline_ui is None and input_surface == "tui"):
+                message._inline_ui_viewer_capable = True
         if harness_injected:
             # The stamp goes on the row THIS call mints, at the one place the
             # row is born — the same contract ``prompt`` documents one method
@@ -12084,6 +12812,7 @@ class Session:
         except (MeshRefusal, ValueError, KeyError, OSError):
             return  # A forged hint cannot become an authentic saved tool card.
         marker = "profile-applied:" + receipt_id
+        from local_operator.session.transcript import projection_entries
 
         def already_delivered():
             # Compaction folds the overlay into its target and removes the
@@ -12097,7 +12826,8 @@ class Session:
                 == receipt_id
                 and ((row.payload.get("provider_payload") or {}).get("details") or {}).get("status")
                 == "applied"
-                for row in self._transcript.entries()
+                # Skeletons keep role, tool_call_id and the receipt details.
+                for row in projection_entries(self._transcript)
             )
 
         if already_delivered():
@@ -12112,7 +12842,7 @@ class Session:
             target = next(
                 (
                     row
-                    for row in self._transcript.entries()
+                    for row in projection_entries(self._transcript)
                     if row.payload.get("role") == "tool"
                     and row.payload.get("tool_call_id") == result.tool_call_id
                     and (row.payload.get("provider_payload") or {})
@@ -12339,6 +13069,7 @@ class Session:
             owner_typed=not bool((getattr(line, "sender", None) or {}).get("remote_origin")),
             _file_capture=self._take_file_continuation(command_id),
             input_surface=spooled_input_surface(line),
+            inline_ui=spooled_inline_ui(line),
         )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
@@ -12362,6 +13093,10 @@ class Session:
         stamped = _input_surface_of(message)
         if stamped is not None and getattr(message, "role", None) == "user":
             self._run_input_surface = stamped
+            self._run_inline_ui_viewer_capable = (
+                stamped in {"desktop", "mobile", "tui"}
+                and getattr(message, "_inline_ui_viewer_capable", False) is True
+            )
             return
         if ask_answer_is_person(message):
             details = getattr(message, "details", None) or {}
@@ -12369,6 +13104,7 @@ class Session:
             surface = self._ask_answer_surfaces.pop(ask_id, None) if ask_id else None
             if surface is not None:
                 self._run_input_surface = surface
+                self._run_inline_ui_viewer_capable = False
 
     def note_answer_surface(self, ask_id: str | None, surface: str) -> Callable[[], None]:
         """The control server's record of WHO answered (ADR 0009, R10).
@@ -12401,11 +13137,14 @@ class Session:
             return undo_queued
         if self._is_streaming:
             previous_run = self._run_input_surface
+            previous_inline_ui = self._run_inline_ui_viewer_capable
             self._run_input_surface = clamped
+            self._run_inline_ui_viewer_capable = False
 
             def undo_live() -> None:
-                if self._run_input_surface == clamped:
+                if self._run_input_surface == clamped and not self._run_inline_ui_viewer_capable:
                     self._run_input_surface = previous_run
+                    self._run_inline_ui_viewer_capable = previous_inline_ui
 
             return undo_live
         return _noop_answer_surface_undo
@@ -12420,10 +13159,13 @@ class Session:
         ``unknown``. Never raises: unreadable history is ``unknown`` (errs quiet).
         """
         from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
-        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+        from local_operator.session.transcript import (
+            ENTRY_CUSTOM,
+            _entry_to_message,
+            resident_entries,
+        )
 
-        try:
-            entries = self._transcript.entries()
+        def walk(entries: list[Any]) -> str | None:
             for entry in reversed(entries):
                 if entry.type == ENTRY_CUSTOM:
                     if entry.payload.get("custom_type") == ATTENTION_CUSTOM_TYPE:
@@ -12438,6 +13180,18 @@ class Session:
                 stamped = _input_surface_of(message)
                 if stamped is not None:
                     return stamped
+            return None
+
+        try:
+            # The resident suffix first: the backward walk returns the newest
+            # stamp, so a hit there is the eager answer. Only a suffix with no
+            # stamp at all re-reads the whole journal (counted, off boot: this
+            # runs at the first run's origin probe).
+            found = walk(resident_entries(self._transcript))
+            if found is None and getattr(self._transcript, "has_prefix", False) is True:
+                found = walk(self._transcript.entries())
+            if found is not None:
+                return found
         except Exception:  # noqa: BLE001 — routing must never cost a turn
             logger.debug("origin: could not rebuild the last driver", exc_info=True)
         return "unknown"
@@ -14156,6 +14910,11 @@ class Session:
         ``_build_tool_context`` is not enough on its own — it decides what a
         tool RUNS against, never whether the tool was advertised.
 
+        ``integrations`` rode the same late-hook trap (its createIf also needs
+        ``ask_user``, plus the consent seam this hook's queue provides) and is
+        rescued, and dropped on uninstall, with ``ask``: see
+        ``ASK_HOOK_CAPABILITY_TOOLS``.
+
         Uninstalling drops it again for the same reason it was gated in the
         first place: a tool advertised with no hook behind it can only fail when
         the model calls it.
@@ -14168,13 +14927,15 @@ class Session:
             self._ask_queue.dispose()
             self._ask_queue = None
         if handler is not None:
-            # BOTH queued-ask tools are gated on the queue this hook creates, so
-            # installing the hook rescues the pair: §2.1's ``ask`` and §12's
-            # ``ask_withdraw``.
-            self._merge_capability_tools(("ask", "ask_withdraw"))
-        elif any(tool.name in ("ask", "ask_withdraw") for tool in self._tools):
+            # Every tool gated on this hook is rescued together: both queued-ask
+            # tools (§2.1's ``ask``, §12's ``ask_withdraw``) and Team
+            # Integrations, whose builder needs ``ask_user`` AND the consent seam
+            # the queue this hook creates provides. Each builder still applies
+            # its own refusals (a child, the blocking arm, no Radient login).
+            self._merge_capability_tools(ASK_HOOK_CAPABILITY_TOOLS)
+        elif any(tool.name in ASK_HOOK_CAPABILITY_TOOLS for tool in self._tools):
             self.refresh_tools(
-                [tool for tool in self._tools if tool.name not in ("ask", "ask_withdraw")]
+                [tool for tool in self._tools if tool.name not in ASK_HOOK_CAPABILITY_TOOLS]
             )
 
     # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
@@ -14258,7 +15019,30 @@ class Session:
         §8.1, S-83). ``answered_ids`` is read LIVE, because the set is filled as
         answer rows arrive during the run and reset when the next run starts.
         """
-        if self._parent_session_id or self.ask_queue() is None:
+        # A resumed child carries no constructor parent, but ``origin.json`` still
+        # names the session that delegated it: treat that marker as "child" too,
+        # or a resumed child would get the integration admin surface its first run
+        # was refused (S-2).
+        if self._parent_session_id or self._origin_parent_session_id:
+            return None
+        # What this condition means: the HOST built an approval gate for this
+        # session (``_request_approval``) AND an ask queue exists. It does NOT mean a
+        # person is present: resume workers are factory-built with a headless gate
+        # (``session_factory``), and the moderation eval agent's gate is
+        # ``ApprovalPolicy.auto()``, a real non-None gate. Presence of a person is
+        # what the per-op consent card enforces: ``IntegrationConsent`` files it
+        # on the ask queue and the operations that file one run only on a human
+        # answer. The eval agent is therefore kept out by name
+        # (``evaluation/team_bridge_moderation/agent.py`` drops the ``integrations``
+        # tool), not by this condition.
+        #
+        # Why the gate is required at all (S-1): the operations that never file a
+        # consent card of their own (``revoke``, ``draft_app``, ``status``,
+        # ``list``) rely on the loop's write-tier card, which is skipped when
+        # ``request_approval`` is None, so a gate-less host would run them
+        # unattended. An interactive ``--yolo`` session still holds its gate on the
+        # Session (yolo is applied where the loop is handed it), so it is unaffected.
+        if self._request_approval is None or self.ask_queue() is None:
             return None
         from local_operator.team_bridge.integration_consent import IntegrationConsent
 
@@ -14287,8 +15071,13 @@ class Session:
         timeout: Any = None,
         tool_call_id: str = "",
         relay: str | None = None,
+        browser_ref: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Queue one ask and return the tool's receipt (or a refusal).
+
+        ``browser_ref`` is the REDACTED handoff reference the ask tool computed
+        from this session's live tab (``BrowserResource.handoff_reference``); it
+        rides the ask's own row so the page it was about stays on record.
 
         Thin by design: the caps, the log write, the index and the deadline row
         all live in ``AskQueue.enqueue``, and the tool layer never learns about
@@ -14303,7 +15092,9 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(
+            questions, timeout, tool_call_id=tool_call_id, browser_ref=browser_ref
+        )
         # The mirror of the notify door's check (``asks/dedupe.py``): a
         # same-topic update raised just before this question leaves Unread and
         # rides the ask. Not on the relay arm: those questions are another
@@ -15279,8 +16070,11 @@ class Session:
         Best-effort in the one way that matters: a stamp is a hint on a card, and
         no surface should fail to open a conversation over it.
         """
+        from local_operator.session.transcript import resident_entries
+
         try:
-            entries = self._transcript.entries()
+            # Only the newest rows are read (the slice below).
+            entries = resident_entries(self._transcript)
         except Exception:  # noqa: BLE001 — a repaint fact is never worth a failure
             logger.debug("ask: could not read the transcript for the user stamp", exc_info=True)
             return
@@ -16497,10 +17291,14 @@ class Session:
         Takes effect at the next publish, like any inventory change.
         """
         if pins is not None:
+            requested = frozenset(pins)
+            inherited: frozenset[str] | None = getattr(self, "_team_generic_pin_ceiling", None)
+            if inherited is not None:
+                requested &= inherited
             # ADDITIVE, for the reason activations are sticky: dropping a pin
             # (an ``/agent clear``, a role switch) would re-defer a schema the
             # cached prefix already carries and pay a second rewrite for it.
-            self._deferral_pins = self._deferral_pins | frozenset(pins)
+            self._deferral_pins = self._deferral_pins | requested
 
     def activate_deferred_tool(self, name: str) -> bool | None:
         """Publish a deferred tool's schema from the next publish on (sticky).
@@ -16576,6 +17374,9 @@ class Session:
         :meth:`_scope_declared_ops`; this method is where every inventory writer
         passes, so this is where the two cannot be applied apart.
         """
+        inherited = getattr(self, "_team_generic_tool_ceiling", None)
+        if inherited is not None:
+            tools = [tool for tool in tools if tool.name in inherited]
         if self._readonly_shell and self._shell_write_root is None:
             # A read-only shell role with no enforceable sandbox gets NO shell
             # (see :meth:`_apply_readonly_shell_role`). Here, not at the attach,
@@ -16905,6 +17706,76 @@ class Session:
                 )
         else:
             self._merge_capability_tools(("no_reply", "notify"))
+
+    def set_public_research(self, policy: Any) -> None:
+        from local_operator.model.configure import SessionStreamFn
+        from local_operator.research_evidence import (
+            PublicEvidenceConditioner,
+            PublicResearchPolicy,
+        )
+
+        if (
+            isinstance(policy, PublicResearchPolicy)
+            and policy.mode == "extract"
+            and policy.attest_public_source is not None
+            and isinstance(self._stream_fn, SessionStreamFn)
+        ):
+            self._public_evidence = PublicEvidenceConditioner(
+                policy, self._stream_fn, self._transcript, self._accrue_auxiliary_usage
+            )
+            self._context.condition_public_evidence = self._public_evidence
+
+    @staticmethod
+    def _book_auxiliary_usage(spend: SessionSpend, receipt: AuxiliaryUsageReceipt) -> None:
+        # Companion money does not advance assistant turns or context occupancy.
+        from local_operator.session.channel_spend import usd_to_micro
+
+        usage = receipt.usage
+        if usage is None:
+            spend.accrue(None)
+        else:
+            dollars = usage.usd_cost if usage.usd_cost is not None else usage.estimated_usd_cost
+            spend.accrue(usd_to_micro(dollars), serving_identity(usage), basis=usage.billing_basis)
+
+    def _restore_auxiliary_spend(self) -> list[AuxiliaryUsageReceipt]:
+        from local_operator.research_evidence import RECEIPT_TYPE, fold_receipts
+
+        transcript = self._transcript
+        if transcript.latest_custom_entry(RECEIPT_TYPE) is None:
+            return []
+        # Bind the applied IDs to the actual aggregate, not journal position:
+        # an async aggregate write can commit after a receipt it didn't see.
+        if self._spend_recorded:
+            details = transcript.latest_custom(SESSION_SPEND_CUSTOM_TYPE) or {}
+            ids = details.get("auxiliary_request_ids")
+            if isinstance(ids, list):
+                self._auxiliary_spend_ids.update(value for value in ids if isinstance(value, str))
+        from local_operator.session.transcript import projection_entries
+
+        # auxiliary_usage_v1 is a keep-set type: every row is in the projection.
+        receipts = fold_receipts(reversed(projection_entries(transcript)), strict=False)
+        changed = False
+        for receipt in receipts:
+            if receipt.request_id not in self._auxiliary_spend_ids:
+                self._book_auxiliary_usage(self.spend, receipt)
+                self._auxiliary_spend_ids.add(receipt.request_id)
+                changed = True
+        if self._spend_recorded:
+            if changed:
+                self.schedule_spend_persist()
+            return []
+        # If a live call beats the historical rebuild, the recovered auxiliary
+        # money must survive in a floor, even without the older main calls.
+        if changed:
+            self.spend.floor = True
+        return receipts
+
+    def _accrue_auxiliary_usage(self, receipt: AuxiliaryUsageReceipt) -> None:
+        if receipt.request_id not in self._auxiliary_spend_ids:
+            self._book_auxiliary_usage(self.spend, receipt)
+            self._auxiliary_spend_ids.add(receipt.request_id)
+            self._spend_live_calls += 1
+            self.schedule_spend_persist()
 
     def set_first_turn_mcp_wait(self, timeout_s: float | None) -> None:
         """Hold the first turn for EVERY configured MCP server, bounded; ``None`` opts out.
@@ -17390,10 +18261,23 @@ class Session:
         input taints. A corrupt record fails closed. An empty transcript (a
         fresh session) is clean. Never raises: unreadable history is tainted.
         """
-        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+        from local_operator.session.transcript import (
+            ENTRY_CUSTOM,
+            _entry_to_message,
+            resident_entries,
+        )
 
         try:
-            entries = self._transcript.entries()
+            entries = resident_entries(self._transcript)
+            if getattr(self._transcript, "has_prefix", False) is True and not any(
+                entry.type == ENTRY_CUSTOM
+                and entry.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
+                for entry in entries
+            ):
+                # The episode needs message BODIES after the newest record; when
+                # that record is older than the resident suffix, read the whole
+                # journal back (counted, rare).
+                entries = self._transcript.entries()
             start = 0
             for index in range(len(entries) - 1, -1, -1):
                 entry = entries[index]
@@ -18262,6 +19146,8 @@ class Session:
         where a per-turn fat checkpoint was not.
         """
         details = self.spend.to_details()
+        if self._auxiliary_spend_ids:
+            details["auxiliary_request_ids"] = sorted(self._auxiliary_spend_ids)
         previous = self._spend_persisted_micro
         if details["micro"] < previous:
             if self._spend_downward_correction:
@@ -18350,8 +19236,16 @@ class Session:
         """
         if transcript.channel_spend_tracked():
             return "marked"
+        from local_operator.session.transcript import (
+            resident_entries,
+            transcript_prefix_flag,
+        )
+
+        if transcript_prefix_flag(transcript, "has_channel_activity"):
+            # Same predicate, evaluated on the dropped prefix at open.
+            return "legacy"
         try:
-            entries = transcript.entries()
+            entries = resident_entries(transcript)
         except Exception:  # noqa: BLE001 — an unreadable journal is not fresh
             logger.debug("channel origin probe failed; treating as legacy", exc_info=True)
             return "legacy"
@@ -18859,7 +19753,7 @@ class Session:
         except Exception:  # noqa: BLE001 — an unpriced rebuild is not an error
             logger.debug("session spend rebuild pricing failed", exc_info=True)
             return
-        if not rows:
+        if not rows and not self._restored_auxiliary_receipts:
             return
         # ``floor`` is earned by a POSITIVE report that a money row is gone, never
         # by a compaction or prune marker (review R1-4): every writer in
@@ -18878,6 +19772,8 @@ class Session:
                 rebuilt.accrue(micro, identity)
             elif has_reported_tokens(row):
                 rebuilt.accrue(None, identity)
+        for receipt in self._restored_auxiliary_receipts:
+            self._book_auxiliary_usage(rebuilt, receipt)
         if not rebuilt.calls:
             return
         # Bail if anything NEWER landed while this ran: a record that reached the
@@ -21632,7 +22528,9 @@ class Session:
         """
         return self._frontend_state_store.read_field("epoch")
 
-    def subscribe_frontend(self, handler, *, display_window=False):  # type: ignore[no-untyped-def]
+    def subscribe_frontend(  # type: ignore[no-untyped-def]
+        self, handler, *, display_window=False, inline_ui_sidecars: bool = False
+    ):
         """Atomically refresh, snapshot and subscribe on the session loop.
 
         The refresh must go through the PUBLISHING path: silently replacing
@@ -21654,6 +22552,7 @@ class Session:
                     "conversation_id": sync.snapshot.session_id,
                     "owner_epoch": sync.epoch,
                     "through_id": sync.live_cursor,
+                    "inline_ui_sidecars": inline_ui_sidecars,
                     "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
@@ -21668,6 +22567,7 @@ class Session:
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
                 window.durable_seed_ids = durable_seed_ids
+                window._sync_inline_ui, window.inline_ui = window.inline_ui, None
                 sync.display_history = window
                 if window.status == "full_required":
                     # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
@@ -21680,6 +22580,7 @@ class Session:
                         self._transcript, **capture_args, bound_oversized=True
                     ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
                     if bounded.status == "ok":
+                        bounded._sync_inline_ui, bounded.inline_ui = bounded.inline_ui, None
                         sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
@@ -21687,7 +22588,12 @@ class Session:
         return subscription
 
     def history_page(  # type: ignore[no-untyped-def]
-        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+        self,
+        before: str,
+        anchor: str = "",
+        *,
+        bound_oversized: bool = False,
+        inline_ui_sidecars: bool = False,
     ):
         """Authenticated reads reuse the resident replay at the signed sync cut.
 
@@ -21706,6 +22612,7 @@ class Session:
             before=before,
             anchor=anchor,
             bound_oversized=bound_oversized,
+            inline_ui_sidecars=inline_ui_sidecars,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
@@ -22525,6 +23432,48 @@ class Session:
             finally:
                 self._turn_lock.release()
 
+    async def _await_declared_mcp_ready(self) -> None:
+        """Hold for a declared MCP server that is still connecting; raise if it never does.
+
+        Shared by the turn pipeline and the cache keep-alive's fire, which must
+        see the same tool array the next turn will publish before it hashes it.
+        Once per runtime: a success latches ``_named_mcp_ready_checked``.
+        """
+        if (
+            self._first_turn_mcp_wait != "off"
+            and not self._named_mcp_ready_checked
+            and not self._mcp_reach_inherited
+        ):
+            from local_operator.session.declared_mcp_ready import (
+                DECLARED_MCP_READY_TIMEOUT_S,
+                await_named_mcp_servers,
+            )
+
+            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
+            # the TUI/desktop subscribed to this runtime) merges a late
+            # ``preload_tools`` server mid-session, the contract documented on
+            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
+            # a headless host (exec, SDK, scheduler) holds the turn for one.
+            # The same "no UI, no attach subscriber" test the turn-end
+            # checkpoint uses to tell a headless store apart (review R4).
+            store = getattr(self, "_frontend_state_store", None)
+            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
+            self._named_mcp_ready_checked = await await_named_mcp_servers(
+                self.mcp_manager,
+                declared=self._declared_tools,
+                reachable=lambda: self.tool_inventory,
+                materialize=self.materialize_declared_tools,
+                wait_for_preload=not front_end,
+                wait_for_all=self._first_turn_mcp_wait == "all",
+                # Esc lands here as the sticky flag (no turn signal exists yet).
+                cancelled=lambda: self._abort_requested,
+                timeout_s=(
+                    DECLARED_MCP_READY_TIMEOUT_S
+                    if self._first_turn_mcp_timeout_s is None
+                    else self._first_turn_mcp_timeout_s
+                ),
+            )
+
     async def _run_turn_pipeline(
         self,
         initial: list[AgentMessage],
@@ -22581,40 +23530,7 @@ class Session:
         # gate settled the borrowed manager, and the gate's grant step would
         # widen the child's surface past what its parent allowed.
         # ``"off"`` is an SDK caller's explicit opt-out (``set_first_turn_mcp_wait``).
-        if (
-            self._first_turn_mcp_wait != "off"
-            and not self._named_mcp_ready_checked
-            and not self._mcp_reach_inherited
-        ):
-            from local_operator.session.declared_mcp_ready import (
-                DECLARED_MCP_READY_TIMEOUT_S,
-                await_named_mcp_servers,
-            )
-
-            # A FRONT END ATTACHED (an in-process terminal, or a viewer such as
-            # the TUI/desktop subscribed to this runtime) merges a late
-            # ``preload_tools`` server mid-session, the contract documented on
-            # ``session_factory.create_session``'s ``defer_mcp_wiring``, so only
-            # a headless host (exec, SDK, scheduler) holds the turn for one.
-            # The same "no UI, no attach subscriber" test the turn-end
-            # checkpoint uses to tell a headless store apart (review R4).
-            store = getattr(self, "_frontend_state_store", None)
-            front_end = self._has_ui or bool(store is not None and store.has_subscribers)
-            self._named_mcp_ready_checked = await await_named_mcp_servers(
-                self.mcp_manager,
-                declared=self._declared_tools,
-                reachable=lambda: self.tool_inventory,
-                materialize=self.materialize_declared_tools,
-                wait_for_preload=not front_end,
-                wait_for_all=self._first_turn_mcp_wait == "all",
-                # Esc lands here as the sticky flag (no turn signal exists yet).
-                cancelled=lambda: self._abort_requested,
-                timeout_s=(
-                    DECLARED_MCP_READY_TIMEOUT_S
-                    if self._first_turn_mcp_timeout_s is None
-                    else self._first_turn_mcp_timeout_s
-                ),
-            )
+        await self._await_declared_mcp_ready()
         admission = await restart_fence.acquire_shared(self._config_dir)
         try:
             publish_admission = getattr(self, "_publish_turn_admitted", None)
@@ -22654,15 +23570,15 @@ class Session:
                 note_open(producer_command_id or "")
             except Exception:  # noqa: BLE001 — an instrument never fails a turn
                 logger.debug("could not open the turn journal row", exc_info=True)
-        # Re-arm the todo guardrail's PENDING branch: a fresh user message may
-        # well be the answer a stalled list was waiting for, so that latch must
-        # not carry over. It is reset HERE and not in `_run_turn` on purpose —
-        # `_run_turn` also runs post-compaction continuations of this SAME user
-        # turn, and re-arming there would re-nudge an unchanged list the model
-        # already declined. The BLOCKED latch is deliberately NOT reset here: it
-        # is cross-turn by design (see `_blocked_reminder_fingerprint`), so an
-        # unchanged parked set is not re-asserted on every wake or quiet end.
-        self._todo_reminder_fingerprint = None
+        # Not in `_run_turn`: compaction can continue the SAME input turn. A
+        # new input re-arms pending, but doesn't re-open accounted blocked work.
+        self._todo_pending_seen.clear()
+        self._todo_projections.clear()
+        self._todo_offer_id = ""
+        self._todo_presented.clear()
+        self._todo_continuation_discarded = False
+        self._todo_terminal_guard_refused = False
+        self._todo_terminal_parked = False
         # The project guardrail's latch and its worked-turn counter share this
         # site for twin reasons: the user's next message may be the update the
         # stale set was waiting for (so a fresh nudge is allowed), and work done
@@ -22731,6 +23647,7 @@ class Session:
         # ADR 0009: origin is per run, so the previous run's human input never
         # labels this one (a wake after a phone prompt inherits it instead).
         self._run_input_surface = None
+        self._run_inline_ui_viewer_capable = False
         self._turn_items = []
         self._prepared_writes = {}
         self._turn_text_budget = TURN_TEXT_BUDGET
@@ -22755,6 +23672,7 @@ class Session:
             },
         )
         self._turn_task = asyncio.current_task()
+        logically_settled = False
         try:
             await self._run_turn(
                 initial,
@@ -22766,6 +23684,7 @@ class Session:
                 opened_body=opened_body,
             )
             await self._settle_quiet_request()
+            logically_settled = self._held_end is not None
         except ImportError as exc:
             # A lazy import against a HALF-REPLACED install is the one failure
             # whose cause the traceback cannot state: ``lop-update`` replaces
@@ -22780,6 +23699,8 @@ class Session:
             self._turn_task = None
             await self._flush_held_end()
             await self._publish_attention_outcome()
+            if logically_settled:
+                self._commit_todo_check()
             # A bang-mode command may have completed while this turn owned the
             # provider message list. Persist it before releasing `_turn_lock`,
             # when no next prompt can build from a half-updated conversation.
@@ -23933,9 +24854,31 @@ class Session:
                     )
                     request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
+                evidence = self._public_evidence if request.purpose == "turn" else None
+                binding = None
+                if evidence is not None:
+                    evidence.main = None
+                    if not request.has_one_turn_secrets and request.model.provider == "bedrock":
+                        from local_operator.research_evidence import (
+                            BedrockEvidenceBinding,
+                        )
+
+                        # Bound before ``inner`` is built below (admitted or
+                        # not), so the provider client sees it on dispatch.
+                        binding = request._evidence_binding = BedrockEvidenceBinding()
 
                 def mark_dispatch() -> None:
                     self._attention_run_request_dispatched = True
+                    if self._todo_projections:
+                        for message in reversed(request.messages):
+                            if (offer := self._todo_projections.get(message.id)) is not None:
+                                pending, blocks = offer
+                                if pending:
+                                    self._todo_pending_seen.add(pending)
+                                self._todo_presented.update(blocks)
+                                self._todo_projections.clear()
+                                self._todo_offer_id = ""
+                                break
                     from local_operator.team_bridge.card_projection import (
                         presented_bridge_ref,
                     )
@@ -23995,6 +24938,20 @@ class Session:
                         # witness and need not accept an extra argument.
                         mark_dispatch()
                     async for event in inner:
+                        if (
+                            binding is not None
+                            and evidence is not None
+                            and isinstance(event, StreamEndEvent)
+                        ):
+                            selected, usage = binding.selected, event.usage
+                            if (
+                                selected is not None
+                                and event.stop_reason in ("toolUse", "stop")
+                                and usage is not None
+                                and usage.provider == "bedrock"
+                                and usage.model_id == selected.model_id
+                            ):
+                                evidence.main = selected
                         yield event
 
                 return witness()
@@ -24049,6 +25006,11 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._prepare_system_blocks,
+                # Explicit epoch-freeze signal for provider cache placement:
+                # evaluated per call after ``_prepare_system_blocks`` so turn 1
+                # already marks the single trailing frozen system block.
+                get_system_blocks_frozen=self._system_blocks_are_frozen,
+                get_system_stable_head_blocks=self._system_stable_head_blocks,
                 # The tools array, re-read per provider step and latched to one
                 # publish per turn; see ``_wire_tools``. The loop's tool
                 # RESOLUTION deliberately keeps reading the live
@@ -24073,6 +25035,19 @@ class Session:
                 # prefix cannot diverge (see ``_render_for_request``).
                 convert_to_llm=self._render_for_request,
                 stream_fn=marking_stream_fn,
+                # Resolve at each call, not once per run: a folded steer can
+                # change the input surface between provider requests. Helpers
+                # bypass this loop config and must keep the exact system prefix.
+                # On an Anthropic thinking wire the per-conversation latch
+                # wins over the live value (``_settle_inline_ui_head_latch``).
+                # Placement follows the REQUEST's model, which the loop passes
+                # in: ``self._model`` can move under a ``/model`` landing
+                # between the settle and the request build, and a thinking
+                # request answered as non-thinking would get the live hint at
+                # its head instead of the row its signed blocks were bound to.
+                get_inline_ui_hint=lambda model: self._inline_ui_head_hint(
+                    model, self._live_inline_ui_hint()
+                ),
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 # The idle-steer wake's opening drain: this run exists because
@@ -24274,6 +25249,20 @@ class Session:
                 if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
                     if event.tool_name != "no_reply":
                         self._turn_tool_calls += 1
+                if isinstance(event, ToolExecutionEndEvent):
+                    details = event.result.details or {}
+                    if details.get(FAULT_KEY) == FAULT_DENIED:
+                        # The terminal producer must not ask the model to find a
+                        # different route around a gate that refused this work.
+                        self._todo_terminal_guard_refused = True
+                    if (
+                        event.tool_name == "sessions"
+                        and not event.is_error
+                        and details.get("op") == "park"
+                        and details.get("self") is True
+                        and details.get("session_id") == self._session_id
+                    ):
+                        self._todo_terminal_parked = True
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -24373,6 +25362,9 @@ class Session:
 
             await self._refresh_context_metadata()
             await self._maybe_compact()
+            # After compaction, which may have rewritten the prefix this keeps
+            # warm. Every main-thread turn end, wakes and quiet turns included.
+            self._arm_cache_keepalive()
         finally:
             runtime = getattr(self, "bridge_runtime", None)
             if runtime is not None:
@@ -24880,6 +25872,7 @@ class Session:
                 self._continuation_queue.clear()
                 return
             if continuations >= _MAX_CONTINUATIONS:
+                self._todo_continuation_discarded = True
                 dropped = len(self._continuation_queue)
                 self._continuation_queue.clear()
                 logger.warning(
@@ -25291,7 +26284,10 @@ class Session:
         transcript = self._transcript
 
         def journal() -> list[tuple[str, dict[str, Any]]]:
-            return [(entry.type, entry.payload) for entry in transcript.entries()]
+            # Every taint/flag source row of the prefix is kept in full.
+            from local_operator.session.transcript import projection_entries
+
+            return [(entry.type, entry.payload) for entry in projection_entries(transcript)]
 
         latch = BridgeTaintLatch(inherited=inherited, entries=journal)
         self._bridge_taint = latch
@@ -25379,7 +26375,10 @@ class Session:
         transcript = self._transcript
 
         def journal() -> list[tuple[str, dict[str, Any]]]:
-            return [(entry.type, entry.payload) for entry in transcript.entries()]
+            # Every taint/flag source row of the prefix is kept in full.
+            from local_operator.session.transcript import projection_entries
+
+            return [(entry.type, entry.payload) for entry in projection_entries(transcript)]
 
         self._community_taint = CommunityTaint(entries=journal)
         self._community_taint_row_task: asyncio.Task[None] | None = None
@@ -25585,6 +26584,7 @@ class Session:
             # attached).
             attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
+            bind_todo_block=self._bind_todo_block,
             monitor_scheduler=self._monitors,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
@@ -25711,6 +26711,11 @@ class Session:
         # team, cycle, depth cap) raises here before any model is priced or
         # job registered (BEN-7-D1/D2/D3).
         target = resolve_launch_target(agent, self)
+        if inherits_bound_team_authority(agent, target):
+            # Generic task is not a fresh persona or model authorization.
+            if effort is not None or model not in (None, "inherit"):
+                raise TeamLaunchError("a generic team task must inherit its parent's model")
+            model = "inherit"
         # MEMORY ADMISSION (memory_guard.admission_check): a child session is
         # resident work in THIS process — its transcript, its tool commands, its
         # browser — and a small node OOM-killed its own mesh relay by adding such
@@ -25727,11 +26732,14 @@ class Session:
 
             if not model_may_choose_tier():
                 raise ValueError("specific task models require subagents.model_choice=model")
+        held_back: list[str] = []
         model_spec, selection_source = self._resolve_subagent_selection(
             target.role,
             effort,
             strict=True,
             model=model,
+            authority=target.authority,
+            notes=held_back,
             roster=target.roster,
             slot_kind="team" if target.is_team_launch else "agent",
             # For a ``team:pod`` launch the resolved ROLE is pod's manager while
@@ -25750,6 +26758,9 @@ class Session:
             # delegating model reads back. Derived here, where the roster is in
             # hand, because ``run_subagent`` cannot see one from the arguments.
             selection_source=selection_source,
+            # A live tier edit the provider ceiling held back is shown on the
+            # receipt, not only logged (the operator's requirement).
+            selection_notes=held_back,
             target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
@@ -26510,8 +27521,17 @@ class Session:
         roster: Any = None,
         slot_kind: str = "agent",
         slot_role: str | None = None,
+        authority: Any = None,
+        notes: list[str] | None = None,
     ) -> tuple[ModelSpec | None, str]:
         """``(spec, model_selection_source)`` for one delegated role.
+
+        ``authority`` is the LAUNCHING session's ``/team`` snapshot
+        (``LaunchTarget.authority``; a resume's launch parent need not be this
+        session), defaulting to this session's own. When bound, the role's own
+        ``effort:`` tag is read from that snapshot and a live edit only passes
+        the provider ceiling (``resolve_member_model``). ``notes`` collects why
+        an edit was held back, for the receipt the operator reads.
 
         The SPEC half is what :meth:`_resolve_subagent_model` hands its naming and
         resume callers. The SOURCE half names WHICH layer decided it, and is the
@@ -26537,19 +27557,27 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            _bound_team_authority,
             local_missing_tier_remedy,
             resolve_member_model,
         )
+        from local_operator.network.move_team import TeamAuthority
+
+        bound = authority if isinstance(authority, TeamAuthority) else _bound_team_authority(self)
 
         def _resolved(registry: Any) -> Any:
-            return resolve_member_model(
+            resolution = resolve_member_model(
                 agent,
                 roster=roster,
                 slot_kind=slot_kind,
                 slot_role=slot_role,
                 launch_tier=effort,
                 agent_registry=registry,
+                bound_authority=bound,
             )
+            if notes is not None:
+                notes.extend(resolution.held_back)
+            return resolution
 
         def _role_resolution() -> Any:
             """The launch resolution WITH the registry, or the lenient fallback.
@@ -26935,7 +27963,10 @@ class Session:
         if self._disposed or not token:
             return
         try:
-            for entry in self._transcript.entries():
+            from local_operator.session.transcript import projection_entries
+
+            # session_incident is a keep-set type.
+            for entry in projection_entries(self._transcript):
                 if entry.payload.get("custom_type") != SESSION_INCIDENT_MESSAGE_TYPE:
                     continue
                 details = entry.payload.get("details")
@@ -27342,8 +28373,10 @@ class Session:
         from the 1000-character copy the writer keeps.
         """
         from local_operator.incidents import format_mcp_unavailable_message
+        from local_operator.session.transcript import resident_entries
 
-        entries = self._transcript.entries()
+        # The resident suffix starts at the cut, so the bound below is unchanged.
+        entries = resident_entries(self._transcript)
         # VISIBILITY BOUND (review round 1, M1): scan only at/above the latest
         # compaction cut. Rows below it were dropped from the context replay —
         # the model's ``build_llm_history`` and the operator's display window
@@ -28985,128 +30018,193 @@ class Session:
         else:
             timer.add_done_callback(finish)
 
-    async def _todo_continuation(self) -> list[AgentMessage]:
-        """The loop's follow-up hook: re-assert the outstanding todos at the yield.
+    def _live_todo_receipt(
+        self, kind: str, handle: str, now: int
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """The incarnation and original purpose fields of a live owner-local receipt."""
+        from hashlib import sha256
 
-        The loop ends a turn the instant the model returns no tool calls, even
-        with every item still open — a steering message answered in prose was
-        enough to end a turn reading ``Todos · 0/6``. A non-empty return here
-        sets ``has_more_tool_calls`` and re-enters the outer loop
-        (harness/loop.py, ``_collect_yield_injections``), so the model gets
-        another turn with its own list in front of it.
+        created_at = 0
+        subject = ""
+        purposes: list[str] = []
+        if kind == "wake" and not self._wake.disposed:
+            from local_operator.wakes.store import is_internal_wake_row
 
-        The work set is pending PLUS blocked, and the two are reconciled
-        differently on purpose. Pending items may not be left running: they are
-        work the model is asked to resume or honestly resolve, and their latch
-        re-arms per turn (reset in ``_run_turn_pipeline``). Blocked items are
-        unfinished too — parked on a user decision or an external service — and
-        the failure this covers is a session that ended turns for ~14 hours over
-        six blocked items while a pending-only guardrail saw an empty work set
-        and let every yield stand. So blocked items are ACCOUNTED for at the
-        same boundary: the reminder asks whether the condition still holds, whose
-        decision it is, and whether anything is armed to revisit it.
+            for row in self._wake.armed_schedules:
+                if row.id != handle or row.hidden or is_internal_wake_row(row):
+                    continue
+                if row.until_at is not None and (
+                    now >= row.until_at or row.next_due_at > row.until_at
+                ):
+                    continue
+                if row.limit is not None and row.fired_count >= row.limit:
+                    continue
+                created_at = row.created_at
+                subject = row.message
+                purposes = [row.message]
+                break
+        elif kind == "monitor" and not self._monitors.disposed:
+            monitor = self._monitors.runtime(handle)
+            if monitor is not None:
+                spec, counters = monitor.spec, monitor.counters
+                due = counters.get("next_due_at")
+                if (
+                    type(due) is int
+                    and due > 0
+                    and (spec.until_at is None or max(now, due) < spec.until_at)
+                    and not any(
+                        counters.get(key)
+                        for key in ("disabled", "blind", "unavailable_since", "failing")
+                    )
+                ):
+                    created_at = spec.created_at
+                    purposes = [spec.description]
+                    subject = json.dumps(
+                        [spec.tool, spec.arguments, spec.cwd, spec.description],
+                        sort_keys=True,
+                        default=str,
+                    )
+        elif kind == "ask":
+            from local_operator.asks import store as ask_store
 
-        The blocked reconciliation fires ONCE PER BLOCKED-IDENTITY CHANGE, on a
-        CROSS-TURN latch (``_blocked_reminder_fingerprint``, deliberately not
-        reset in ``_run_turn_pipeline``). The identity is
-        ``(phase, text, status)`` per blocked item, WITHOUT the reason: a
-        reason-only rewrite is the model re-checking a parked item — its own
-        bookkeeping, not a new ask — so it does not re-fire a reconciliation,
-        though it still expires the stale rendered assertion (the full
-        fingerprint, reason included, rides the reminder's ``details``; see
-        :meth:`_live_todo_reminders`). What this replaces is the measured
-        over-fire: a per-turn re-arm meant an operator session whose open work
-        was ALL blocked — 0 pending, 5-6 parked items — was re-asserted on every
-        turn (every peer wake, every quiet end); across two such sessions ~97 of
-        ~116 quiet-end attempts were overridden by continued model output.
+            queue = self.ask_queue()
+            row = queue.find(handle, now) if queue is not None else None
+            if (
+                row is not None
+                and row.get("status") == ask_store.STATUS_OPEN
+                and row.get("questions")
+                and row.get("expires_at", 0) > now
+            ):
+                created_at = row.get("created_at", 0)
+                purposes = [str(question.get("question") or "") for question in row["questions"]]
+                subject = json.dumps([row.get("tool_call_id"), row["questions"]], sort_keys=True)
+        if type(created_at) is not int or created_at <= 0:
+            return None
+        # The digest covers the producer's purpose, not merely the handle.
+        # A purpose edit or handle reuse invalidates a binding without copying
+        # the durable receipt into each todo snapshot.
+        digest = sha256(subject.encode()).hexdigest()
+        return f"{kind}:{handle}:{created_at}:{digest}", tuple(purposes)
 
-        The honest stop is preserved — a blocked model may still finish its turn
-        (the paragraph asks it to account, never to invent progress), and,
-        crucially, it is not deferred forever by this hook: one accounting pass
-        per identity change is all that is owed (see the latch above). ``done``
-        and ``dropped`` stay out: they are settled, and re-asserting them would
-        feed the model a claim that is false. The latch IS the mechanism — no
-        prompt text, classifier or new tool: a set new or changed since it was
-        last accounted earns one nudge; an unchanged one earns none.
+    def _bind_todo_block(self, text: str, reason: str) -> str | None:
+        ref = _todo_block_ref(reason)
+        condition = todo_block_condition(reason)
+        if ref is None or not condition:
+            return None
+        receipt = self._live_todo_receipt(*ref, int(time.time() * 1000))
+        if receipt is not None and _todo_purpose_matches(receipt[1], text, condition):
+            return _todo_binding_for_condition(receipt[0], condition)
+        return None
 
-        Fires only while the list is MOVING — for pending, movement since the
-        per-turn re-arm; for blocked, movement of the identity since it was last
-        accounted. A model that yields twice with a byte-identical list is
-        telling you it cannot proceed — usually it needs a decision only the
-        user can make — and nudging it again would burn the loop's
-        ``max_follow_up_continuations`` budget (its own, and the larger one: 64
-        against the 8 the steering/aside producers share), end the turn with a
-        continuation-limit notice, and delay the user's answer by up to that
-        many model calls. That latch is also what keeps the blocked
-        reconciliation bounded: blocking is MOVEMENT (it changes the
-        fingerprint), so it earns exactly one nudge, and the byte-identical
-        yield after the model accounts is released — one pass, not a loop. The
-        larger budget is safe precisely because the latch above is what really
-        bounds this producer — a chatty parent can no longer spend the allowance
-        a still-moving list needs.
+    def _todo_state(self) -> tuple[_TodoPending, dict[_TodoKey, _TodoBlock]]:
+        now = int(time.time() * 1000)
+        receipts: dict[tuple[str, str], tuple[str, tuple[str, ...]] | None] = {}
+        pending: list[_TodoKey] = []
+        blocks: dict[_TodoKey, _TodoBlock] = {}
+        for key, item in _todo_rows(todo_snapshot(self._session_id)):
+            if item["status"] == "pending":
+                pending.append(key)
+            elif item["status"] == "blocked":
+                raw_reason = item.get("reason")
+                # Malformed restored values are not blocker text or receipt refs.
+                # Never stringify their contents into a model-facing reminder.
+                reason = raw_reason if isinstance(raw_reason, str) else ""
+                binding = item.get("block_binding")
+                ref = _todo_block_ref(reason) if binding else None
+                if ref is not None and ref not in receipts:
+                    receipts[ref] = self._live_todo_receipt(*ref, now)
+                receipt = receipts.get(ref) if ref is not None else None
+                condition = todo_block_condition(reason)
+                covered = bool(
+                    receipt
+                    and _todo_binding_for_condition(receipt[0], condition) == binding
+                    and _todo_purpose_matches(receipt[1], key[1], condition)
+                )
+                blocks[key] = (reason, binding, covered)
+        # Membership, not display order, decides if the model made progress.
+        return tuple(sorted(pending)), blocks
 
-        Both latches are IN-MEMORY, and that is the accepted limit: a process
-        restart re-asks once per current set (the first yield after the restart
-        sees fresh latches), which re-founds the same one-pass bound rather than
-        opening a new over-fire path.
+    def _todo_retry_forbidden(self) -> bool:
+        return (
+            self._todo_terminal_guard_refused
+            or self._deliberate_stop_noted
+            or self._abort_requested
+            or self._disposed
+            or self._todo_terminal_parked
+        )
 
-        The nudge it returns is a point-in-time assertion and stops being sent
-        the moment the list moves — see :meth:`_live_todo_reminders`, which
-        expires it against the fingerprint stamped in its details.
+    def _todo_unchecked_blocks(
+        self, blocks: dict[_TodoKey, _TodoBlock]
+    ) -> dict[_TodoKey, _TodoBlock]:
+        # A changed condition (including gaining or losing coverage) cannot
+        # inherit the old assessment if it changes back later.
+        self._todo_accounted = {
+            key: row for key, row in self._todo_accounted.items() if blocks.get(key) == row
+        }
+        return {
+            key: row
+            for key, row in blocks.items()
+            if not row[-1] and self._todo_accounted.get(key) != row
+        }
 
-        Invisible to the user by construction, which is exactly why the nudge is
-        a ``CustomMessage`` and not a ``Message.user(...)``: follow-ups are
-        appended by ``AgentLoop._drain_pending``, which emits no AgentEvent;
-        they never enter the run's ``new_messages``, so nothing persists them;
-        and the TUI's resume replay (``_render_resumed_history``) branches on
-        ``getattr(message, "role", None)``, which a CustomMessage does not have.
-        A plain user message would fail all three and would print in the
-        transcript as if the user had typed it.
-        """
-        pending = open_todos(self._session_id)
-        blocked = blocked_todos(self._session_id)
-        if not pending and not blocked:
-            # Nothing parked means the blocked identity IS the empty tuple, and
-            # THAT is still a fact to record: an identity change with nothing to
-            # ask about must still move the ledger, or a set that resolved to
-            # EMPTY and is re-parked identically later would read as "still
-            # accounted" and stay silent forever (round-1 F1).
-            self._blocked_reminder_fingerprint = ()
-            return []
-        fingerprint = todo_fingerprint(self._session_id)
-        # The blocked group's IDENTITY — (phase, text, status), no reason — see the
-        # field comment beside `self._blocked_reminder_fingerprint`.
-        blocked_identity = tuple(x[:3] for x in fingerprint if x[2] == "blocked")
-        blocked_changed = blocked_identity != self._blocked_reminder_fingerprint
-        pending_fires = bool(pending) and fingerprint != self._todo_reminder_fingerprint
-        blocked_fires = bool(blocked_identity) and blocked_changed
-        if not (pending_fires or blocked_fires):
-            # An identity change with nothing to ask about — the set resolved to
-            # EMPTY — is still a change: record it here, or an identical set
-            # re-parked later would read as "still accounted" and stay silent
-            # forever (round-1 F1). A non-empty change fires above; the no-work
-            # return records the fully-empty case.
-            if blocked_changed:
-                self._blocked_reminder_fingerprint = blocked_identity
-            return []
-        self._todo_reminder_fingerprint = fingerprint
-        self._blocked_reminder_fingerprint = blocked_identity
-        return [
-            CustomMessage(
-                custom_type=TODO_REMINDER_MESSAGE_TYPE,
-                attribution="system",
-                # The fingerprint rides ALONG with the text: it is what the render
-                # path compares to decide the assertion is still true (see
-                # :meth:`_live_todo_reminders`). Each group's section renders only
-                # when that group is what fired.
-                details={
-                    "text": _todo_reminder_text(
-                        pending if pending_fires else [], blocked if blocked_fires else []
-                    ),
-                    "fingerprint": fingerprint,
-                },
-            )
+    def _commit_todo_check(self) -> None:
+        # A dispatch is not a terminal assessment, and an assessment is not
+        # completion. Only carry *heard*, still-current conditions forward
+        # after the host settled all required work. No public outcome is set.
+        if self._todo_retry_forbidden() or self._todo_continuation_discarded:
+            return
+        if not (self._todo_presented or self._todo_pending_seen):
+            return
+        pending, current = self._todo_state()
+        self._todo_accounted.update(
+            {key: row for key, row in self._todo_presented.items() if current.get(key) == row}
+        )
+        if pending and pending in self._todo_pending_seen:
+            self._todo_accounted_pending = pending
+
+    @staticmethod
+    def _make_todo_reminder(
+        pending: _TodoPending,
+        blocks: dict[_TodoKey, _TodoBlock],
+    ) -> CustomMessage:
+        blocked = [
+            {"text": key[1], "reason": todo_block_condition(reason)}
+            for key, (reason, _, _) in blocks.items()
         ]
+        return CustomMessage(
+            custom_type=TODO_REMINDER_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": _todo_reminder_text([{"text": key[1]} for key in pending], blocked),
+                "blocks": True,  # live, per-offer projection rather than a legacy stamp
+            },
+        )
+
+    async def _todo_continuation(self) -> list[AgentMessage]:
+        """At most one *presented* check per row / pending set inside the loop budget."""
+        if self._todo_retry_forbidden():
+            return []
+        pending, blocks = self._todo_state()
+        due = {
+            key: row
+            for key, row in self._todo_unchecked_blocks(blocks).items()
+            if key not in self._todo_presented
+        }
+        if pending != self._todo_accounted_pending:
+            self._todo_accounted_pending = ()
+        # A passive check-in is not new work merely because the model returns
+        # prose instead of calling no_reply. A person's input or real pending
+        # membership change can re-arm the check; reordering cannot.
+        if pending in self._todo_pending_seen or (
+            pending == self._todo_accounted_pending and not self._run_typed_user
+        ):
+            pending = ()
+        if not (pending or due):
+            return []
+        message = self._make_todo_reminder(pending, due)
+        self._todo_offer_id = message.id
+        self._todo_projections = {message.id: (pending, due)}
+        return [message]
 
     async def _project_continuation(self) -> list[AgentMessage]:
         """The completion-time project check: re-assert stale project rows at the yield boundary.
@@ -30234,7 +31332,14 @@ class Session:
         ttl = self._idle_cache_ttl_s
         if anchor <= 0 or not ttl or median_gap_ms <= 0:
             return False
-        return int(time.time() * 1000) + int(median_gap_ms) > anchor + int(ttl * 1000)
+        expiry = anchor + int(ttl * 1000)
+        # The cache keep-alive extends the warm window by one ping interval per
+        # ping this turn end will buy; without it the cold shortcut would be
+        # taken for a miss the keep-alive prevents.
+        from local_operator.compaction.keepalive import KEEPALIVE_PING_INTERVAL_S
+
+        expiry += self._keepalive_remaining_pings() * int(KEEPALIVE_PING_INTERVAL_S * 1000)
+        return int(time.time() * 1000) + int(median_gap_ms) > expiry
 
     async def _economic_exact_residual(
         self, plan: _CompactionPlan, *, prefix_tokens: int, provider_context: int
@@ -30747,6 +31852,448 @@ class Session:
             or self._advisor_in_flight
         )
 
+    # -- prompt-cache keep-alive (``compaction/keepalive.py``) ----------------
+    #
+    # A hidden wake row per session, armed at every main-thread turn end for
+    # 55 minutes after the request that last touched the 1h cache. When it
+    # fires (usually in a runtime the supervisor relaunched for it), ONE
+    # read-only request re-reads the prefix and the row is re-armed from that
+    # request's start, up to ``keepalive_max_consecutive`` times per gap. The
+    # ping joins nothing: no conversation row, no event, no ``_last_usage``; the
+    # analytics ledger's ``purpose=cache_keepalive`` row is its only record.
+    # The fire does rewrite the transcript's ``wake_schedules`` entry (retire
+    # plus re-arm), because the wake index is derived from it.
+
+    def _keepalive_settings(self) -> Any | None:
+        """Compaction settings when this session may keep its cache warm, else ``None``.
+
+        Never a subagent: a child's context dies with its job. The identity
+        half of the mode is :meth:`_keepalive_covers`.
+        """
+        if self._disposed or self._parent_session_id:
+            return None
+        from local_operator.compaction import api as compaction_api
+
+        settings = self._compaction_settings or compaction_api.CompactionSettings()
+        mode = str(getattr(settings, "keepalive_mode", "off") or "off")
+        if mode == "off" or not self._keepalive_covers(mode):
+            return None
+        return settings
+
+    def _keepalive_covers(self, mode: str) -> bool:
+        """``chief_of_staff``: her session. ``always_on``: hers or Team Bridge's."""
+        if self._aida_is_hers():
+            return True
+        if mode != "always_on" or not self._session_id:
+            return False
+        if self._keepalive_bridge_covered is None:
+            # Only a read that COMPLETED is cached: a failed one leaves this
+            # ``None`` so the next turn end asks again rather than muting this
+            # runtime's keep-alive (review R2-2).
+            self._keepalive_bridge_covered = self._keepalive_is_bridge_session()
+        return bool(self._keepalive_bridge_covered)
+
+    def _keepalive_is_bridge_session(self) -> bool | None:
+        """Whether ``team_bridge.session`` names this session, read once.
+
+        From THIS session's config root (``self._config_dir``), as
+        :meth:`_aida_filter_rows` does, so a session built against an injected
+        root does not answer from the process-global one. Cached by the caller:
+        a relaunched runtime (where every ping runs) reads it fresh, and a
+        rebind mid-runtime costs at most that runtime's chain.
+
+        ``None`` when the read did not complete (no answer to cache).
+        ``read_config_values`` returns that same ``None`` for a file it cannot
+        read or parse right now, and its contract is that the caller keeps what
+        it had rather than treating a torn read as "everything unset" — so the
+        caller retries instead of remembering "not covered" (review R2-2).
+        """
+        try:
+            from local_operator.config import read_config_values
+            from local_operator.team_bridge.settings import TeamBridgeSettings
+
+            values = read_config_values(self._config_dir)
+            if values is None:
+                logger.debug("cache keep-alive: team_bridge.session unreadable; not cached")
+                return None
+            return TeamBridgeSettings.from_values(values).session == self._session_id
+        except Exception:  # noqa: BLE001 — a lookup; failing closed sends nothing
+            logger.debug("cache keep-alive: could not read team_bridge.session", exc_info=True)
+            return None
+
+    def _keepalive_saver_active(self) -> bool:
+        """Whether Radient Saver reduces, or may reduce, this session's turns.
+
+        Asked of the stream (``SessionStreamFn.saver_may_reduce``), which owns
+        the chain and the resolver inputs. A stream without the hook (an SDK
+        or test ``stream_fn``) has no Saver. A failure counts as active: the
+        cost of a wrong "no" is a full write per gap, of a wrong "yes" one
+        cold start.
+        """
+        probe = getattr(self._stream_fn, "saver_may_reduce", None)
+        if not callable(probe):
+            return False
+        try:
+            return bool(probe(self._model))
+        except Exception:  # noqa: BLE001 - fail closed: no ping
+            logger.debug("cache keep-alive: saver probe failed", exc_info=True)
+            return True
+
+    def _keepalive_route_matches(self, usage: Usage | None) -> bool:
+        """Whether a ping on ``self._model`` would land in ``usage``'s cache namespace.
+
+        The ping is ``same_route_retry`` (one attempt, no fallback) on the
+        primary model, so a prefix a pinned fallback wrote is not reachable.
+        """
+        if usage is None or self._active_fallback is not None:
+            return False
+        route = (
+            usage.provider or self._model.provider,
+            usage.model_id or self._model.model_id,
+        )
+        return route == (self._model.provider, self._model.model_id)
+
+    async def _keepalive_prefix_digest(self) -> str:
+        """The digest of the prefix a ping would send NOW (system, tools, history tail)."""
+        from local_operator.compaction import keepalive
+
+        _desired, blocks = await self._read_only_system_blocks()
+        last_id = next(
+            (
+                str(message.id)
+                for message in reversed(self._context.messages)
+                if getattr(message, "id", None)
+            ),
+            None,
+        )
+        return keepalive.prefix_digest(blocks, self._side_channel_tools(), last_id)
+
+    def _keepalive_arm_check(
+        self,
+        settings: Any,
+        *,
+        usage: Usage | None,
+        ttl_s: float | None,
+        anchor_ms: int,
+        attempt: int,
+    ) -> Any:
+        from local_operator.compaction import keepalive
+        from local_operator.wakes.store import is_cache_keepalive_row
+
+        if self._compaction_pass_in_flight or self._pending_compaction is not None:
+            # The pass lands at the next turn edge and rewrites the prefix, so a
+            # ping now would keep warm a prefix the next request will not send.
+            return keepalive.KeepaliveDecision(False, "compaction_pending")
+        other_due = min(
+            (
+                row.next_due_at
+                for row in self._wake.armed_schedules
+                if not is_cache_keepalive_row(row)
+            ),
+            default=None,
+        )
+        return keepalive.arm_decision(
+            mode=str(settings.keepalive_mode),
+            covered=True,
+            is_subagent=bool(self._parent_session_id),
+            ttl_s=ttl_s,
+            anchor_ms=int(anchor_ms or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0) or 0),
+            cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0) or 0),
+            route_matches=self._keepalive_route_matches(usage),
+            other_wake_due_ms=other_due,
+            remaining_pings=int(settings.keepalive_max_consecutive) - int(attempt),
+            saver_active=self._keepalive_saver_active(),
+        )
+
+    def _keepalive_remaining_pings(self) -> int:
+        """Pings a turn end ending now would buy, for the economic cold-next estimate."""
+        try:
+            settings = self._keepalive_settings()
+            if settings is None:
+                return 0
+            decision = self._keepalive_arm_check(
+                settings,
+                usage=self._last_usage,
+                ttl_s=self._idle_cache_ttl_s,
+                anchor_ms=self._idle_cache_anchor_ms,
+                attempt=0,
+            )
+            return int(settings.keepalive_max_consecutive) if decision.ok else 0
+        except Exception:  # noqa: BLE001 - an estimate input; 0 is today's behaviour
+            logger.debug("cache keep-alive: remaining-ping estimate failed", exc_info=True)
+            return 0
+
+    def _arm_cache_keepalive(self) -> None:
+        """Turn end: arm, replace or clear this session's keep-alive row. Never raises.
+
+        Runs at EVERY main-thread turn end, after compaction settled the
+        prefix. Spawned rather than awaited: the write goes through the wake
+        scheduler's lock, which a wake delivery's pump may be holding.
+        """
+        if self._disposed or self._parent_session_id:
+            return
+        # Synchronously, before the spawn: a ping streaming right now must see
+        # this turn end when its own write lands, whichever lands first.
+        self._keepalive_turn_ends += 1
+        try:
+            self._spawn_background(
+                self._rearm_cache_keepalive(
+                    usage=self._last_usage,
+                    ttl_s=self._idle_cache_ttl_s,
+                    anchor_ms=int(self._idle_cache_anchor_ms or 0),
+                    attempt=0,
+                )
+            )
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("cache keep-alive: arm spawn failed", exc_info=True)
+
+    async def _rearm_cache_keepalive(
+        self,
+        *,
+        usage: Usage | None,
+        ttl_s: float | None,
+        anchor_ms: int,
+        attempt: int,
+        turn_epoch: int | None = None,
+        clear_only: bool = False,
+    ) -> None:
+        """Replace this session's keep-alive row with a fresh one, or clear it. Total.
+
+        A FRESH id per write (``cache-keepalive:<anchor_ms>``) and a drop of
+        every earlier keep-alive row in the same locked write, so the pump
+        retiring the row that just fired can never remove its successor. Under
+        ``_ask_wake_lock`` as well, because the ask queue's writers snapshot
+        the full list there and would otherwise write this row back out.
+
+        ``turn_epoch`` is set by a ping's write (re-arm or chain end): the
+        turn-end count when the fire began. If a turn ended since, or a row
+        with a newer anchor is already there, that turn's arm owns the row:
+        this write adds nothing and drops only rows no newer than its own
+        anchor (review R1-3). A turn-end write (``None``) always owns it.
+
+        ``clear_only`` is a chain's end, for every stop reason: an explicit
+        clear rather than a bare return, so a fired row that a stale full-list
+        snapshot (``arm_ask_wake``, the wake tool) wrote back cannot fire again
+        outside the consecutive count (review R1-5).
+        """
+        from local_operator.compaction import keepalive
+        from local_operator.wakes.store import is_cache_keepalive_row
+
+        try:
+            settings = self._keepalive_settings()
+            row: WakeSchedule | None = None
+            if settings is not None and not clear_only:
+                decision = self._keepalive_arm_check(
+                    settings, usage=usage, ttl_s=ttl_s, anchor_ms=anchor_ms, attempt=attempt
+                )
+                logger.debug("cache keep-alive arm (attempt %d): %s", attempt, decision.reason)
+                if decision.ok:
+                    row = WakeSchedule(
+                        id=keepalive.row_id(anchor_ms),
+                        message="prompt-cache keep-alive",
+                        next_due_at=int(anchor_ms + keepalive.KEEPALIVE_PING_INTERVAL_S * 1000),
+                        created_at=int(time.time() * 1000),
+                        kind="cache_keepalive",
+                        hidden=True,
+                        # Engine text: nothing a person wrote is in this message.
+                        origin="tool",
+                        attempt=attempt,
+                        cache_anchor_ms=int(anchor_ms),
+                        prefix_digest=await self._keepalive_prefix_digest(),
+                    )
+            async with self._ask_wake_lock:
+                keep_newer_than: int | None = None
+                if turn_epoch is not None and (
+                    turn_epoch != self._keepalive_turn_ends
+                    or any(
+                        int(r.cache_anchor_ms) > anchor_ms
+                        for r in self._wake.schedules
+                        if is_cache_keepalive_row(r)
+                    )
+                ):
+                    row = None
+                    keep_newer_than = anchor_ms
+
+                def drop(r: WakeSchedule) -> bool:
+                    if not is_cache_keepalive_row(r):
+                        return False
+                    return keep_newer_than is None or int(r.cache_anchor_ms) <= keep_newer_than
+
+                if row is None and not any(drop(r) for r in self._wake.schedules):
+                    # Nothing to clear: not a wake-list write at all.
+                    return
+                await self._wake.replace_rows(drop, [row] if row else [])
+        except Exception:  # noqa: BLE001 - best effort, like every wake-index writer
+            logger.warning("cache keep-alive: could not write the wake row", exc_info=True)
+
+    async def _deliver_cache_keepalive(self, due: DueWake) -> None:
+        """A fired keep-alive row. Returns at once; the ping runs off the pump.
+
+        The pump holds the scheduler's write lock for the whole delivery, and
+        the re-arm needs it, so the work is spawned. The pump's own advance has
+        already retired the fired one-shot by the time the re-arm lands.
+        """
+        self._spawn_background(self._run_cache_keepalive(due.schedule))
+
+    async def _run_cache_keepalive(self, row: WakeSchedule) -> None:
+        """Gate, ping, re-arm. Total: any refusal or failure ends the chain."""
+        epoch = self._keepalive_turn_ends
+        if await self._cache_keepalive_fire(row, epoch=epoch):
+            # Re-armed, or cleared by the re-arm's own refusal (a spent chain).
+            return
+        # Every stop reason ends in an explicit clear (review R1-5).
+        await self._rearm_cache_keepalive(
+            usage=None,
+            ttl_s=None,
+            anchor_ms=int(row.cache_anchor_ms),
+            attempt=int(row.attempt),
+            turn_epoch=epoch,
+            clear_only=True,
+        )
+
+    async def _cache_keepalive_fire(self, row: WakeSchedule, *, epoch: int) -> bool:
+        """The fire's body: ``True`` once the chain is re-armed, ``False`` when it ends."""
+        from local_operator.compaction import keepalive
+
+        try:
+            settings = self._keepalive_settings()
+            if settings is None:
+                logger.debug("cache keep-alive %s: mode no longer covers this session", row.id)
+                return False
+            # The next turn waits for its declared MCP tools before publishing
+            # its array; hashing before they connect would compare a smaller
+            # array than either side sends.
+            await self._await_declared_mcp_ready()
+            digest = await self._keepalive_prefix_digest()
+            daily = await asyncio.to_thread(self._keepalive_daily_count)
+            decision = keepalive.fire_decision(
+                now_ms=int(time.time() * 1000),
+                anchor_ms=int(row.cache_anchor_ms),
+                attempt=int(row.attempt),
+                max_consecutive=int(settings.keepalive_max_consecutive),
+                daily_count=daily,
+                daily_max=int(settings.keepalive_daily_max),
+                stored_digest=row.prefix_digest,
+                current_digest=digest,
+                route_matches=self._keepalive_route_matches(self._last_usage),
+                busy=not self._idle_may_proceed(self._generation),
+                saver_active=self._keepalive_saver_active(),
+            )
+            if not decision.ok:
+                logger.info("cache keep-alive %s: not sent (%s)", row.id, decision.reason)
+                return False
+            started_ms = int(time.time() * 1000)
+            usage = await self._cache_keepalive_ping()
+        except Exception:  # noqa: BLE001 - a 429/provider error retires the chain
+            logger.warning("cache keep-alive %s: ping failed; chain ended", row.id, exc_info=True)
+            return False
+        if usage is None:
+            logger.warning("cache keep-alive %s: no usage reported; chain ended", row.id)
+            return False
+        context = int(getattr(self._last_usage, "context_tokens", 0) or 0)
+        read = int(usage.cache_read_tokens or 0)
+        logger.info(
+            "cache keep-alive %s: attempt=%d cache_read=%d cache_write=%d context=%d",
+            row.id,
+            row.attempt + 1,
+            read,
+            int(usage.cache_write_tokens or 0),
+            context,
+        )
+        if read * 2 < context:
+            # The prefix was not reused, so every further ping would write it
+            # again: one wasted write per chain is the bound.
+            logger.warning(
+                "cache keep-alive %s: read %d of a %d-token context; chain ended",
+                row.id,
+                read,
+                context,
+            )
+            return False
+        from local_operator.compaction.idle import cache_ttl_from_usage
+
+        await self._rearm_cache_keepalive(
+            usage=usage,
+            # A read-only ping refreshes the lifetime the entry was written with,
+            # which was 1h or this row would not exist.
+            ttl_s=cache_ttl_from_usage(usage) or keepalive.KEEPALIVE_TTL_S,
+            anchor_ms=started_ms,
+            attempt=int(row.attempt) + 1,
+            turn_epoch=epoch,
+        )
+        return True
+
+    def _keepalive_daily_count(self) -> int | None:
+        """This session's keep-alive requests in the trailing 24 h, or ``None``.
+
+        Read from the analytics ledger, the only record a ping leaves; off the
+        loop (sqlite). ``None`` (unreadable) refuses the ping.
+        """
+        from local_operator.analytics.recorder import get_recorder
+        from local_operator.compaction import keepalive
+
+        if not self._session_id:
+            return None
+        try:
+            return get_recorder().store.count_purpose_calls(
+                self._session_id,
+                keepalive.KEEPALIVE_PURPOSE,
+                int(time.time() * 1000) - 86_400_000,
+            )
+        except Exception:  # noqa: BLE001 - unreadable refuses
+            logger.debug("cache keep-alive: ledger read failed", exc_info=True)
+            return None
+
+    async def _cache_keepalive_ping(self) -> Usage | None:
+        """ONE read-only request over the current prefix; the usage, or ``None`` on failure.
+
+        :meth:`advise_compaction`'s request, for its reasons (append-only on the
+        turn's prefix, the side-channel tool array, the frozen blocks, the
+        latched head row, ``tool_choice="none"``), with three deltas:
+        ``same_route_retry`` so the one attempt can never hop to a fallback
+        route (that would write the whole prefix in another namespace), a
+        small generation bound, and NOT ``replayable`` (a second attempt is a
+        second bill). The thinking configuration is the model spec's, exactly
+        as the turn's, because a thinking change invalidates the cached
+        messages. Text is discarded; nothing here reaches the conversation.
+        """
+        from local_operator.compaction import keepalive
+
+        blocks, messages = await self._read_only_prompt(
+            [Message.user(keepalive.KEEPALIVE_TURN_TEXT)]
+        )
+        hint = self._context_tokens_hint
+        if hint is None and self._last_usage is not None and self._last_usage.context_tokens:
+            # A relaunched runtime has not adopted a reading yet; the restored
+            # last usage is this conversation's size, and the TTL decision reads it.
+            hint = int(self._last_usage.context_tokens)
+        request = ChatRequest(
+            model=self._model,
+            purpose=keepalive.KEEPALIVE_PURPOSE,
+            system_blocks=list(blocks),
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
+            messages=messages,
+            tools=self._side_channel_tools(),
+            tool_choice="none",
+            max_tokens=keepalive.KEEPALIVE_MAX_TOKENS,
+            same_route_retry=True,
+            isolated=False,
+            context_tokens_hint=hint,
+        )
+        usage: Usage | None = None
+        async for event in self._stream_fn(request, None):
+            if isinstance(event, StreamUsageEvent):
+                usage = event.usage
+            elif isinstance(event, StreamEndEvent):
+                if event.stop_reason == "error":
+                    return None
+                if event.usage is not None:
+                    usage = event.usage
+        return usage
+
     async def _journal_idle_decline(self, context_tokens: int, why: str) -> None:
         """Durably record "not now" so the advisor waits for ``G`` more growth."""
         if self._transcript is None:
@@ -31246,6 +32793,30 @@ class Session:
         if changed:
             self._published_tools = None
         return changed
+
+    def _forget_mcp_seen_urls(self) -> None:
+        """Drop this session's MCP seen-URL ledger (``McpManager.forget_seen_urls``).
+
+        The ledger lets an MCP search drop the snippet of a hit whose URL the
+        model was already shown. That is only true while the earlier result is
+        still in the model's context: a compaction commit replaces it with a
+        summary under the SAME session id, so without this the session would
+        keep eliding snippets the model no longer has (PR #4540 review M1).
+        Called at the compaction commit and on dispose (review m5: a long-lived
+        manager otherwise keeps one ledger per session it ever served). Read
+        off ``mcp_manager`` -- a subagent's is its parent's borrowed manager,
+        keyed by the child's own id -- with ``getattr`` because hosts install
+        other managers (``SnapshotMcpManager``, test fakes) that have no
+        ledger. Best-effort: bookkeeping must never fail a compaction or a
+        dispose.
+        """
+        forget = getattr(getattr(self, "mcp_manager", None), "forget_seen_urls", None)
+        if forget is None:
+            return
+        try:
+            forget(self._session_id)
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("MCP seen-URL ledger reset failed", exc_info=True)
 
     async def _plan_compaction(
         self, *, respect_threshold: bool, parked_hint: Any | None = None
@@ -32723,6 +34294,9 @@ class Session:
             # The commit has landed: the next request re-writes the history, so
             # idle published MCP schemas leave the tools array on THAT request.
             self._demote_cold_mcp_tools()
+            # ...and the MCP results before it left the model's context, so a
+            # repeat search hit must carry its snippet again.
+            self._forget_mcp_seen_urls()
             outcome = CompactionOutcome(
                 ran=True,
                 strategy=plan.strategy,
@@ -33859,6 +35433,12 @@ class Session:
             model=self._model,
             purpose="aside",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): keep the aside on the SAME cache prefix the
             # working turn builds. See the docstring for why this is a cache
@@ -33995,6 +35575,12 @@ class Session:
             model=self._model,
             purpose="clearance",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Live tools (not []): the same cache-prefix rule the aside states
             # at length — the tools block leads the prefix, so an empty array
@@ -34146,6 +35732,12 @@ class Session:
             model=self._model,
             purpose="compaction_advisor",
             system_blocks=list(blocks),
+            # Same head row as the turn on a thinking wire, or the replayed
+            # signed blocks lose their prefix (``_settle_inline_ui_head_latch``);
+            # elsewhere helpers still carry no hint.
+            inline_ui_hint=self._inline_ui_head_hint(self._model, None),
+            system_blocks_frozen=self._system_blocks_are_frozen(),
+            system_stable_head_blocks=self._system_stable_head_blocks(),
             messages=messages,
             # Same array as the running turn (not []): the tools block is the
             # FRONT of the provider cache prefix, so sending [] would change
@@ -35010,7 +36602,18 @@ class Session:
                     "patience: retired %d stale wait(s) at load", len(schedules) - len(kept)
                 )
             schedules = kept
-        self._wake.load(schedules)
+        from local_operator.harness.wake import (
+            WAKE_COALESCE_WINDOW_MS,
+            take_supervisor_started,
+        )
+
+        # A runtime the wake supervisor cold-booted also delivers this session's
+        # wakes due within the window, instead of paying another cold boot for
+        # each of them minutes later (wake boot economy; see ``load``).
+        self._wake.load(
+            schedules,
+            pull_forward_ms=WAKE_COALESCE_WINDOW_MS if take_supervisor_started() else 0,
+        )
 
     def _load_monitor_schedules(self) -> None:
         """Adopt the transcript's ``monitor_schedules`` rows, latest entry wins.
@@ -36170,12 +37773,42 @@ class Session:
                 schedule.next_due_at, now=datetime.fromtimestamp(now_ms / 1000, tz=UTC)
             )
 
+        from local_operator.harness.wake import COLD_BOOT_DELIVERY_MS
+
         lines = []
-        for entry in missed:
+        cold_boot_only = True
+        # DUE ORDER, not creation order: a supervisor-started runtime also
+        # delivers the session's wakes due within a window (pulled forward into
+        # this one turn), and the turn must read as the sequence they come due in.
+        for entry in sorted(missed, key=lambda item: item["schedule"].next_due_at):
             schedule = entry["schedule"]
             # The DUE-while-down count is what the agent should read (M2).
             occurrences = entry["due"]
-            if occurrences > 1:
+            # A COLD-BOOT DELIVERY IS NOT A MISS. The supervisor starts a runtime
+            # for a wake only once it is due, so its runtime always loads that
+            # wake overdue, by the engage + boot latency. Within
+            # ``COLD_BOOT_DELIVERY_MS`` a single occurrence is a punctual delivery
+            # by the supervisor, and calling it "missed while the session was
+            # down" told the model to treat on-time fires as missed ones
+            # (316765a40496: 85 such notices in 3.57 days, each a distinct
+            # on-time wake; they read as repeated missed-notice boots). An
+            # ``early`` row was pulled forward into this boot and is not due yet.
+            early = bool(entry.get("early"))
+            cold_boot = early or (
+                occurrences <= 1 and now_ms - schedule.next_due_at <= COLD_BOOT_DELIVERY_MS
+            )
+            cold_boot_only = cold_boot_only and cold_boot
+            if early:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): not due yet; delivered "
+                    "early with this start instead of starting the session again for it."
+                )
+            elif cold_boot:
+                header = (
+                    f"- {schedule.id} (due {_due_label(schedule)}): came due while no "
+                    "runtime was running; delivered at this start."
+                )
+            elif occurrences > 1:
                 # occurrences > 1 implies a repeating schedule, so every_ms is
                 # set; the assert turns that reasoning into a type narrowing.
                 assert schedule.every_ms is not None
@@ -36192,6 +37825,14 @@ class Session:
             lines.append(
                 f"{header}\n  Message: {schedule.message}"
             )  # i18n: ignore model-facing wake prompt
+        if cold_boot_only:
+            # i18n: ignore model-facing wake prompt
+            return (
+                "(alarm) Scheduled wake(s) delivered at this start, listed in due order, "
+                "each with its own id and due time. None was missed: no runtime was "
+                "running when they came due (or they are due shortly). Handle each one "
+                "now.\n\n" + "\n".join(lines)
+            )
         return (
             "(alarm) The session resumed after being closed; the following scheduled wake(s) "
             "came due while it was down. Each fires once now — handle them as missed wakes, "
@@ -36953,16 +38594,15 @@ class Session:
         """Snapshot the todo list to the transcript when it moved this turn.
 
         The todo tool keeps the live list in a process-local table, so a
-        transcript snapshot is the only durable copy a resume can read. Guarded
-        by the FULL-list fingerprint (the same one the continuation guardrail
-        compares): an unchanged list is one tuple comparison and no write, while
-        any init/add/done/block/drop lands a fresh newest-wins entry. Never
-        raises — a status write must not break a turn.
+        transcript snapshot is the only durable copy a resume can read. Compare
+        the snapshot itself: rebinding an explicitly linked receipt may leave
+        the visible reason and status byte-identical. Never raises — a status
+        write must not break a turn.
         """
-        fingerprint = todo_fingerprint(self._session_id)
-        if fingerprint == self._persisted_todo_fingerprint:
+        snapshot = todo_snapshot(self._session_id)
+        if snapshot == self._persisted_todo_snapshot:
             return
-        if not fingerprint and self._persisted_todo_fingerprint is None:
+        if not snapshot and self._persisted_todo_snapshot is None:
             # An empty list that was never persisted is the ordinary
             # never-used-todos session: record nothing and, importantly, do
             # not append an empty snapshot at teardown (which on a wedged mount
@@ -36973,9 +38613,9 @@ class Session:
         try:
             await self._transcript.append_custom(
                 TODO_SNAPSHOT_CUSTOM_TYPE,
-                {"items": todo_snapshot(self._session_id)},
+                {"items": snapshot},
             )
-            self._persisted_todo_fingerprint = fingerprint
+            self._persisted_todo_snapshot = snapshot
         except Exception:  # noqa: BLE001 - persistence must never break a turn
             logger.warning("could not persist todo snapshot", exc_info=True)
 
@@ -36994,7 +38634,7 @@ class Session:
         items = details.get("items") or []
         if items:
             restore_todos(self._session_id, list(items))
-            self._persisted_todo_fingerprint = todo_fingerprint(self._session_id)
+            self._persisted_todo_snapshot = todo_snapshot(self._session_id)
 
     # -- active model route (fallback persistence) ---------------------------
 
@@ -37102,6 +38742,10 @@ class Session:
             "fast": bool(model.fast_mode),
             "boot": self._boot_selector,
         }
+        # Keep the explicit snapshot unchanged. Only a marked row says its
+        # concrete ID is a preview rather than an explicit wire pin.
+        if model.auth_route_default is True:
+            payload["auth_route_default"] = True
         await self._transcript.append_custom(SELECTED_MODEL_CUSTOM_TYPE, payload)
         self._selection_needs_initial_write = False
         current = self._model
@@ -37114,10 +38758,12 @@ class Session:
             f"{current.provider}/{current.model_id}",
             self._chosen_effort or current.reasoning_effort,
             bool(current.fast_mode),
+            current.auth_route_default,
         ) == (
             payload["selector"],
             payload["effort"],
             payload["fast"],
+            payload.get("auth_route_default", False),
         ):
             self._selected_model_dirty = False
         else:
@@ -37150,12 +38796,31 @@ class Session:
                 )
             )
 
+    def _patience_rows(self, cutoff_ms: int) -> list[Any]:
+        """Rows for the patience scan: the resident suffix when it reaches back
+        past ``cutoff_ms`` (the scan stops there), else the whole journal."""
+        from local_operator.session.transcript import resident_entries
+
+        rows = resident_entries(self._transcript)
+        if (
+            getattr(self._transcript, "has_prefix", False) is True
+            and rows
+            and int(float(getattr(rows[0], "ts", 0) or 0) * 1000) > cutoff_ms
+        ):
+            return self._transcript.entries()
+        return rows
+
     def _restore_selected_model(self) -> None:
         """Restore conversation identity independently of today's defaults."""
         from local_operator.session.model_selection import selection_from_payloads
+        from local_operator.session.transcript import (
+            projection_entries,
+            transcript_prefix_flag,
+        )
 
+        # selected_model and the checkpoint are keep-set types, in order.
         saved = selection_from_payloads(
-            row.payload for row in self._transcript.entries() if row.type == ENTRY_CUSTOM
+            row.payload for row in projection_entries(self._transcript) if row.type == ENTRY_CUSTOM
         )
         # A child is skipped like a flag, because its model was also chosen
         # deliberately just before construction: ``run_subagent`` resolved the
@@ -37184,14 +38849,16 @@ class Session:
             # and lost — so either a message row or a `selected_model` row
             # keeps the notice (the latter is the unusable-selection recovery
             # this branch's sibling below also serves).
-            self._model_migration_notice = any(
+            self._model_migration_notice = transcript_prefix_flag(
+                self._transcript, "has_message"
+            ) or any(
                 row.type == ENTRY_MESSAGE
                 or (
                     row.type == ENTRY_CUSTOM
                     and str((row.payload or {}).get("custom_type", ""))
                     == SELECTED_MODEL_CUSTOM_TYPE
                 )
-                for row in self._transcript.entries()
+                for row in projection_entries(self._transcript)
             )
             return
         selector, effort = saved.selector, saved.effort
@@ -37214,8 +38881,11 @@ class Session:
             # reopen — the same defect (ui#1266) through the new field. ``None``
             # is no evidence and leaves the incoming spec alone.
             dial = fast_dial_from_row(saved.fast, self._model)
-            if dial is not None:
-                self._model = self._model.model_copy(update={"fast_mode": dial})
+            if dial is not None or self._model.auth_route_default != saved.auth_route_default:
+                update = {"auth_route_default": saved.auth_route_default}
+                if dial is not None:
+                    update["fast_mode"] = dial
+                self._model = self._model.model_copy(update=update)
             return
         # The SAME derivation `/model` itself lands on: `spec_for_target`
         # builds the target model's own spec (its base_url, window,
@@ -37269,6 +38939,8 @@ class Session:
         dial = fast_dial_from_row(saved.fast, spec)
         if dial is not None:
             spec = spec.model_copy(update={"fast_mode": dial})
+        if saved.auth_route_default:
+            spec = spec.model_copy(update={"auth_route_default": True})
         self._model = spec
         # AGAINST THE TARGET SPEC, not the birth spec (review round 2, M5). A
         # withdrawal row now stores the TARGET's seed, so comparing it to the
@@ -37523,10 +39195,20 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
+        from local_operator.wakes.store import (
+            is_ask_timeout_row,
+            is_cache_keepalive_row,
+            is_patience_row,
+        )
+
+        if is_cache_keepalive_row(due.schedule):
+            # FIRST, ahead of the refetch below: a keep-alive delivers nothing
+            # into the session, so the context did not move.
+            await self._deliver_cache_keepalive(due)
+            return
         # A delivery into the session is one of the design's refetch moments
         # (§D.5): the context moved, and the operator may look next.
         await self._mark_code_requests_dirty()
-        from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
 
         if is_ask_timeout_row(due.schedule):
             # A queued ask's DEADLINE. The fire carries no payload on purpose
@@ -38535,7 +40217,7 @@ class Session:
         # fact that could matter is in reach and the scan stays bounded on a
         # long conversation.
         cutoff = now - (pol.ttl_ms + 3_600_000)
-        facts = patience.scan_entries(self._transcript.entries(), cutoff_ms=cutoff)
+        facts = patience.scan_entries(self._patience_rows(cutoff), cutoff_ms=cutoff)
         if patience.fire_is_stale(due.schedule, facts):
             logger.info(
                 "patience: %s predates the last inbound; retiring without a turn",
@@ -38592,9 +40274,8 @@ class Session:
                 from local_operator.wakes import patience
 
                 now = int(time.time() * 1000)
-                facts = patience.scan_entries(
-                    self._transcript.entries(), cutoff_ms=now - (pol.ttl_ms + 3_600_000)
-                )
+                cutoff = now - (pol.ttl_ms + 3_600_000)
+                facts = patience.scan_entries(self._patience_rows(cutoff), cutoff_ms=cutoff)
                 return not patience.fire_is_stale(row, facts)
             except Exception:  # noqa: BLE001 — documented fail-open
                 return True
@@ -40290,6 +41971,9 @@ class Session:
                 # Own finally: a fault in the notice flush or console cleanup must
                 # not leak this session's servers (the reap never raises itself).
                 await self._reap_session_process_groups()
+                # The manager can outlive this session (a borrowed parent
+                # manager, the server host): drop its ledger. Never raises.
+                self._forget_mcp_seen_urls()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

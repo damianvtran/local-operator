@@ -70,6 +70,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 import zlib
 from _thread import LockType
 from collections import OrderedDict
@@ -1629,6 +1630,34 @@ class _SerializedConnection:
         # is applied, and a future caller holding the lock across a helper that
         # also executes must not deadlock against itself.
         self._lock = threading.RLock()
+        # Close the sqlite handle when this wrapper is RELEASED, not when the
+        # cyclic GC eventually finds it. CPython's ``sqlite3.Connection`` holds
+        # its own statement cache, an ``lru_cache`` wrapped around the
+        # connection itself -- a reference cycle -- so a connection that is
+        # dropped without ``close()`` keeps ``auth.db`` and both WAL sidecars
+        # (three descriptors) open until a generation-2 collection. Plenty of
+        # owners drop a store rather than close it: the shared-store map
+        # evicts by dropping its reference (see :func:`shared_auth_store`), and
+        # one-shot ``AuthStore(...)`` constructions across the tree never call
+        # ``close()``. Measured on tests/unit/tools/test_builtin_tools.py run
+        # alone: 455 unclosed connections at test end, a 466-fd peak.
+        #
+        # The wrapper itself is in no cycle, so refcounting releases it the
+        # moment its last holder lets go -- the same instant the "descriptors
+        # return by refcount" contract in ``shared_auth_store`` promised. The
+        # finalizer references only the raw connection, never ``self``, and an
+        # explicit :meth:`close` first makes it a no-op (sqlite's ``close`` is
+        # idempotent). Closing here cannot cut a live caller short: a caller
+        # mid-statement holds the wrapper, so the finalizer cannot have run.
+        self._finalizer = weakref.finalize(self, conn.close)
+        # Release only: never at interpreter exit. ``finalize`` defaults to
+        # ``atexit=True``, and ``weakref._exitfunc`` would then close every live
+        # store's handle WITHOUT ``self._lock`` while daemon threads still run
+        # -- one mid-``sqlite3_step`` would have the db pulled out from under
+        # it. The orderly shutdown closer is ``close_shared_auth_stores``, which
+        # goes through :meth:`close` and takes the lock; the OS reclaims the
+        # rest at exit. (PR #4539 review finding R1.)
+        self._finalizer.atexit = False
 
     @property
     def lock(self) -> threading.RLock:
@@ -2129,25 +2158,31 @@ class AuthStore:
                         (secrets.token_hex(16),),
                     )
                 conn.commit()
-                # Local metadata, never credential payload: old rows remain unknown until
-                # a real login write attests an incarnation. Refresh cannot create one.
-                # Concurrent process startup must serialize the check and ALTER, not
-                # swallow duplicate-column errors (which can conceal real corruption).
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    columns = {
-                        row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
-                    }
-                    if "login_incarnation" not in columns:
-                        conn.execute(
-                            "ALTER TABLE auth_credentials ADD COLUMN "
-                            "login_incarnation TEXT DEFAULT NULL"
-                        )
-                    conn.commit()
-                except BaseException:
-                    with suppress(Exception):
-                        conn.rollback()
-                    raise
+                # The bootstrap guard still owns schema installation and serializes
+                # cooperating migrations. Check the live schema on this connection
+                # before competing with credential writers: an up-to-date store needs
+                # no SQLite writer lock just to open. Do not cache this check by path;
+                # a replaced database must be initialized/migrated on its own merits.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")}
+                if "login_incarnation" not in columns:
+                    # Recheck inside the write transaction before ALTER, including
+                    # against any schema writer that doesn't take the bootstrap guard.
+                    # Old rows stay unverified until a real login attests an incarnation.
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        columns = {
+                            row[1] for row in conn.execute("PRAGMA table_info(auth_credentials)")
+                        }
+                        if "login_incarnation" not in columns:
+                            conn.execute(
+                                "ALTER TABLE auth_credentials ADD COLUMN "
+                                "login_incarnation TEXT DEFAULT NULL"
+                            )
+                        conn.commit()
+                    except BaseException:
+                        with suppress(Exception):
+                            conn.rollback()
+                        raise
                 for path in (
                     ()
                     if memory
@@ -6150,6 +6185,31 @@ class AuthStore:
             return [r for r in rows if r.id not in demoted or r.id in {sticky_id, tentative_id}]
         return rows
 
+    def oauth_locations_for_default(self, provider: str) -> tuple[str, ...]:
+        """Local OAuth evidence for model previews; never refresh or move accounts."""
+
+        def can_refresh_vertex(data: dict[str, Any]) -> bool:
+            # Cloud access tokens typically expire between turns. A stored
+            # refresh path still identifies the tier; it does not prove the
+            # grant will refresh. Dispatch alone can make that decision.
+            if provider != "google-vertex":
+                return False
+            if data.get("auth_mode") == "service_account":
+                fields = (data.get("client_email"), data.get("private_key"))
+            else:
+                fields = (data.get("refresh") or data.get("refresh_token"),)
+            return all(isinstance(field, str) and bool(field.strip()) for field in fields)
+
+        if self.override_keys(provider):
+            return ()
+        return tuple(
+            str(row.data.get("location") or "")
+            for row in self._usable_key_rows(provider, "oauth", source=None)
+            if not self._grant_dead_at(row.data)
+            and not self._family_moved_at(row.data)
+            and (not self._needs_refresh(row.data) or can_refresh_vertex(row.data))
+        )
+
     # -- the cascade ---------------------------------------------------------
 
     async def get_api_key(
@@ -6162,6 +6222,7 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        offload_static_key: bool = False,
     ) -> str | None:
         """Resolve the API key for ``provider`` via the 7-step cascade.
 
@@ -6180,6 +6241,7 @@ class AuthStore:
             model_id=model_id,
             exclude_keys=exclude_keys,
             exclude_credential_ids=exclude_credential_ids,
+            offload_static_key=offload_static_key,
         )
         return key
 
@@ -6194,6 +6256,7 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
     ) -> OAuthAccess | None:
         """The identity-carrying record for wire clients.
 
@@ -6213,11 +6276,18 @@ class AuthStore:
         broker hiding owner rows must reach an eligible stored API key rather
         than stop at an ambient winner that its safety backstop must discard.
         None preserves the ordinary cascade, including override short-circuiting.
+        ``local_oauth_only`` is for automatic advisory work: use an already
+        fresh local bearer, never refresh it, borrow, or move session routing.
         """
         if persisted_kinds is None and (
             self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
         ):
             return None
+        if local_oauth_only:
+            if self.override_keys(provider):
+                return None  # An explicit gateway is not consent for a public OAuth route.
+            persisted_kinds = frozenset({"oauth"})
+            read_only = True
         # An inherited ContextVar value is a shared object, not a deep copy.
         # Give EACH getter a collector so nested provider lookups or parallel
         # getters under one opt-in cannot overwrite the returning row's rank.
@@ -6232,6 +6302,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                local_oauth_only=local_oauth_only,
             )
             # Refresh may skip a candidate and re-read the successful row. Bind
             # its creation stamp, not a mutable pointer or a fresh ranking read.
@@ -6581,6 +6652,54 @@ class AuthStore:
             )
         return identities
 
+    def _fresh_local_oauth(
+        self,
+        provider: str,
+        session_id: str | None,
+        *,
+        model_id: str,
+        force_refresh: bool,
+        exclude_keys: Collection[str] | None,
+        exclude_credential_ids: Collection[int] | None,
+    ) -> tuple[str | None, StoredCredential | None]:
+        rows = self._usable_key_rows(
+            provider,
+            "oauth",
+            source=None,
+            model_id=model_id,
+            session_id=session_id,
+            exclude_keys=exclude_keys,
+            exclude_credential_ids=exclude_credential_ids,
+        )
+        local = [
+            row
+            for row in rows
+            if "mesh_origin" not in row.data and REFRESH_DELEGATE_KEY not in row.data
+        ]
+        for row in self._selection_order(
+            local, provider, session_id, read_only=True, model_id=model_id
+        ):
+            # Ranking can race a writeback. Read the current row without ever
+            # taking the refresh lock, invoking refresh, or changing affinity.
+            current = self.get_credential(row.id)
+            if current is None or current.disabled_cause is not None:
+                continue
+            data = current.data
+            if (
+                "mesh_origin" in data
+                or REFRESH_DELEGATE_KEY in data
+                or data.get(AWAITING_WRITEBACK_KEY)
+                or self._grant_dead_at(data) is not None
+                or self._family_moved_at(data) is not None
+                or self._needs_refresh(data, force=force_refresh)
+            ):
+                continue
+            key_fn = self._oauth_key_fn(provider)
+            key = key_fn(data) if key_fn else data.get("access")
+            if key:
+                return key, current
+        return None, None
+
     async def _resolve(
         self,
         provider: str,
@@ -6593,6 +6712,8 @@ class AuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
         persisted_kinds: frozenset[str] | None = None,
+        local_oauth_only: bool = False,
+        offload_static_key: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
@@ -6652,6 +6773,19 @@ class AuthStore:
         if config and persisted_kinds is None:
             return config, None
 
+        if local_oauth_only:
+            # This path performs no refresh or routing writes. SQLite and secret
+            # resolution can block, so run the entire local selection off-loop.
+            return await asyncio.to_thread(
+                self._fresh_local_oauth,
+                provider,
+                session_id,
+                model_id=model_id,
+                force_refresh=force_refresh,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+            )
+
         # 3. OAuth credential (skipped when the caller wants API-key rows only)
         oauth_rows = (
             []
@@ -6684,8 +6818,7 @@ class AuthStore:
             key = key_fn(creds) if key_fn else creds.get("access")
             if key:
                 pin(row.id)
-                refreshed = self.get_credential(row.id)
-                return key, refreshed or row
+                return key, self.get_credential(row.id) or row
         if oauth_rows and force_refresh:
             # Every sibling failed its refresh — surface the failure so the
             # failover layer can block/back off instead of silently looping.
@@ -6723,7 +6856,13 @@ class AuthStore:
 
         # 5. Env var tier (the process environment; the plaintext credentials.env
         # file is no longer read here, PR2a).
-        env_key = self._env_api_key(provider) if persisted_kinds is None else None
+        env_key = None
+        if persisted_kinds is None:
+            env_key = (
+                await asyncio.to_thread(self._env_api_key, provider)
+                if offload_static_key
+                else self._env_api_key(provider)
+            )
         if env_key:
             return env_key, None
 
@@ -6787,6 +6926,7 @@ class AuthStore:
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
                 persisted_kinds=persisted_kinds,
+                offload_static_key=offload_static_key,
             )
 
         return None, None

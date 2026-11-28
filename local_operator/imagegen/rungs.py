@@ -104,10 +104,24 @@ OPENAI_IMAGE_TIMEOUT_S = 120.0
 #: below states the mechanic).
 CANCEL_TIMEOUT_TOTAL_S = 5.0
 
-#: FAL's default app path, mirroring the legacy client's constant. The only
-#: place a FAL model id is written down, and it is a DEFAULT, not a pin — the
-#: ``model`` parameter overrides it and no list of ids is cached anywhere.
-FAL_DEFAULT_MODEL = "fal-ai/flux/dev"
+#: FAL's default text-to-image app. A DEFAULT, not a pin — the ``model``
+#: parameter overrides it and no list of ids is cached anywhere.
+#:
+#: Why this model (chosen 2026-11-19, ids read off ``fal.ai/api/models``):
+#: GPT Image 2.6 is the newest GPT Image release (2026-11-04) and the top of
+#: the frontier tier; Sunburst is the variant that "spends longer to hold
+#: intricate detail" at the same token price as Flare, which matters most for
+#: the text-heavy and UI work the harness sends. It is also what Radient's hub
+#: resolves for an unpinned request (agent-server's registry default), so a
+#: Radient refusal that falls through to the user's own FAL key keeps the
+#: SAME model instead of silently dropping a tier. It replaced FLUX.1 [dev]
+#: (``fal-ai/flux/dev``, 2024), a mid-range model that rendered prompt words
+#: as on-image text and could not keep UI text legible (incident 2026-11-19).
+#: The app accepts FAL's ``image_size`` presets and renders the three below
+#: its 655,360-pixel floor (``square``, ``*_16_9``) at the smallest valid
+#: size of the same aspect (measured live 2026-11-19), so the tool's size enum
+#: rides unchanged.
+FAL_DEFAULT_MODEL = "openai/gpt-image-2.6/sunburst/text-to-image"
 
 #: How the cascade lets a rung wait abortably: ``await pause(seconds)`` returns
 #: early (raising ``ImageGenerationCancelled``) when the user's abort signal
@@ -237,9 +251,18 @@ async def _download_rows(
     return assets
 
 
-#: OpenAI's default image model (the ``gpt-image-1`` class). Same rule: a
-#: default, never a pin.
-OPENAI_DEFAULT_IMAGE_MODEL = "gpt-image-1"
+#: OpenAI's default image model. Same rule: a default, never a pin.
+#:
+#: Why this model (chosen 2026-11-19 from OpenAI's image-generation guide,
+#: which says "For new integrations, use GPT-Image-2.6 Sunburst or Flare"):
+#: the newest GPT Image release, Sunburst for detail at Flare's price, and the
+#: same family as the Radient and FAL defaults so failover does not change
+#: model character. It replaced ``gpt-image-1``, which OpenAI shut down on
+#: 2026-10-23 — the old default could only fail. Both generate
+#: (``/images/generations``) and edit (``/images/edits``, up to 16 images)
+#: run on it; :func:`openai_size` maps the tool's enum onto its recommended
+#: 1024/1536 sizes.
+OPENAI_DEFAULT_IMAGE_MODEL = "gpt-image-2.6-sunburst"
 OPENAI_IMAGE_BASE_URL = "https://api.openai.com/v1"
 
 # ``RungSkipped``, ``CancelHandle`` and ``RungResult`` — with ``ProgressFn``/
@@ -974,11 +997,25 @@ async def run_radient(
 #: FAL's queue host, mirroring the legacy client's default.
 FAL_QUEUE_BASE_URL = "https://queue.fal.run"
 
-#: One FAL edit route: the app path, the field its source(s) ride, and the
-#: app's documented reference ceiling (``None`` = shape known, count not).
-FalEditRoute = NamedTuple(
-    "FalEditRoute", [("app", str), ("field", str), ("max_sources", int | None)]
-)
+
+class FalEditRoute(NamedTuple):
+    """One FAL edit route.
+
+    ``app`` is the app path, ``field`` the field its source(s) ride, and
+    ``max_sources`` the app's documented reference ceiling (``None`` = shape
+    known, count not). ``sends_size`` / ``sends_count`` mark apps whose edit
+    schema documents ``image_size`` / ``num_images`` (the GPT Image edit apps
+    do; the FLUX edit apps document neither), so those knobs ride the wire only
+    where the vendor reads them — a count against an app without one stays a
+    recorded skip rather than a silently smaller delivery.
+    """
+
+    app: str
+    field: str
+    max_sources: int | None
+    sends_size: bool = False
+    sends_count: bool = False
+
 
 #: FAL edit routes, keyed by the model id a caller pins. FAL serves an edit as
 #: a SEPARATE app with its own request schema (both pages fetched 2026-10-10),
@@ -986,21 +1023,54 @@ FalEditRoute = NamedTuple(
 #: model path: the flux-class i2i apps take a single ``image_url``, while the
 #: newer multi-reference editors take an ``image_urls`` LIST (1..10 refs).
 FAL_EDIT_MODELS: dict[str, FalEditRoute] = {
-    # The default model's editor: documented at
+    # The default model's editor (the OpenAPI schema at
+    # fal.ai/api/openapi/queue/openapi.json?endpoint_id=openai/gpt-image-2.6/sunburst/edit,
+    # read 2026-11-19): ``image_urls`` list required (up to 16 references),
+    # ``image_size`` preset or {width,height} (schema default "auto" = the
+    # input's size), ``num_images``; no ``strength`` field. Faithful
+    # single-shot edits with legible in-image text are why it is the default:
+    # the same family is Radient's hub edit default, so a fall-through to this
+    # rung keeps the model the user would have got.
+    FAL_DEFAULT_MODEL: FalEditRoute(
+        "openai/gpt-image-2.6/sunburst/edit",
+        "image_urls",
+        16,
+        sends_size=True,
+        sends_count=True,
+    ),
+    # The legacy flux-class editor stays REGISTERED (a caller may still pin
+    # ``fal-ai/flux/dev``): documented at
     # fal.ai/models/fal-ai/flux/dev/image-to-image (image_url required,
-    # strength default 0.95).
-    FAL_DEFAULT_MODEL: FalEditRoute("fal-ai/flux/dev/image-to-image", "image_url", 1),
+    # strength default 0.95). It is no longer a default anywhere.
+    "fal-ai/flux/dev": FalEditRoute("fal-ai/flux/dev/image-to-image", "image_url", 1),
     # The registered multi-reference editor: references as a list (1..10), no
     # strength or number parameter in its schema.
     "blackforestlabs/flux-3/edit-image": FalEditRoute(
         "blackforestlabs/flux-3/edit-image", "image_urls", 10
     ),
+    # Frontier alternatives the guide names, so a caller who pins their
+    # TEXT-TO-IMAGE id still edits on the real edit app instead of the
+    # flux-class ``/image-to-image`` append (an app that does not exist for
+    # either). Schemas read 2026-11-19: FLUX 3's editor is the one above;
+    # Nano Banana Pro's ``/edit`` takes ``image_urls`` (the model family's 14
+    # references) and ``num_images`` 1..4, and sizes by ``aspect_ratio`` /
+    # ``resolution`` — it has no ``image_size``, so none is sent.
+    "blackforestlabs/flux-3/text-to-image": FalEditRoute(
+        "blackforestlabs/flux-3/edit-image", "image_urls", 10
+    ),
+    "fal-ai/nano-banana-pro": FalEditRoute(
+        "fal-ai/nano-banana-pro/edit", "image_urls", 14, sends_count=True
+    ),
 }
 
 #: The registered multi-reference editor an unpinned multi-source edit runs
 #: on (D3): ``run_fal`` resolves it and ``_fal_edit_route``'s skip sentences
-#: name it as the remedy.
-FAL_MULTI_EDIT_DEFAULT = FAL_EDIT_MODELS["blackforestlabs/flux-3/edit-image"]
+#: name it as the remedy. Since 2026-11-19 it is the default model's own
+#: editor (GPT Image 2.6 Sunburst edit, 16 references) — the single- and
+#: multi-source defaults are the same frontier model, so adding a second
+#: reference no longer changes model family. FLUX 3 edit (10 references)
+#: stays registered for callers who pin it.
+FAL_MULTI_EDIT_DEFAULT = FAL_EDIT_MODELS[FAL_DEFAULT_MODEL]
 
 
 def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str, str, str]:
@@ -1018,6 +1088,35 @@ def _fal_fallback_urls(base: str, model_path: str, request_id: str) -> tuple[str
     app_root = model_path.rsplit("/", 1)[0] if "/" in model_path else model_path
     root = f"{base}/{app_root}/requests/{request_id.strip('/')}"
     return f"{root}/status", root, f"{root}/cancel"
+
+
+#: FAL app-path prefixes whose request schemas have no ``seed`` field (GPT
+#: Image 2.x and FLUX 3, OpenAPI schemas read 2026-11-19): ``run_fal`` drops a
+#: requested seed there instead of sending a field the app cannot honour.
+_FAL_SEEDLESS_APP_PREFIXES: tuple[str, ...] = ("openai/gpt-image-", "blackforestlabs/flux-3/")
+
+
+def _fal_gpt_image_edit_route(model_path: str) -> FalEditRoute | None:
+    """The edit route for any pinned FAL GPT Image app, else ``None``.
+
+    FAL serves every GPT Image generation as ``openai/gpt-image-<v>[/<variant>]``
+    with a ``/text-to-image`` app and an ``/edit`` app that share one schema
+    shape (``image_urls`` up to 16, ``image_size``, ``num_images``; read for
+    2.5 and 2.6 on 2026-11-19). Deriving the route keeps a caller's pin of a
+    sibling version or variant (e.g. ``openai/gpt-image-2.5/flare/text-to-image``)
+    on its own family's editor, instead of the flux-class ``/image-to-image``
+    append that would address an app that does not exist.
+    """
+    if not model_path.startswith("openai/gpt-image-"):
+        return None
+    if model_path.endswith("/edit"):
+        app = model_path
+    elif model_path.endswith("/text-to-image"):
+        app = model_path[: -len("/text-to-image")] + "/edit"
+    else:
+        # The bare form (``openai/gpt-image-2``) takes ``/edit`` too.
+        app = model_path + "/edit"
+    return FalEditRoute(app, "image_urls", 16, sends_size=True, sends_count=True)
 
 
 def _fal_edit_route(model_path: str, *, source_count: int) -> FalEditRoute:
@@ -1049,6 +1148,8 @@ def _fal_edit_route(model_path: str, *, source_count: int) -> FalEditRoute:
             if model_path == entry.app:
                 mapped = entry
                 break
+    if mapped is None:
+        mapped = _fal_gpt_image_edit_route(model_path)
     if mapped is None:
         if model_path.endswith(("/edit", "/edit-image")):
             if source_count > 1:
@@ -1131,7 +1232,14 @@ async def run_fal(
             model_path = route.app
             if route.field == "image_urls":
                 body["image_urls"] = list(source_urls)
-                if num_images > 1:
+                if route.sends_size:
+                    # The GPT Image edit apps read image_size (their schema
+                    # default "auto" keeps the input's size); the tool's
+                    # requested size is the caller's intent, so it rides.
+                    body["image_size"] = image_size
+                # num_images already rides the base body; an app whose schema
+                # has no count cannot honour more than one.
+                if num_images > 1 and not route.sends_count:
                     raise RungSkipped(
                         f"FAL's edit app {model_path} documents no image count; "
                         "a multi-image request is skipped rather than silently "
@@ -1148,7 +1256,10 @@ async def run_fal(
                     body["strength"] = strength
         else:
             body["image_size"] = image_size
-        if seed is not None:
+        if seed is not None and not model_path.startswith(_FAL_SEEDLESS_APP_PREFIXES):
+            # The GPT Image and FLUX 3 apps' schemas document no seed (read
+            # 2026-11-19), so a seed is dropped there — the OpenAI and Google
+            # rungs' rule: a field the wire cannot carry cannot be honoured.
             body["seed"] = seed
 
         submit = await _request_json(
@@ -1287,6 +1398,10 @@ OPENAI_EDITS_PATH = "/images/edits"
 #: text input). An estimate multiplies ONLY this table; a model outside it
 #: yields no figure rather than a borrowed rate.
 _OPENAI_EDIT_TOKEN_RATES: tuple[tuple[str, float, float, float], ...] = (
+    # gpt-image-2.6: the same per-token rates as 2.5 (OpenAI model page and
+    # fal's mirror, read 2026-11-19); listed so the new default's edits
+    # still carry an estimate.
+    ("gpt-image-2.6", 8.0, 30.0, 5.0),
     ("gpt-image-2.5", 8.0, 30.0, 5.0),
     ("gpt-image-2", 8.0, 30.0, 5.0),
     ("gpt-image-1.5", 8.0, 32.0, 5.0),
@@ -1338,7 +1453,7 @@ def _openai_edit_usage_cost(model_id: str, usage: Any) -> tuple[float | None, st
         + (image_out or 0) * image_out_rate
     ) / 1_000_000
     provenance = (
-        "OpenAI docs pricing (fetched 2026-10-10): "
+        "OpenAI docs pricing (fetched 2026-10-10; gpt-image-2.6 row 2026-11-19): "
         f"${image_in_rate:g}/M image input + ${text_in_rate:g}/M text input + "
         f"${image_out_rate:g}/M image output, applied to the edits response "
         "usage tokens — an estimate, not an invoice"

@@ -72,6 +72,34 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: declared one: a new same-shape call fails until a reviewer bumps the
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
+    # -- P3 sealed snapshots: ONE nonce directory INSIDE a session ------------
+    # ``sessions/<id>/mentioned-file-versions/<nonce>/`` is a byte copy this op's
+    # own establishment wrote (PR #4563 R1-2/S1-3: otherwise one full copy per
+    # stat, never reclaimed). It sits in the protected tree, so the argument is
+    # the shape, not the location: the nonce must be 32 hex and equal the leaf
+    # name, the parent must be named ``mentioned-file-versions``, the parent is
+    # opened no-follow from the anchor, the leaf is lstat'ed (a link or non-dir
+    # refuses) and, when a seal exists, must match its recorded (dev, ino);
+    # otherwise (a failed establishment) the leaf is the exact nonce directory
+    # that call minted with ``secrets.token_hex`` and created itself; the unlinks are of
+    # that directory's plain entries via its own fd (a subdirectory refuses the
+    # whole removal), and the rmdir is non-recursive. It can never name a
+    # session directory or anything above the nonce.
+    (
+        "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
+        "os.unlink",
+        "Unlinks only plain entries (snapshot, seal.json) of one "
+        "mentioned-file-versions/<nonce>/ directory, by dir_fd; identity-checked when "
+        "a seal exists, else the exact nonce dir its failed establishment created; "
+        "never a directory",
+    ),
+    (
+        "local_operator/network/mentioned_file_serve.py::_remove_version_directory",
+        "os.rmdir",
+        "Non-recursive rmdir of one mentioned-file-versions/<nonce>/ directory this op "
+        "created, by dir_fd; identity-checked when a seal exists, else the exact nonce "
+        "dir its failed establishment created; never a session directory",
+    ),
     (
         "local_operator/network/file_release_coordinator.py::FileReleaseCoordinator._write",
         "os.replace",
@@ -282,6 +310,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The excerpt memo's mirror. ``_path`` IS inside a session directory, but it is
+    # always ``<session dir>/EXCERPT_MEMO_NAME`` (a fixed FILE name joined by
+    # ``Session.__init__``), never the directory, a transcript or a caller-supplied
+    # name: clearing the memo (standing refusal, compaction) removes only that file.
+    (
+        "local_operator/team_bridge/card_projection.py::ExcerptMemo.clear",
+        "<path>.unlink",
+        "Unlinks the fixed-name FILE sessions/<id>/bridge-excerpt-memo.json; never a directory",
+    ),
     # The receiver's runtime record (which build is running): a config-dir
     # sidecar published by atomic replace, the same pattern as the counter above.
     # Every ``_write`` caller passes ``record_path(config_dir)`` =
@@ -319,6 +356,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/team_bridge/reply_guard.py::_digest_key",
         "os.unlink",
         "Removes only the mkstemp temp FILE this call created in the config dir's team_bridge/",
+    ),
+    # Radient Guard's file-backed install key (``LOCAL_OPERATOR_GUARD_KEY_STORE=file``,
+    # the fallback when no Keychain exists). Its only path is ``key_file(config_dir)``
+    # = ``<config_dir>/guard/install.key`` -- the constant KEY_FILENAME under the
+    # fixed ``guard`` component -- plus that name's per-writer temp sibling
+    # ``install.key.<16 hex>.tmp``, created O_EXCL by the same ``store`` call. No
+    # caller input names either path, ``guard/`` is not ``sessions/``, and both
+    # targets are regular FILES: ``os.replace`` publishes the temp file onto the key
+    # file (twice: stale-key replace and the no-hard-link fallback), the ``store``
+    # unlink drops the temp NAME after the publish, and ``delete`` unlinks the key file.
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.store",
+        "os.replace",
+        "Publishes its own O_EXCL temp FILE onto <config>/guard/install.key; never a session path",
+        2,
+    ),
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.store",
+        "<path>.unlink",
+        "Removes only the install.key.<hex>.tmp FILE this call created in <config>/guard/",
+    ),
+    (
+        "local_operator/guard/install_key.py::FileKeyStore.delete",
+        "<path>.unlink",
+        "Removes the fixed <config>/guard/install.key FILE; never a session path",
     ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
@@ -399,6 +461,32 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
+    ),
+    # The local team-identity binding journal. `directory` IS A SESSION
+    # DIRECTORY (callers: move_team.inherit_fork_binding with the fork,
+    # require_replica_reauthorization with the recovered replica,
+    # bind_runtime_authority with the transcript's directory; fork.py passes
+    # the new fork directory), so the argument is about the call SHAPE, not the
+    # receiver's neighbourhood: the directory is only the CONTAINER. The temp
+    # FILE is created by this same call with NamedTemporaryFile(dir=directory,
+    # delete=False); `replace` moves it onto the single fixed basename
+    # LOCAL_BINDING_NAME ("local-team-binding.json"), never onto the directory
+    # or a transcript; `unlink` runs only on failure and only on that temp.
+    (
+        "local_operator/network/move_team.py::_write_local_binding",
+        "<path>.replace",
+        "Renames this call's own NamedTemporaryFile(dir=<session>) temp FILE onto the fixed "
+        "<session>/local-team-binding.json; the session directory is the container, never "
+        "the source or target, and a transcript name is never the destination",
+        1,
+    ),
+    (
+        "local_operator/network/move_team.py::_write_local_binding",
+        "<path>.unlink",
+        "On a failed write only, removes this call's own NamedTemporaryFile temp FILE "
+        "(missing_ok); the receiver is set from temp.name and nothing else, so it can be "
+        "neither the session directory nor a transcript",
+        1,
     ),
     # -- permissions_cli: the team-signing opt-in record ----------------------
     (
@@ -1430,16 +1518,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "`uninstall --purge`: invite FILEs, parked pending/decision FILEs, the network "
         "record and .secrets.json FILEs, audit.jsonl plus its .<n>.gz generations, and "
         "the network-scoped catalog.json — every path built by this module's own "
-        "helpers under <config>/network/ (design §12's blast radius, identity kept)",
-        8,
+        "helpers under <config>/network/ (design §12's blast radius, identity kept); "
+        "the ninth is the audit writers' audit.jsonl.lock FILE (is_file, not a symlink)",
+        9,
     ),
     (
         "local_operator/network/store.py::purge_network_artifacts",
         "shutil.rmtree",
         "The two outbox queue DIRECTORIES: <config>/network/outbox/<device_id>/ for each "
         "member of a purged network, and every remaining queue when the purge covers "
-        "every network. Both are children of network/outbox/, a sibling of sessions/",
-        2,
+        "every network. Both are children of network/outbox/, a sibling of sessions/; "
+        "the third is the literal <config>/network/audit.jsonl.pending/ DIRECTORY of "
+        "parked audit rows (is_dir, not a symlink), also a sibling of sessions/",
+        3,
     ),
     (
         "local_operator/network/credentials/placement.py::forget_network",
@@ -1511,6 +1602,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Drops an aged or over-count audit.jsonl.<n>.gz generation FILE in "
         "<config>/network/, oldest first, and logs each deletion in the surviving log",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._spill_pending",
+        "os.replace",
+        "Publishes this call's own <stem>.tmp FILE as <stem>.jsonl inside the lstat-checked "
+        "<config>/network/audit.jsonl.pending/ directory; never a sessions/ path",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._claim_and_append",
+        "os.replace",
+        "Renames one parked spill FILE to its .draining claim, and back when nothing was "
+        "appended, both inside <config>/network/audit.jsonl.pending/",
+        2,
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._discard_resolved",
+        "<path>.unlink",
+        "Removes one drained spill/claim FILE from <config>/network/audit.jsonl.pending/ "
+        "only once its rows are durably in audit.jsonl",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._set_aside",
+        "os.replace",
+        "Renames one unreadable parked entry to <name>.rejected in the same "
+        "<config>/network/audit.jsonl.pending/ directory (kept, never deleted)",
     ),
     (
         "local_operator/network/approvals.py::_sweep_namespace",
@@ -2646,7 +2762,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "temp FILE -> inbox.jsonl inside the same session directory",
     ),
     (
-        "local_operator/session/session.py::_write_roster_sidecar",
+        "local_operator/session/session.py::_replace_roster_sidecar",
         "os.replace",
         "temp FILE -> roster sidecar inside the same session directory",
     ),
@@ -2659,6 +2775,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/transcript.py::Transcript._replace_file",
         "os.replace",
         "compaction temp FILE -> transcript.jsonl inside the same session directory",
+    ),
+    (
+        "local_operator/session/transcript.py::Transcript._replace_file",
+        "<path>.unlink",
+        "removes its own compaction temp FILE (transcript.jsonl.compact, a sibling "
+        "of transcript.jsonl) when the prefix copy or replace fails, never a directory",
     ),
     (
         "local_operator/session/transcript.py::Transcript._rewrite_without_lines",
@@ -3823,10 +3945,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "sessions/); unlink rejects directories",
     ),
     (
+        "local_operator/network/mobility.py::_verify_staging",
+        "<path>.replace",
+        "Before replacing, the containment helper checks every staging directory component "
+        "below the config anchor and requires regular-file leaves (an absent target is "
+        "allowed); the digest must match before any write. The swap cannot address a "
+        "directory under sessions/",
+    ),
+    (
+        "local_operator/network/mobility.py::_verify_staging",
+        "<path>.unlink",
+        "Removes only the checked, contained regular-file backup. Replacing two hard "
+        "links to the same inode is a no-op, so this cleanup is not redundant",
+    ),
+    (
         "local_operator/network/mobility.py::_promote",
         "<path>.unlink",
-        "Removes the move's own ready.json boot marker from the just-adopted session "
-        "directory: a bookkeeping FILE written by the move, not session content",
+        "After publication, removes two distinct fixed bookkeeping names: the existing "
+        "ready.json boot marker and the separate .skill-pin-original backup. Unlink "
+        "rejects real directories and does not follow the leaf",
+        2,
     ),
     (
         "local_operator/network/mobility.py::_roll_back_destination",
@@ -3841,26 +3979,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "marker exempts one, because those bytes may be the last copy alive); never "
         "a path under sessions/",
     ),
-    # THE MOVE'S OWN BOOT MARKER, removed from a session directory a promote already
-    # adopted. This is the one call in the move that touches a file INSIDE
-    # ``sessions/``, and it removes exactly one name — ``ready.json``, which
-    # ``sync.EXCLUDED_ENTRIES`` classifies as the move's own bookkeeping rather than
-    # content. It exists because a promote that reached ``os.replace`` and then died
-    # leaves the marker behind, and carrying it forward would put a file every reader
-    # has to learn to ignore into a conversation the user opens.
     (
         "local_operator/network/mobility.py::_reconcile_destination",
         "<path>.unlink",
-        "Removes the move's own ready.json boot marker from an already-promoted "
-        "session: a bookkeeping FILE the move wrote, never session content",
+        "When the staged ready.json marker is missing, clears two distinct fixed names: "
+        "the destination's ready.json boot marker and .skill-pin-original backup. "
+        "Unlink rejects real directories and does not follow the leaf",
+        2,
     ),
     (
         "local_operator/network/mobility.py::settle_promoted_handoff",
         "<path>.unlink",
-        "Removes the SAME marker from the same place, in the other recovery path: a "
-        "destination whose promote landed and then failed before it deleted its own boot "
-        "marker. Only reached when the session directory exists with a transcript, i.e. "
-        "the move already finished (review round 2, the p1c probe)",
+        "Once the session has arrived with a transcript, clears two distinct fixed "
+        "names: the existing ready.json boot marker and the separate .skill-pin-original "
+        "backup. Unlink rejects real directories and does not follow the leaf",
+        2,
     ),
     # A replica lives at network/replicas/<id>/ — outside the session store, so it
     # can never be a second directory for an id the owner holds (INV-1). Its cursor
@@ -5295,7 +5428,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/temporary.py::_write_mark_file",  # tmp -> temporary.json FILE
-        "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
+        "local_operator/session/session.py::_replace_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
         # pid and nothing else (see the allow-list rows above): no session id, no
         # caller input, so neither can name a path under sessions/.

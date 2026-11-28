@@ -87,6 +87,9 @@ class StubSession:
     def _reconcile_tool_inventory(self, blocks: list[str]) -> list[str]:
         return blocks
 
+    # The real block selection, not a stub: it is part of the seam under test.
+    _read_only_system_blocks = Session._read_only_system_blocks
+
     def _wire_legal_snapshot(self) -> list[Message]:
         return list(self._history)
 

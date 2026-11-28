@@ -1,0 +1,5 @@
+{
+  "cli.update_daemons.incomplete_heading": "обновление установлено, но эти службы всё ещё работают на старой сборке:",
+  "cli.update_daemons.incomplete_row": "  {name}: {remedy}",
+  "cli.update_daemons.remedy_fallback": "выполните `lop services status`, чтобы узнать, почему так и как перевести её на новую сборку"
+}

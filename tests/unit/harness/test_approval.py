@@ -214,3 +214,17 @@ async def test_a_truthy_non_bool_answer_is_normalized() -> None:
 
     result = await ask_approval(gate, "bash", "ls")
     assert result is True
+
+
+def test_guard_consent_gate_is_person_only_and_named_in_the_auto_receipt() -> None:
+    """Guard RFC v0.9 §5.2.4 (belt-and-braces): no auto mode answers Guard consent,
+    and the receipt every auto mode prints says so rather than a false absolute."""
+    from local_operator.harness.approval import (
+        AUTO_MODE_EFFECT,
+        GUARD_CONSENT_GATE,
+        never_auto_approved,
+    )
+
+    assert never_auto_approved(GUARD_CONSENT_GATE)
+    assert "Radient Guard sharing consent" in AUTO_MODE_EFFECT
+    assert "account profile saves" in AUTO_MODE_EFFECT and "community posts" in AUTO_MODE_EFFECT

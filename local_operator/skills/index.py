@@ -310,7 +310,9 @@ def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) ->
     return clipped.rstrip(" ,;:—-") + "…"
 
 
-def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> str:
+def render_block(
+    skills: list[Skill], *, conditional_skills: bool = False, skill_notes: tuple[str, ...] = ()
+) -> str:
     """Render selected guides and skills without rendering private hints.
 
     The stable base prompt still owns the ``guide://`` protocol rule in full;
@@ -322,16 +324,12 @@ def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> st
     user_skills = [item for item in skills if item.resource_type == "skill"]
     sections: list[str] = []
     if guides:
-        # The imperative mirrors the skills branch below. Without it this
-        # section was bare name/description lines and the only instruction to
-        # act on them lived far away in the base prompt, phrased as a
-        # conditional about questions on Local Operator itself - which a model
-        # asked to DO something (rather than answer a question) does not
-        # classify as a match. Costs its tokens only when a guide is selected.
+        # Keep the local cue beside the selection, without making a persistent
+        # catalogue sound like a new read request on every tool continuation.
         lines = [
-            "Guides are procedures for this harness. If one matches your task, you MUST "
-            "read `guide://<name>` before acting, even if you think you already know the "
-            "answer.",
+            "Guides are procedures for this harness. Before acting, you MUST read an "
+            "applicable guide via `guide://<name>` unless its current, relevant "
+            "instructions are already available in context.",
             "<guides>",
         ]
         lines.extend(f"- {guide.name}: {guide.description}" for guide in guides)
@@ -345,10 +343,14 @@ def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> st
         # Multimodal routing only embeds text: a candidate is not proof of a
         # domain match. Keep direct virtual-resource reads, not mandatory noise.
         skill_instruction = (
-            "Read the selected skills that actually fit this request; "
-            f"ignore unrelated matches: {selected_urls}. "
+            "Ignore unrelated matches. Before proceeding, read the selected skills that fit "
+            "this request unless their current, relevant instructions are already available "
+            f"in context: {selected_urls}. "
             if conditional_skills
-            else f"Read these selected skills immediately before proceeding: {selected_urls}. "
+            else (
+                "Before proceeding, read these selected skills unless their current, "
+                f"relevant instructions are already available in context: {selected_urls}. "
+            )
         )
         lines = [
             (
@@ -365,8 +367,20 @@ def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> st
         lines.extend(
             f"- {skill.name}: {short_description(skill.description)}" for skill in user_skills
         )
+        lines.extend(skill_notes)
         lines.append("</skills>")
         sections.append("\n".join(lines))
+    elif skill_notes:
+        # An entirely missing carried selection must still be visible.
+        sections.append("\n".join(("<skills>", *skill_notes, "</skills>")))
+    # Pay for the read-result caveats only when a resource is selected, once
+    # even when both catalogues are present.
+    if sections:
+        sections.append(
+            "Use direct `read` to bring instructions into context. A listing, partial "
+            "index, spill handle or nested call's status alone does not supply omitted "
+            "content; use the indicated range or spill handle for needed sections."
+        )
     return "\n\n".join(sections)
 
 

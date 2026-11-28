@@ -86,6 +86,102 @@ async def test_pages_match_canonical_cut_across_appends_and_reset_on_prune(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_inline_ui_projects_before_bounding_without_mutating_replay(tmp_path: Path) -> None:
+    transcript = Transcript(tmp_path)
+    # This reserved block is too big for the page in source form. The marked
+    # row fits as prose; the same source from an old log cannot be reclassified.
+    source = f"Before.\n\n```lop-ui\n{'x' * 2048}\n```\n\nAfter."
+    marked = Message.assistant(source)
+    marked._inline_ui_source_version = 1
+    legacy = Message.assistant(source)
+    await transcript.append_messages([legacy, marked])
+    head = window(transcript, max_wire_bytes=9216)
+    assert head.status == "ok" and head.before_token
+    assert [row.id for row in head.messages] == [marked.id]
+    assert (
+        isinstance(head.messages[0], Message) and head.messages[0].text == "Before.\n\n\n\nAfter."
+    )
+    assert (
+        window(transcript, before=head.before_token, max_wire_bytes=9216).status == "full_required"
+    )
+
+    replay = transcript.build_llm_history()
+    assert [row.model_dump() for row in replay] == [legacy.model_dump(), marked.model_dump()]
+    assert isinstance(replay[-1], Message) and replay[-1]._inline_ui_source_version == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_ui_projects_on_pre_compaction_audit_pages(tmp_path: Path) -> None:
+    transcript = Transcript(tmp_path)
+    source = '```lop-ui\n{"type":"bar","title":"Counts","data":[["One",1]]}\n```'
+    marked = Message.assistant(source)
+    marked.content = [TextContent(text=source[:5]), TextContent(text=source[5:])]
+    marked._inline_ui_source_version = 1
+    legacy = Message.assistant(source)
+    user = Message.user(source)
+    user._inline_ui_source_version = 1
+    kept = Message.user("After compaction")
+    await transcript.append_messages([marked, legacy, user, kept])
+    await transcript.append_compaction("summary", kept.id, 500)
+
+    _, pages = _walk(transcript)
+    rows = {row.id: row for page in pages if page.audit for row in page.messages}
+    expected = marked.model_copy(update={"content": [TextContent(text="\n")]})
+    assert rows[marked.id].model_dump() == expected.model_dump()
+    assert rows[legacy.id].model_dump() == legacy.model_dump()
+    assert rows[user.id].model_dump() == user.model_dump()
+
+    token = pages[0].before_token
+    assert token
+    audit = window(transcript, before=token, inline_ui_sidecars=True)
+    assert audit.audit and audit.inline_ui is not None
+    assert audit.inline_ui["messages"] == {
+        marked.id: {
+            "version": 1,
+            "text": "\n",
+            "widgets": [
+                {
+                    "offset": 0,
+                    "payload": {"type": "bar", "title": "Counts", "data": [["One", 1]]},
+                }
+            ],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_inline_ui_sidecar_drops_before_prose_at_page_budget(tmp_path: Path) -> None:
+    transcript = Transcript(tmp_path)
+    widget = {"type": "bar", "title": "Counts", "data": [["🌱" * 100, 1]]}
+    marked = Message.assistant(f"Before.\n\n```lop-ui\n{json.dumps(widget)}\n```\nAfter.")
+    marked._inline_ui_source_version = 1
+    await transcript.append_message(marked)
+
+    legacy = window(transcript, max_wire_bytes=9216)
+    assert legacy.status == "ok" and len(legacy.messages) == 1
+    assert "inline_ui" not in legacy.model_dump()
+    tight = window(transcript, max_wire_bytes=9216, inline_ui_sidecars=True)
+    assert tight.model_dump() == legacy.model_dump()
+    ample = window(transcript, inline_ui_sidecars=True)
+    assert ample.inline_ui is not None
+    assert ample.inline_ui["messages"][marked.id]["widgets"][0]["payload"] == widget
+
+    from local_operator.session.runtime.inline_ui_egress import _MAX_SIDECAR_BYTES
+
+    count = _MAX_SIDECAR_BYTES // len(json.dumps(widget, separators=(",", ":"))) + 1
+    repeated = Message.assistant((marked.text + "\n\n") * count)
+    repeated._inline_ui_source_version = 1
+    await transcript.append_message(repeated)
+    capped = window(transcript, inline_ui_sidecars=True)
+    assert capped.inline_ui is not None
+    assert len(json.dumps(capped.inline_ui, separators=(",", ":")).encode()) <= _MAX_SIDECAR_BYTES
+    widgets = capped.inline_ui["messages"][repeated.id]["widgets"]
+    assert 0 < len(widgets) < count
+    assert all(placement["payload"] == widget for placement in widgets)
+    assert capped.messages == window(transcript).messages
+
+
+@pytest.mark.asyncio
 async def test_compaction_roles_and_delayed_tool_results_share_canonical_replay(
     tmp_path: Path,
 ) -> None:
