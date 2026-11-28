@@ -169,7 +169,7 @@ def test_ask_names_the_cases_that_do_warrant_a_question() -> None:
     assert "genuinely theirs to state" in head
     # Ambiguity is pinned to the REQUEST, not to the work.
     assert "the words of the request have two plausible readings" in head
-    assert "Two technical approaches is a choice you are equipped to make" in head
+    assert "Two technical approaches is your choice; take the reversible one" in head
     assert "Authorization never extends to a destructive or irreversible step by implication" in (
         head
     )

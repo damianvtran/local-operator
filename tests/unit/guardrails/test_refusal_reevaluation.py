@@ -198,7 +198,9 @@ def test_system_prompt_names_both_exceptions_and_the_untrusted_list() -> None:
     # Finality itself is unchanged.
     assert (
         "`BLOCKED by guardrail` is final for that effect on those targets, by any "
-        "route: report it. Fresh work of your own is not a reroute."
+        "route: report it. Fresh work of your own, or resubmitting as the refusal "
+        "prescribes (a literal path you can verify, inside your own scratchpad or "
+        "worktree), is a new action, not a reroute; the guard checks it afresh."
     ) in prompt
     assert "Only two exceptions allow ONE identical re-issue, still guard-checked" in prompt
     assert "`(guard <version>)` differs from the installed one" in prompt

@@ -345,14 +345,13 @@ def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> N
     # PR #4141 merged with #4098: one prompt line carries both — the operator's
     # `ask` reply naming the exact path (#4098) beside the re-evaluation and
     # typed-approval exceptions (#4141); test_refusal_reevaluation pins the rest.
+    # The system prompt folds "prescribed narrowing" into the one sentence below
+    # (the budget gate forced the shorter wording); the refusal text keeps the long form.
     assert (
         "`BLOCKED by guardrail` is final for that effect on those targets, by any "
-        "route: report it. Fresh work of your own is not a reroute."
-    ) in prompt
-    assert (
-        "Following the refusal's own prescribed narrowing — resubmitting with a literal "
-        "path you can verify, inside your own scratchpad or worktree — is a new action, "
-        "not a reroute; the guard checks that literal afresh."
+        "route: report it. Fresh work of your own, or resubmitting as the refusal "
+        "prescribes (a literal path you can verify, inside your own scratchpad or "
+        "worktree), is a new action, not a reroute; the guard checks it afresh."
     ) in prompt
     assert "or their own `ask` reply names the exact path" in prompt
     root = Path(prov.__file__).resolve().parents[1]

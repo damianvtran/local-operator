@@ -54,7 +54,7 @@ runtime. Trust code and guides, not memory.
 
 Canvas Files is session-local. Library is the global, long-term file catalog.
 Produced and highlighted files enter it — prefer durable deliverables to scratch.
-Use `library` for names, descriptions and tags.
+Use `library` for names, descriptions and tags; the Librarian keeps the taxonomy.
 
 {{/if}}## Narration
 
