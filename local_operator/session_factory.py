@@ -5731,7 +5731,10 @@ async def _prepare(
     # directory name), which is why it lives here and not beside the
     # ToolContext it feeds. A session that cannot use the bridge pays no schema:
     # a gate miss leaves the field None and the createIf behaves as before.
-    from local_operator.team_bridge.host import bridge_runtime_for_session
+    from local_operator.team_bridge.host import (
+        bridge_roster_root_session_id,
+        bridge_runtime_for_session,
+    )
 
     # One host-resolved name snapshot, shared by construction and dispatch.
     bridge_session_agent_display = agent.name if agent is not None else None
@@ -5745,6 +5748,14 @@ async def _prepare(
     # resolutions here would be two answers waiting to disagree.
     tool_context.bridge_runtime = bridge_runtime
     tool_context.bridge_session_agent_display = bridge_session_agent_display
+    roster_root_id = None
+    if bridge_runtime is not None:
+        roster_root_id = bridge_roster_root_session_id(config_dir, transcript)
+    if roster_root_id is not None:
+        # At this boundary there is not yet a Session or live parent chain.
+        # Only the verified durable root above justifies a zero-hop context.
+        tool_context.ancestor_session_ids = ()
+        tool_context.bind_bridge_roster_root(roster_root_id, ())
     tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
@@ -5914,6 +5925,8 @@ async def _prepare(
     # never receive it (see the parameter's comment on ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
+    if roster_root_id is not None:
+        session_kwargs["bridge_roster_root_id"] = roster_root_id
     return _SessionPlan(
         session_kwargs=session_kwargs,
         system_blocks_provider=system_blocks_provider,

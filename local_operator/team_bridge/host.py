@@ -71,11 +71,56 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Mapping
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from .tool import BridgeRuntime
+from .client import (
+    BridgeRefusal,
+    BridgeSignInRequired,
+    RosterReadBinding,
+    TeamBridgeClient,
+)
+from .tool import BridgeRuntime, _RosterReadRefused
+
+if TYPE_CHECKING:
+    from local_operator.session.transcript import Transcript
 
 logger = logging.getLogger(__name__)
+
+
+def bridge_roster_root_session_id(config_dir: Path, transcript: Transcript) -> str | None:
+    """Prove this designated session was born on the host's Aida root path.
+
+    A resumed child can reach the same factory without a live parent object.
+    Missing origin alone is not evidence: the child sidecar is best effort.
+    Require the host-only Aida birth row as well, for the exact designated
+    directory. Any origin sidecar (including a damaged one) vetoes that row:
+    for example, a fork can copy its parent's transcript but not its authority.
+    """
+    from local_operator.aida.bootstrap import BIRTH_CUSTOM_TYPE
+    from local_operator.aida.state import STATE_SCHEMA, is_aida_session
+    from local_operator.resume import ORIGIN_NAME
+
+    session_id = transcript.directory.name
+    if not is_aida_session(config_dir, session_id):
+        return None
+    birth = transcript.latest_custom_entry(BIRTH_CUSTOM_TYPE)
+    details = birth.payload.get("details") if birth is not None else None
+    if not isinstance(details, dict):
+        return None
+    schema, created = details.get("schema_version"), details.get("created_at_ms")
+    if type(schema) is not int or schema != STATE_SCHEMA:
+        return None
+    if type(created) is not int or created <= 0:
+        return None
+    try:
+        (transcript.directory / ORIGIN_NAME).lstat()
+    except FileNotFoundError:
+        return session_id
+    except OSError:
+        return None
+    return None
+
 
 #: The ``bridge_credential_pin_gone`` refusals (model-facing tool results, like
 #: every sentence in ``_admission_refusal``). The pinned login row is gone but
@@ -112,6 +157,7 @@ __all__ = [
     "admission_refusal",
     "admit_bridge_runtime",
     "admit_soon",
+    "admit_channels_soon",
     "bridge_runtime_for_session",
     "owner_fence_refusal",
     "outbound_tool_fence",
@@ -247,7 +293,7 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
     """The ONE in-flight fetch: fence → GET → fence → settle."""
 
     from .authority import outbound_authority_fence
-    from .client import BridgeRefusal, BridgeSignInRequired, BridgeUnreachable
+    from .client import BridgeUnreachable
 
     if outbound_authority_fence(runtime) is not None:
         return  # revoked between scheduling and the GET: zero traffic
@@ -283,7 +329,23 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
     runtime.admission_note = note
 
 
-def _ensure_admission_task(runtime: BridgeRuntime) -> "asyncio.Task[None] | None":
+async def _channels_admission_fetch(
+    runtime: BridgeRuntime, client: TeamBridgeClient, binding: RosterReadBinding
+) -> None:
+    # The client fences the exact enrollment before freshness, on dispatch and
+    # on a 401 retry. Settle only an answered status for that same live binding;
+    # a lost binding or failed probe cannot admit anything or trigger pin healing.
+    try:
+        payload = await client.status(roster_binding=binding)
+        client._roster_pinned_row(binding)
+    except (BridgeRefusal, BridgeSignInRequired, _RosterReadRefused):
+        return
+    runtime.admission, runtime.admission_note = _admission_from_payload(payload, binding.owner)
+
+
+def _ensure_admission_task(
+    runtime: BridgeRuntime, *, channels_binding: RosterReadBinding | None = None
+) -> "asyncio.Task[None] | None":
     """The ONE shared task: return a live one, else create it (or nothing)."""
 
     task = runtime._admission_task
@@ -293,7 +355,12 @@ def _ensure_admission_task(runtime: BridgeRuntime) -> "asyncio.Task[None] | None
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None  # no running loop: nothing to schedule here
-    runtime._admission_task = task = loop.create_task(_admission_fetch(runtime))
+    fetch = (
+        _admission_fetch(runtime)
+        if channels_binding is None
+        else _channels_admission_fetch(runtime, runtime.client, channels_binding)
+    )
+    runtime._admission_task = task = loop.create_task(fetch)
     task.add_done_callback(_swallow_admission_result)
     return task
 
@@ -322,6 +389,18 @@ def admit_soon(runtime: BridgeRuntime) -> None:
         _cancel_inflight_admission(runtime)  # off/drifted: zero traffic
         return
     _ensure_admission_task(runtime)
+
+
+def admit_channels_soon(runtime: BridgeRuntime, binding: RosterReadBinding) -> None:
+    """Re-arm CoS channels without borrowing the ordinary outbound fence."""
+
+    # Don't queue work (or touch an existing slot) for an invalid roster edge.
+    # The client must still check again after this synchronous scheduling edge.
+    try:
+        runtime.client._roster_pinned_row(binding)
+    except (BridgeRefusal, BridgeSignInRequired, _RosterReadRefused):
+        return
+    _ensure_admission_task(runtime, channels_binding=binding)
 
 
 def _swallow_admission_result(task: "asyncio.Task[Any]") -> None:

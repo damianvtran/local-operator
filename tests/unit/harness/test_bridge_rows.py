@@ -53,6 +53,30 @@ def test_known_ops_match_the_tool_schema() -> None:
     assert set(get_args(annotation)) == set(BRIDGE_KNOWN_OPS)
 
 
+def test_roster_row_is_targeted_but_does_not_display_private_metadata() -> None:
+    args = {"op": "channel_members", "channel_id": CHANNEL, "name": "not a row label"}
+    success = {
+        "ok": True,
+        "conversation_label": "private room label",
+        "content": json.dumps({"members": [{"account_id": "acc_fixture"}]}),
+    }
+    failure = {**success, "ok": False, "code": "conversation_not_found"}
+    opening, settled, refused = (bridge_row(args, details) for details in (None, success, failure))
+    assert all(
+        r["target"] == {"kind": "channel", "label": None} for r in (opening, settled, refused)
+    )
+    assert all(r["preview"] is None for r in (opening, settled, refused))
+    assert settled["count"] == 1 and opening["count"] is refused["count"] is None
+    assert refused["outcome"] == "refused" and refused["code"] == "conversation_not_found"
+    assert bridge_row_line(opening, running=True) == "Reading room members"
+    assert bridge_row_line(settled, running=False) == "Read room members (1 member)"
+    assert bridge_row_line(refused, running=False) == (
+        "Couldn't read room members · refused · conversation_not_found"
+    )
+    assert bridge_row_line(opening, running=False, failed=True) == "Couldn't read room members"
+    assert bridge_row_line(bridge_row(args, {"ok": True}), running=False) == "Read room members"
+
+
 def test_tokens_are_the_documented_json_shape() -> None:
     row = bridge_row({"op": "channel_post", "channel_id": CHANNEL, "body": "hi"}, _posted())
     assert set(row) == {

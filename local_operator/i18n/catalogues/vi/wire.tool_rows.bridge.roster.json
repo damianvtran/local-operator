@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": "Không thể lấy danh sách thành viên của cuộc trò chuyện",
+  "wire.tool_rows.bridge.roster.verb.running": "Đang lấy danh sách thành viên của cuộc trò chuyện",
+  "wire.tool_rows.bridge.roster.verb.settled": "Đã lấy danh sách thành viên của cuộc trò chuyện"
+}

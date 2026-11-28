@@ -2453,6 +2453,9 @@ def _bridge_json_tail(content: object) -> Any:
 def _bridge_count(op: str, details: Mapping[str, Any]) -> int | None:
     """How many rows a read returned, when the result says so."""
     payload = _bridge_json_tail(details.get("content"))
+    if op == "channel_members":
+        members = payload.get("members") if isinstance(payload, Mapping) else None
+        return len(members) if isinstance(members, list) else None
     if op in ("channel_history", "shared_history"):
         messages = payload.get("messages") if isinstance(payload, Mapping) else None
         return len(messages) if isinstance(messages, list) else None
@@ -2496,6 +2499,10 @@ def _bridge_target(
     op: str, args: Mapping[str, object], details: Mapping[str, Any]
 ) -> dict[str, str | None]:
     """``{kind, label}``: what the row is ABOUT, in the contract's label order."""
+    if op == "channel_members":
+        # This receipt is deliberately opaque about the room on every outcome.
+        # Do not dress it with a model-supplied name or details from old replays.
+        return {"kind": "channel", "label": None}
     if op in (
         "channel_post",
         "channel_create",
@@ -2627,6 +2634,7 @@ BRIDGE_KNOWN_OPS = frozenset(
         "channel_create",
         "channel_post",
         "channel_history",
+        "channel_members",
         "react",
         "channel_thread",
         "directory",

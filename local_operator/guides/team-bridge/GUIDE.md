@@ -162,6 +162,16 @@ tell whose it is.
 **`dm` binds replies** like `channel_post`: after a run has received bridge
 input, a post needs `in_reply_to_message_id` or a deliberate `new_post: true`.
 
+## Read a room roster
+
+In the designated chief-of-staff session, run `bridge(op="channels")`. Copy
+the room's `id` from that page and pass it as `channel_id` to
+`bridge(op="channel_members")`. The roster shows active members and pending
+invitations for an open group or channel where your account is an active human
+member. Use `directory` to look up names for returned account or endpoint IDs
+where available. DMs, built-ins, and rooms not on the latest page are excluded.
+This operation cannot change membership.
+
 ## Finding a room: by name, never by creating one
 
 A task session cannot list rooms — `channels` is the chief of staff's and

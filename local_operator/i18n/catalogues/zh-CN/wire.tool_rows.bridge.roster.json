@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.roster.verb.failed": "无法获取对话成员列表",
+  "wire.tool_rows.bridge.roster.verb.running": "正在获取对话成员列表",
+  "wire.tool_rows.bridge.roster.verb.settled": "已获取对话成员列表"
+}

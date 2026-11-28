@@ -39,6 +39,7 @@ class FakeRow:
     data: dict[str, Any] = field(default_factory=dict)
     provider: str = "radient"
     credential_type: str = "oauth"
+    disabled_cause: str | None = None
 
 
 class FakeStore:
@@ -87,13 +88,17 @@ class FakeStore:
                 return row
         return None
 
-    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
+    async def ensure_oauth_fresh_or_raise(
+        self, credential_id: int, *, force: bool = False, row_guard=None
+    ):
         self.refresh_calls.append((credential_id, force))
         if force and self._refresh_error is not None:
             raise self._refresh_error
         row = self.get_credential(credential_id)
         if row is None:
             return None
+        if row_guard is not None:
+            row_guard(row)
         data = dict(row.data)
         # Mirrors the real store's shape for these tests: the ordinary read
         # serves the stored row; the FORCED (post-401) path applies the
@@ -651,8 +656,12 @@ class _LateSwitchStore(FakeStore):
     A's bearer to B; the one-snapshot client never re-reads.
     """
 
-    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
-        data = await super().ensure_oauth_fresh_or_raise(credential_id, force=force)
+    async def ensure_oauth_fresh_or_raise(
+        self, credential_id: int, *, force: bool = False, row_guard=None
+    ):
+        data = await super().ensure_oauth_fresh_or_raise(
+            credential_id, force=force, row_guard=row_guard
+        )
         self.rows = [FakeRow(credential_id, data={"access": "token-2", "account_id": "acc_b"})]
         return data
 

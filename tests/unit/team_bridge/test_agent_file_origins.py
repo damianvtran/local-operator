@@ -68,8 +68,10 @@ async def test_normal_tool_pins_every_status_and_cleanup_attempt(
     holder = {}
 
     class Freshness(FakeStore):
-        async def ensure_oauth_fresh_or_raise(self, credential_id, *, force=False):
-            data = await super().ensure_oauth_fresh_or_raise(credential_id, force=force)
+        async def ensure_oauth_fresh_or_raise(self, credential_id, *, force=False, row_guard=None):
+            data = await super().ensure_oauth_fresh_or_raise(
+                credential_id, force=force, row_guard=row_guard
+            )
             await asyncio.sleep(0)  # the real dispatch boundary must survive this wait
             if state["armed"] and ((window == "refresh") == force):
                 state["armed"] = False

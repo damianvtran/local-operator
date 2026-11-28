@@ -4448,7 +4448,11 @@ class AuthStore:
         return int(expires) <= AuthStore._now_ms() + OAUTH_REFRESH_SKEW_MS
 
     async def _ensure_oauth_fresh(
-        self, row: StoredCredential, *, force: bool = False
+        self,
+        row: StoredCredential,
+        *,
+        force: bool = False,
+        row_guard: Callable[[StoredCredential], None] | None = None,
     ) -> dict[str, Any]:
         """Return usable OAuth data for ``row``, refreshing single-flight.
 
@@ -4462,6 +4466,8 @@ class AuthStore:
         a refresh function that (mistakenly) returns org_id/org_name/
         authorized_at can never rewrite them — identity is fixed at login.
         """
+        if row_guard is not None:
+            row_guard(row)
         creds = dict(row.data)
         if row.provider == "meta-muse" and force:
             # The account bearer was discarded after mint. A failed static key
@@ -4575,6 +4581,8 @@ class AuthStore:
             current = self.get_credential(row.id)
             if current is None or current.disabled_cause is not None:
                 raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+            if row_guard is not None:
+                row_guard(current)
             fresh = dict(current.data)
             # The same ask as the pre-lock check, repeated under the lock: a
             # sibling may have tombstoned the grant while we waited for it.
@@ -4617,6 +4625,8 @@ class AuthStore:
                 now_row = self.get_credential(row.id)
                 if now_row is None or now_row.disabled_cause is not None:
                     raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                if row_guard is not None:
+                    row_guard(now_row)
                 now_data = dict(now_row.data)
                 if not self._needs_refresh(now_data, force=force):
                     return now_data
@@ -4658,6 +4668,8 @@ class AuthStore:
                     retaken = self.get_credential(row.id)
                     if retaken is None or retaken.disabled_cause is not None:
                         raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                    if row_guard is not None:
+                        row_guard(retaken)
                     retaken_data = dict(retaken.data)
                     if retaken_data.get("access") != fresh.get(
                         "access"
@@ -4776,6 +4788,15 @@ class AuthStore:
                             )
                         if refusal is not None:
                             raise RefreshDelegatedError(str(refusal))
+                if row_guard is not None:
+                    # Delegation hooks may await. Recheck the exact row and
+                    # caller's authority before arming the durable send marker.
+                    latest = self._refreshable_row(row.id)
+                    if latest is None:
+                        raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
+                    row_guard(latest)
+                    if self._presented_refresh_token(latest.data) != presented:
+                        raise AuthStoreError(f"Credential {row.id} changed during refresh")
                 armed: dict[str, Any] | None = None
                 if presented:
                     # WRITE-AHEAD, and before the request can be on the wire: a
@@ -5088,7 +5109,11 @@ class AuthStore:
             return None
 
     async def ensure_oauth_fresh_or_raise(
-        self, credential_id: int, *, force: bool = False
+        self,
+        credential_id: int,
+        *,
+        force: bool = False,
+        row_guard: Callable[[StoredCredential], None] | None = None,
     ) -> dict[str, Any] | None:
         """`ensure_oauth_fresh`, but a refresh that fails keeps its cause.
 
@@ -5108,11 +5133,17 @@ class AuthStore:
         tombstoned-grant check — a grant the IdP has declared dead is dead
         whatever the caller believes — and it stays refresh-single-flight like
         every other path through ``_ensure_oauth_fresh``.
+
+        A scoped caller may supply a synchronous ``row_guard`` that raises on
+        identity or authority drift. Run it against store snapshots, not just
+        a client's pre-read: waiting for the refresh lock can change the row.
         """
         row = self._refreshable_row(credential_id)
         if row is None:
             return None
-        return await self._ensure_oauth_fresh(row, force=force)
+        if row_guard is None:
+            return await self._ensure_oauth_fresh(row, force=force)
+        return await self._ensure_oauth_fresh(row, force=force, row_guard=row_guard)
 
     def refresh_deferred(self, credential_id: int) -> bool:
         """Whether an unsettled send is holding this row's refresh off right now.
