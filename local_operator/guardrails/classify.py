@@ -1476,6 +1476,9 @@ _REMNANT_MEMO: dict[str, tuple[int, float]] = {}
 _REMNANT_MEMO_TTL_S = 120.0
 
 
+_GIT_MARKER_FOLDS = frozenset({".git", "git~1"})
+
+
 def _git_marker_alias(name: str) -> bool:
     """Could the filesystem resolve ``name`` to Git's ``.git`` marker?
 
@@ -1485,14 +1488,21 @@ def _git_marker_alias(name: str) -> bool:
     NTFS ignore some format characters and trailing dots/spaces, and NTFS has
     the ``git~1`` short name. Fold all of those, so an alias is treated AS a
     marker. Over-matching only holds a remnant (fail closed).
+
+    Pure-ASCII names (nearly every entry of a ``node_modules`` walk) take a
+    two-operation fast path: NFKC is the identity on ASCII and ASCII holds no
+    format (Cf) character, so folding case and trailing dots/spaces is the whole
+    answer (the walk runs this on every entry; #4669 QA Q2 cost).
     """
+    if name.isascii():
+        return name.casefold().rstrip(" .") in _GIT_MARKER_FOLDS
     import unicodedata
 
     kept = "".join(
         c for c in unicodedata.normalize("NFKC", name) if unicodedata.category(c) != "Cf"
     )
     folded = unicodedata.normalize("NFKC", kept.casefold()).rstrip(" .")
-    return folded in (".git", "git~1")
+    return folded in _GIT_MARKER_FOLDS
 
 
 def _linux_mount_points() -> frozenset[str] | None:
@@ -1581,10 +1591,64 @@ def _shed_tree_safe(top: str, device: int, mounts: frozenset[str]) -> bool:
 _REMNANT_SHED_GIT_TIMEOUT_S = 30.0
 
 
-def _tracked_at_a_tip(repo: str, names: list[str]) -> set[str] | None:
-    """Names (of ``names``) that ANY ref tip, a linked worktree's HEAD or the
-    repository's HEAD tracks something under, or ``None`` when that cannot be
-    answered (the caller then sheds nothing).
+#: The names the NEW shed route may skip unread (#4669 round 2, manager
+#: decision on S1'): dependency and tool caches that are untracked BY CONVENTION
+#: and rebuilt by one install/build command. Deliberately narrower than
+#: ``provenance._REGENERABLE`` (left unchanged for its other callers): ``build``,
+#: ``dist``, ``out``, ``coverage``, ``target``, ``dist-ssr`` are output
+#: directories real repositories legitimately TRACK. For them the only evidence
+#: that bytes are not lost is the ref-tip check, and a commit no ref reaches (a
+#: detached HEAD of a pruned worktree) or a reachable non-tip commit that
+#: tracked the path is invisible to it; the loss was reproduced for all three
+#: shapes. Those names therefore keep the ordinary blob-by-blob proof, which
+#: still passes a tracked, byte-identical ``build/`` (LOW) and holds on
+#: anything Git does not have.
+_REMNANT_SHED_NAMES = frozenset(
+    {
+        "node_modules",
+        ".pnpm-store",
+        ".cache",
+        ".next",
+        ".turbo",
+        ".expo",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".eggs",
+        ".parcel-cache",
+        ".nuxt",
+        ".svelte-kit",
+        ".gradle",
+    }
+)
+
+
+def _shed_name_key(name: str) -> str:
+    """Comparison key for a top-level name: NFC, case-folded, NFC again.
+
+    WHY (security review S1'(c), #4669): this machine's APFS is case-insensitive
+    and normalization-insensitive, so ``Node_Modules`` IS ``node_modules`` to
+    the filesystem and to ``rm`` while a plain ``in`` test calls it a different
+    name. Every comparison of the shed name set and of the ref-tip tracked set
+    goes through this key, so an alias can neither dodge the tip check nor be
+    mistaken for a different name than the one Git tracks.
+    """
+    import unicodedata
+
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", name).casefold())
+
+
+_REMNANT_SHED_KEYS = frozenset(_shed_name_key(n) for n in _REMNANT_SHED_NAMES)
+
+
+def _tracked_top_level_keys(repo: str) -> set[str] | None:
+    """:func:`_shed_name_key` of every TOP-LEVEL name that ANY ref tip, a linked
+    worktree's HEAD or the repository's HEAD tracks, or ``None`` when that cannot
+    be answered (the caller then sheds nothing).
 
     WHY tips and not ``git rev-list --all -- <name>`` (the stricter test the
     review suggested): that walks all history, and measured on
@@ -1595,21 +1659,23 @@ def _tracked_at_a_tip(repo: str, names: list[str]) -> set[str] | None:
     question that matters in bounded time: a branch (including the remnant's
     own, which ``git worktree remove`` leaves behind) or any other ref that
     still tracks bytes under the name holds. Its limit, stated: a commit no ref
-    and no linked worktree's HEAD reaches is not consulted; the ignore rule the
-    caller requires (``.gitignore`` is itself blob-verified) is the other half
-    of the evidence.
+    and no linked worktree's HEAD reaches (a pruned worktree's detached HEAD)
+    and a reachable commit that is not a tip are not consulted; the narrowed
+    name set (:data:`_REMNANT_SHED_NAMES`) keeps the names real repositories
+    track off this route, and the ignore rule the caller requires is the other
+    half of the evidence.
+
+    WHY the tip's top-level tree is READ rather than queried by ``<tip>:<name>``:
+    a by-name query is case-sensitive, so a tracked ``node_modules`` would not
+    answer for the alias ``Node_Modules``. One ``cat-file --batch`` over every
+    tip's ``<tip>^{tree}`` returns the raw trees (a few hundred bytes each); the
+    entry names are compared through the case/normalization-folding key.
     """
     env = _git_env()
     common = os.path.join(repo, ".git")
     try:
         refs = subprocess.run(
-            [
-                "git",
-                "--git-dir",
-                common,
-                "for-each-ref",
-                "--format=%(objectname)",
-            ],
+            ["git", "--git-dir", common, "for-each-ref", "--format=%(objectname)"],
             capture_output=True,
             text=True,
             timeout=_REMNANT_SHED_GIT_TIMEOUT_S,
@@ -1626,33 +1692,62 @@ def _tracked_at_a_tip(repo: str, names: list[str]) -> set[str] | None:
         return None
     if refs.returncode != 0 or trees.returncode != 0:
         return None
-    # Every ref's object, whatever its type: ``<tag>:<name>`` peels, a tree
-    # answers directly, and a blob simply reports ``missing``.
+    # Every ref's object, whatever its type: ``^{tree}`` peels a commit or tag
+    # and a blob simply reports ``missing``.
     tips: set[str] = {"HEAD", *refs.stdout.split()}
     for row in trees.stdout.splitlines():
         if row.startswith("HEAD "):
             tips.add(row[5:].strip())
-    queries = [(name, f"{tip}:{name}") for tip in sorted(tips) for name in names]
+    queries = [f"{tip}^{{tree}}" for tip in sorted(tips)]
     try:
-        checked = subprocess.run(
-            ["git", "--git-dir", common, "cat-file", "--batch-check"],
-            input="\n".join(q for _, q in queries) + "\n",
+        batch = subprocess.run(
+            ["git", "--git-dir", common, "cat-file", "--batch"],
+            input=("\n".join(queries) + "\n").encode(),
             capture_output=True,
-            text=True,
             timeout=_REMNANT_SHED_GIT_TIMEOUT_S,
             env=env,
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    rows = checked.stdout.splitlines()
-    if checked.returncode != 0 or len(rows) != len(queries):
+    if batch.returncode != 0:
         return None
-    return {name for (name, _), row in zip(queries, rows) if not row.endswith(" missing")}
+    data = batch.stdout
+    keys: set[str] = set()
+    try:
+        pos = 0
+        seen_rows = 0
+        while pos < len(data):
+            end = data.index(b"\n", pos)
+            header = data[pos:end].split(b" ")
+            pos = end + 1
+            seen_rows += 1
+            if len(header) == 2 and header[1] == b"missing":
+                continue
+            if len(header) != 3 or header[1] != b"tree":
+                return None  # ambiguous or unexpected: the answer is unknown
+            size = int(header[2])
+            body = data[pos : pos + size]
+            if len(body) != size:
+                return None
+            pos += size + 1
+            raw = len(header[0]) // 2  # object-id bytes: 20 (sha1) or 32 (sha256)
+            i = 0
+            while i < len(body):
+                sp = body.index(b" ", i)
+                nul = body.index(b"\0", sp)
+                keys.add(_shed_name_key(body[sp + 1 : nul].decode("utf-8", "surrogateescape")))
+                i = nul + 1 + raw
+        if seen_rows != len(queries):
+            return None
+    except ValueError:
+        return None
+    return keys
 
 
-def _remnant_shed_entries(repo: str, real: str, candidates: list[str]) -> set[str]:
+def _remnant_shed_entries(repo: str, real: str, candidates: list[str]) -> set[str] | None:
     """Which TOP-LEVEL ``candidates`` of a remnant with its ``.git`` POINTER
-    may be deleted without being hash-checked. Empty on any doubt.
+    may be deleted without being hash-checked; ``None`` is a HARD HOLD of the
+    WHOLE remnant (the caller returns at once, never to the blob proof).
 
     Field case 2026-11-28 (guard 0.113.23, the operator's own leftovers): a
     guard-allowed plain ``git worktree remove`` of a clean, merged tree failed
@@ -1664,34 +1759,39 @@ def _remnant_shed_entries(repo: str, real: str, candidates: list[str]) -> set[st
 
     WHY a NAME is not enough (security review S1, #4669): a missing admin dir
     and a basename prove nothing about the bytes; a hand-moved tree that
-    ``git worktree prune`` unregistered looks identical, and ``build/`` may hold
-    an edited tracked file or an unignored hand-written one. So an entry is shed
+    ``git worktree prune`` unregistered looks identical. So an entry is shed
     only when ALL of this holds, each checked now, each failing closed:
 
-    - the name is on ``provenance._REGENERABLE`` and is not ``.git``/OS metadata
-      (the caller only passes such names, and only for a remnant whose
-      ``.git`` pointer FILE exists; a pointerless folder keeps base behaviour);
+    - its name is on :data:`_REMNANT_SHED_NAMES` (compared case/normalization
+      folded) and is not ``.git``/OS metadata; names real repositories track
+      (``build``, ``dist``, ``out``) are not on it and use the blob proof;
     - it is a symlink (``rm`` unlinks the entry and never follows it), or a real
       directory on the remnant's device that :func:`_shed_tree_safe` clears;
     - Git ignores it by the remnant's OWN rules (``check-ignore --no-index``
       against the shared repository and this work tree): ignored content is
       what plain ``git worktree remove`` itself deletes without a ``--force``;
-    - no ref tip or worktree HEAD tracks anything under the name
-      (:func:`_tracked_at_a_tip`).
+    - no ref tip or worktree HEAD tracks a top-level name that folds to the same
+      key (:func:`_tracked_top_level_keys`).
 
-    A regular file of such a name is never shed (ordinary blob proof).
+    An entry that fails the ignore or tracked test merely stays for the ordinary
+    blob proof. An entry whose WALK is unsafe (a mount or device boundary, a
+    special file, a Git marker or alias, an unreadable directory, too many
+    entries, a failure to read the mount table) is different (security review
+    S2'): the blob proof would hash the files a nested mount exposes and let
+    another directory carry the removal to LOW, so it holds the whole remnant.
+    A regular file of a listed name is never shed (ordinary blob proof).
     """
-    from local_operator.guardrails import provenance as prov
-
     try:
         device = os.lstat(real).st_dev
     except OSError:
-        return set()
+        return None
     mounts: frozenset[str] | None = None
     survivors: list[str] = []
     env = _git_env()
     for name in candidates:
-        if name == ".git" or name in _REMNANT_OS_METADATA or name not in prov._REGENERABLE:
+        if name == ".git" or name in _REMNANT_OS_METADATA:
+            continue
+        if _shed_name_key(name) not in _REMNANT_SHED_KEYS:
             continue
         full = os.path.join(real, name)
         try:
@@ -1700,7 +1800,7 @@ def _remnant_shed_entries(repo: str, real: str, candidates: list[str]) -> set[st
                 if mounts is None:
                     mounts = _linux_mount_points()
                 if mounts is None or not _shed_tree_safe(full, device, mounts):
-                    continue
+                    return None
             elif not stat.S_ISLNK(mode):
                 continue
             ignored = subprocess.run(
@@ -1721,13 +1821,15 @@ def _remnant_shed_entries(repo: str, real: str, candidates: list[str]) -> set[st
                 env=env,
             )
         except (OSError, subprocess.SubprocessError, ValueError):
-            continue
+            return None
         if ignored.returncode == 0:  # 1 = not ignored, 128 = error: both hold
             survivors.append(name)
     if not survivors:
         return set()
-    tracked = _tracked_at_a_tip(repo, survivors)
-    return set() if tracked is None else set(survivors) - tracked
+    tracked = _tracked_top_level_keys(repo)
+    if tracked is None:
+        return set()
+    return {n for n in survivors if _shed_name_key(n) not in tracked}
 
 
 def _removed_worktree_remnant(path: str) -> bool:
@@ -1736,7 +1838,33 @@ def _removed_worktree_remnant(path: str) -> bool:
     return _remnant_proof(path) is not None
 
 
+#: Proofs computed during ONE :func:`_rank` call, ``realpath -> proof``; ``None``
+#: outside a ranking (direct callers and tests are never cached).
+#:
+#: WHY (#4669 QA Q2 cost): ranking one remnant asks for the proof up to three
+#: times (the "a git repository root" test, the foreign-worktree exemption and
+#: the final rank), and each ask reads the whole folder (walks, several git
+#: calls, a blob hash). Scoping the memo to a single ranking call, not a clock,
+#: keeps every NEW classification a fresh read of the disk: nothing is reused
+#: across tool calls, so a process that enters or a file written in between is
+#: always seen.
+_REMNANT_PROOFS: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.ContextVar(
+    "remnant_proofs", default=None
+)
+
+
 def _remnant_proof(path: str) -> str | None:
+    """:func:`_remnant_proof_uncached`, answered once per :func:`_rank` call."""
+    scope = _REMNANT_PROOFS.get()
+    if scope is None:
+        return _remnant_proof_uncached(path)
+    key = os.path.realpath(path)
+    if key not in scope:
+        scope[key] = _remnant_proof_uncached(path)
+    return scope[key]
+
+
+def _remnant_proof_uncached(path: str) -> str | None:
     """Is ``path`` a leftover of a FAILED ``git worktree remove`` that loses
     nothing when deleted?
 
@@ -1758,12 +1886,13 @@ def _remnant_proof(path: str) -> str | None:
       directory, and that admin directory is GONE, so Git no longer tracks
       this folder;
     - when the ``.git`` POINTER file exists, a TOP-LEVEL entry on
-      ``provenance._REGENERABLE`` (``node_modules``, ``.pnpm-store``,
-      ``.cache``, ``build`` …) is shed without being read ONLY on the positive
+      :data:`_REMNANT_SHED_NAMES` (``node_modules``, ``.pnpm-store``,
+      ``.cache`` …; NOT ``build``/``dist``/``out``, which repos track and which
+      keep this blob proof) is shed without being read ONLY on the positive
       evidence :func:`_remnant_shed_entries` lists (ignored by the remnant's own
       rules, tracked at no ref tip, a safe full-depth walk on one device). A
       name alone proves nothing (#4669 S1); a pointerless folder never takes
-      this route;
+      this route; an unsafe walk inside such an entry holds the whole folder;
     - EVERY remaining regular file is either a Finder/Explorer metadata file
       or byte-identical to a blob already in ``<repo>``'s object store
       (``git hash-object --stdin-paths`` then ``git cat-file
@@ -1830,12 +1959,17 @@ def _remnant_proof(path: str) -> str | None:
                 # the base route exactly (#4669 S1).
                 if os.path.lexists(os.path.join(real, ".git")):
                     candidates = [
-                        n for n in (*dirs, *names) if n in _prov._REGENERABLE and n != ".git"
+                        n
+                        for n in (*dirs, *names)
+                        if n != ".git" and _shed_name_key(n) in _REMNANT_SHED_KEYS
                     ]
                     try:
                         shed_now = _remnant_shed_entries(repo, real, candidates)
                     except Exception:  # noqa: BLE001 - any failure of the proof is a hold
-                        shed_now = set()
+                        return None
+                    if shed_now is None:
+                        # Hard hold (S2'): never fall through to the blob proof.
+                        return None
                     if shed_now:
                         shed = True
                         dirs[:] = [d for d in dirs if d not in shed_now]
@@ -2052,6 +2186,27 @@ def _glob_reaches_git_dir(pattern: str) -> str | None:
 
 
 def _rank(
+    target: Target,
+    prot: _Protected,
+    session_id: str = "",
+    globstar: bool = False,
+    *,
+    foreign: ForeignCreations | None = None,
+    exact_cleanup: bool = False,
+) -> RankedTarget:
+    """Rank one target. Opens the per-ranking remnant-proof scope
+    (:data:`_REMNANT_PROOFS`); the recursive landing readings share it."""
+    token = _REMNANT_PROOFS.set({}) if _REMNANT_PROOFS.get() is None else None
+    try:
+        return _rank_target(
+            target, prot, session_id, globstar, foreign=foreign, exact_cleanup=exact_cleanup
+        )
+    finally:
+        if token is not None:
+            _REMNANT_PROOFS.reset(token)
+
+
+def _rank_target(
     target: Target,
     prot: _Protected,
     session_id: str = "",

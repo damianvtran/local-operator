@@ -5,7 +5,7 @@ leftovers): ``git worktree remove`` of a clean, merged ``local-operator-ui``
 tree failed "Directory not empty" (Finder/a watcher wrote mid-delete). Git had
 already deleted the admin directory, so the folder was a remnant; it still held
 ``node_modules`` (a pnpm symlink farm), ``.pnpm-store``, ``.cache`` and
-``build``. The blob walk in ``classify._removed_worktree_remnant`` returns False
+``build`` (``build`` is no longer shed unread, see round 2 below). The blob walk in ``classify._removed_worktree_remnant`` returns False
 on ANY symlink, so the remnant ranked HIGH "a git repository root" and an
 agent could not delete its own finished work without an approval.
 
@@ -46,6 +46,32 @@ from local_operator.guardrails.classify import (
 )
 
 ENV = {**os.environ, "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"}
+
+
+@pytest.fixture(autouse=True)
+def _pinned_process_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin "no live process inside the tree" so the file is hermetic on any host.
+
+    ``classify._remnant_proof`` begins with ``provenance._live_cwd_inside(real,
+    fresh=True, hidden_blocks=True) is not False -> hold``. On a GitHub Linux
+    runner, hidden root processes make that inventory UNKNOWN (``None``), so
+    every remnant holds there regardless of what the test built (the failure
+    #4599's own gate hit). The fixtures here have no live owner by
+    construction, so the inventory is pinned to ``False``; the dedicated
+    ``test_an_unknown_or_live_process_inventory_holds`` keeps ``None`` and
+    ``True`` pinned to a hold, and ``test_a_live_owner_inside_shed_output_holds``
+    asks the real table (skipping when the host cannot answer).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda *_a, **_k: False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_remnant_memo() -> None:
+    """The proven-lossless memo is keyed by path and lives 120 s: a test that
+    changes what git answers must not be satisfied by an earlier call's answer."""
+    cl._REMNANT_MEMO.clear()
 
 
 def _git(*args: str, cwd: Path) -> None:
@@ -104,7 +130,10 @@ def _remnant(
 
 
 def _add_build_output(wt: Path) -> None:
-    """The measured shape: a pnpm symlink farm, a store, caches, build output."""
+    """The measured shape: a pnpm symlink farm, a store and caches. NOT ``build``:
+    round 2 of #4669 took the generic output names (``build``/``dist``/``out``)
+    off the shed route, because real repositories TRACK them; see
+    ``test_generic_output_names_use_the_blob_proof``."""
     pnpm = wt / "node_modules" / ".pnpm" / "zod@3" / "node_modules" / "zod"
     pnpm.mkdir(parents=True)
     (pnpm / "index.js").write_text("module.exports = 1\n")
@@ -113,8 +142,6 @@ def _add_build_output(wt: Path) -> None:
     (wt / ".pnpm-store" / "v3" / "blob").write_text("content-addressed\n")
     (wt / ".cache" / "typecheck").mkdir(parents=True)
     (wt / ".cache" / "typecheck" / "out.json").write_text("{}\n")
-    (wt / "build").mkdir()
-    (wt / "build" / "app.js").write_text("compiled\n")
     (wt / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
 
 
@@ -250,7 +277,7 @@ def test_a_listed_directory_on_another_device_holds(
     wt = _remnant(repo, "mounted")
     _add_build_output(wt)
     real_lstat = os.lstat
-    mount = os.path.join(os.path.realpath(wt), "build")
+    mount = os.path.join(os.path.realpath(wt), ".cache")
 
     def fake(path, *a, **k):
         st = real_lstat(path, *a, **k)
@@ -290,9 +317,17 @@ def test_a_listed_top_level_link_is_unlinked_never_followed(repo: Path, tmp_path
     assert _rank(repo, wt).risk is Risk.LOW
 
 
-def test_a_live_owner_inside_shed_output_holds(repo: Path) -> None:
+def test_a_live_owner_inside_shed_output_holds(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL process table (the autouse pin is lifted for this test)."""
+    from local_operator.guardrails import provenance as prov
+
+    monkeypatch.undo()  # drops the autouse pin: this test needs the real inventory
     wt = _remnant(repo, "owned")
     _add_build_output(wt)
+    if prov._live_cwd_inside(os.path.realpath(wt), fresh=True, hidden_blocks=True) is not False:
+        pytest.skip("this host cannot give a clean process inventory (hidden processes)")
     assert _rank(repo, wt).risk is Risk.LOW
     proc = subprocess.Popen(["sleep", "30"], cwd=wt / "node_modules", start_new_session=True)
     try:
@@ -443,7 +478,7 @@ def _hold_at_depth(repo: Path, name: str, setup) -> None:
 @pytest.mark.parametrize("kind", ["dir", "file"])
 def test_an_alias_of_the_git_marker_at_depth_holds(repo: Path, alias: str, kind: str) -> None:
     def setup(wt: Path) -> None:
-        deep = wt / "build" / "a" / "b"
+        deep = wt / ".cache" / "a" / "b"
         deep.mkdir(parents=True)
         (deep / alias).mkdir() if kind == "dir" else (deep / alias).write_text("gitdir: /x\n")
 
@@ -468,7 +503,7 @@ def test_a_bare_layout_in_any_case_at_depth_holds(repo: Path, layout: tuple[str,
 @pytest.mark.parametrize("depth", [1, 3])
 def test_a_fifo_below_the_shed_root_holds(repo: Path, depth: int) -> None:
     def setup(wt: Path) -> None:
-        deep = wt / "build" / Path(*["d"] * depth)
+        deep = wt / ".cache" / Path(*["d"] * depth)
         deep.mkdir(parents=True)
         os.mkfifo(deep / "pipe")
 
@@ -478,11 +513,11 @@ def test_a_fifo_below_the_shed_root_holds(repo: Path, depth: int) -> None:
 def test_a_device_boundary_below_the_shed_root_holds(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``build/a/mount`` on another device: a recursive ``rm`` descends into it."""
+    """``.cache/a/mount`` on another device: a recursive ``rm`` descends into it."""
     wt = _remnant(repo, "dev-depth")
     _add_build_output(wt)
-    (wt / "build" / "a" / "mount").mkdir(parents=True)
-    mount = os.path.join(os.path.realpath(wt), "build", "a", "mount")
+    (wt / ".cache" / "a" / "mount").mkdir(parents=True)
+    mount = os.path.join(os.path.realpath(wt), ".cache", "a", "mount")
     real_lstat = os.lstat
 
     def fake(path, *a, **k):
@@ -573,9 +608,9 @@ def test_a_symlink_below_the_shed_root_is_unlinked_never_followed(
     decoy = tmp_path / "decoy"
     decoy.mkdir()
     (decoy / "precious").write_text("x\n")
-    (wt / "build" / "escape").symlink_to(decoy)
-    (wt / "build" / "loop").symlink_to(".")
-    (wt / "build" / "dangling").symlink_to("nowhere")
+    (wt / ".cache" / "escape").symlink_to(decoy)
+    (wt / ".cache" / "loop").symlink_to(".")
+    (wt / ".cache" / "dangling").symlink_to("nowhere")
     assert cl._remnant_proof(str(wt)) == cl.PROOF_SHED
     assert (decoy / "precious").read_text() == "x\n"
 
@@ -615,19 +650,26 @@ def test_git_marker_alias_folding(name: str, alias: bool) -> None:
 
 
 def test_unavailable_git_answers_hold(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A timeout, error or missing git binary is never a yes."""
+    """A timeout, error or missing git binary is never a yes. Two routes:
+    ``--batch-check`` is the blob proof, plain ``--batch`` is the tip-tree read
+    (:func:`classify._tracked_top_level_keys`); each must fail closed on its own."""
     wt = _remnant(repo, "git-down")
     _add_build_output(wt)
     assert cl._remnant_proof(str(wt)) == cl.PROOF_SHED
     real_run = subprocess.run
+    for flag in ("--batch-check", "--batch"):
+        cl._REMNANT_MEMO.clear()  # else the blob proof is answered from memory
 
-    def fail(cmd, *a, **k):
-        if "cat-file" in cmd and "--batch-check" in cmd:
-            raise subprocess.TimeoutExpired(cmd, 1)
-        return real_run(cmd, *a, **k)
+        def fail(cmd, *a, _flag=flag, **k):
+            if "cat-file" in cmd and any(
+                a == _flag or (_flag.endswith("check") and a.startswith(_flag)) for a in cmd
+            ):
+                raise subprocess.TimeoutExpired(cmd, 1)
+            return real_run(cmd, *a, **k)
 
-    monkeypatch.setattr(subprocess, "run", fail)
-    assert cl._remnant_proof(str(wt)) is None
+        monkeypatch.setattr(subprocess, "run", fail)
+        assert cl._remnant_proof(str(wt)) is None, flag
+        monkeypatch.setattr(subprocess, "run", real_run)
 
 
 # -- lapsed asks: the shed LOW is NOT the lossless reason (S1, second half) -----------
@@ -782,3 +824,300 @@ async def test_an_open_ask_refuses_and_a_trusted_exact_approval_allows(
     out, calls = await _delete(repo, approved)
     assert out is None or not out.blocked, out
     assert calls == []
+
+
+# -- Review round 2 of #4669 (S1', S2', hermetic inventory) ---------------------------
+#
+# S1': after a real ``git worktree prune`` three trees with unique uncommitted edits
+# ranked LOW on 1e6abd2 because the ref-tip check cannot see (a) a pruned DETACHED
+# HEAD no ref reaches, (b) a reachable non-tip commit that tracked the path, or (c) a
+# tracked name spelled in another case. The shed route now lists only names real
+# repositories do not track, compares every name through ``_shed_name_key`` and holds
+# the whole remnant on an unsafe walk. Each row below ranked LOW before the fix.
+
+COMMIT = ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m")
+
+
+def _rev(cwd: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=ENV
+    )
+    return out.stdout.strip()
+
+
+def _tips_track(repo: Path, name: str) -> bool:
+    """Does ANY ref tip (or the repository's HEAD) track a top-level entry named
+    exactly ``name``? Plain git, independent of the code under test, so the
+    precondition of a repro is checked without borrowing the guard's own reader."""
+    tips = ["HEAD", *_rev(repo, "for-each-ref", "--format=%(refname)").split()]
+    for tip in tips:
+        listed = _rev(repo, "ls-tree", "--name-only", tip).splitlines()
+        if name in listed:
+            return True
+    return False
+
+
+def _commit_tracked(wt: Path, rel: str, text: str = "committed\n") -> None:
+    """Force-add ``rel`` (build output is ignored) and commit it."""
+    path = wt / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    _git("add", "-f", rel, cwd=wt)
+    _git(*COMMIT, rel, cwd=wt)
+
+
+@pytest.mark.parametrize("name", ["build", "dist", "out"])
+def test_a_pruned_detached_head_tracking_an_edited_file_holds(repo: Path, name: str) -> None:
+    """(a) The tracked file lives only in a DETACHED worktree HEAD; ``git worktree
+    prune`` drops the admin dir (and with it the only pointer to that commit), so
+    no ref and no listed worktree reaches it. The generic name is off the shed
+    route, so the blob proof sees the edit and holds."""
+    detached: list[str] = []
+
+    def prep(wt: Path) -> None:
+        _git("checkout", "-q", "--detach", cwd=wt)
+        _commit_tracked(wt, f"{name}/tracked.txt")
+        detached.append(_rev(wt, "rev-parse", "HEAD"))
+        (wt / name / "tracked.txt").write_text("UNIQUE UNCOMMITTED EDIT\n")
+
+    wt = _remnant(repo, f"detached-{name}", ignores=f"{name}\n", prep=prep, prune=True)
+    # The precondition that made it a loss: nothing reaches the commit any more.
+    assert _rev(repo, "for-each-ref", "--contains", detached[0]) == ""
+    assert not _tips_track(repo, name)
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+    assert (wt / name / "tracked.txt").read_text().startswith("UNIQUE")
+
+
+@pytest.mark.parametrize("name", ["build", "dist", "out"])
+def test_a_reachable_non_tip_commit_tracking_an_edited_file_holds(repo: Path, name: str) -> None:
+    """(b) A reachable commit tracked ``<name>/tracked.txt``; the tip untracked it
+    (``git rm --cached``) and ignored it, the file stayed on disk with an edit."""
+
+    def prep(wt: Path) -> None:
+        _commit_tracked(wt, f"{name}/tracked.txt")
+        _git("rm", "-r", "-q", "--cached", name, cwd=wt)
+        _git(*COMMIT, "untrack", cwd=wt)
+        (wt / name / "tracked.txt").write_text("UNIQUE UNCOMMITTED EDIT\n")
+
+    wt = _remnant(repo, f"non-tip-{name}", ignores=f"{name}\n", prep=prep, prune=True)
+    assert not _tips_track(repo, name)  # the tips are blind to it
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+
+
+def test_a_case_alias_of_a_tracked_name_never_dodges_the_tip_check(repo: Path) -> None:
+    """(c) ``Node_Modules`` is tracked at a branch tip; on a case-insensitive volume
+    the remnant's ``node_modules`` link IS that name, but ``<tip>:node_modules``
+    asked git case-sensitively and answered "missing"."""
+
+    def prep(wt: Path) -> None:
+        (wt / "Node_Modules").symlink_to("elsewhere")
+        _git("add", "-f", "Node_Modules", cwd=wt)
+        _git(*COMMIT, "tracked alias", cwd=wt)
+
+    _remnant(repo, "alias-owner", ignores="Node_Modules\n", prep=prep)
+    assert _tips_track(repo, "Node_Modules") and not _tips_track(repo, "node_modules")
+    wt = _remnant(repo, "alias-victim")
+    (wt / "node_modules").symlink_to("elsewhere")
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+
+
+def test_a_case_alias_spelling_on_disk_is_matched_to_the_tracked_name(repo: Path) -> None:
+    """The mirror: ``node_modules`` is tracked, the remnant spells its link
+    ``Node_Modules``. The listed-name check folds case too, so the alias is
+    recognised as the name (and then held by the tip check)."""
+
+    def prep(wt: Path) -> None:
+        (wt / "node_modules").symlink_to("elsewhere")
+        _git("add", "-f", "node_modules", cwd=wt)
+        _git(*COMMIT, "tracked", cwd=wt)
+
+    _remnant(repo, "alias-owner2", prep=prep)
+    wt = _remnant(repo, "alias-victim2", ignores=IGNORES + "Node_Modules\n")
+    (wt / "Node_Modules").symlink_to("elsewhere")
+    assert cl._remnant_proof(str(wt)) is None
+    # And untracked, the same alias IS the listed name and is shed.
+    clean_repo = repo.parent / "repo2"
+    clean_repo.mkdir()
+    _git("init", "-q", "-b", "main", cwd=clean_repo)
+    _git(*COMMIT, "i", "--allow-empty", cwd=clean_repo)
+    shed = _remnant(clean_repo, "alias-shed", ignores=IGNORES + "Node_Modules\n")
+    (shed / "Node_Modules").symlink_to("elsewhere")
+    assert cl._remnant_proof(str(shed)) == cl.PROOF_SHED
+
+
+def test_a_tracked_generic_name_in_another_case_holds(repo: Path) -> None:
+    """The ledger's ``BUILD``/``build`` shape: tracked ``BUILD/x`` at a tip, the
+    remnant's directory spelled ``build`` with an edit. Generic names use the blob
+    proof, so the edit holds whatever the spelling."""
+
+    def prep(wt: Path) -> None:
+        _commit_tracked(wt, "BUILD/tracked.txt")
+
+    _remnant(repo, "upper-owner", ignores="BUILD\n", prep=prep)
+    wt = _remnant(repo, "upper-victim", ignores="build\n")
+    (wt / "build").mkdir()
+    (wt / "build" / "tracked.txt").write_text("UNIQUE UNCOMMITTED EDIT\n")
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+
+
+@pytest.mark.parametrize("name", ["build", "dist", "out", "coverage", "target", "dist-ssr"])
+def test_generic_output_names_use_the_blob_proof(repo: Path, name: str) -> None:
+    """Narrowed set: the names real repositories track are not shed unread. Content
+    Git does not hold under them holds the remnant; tracked, byte-identical content
+    is lossless (the operator's ``credential-chip-polish`` shape)."""
+    wt = _remnant(repo, f"generic-{name}", ignores=IGNORES + f"{name}\n")
+    _add_build_output(wt)
+    (wt / name).mkdir()
+    (wt / name / "bundle.js").write_text("compiled, never in Git\n")
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+
+    def prep(w: Path) -> None:
+        _commit_tracked(w, f"{name}/tracked.txt")
+
+    same = _remnant(repo, f"generic-same-{name}", ignores=IGNORES + f"{name}\n", prep=prep)
+    assert cl._remnant_proof(str(same)) == cl.PROOF_LOSSLESS
+    assert _rank(repo, same).reason == REMNANT_REASON
+    _add_build_output(same)  # plus the shed names: LOW, but now the shed reason
+    assert cl._remnant_proof(str(same)) == cl.PROOF_SHED
+    assert _rank(repo, same).risk is Risk.LOW
+
+
+def test_the_shed_name_set_is_the_reviewed_one() -> None:
+    from local_operator.guardrails import provenance as prov
+
+    assert cl._REMNANT_SHED_NAMES == frozenset(
+        {
+            "node_modules", ".pnpm-store", ".cache", ".next", ".turbo", ".expo", ".venv",
+            "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+            ".eggs", ".parcel-cache", ".nuxt", ".svelte-kit", ".gradle",
+        }
+    )  # fmt: skip
+    # The names repositories track stay off it, and the shared list is untouched.
+    assert not {"build", "dist", "out", "coverage", "target", "dist-ssr"} & cl._REMNANT_SHED_NAMES
+    assert {"build", "dist", "out", "coverage", "target", "dist-ssr"} <= prov._REGENERABLE
+
+
+def test_shed_name_key_folds_case_and_normalization() -> None:
+    assert cl._shed_name_key("Node_Modules") == cl._shed_name_key("node_modules")
+    assert cl._shed_name_key(".PNPM-STORE") == ".pnpm-store"
+    assert cl._shed_name_key("cafe\u0301") == cl._shed_name_key("caf\u00e9")
+    assert cl._shed_name_key("build") != cl._shed_name_key("builds")
+
+
+def _mounted_cache(wt: Path) -> None:
+    """``.cache/a/mount/copy.txt`` holding a COMMITTED file's bytes, so the blob
+    proof would pass it if it ever saw it."""
+    mount = wt / ".cache" / "a" / "mount"
+    mount.mkdir(parents=True, exist_ok=True)
+    (mount / "copy.txt").write_text((wt / "kept.txt").read_text())
+
+
+def _simulate_device_boundary(wt: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``.cache/a/mount`` report another ``st_dev`` (the technique of
+    ``test_a_device_boundary_below_the_shed_root_holds``)."""
+    target = os.path.join(os.path.realpath(wt), ".cache", "a", "mount")
+    real_lstat = os.lstat
+
+    def fake(path, *a, **k):
+        st = real_lstat(path, *a, **k)
+        if os.fspath(path) == target:
+            values = list(st)
+            values[2] = st.st_dev + 1
+            return os.stat_result(values)
+        return st
+
+    monkeypatch.setattr(os, "lstat", fake)
+
+
+@pytest.mark.asyncio
+async def test_a_device_boundary_in_one_shed_entry_holds_the_whole_remnant(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S2': one safe shed directory (``node_modules``) beside one holding a nested
+    device boundary whose files hash as committed blobs. 1e6abd2 skipped the
+    unsafe entry, let the blob proof pass its mounted files and ranked the whole
+    thing LOW with zero judge calls. Now ANY unsafe finding returns False at once."""
+    wt = _remnant(repo, "mixed-mount")
+    # Deliberately ONLY blob-identical bytes under ``.cache`` (no other junk that
+    # would hold the blob proof by itself): the mounted copy is the sole evidence.
+    (wt / "node_modules" / "zod").mkdir(parents=True)
+    (wt / "node_modules" / "zod" / "index.js").write_text("module.exports = 1\n")
+    (wt / "node_modules" / "link").symlink_to("zod")
+    _mounted_cache(wt)
+    assert cl._remnant_proof(str(wt)) == cl.PROOF_SHED  # control: no boundary yet
+    cl._REMNANT_MEMO.clear()
+    _simulate_device_boundary(wt, monkeypatch)
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+    # And through the real gate: it goes to the judge instead of running unasked.
+    out, calls = await _delete(repo, wt)
+    assert len(calls) == 1 and out is not None and out.blocked, (calls, out)
+
+
+def test_every_unsafe_walk_finding_is_a_hard_hold(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wt = _remnant(repo, "hard-hold")
+    _add_build_output(wt)
+    real = os.path.realpath(wt)
+    repo_s = str(repo)
+    # None is the hard hold; a set (possibly empty) lets the blob proof continue.
+    assert cl._remnant_shed_entries(repo_s, real, ["node_modules", ".cache"]) == {
+        "node_modules",
+        ".cache",
+    }
+    monkeypatch.setattr(cl, "_shed_tree_safe", lambda *a, **k: False)
+    assert cl._remnant_shed_entries(repo_s, real, ["node_modules"]) is None
+    monkeypatch.undo()
+    monkeypatch.setattr(cl, "_linux_mount_points", lambda: None)  # unreadable mount table
+    assert cl._remnant_shed_entries(repo_s, real, [".cache"]) is None
+    monkeypatch.undo()
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated")
+
+    monkeypatch.setattr(cl, "_remnant_shed_entries", boom)
+    assert cl._remnant_proof(str(wt)) is None
+
+
+@pytest.mark.parametrize("inventory", [None, True], ids=["unknown", "live-owner"])
+def test_an_unknown_or_live_process_inventory_holds(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, inventory: bool | None
+) -> None:
+    """The autouse pin says "no live owner"; an UNKNOWN inventory (a Linux runner
+    with hidden processes) or a live owner is a hold, shed route included."""
+    from local_operator.guardrails import provenance as prov
+
+    wt = _remnant(repo, f"inventory-{inventory}")
+    _add_build_output(wt)
+    assert cl._remnant_proof(str(wt)) == cl.PROOF_SHED
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda *_a, **_k: inventory)
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+
+
+def test_the_remnant_proof_runs_once_per_classification(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q2 cost: the foreign-worktree check and the final rank both want the
+    proof; it is computed once."""
+    wt = _remnant(repo, "once")
+    _add_build_output(wt)
+    calls: list[str] = []
+    real_proof = cl._remnant_proof_uncached
+
+    def counted(path: str):
+        calls.append(path)
+        return real_proof(path)
+
+    monkeypatch.setattr(cl, "_remnant_proof_uncached", counted)
+    assert _rank(repo, wt).reason == REMNANT_SHED_REASON
+    assert len(calls) == 1, calls
+    # Not remembered across rankings: the next classification reads the disk again.
+    assert _rank(repo, wt).reason == REMNANT_SHED_REASON
+    assert len(calls) == 2, calls
