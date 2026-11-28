@@ -33,9 +33,10 @@ import time
 import unicodedata
 import urllib.parse
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from datetime import timezone
+from itertools import groupby
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, runtime_checkable
 
 import httpx
@@ -5445,6 +5446,72 @@ def _anthropic_native_blocks(
     return rendered
 
 
+_ANTHROPIC_TOOL_ID = re.compile(r"[a-zA-Z0-9_-]+")
+
+
+def _alias_anthropic_tool_ids(
+    messages: list[dict[str, Any]], foreign_calls: dict[int, list[dict[str, Any]]]
+) -> None:
+    """Replace foreign IDs on rebuilt blocks, never in the native or stored history."""
+    if not foreign_calls:
+        return
+
+    # An alias cannot shadow any existing wire ID, even one in a later signed
+    # block or a dangling result. Reserve those before assigning in wire order.
+    id_fields = {"tool_use": "id", "tool_result": "tool_use_id"}
+    reserved = {
+        call_id
+        for row in messages
+        for block in row["content"]
+        if (field := id_fields.get(block.get("type", "")))
+        and isinstance(call_id := block.get(field), str)
+        and _ANTHROPIC_TOOL_ID.fullmatch(call_id)
+    }
+    next_suffix: dict[str, int] = {}
+    aliases: dict[str, str] = {}
+    # Messages joins consecutive assistant rows into a single tool-use batch.
+    # Start a fresh pairing map at each such batch, not one per request or row.
+    for role, batch in groupby(enumerate(messages), key=lambda entry: entry[1]["role"]):
+        if role != "assistant":
+            _, first = next(batch)
+            for block in first["content"]:
+                if block["type"] == "tool_result" and block["tool_use_id"] in aliases:
+                    block["tool_use_id"] = aliases[block["tool_use_id"]]
+            # The renderer puts tool results together in the first user row.
+            # Later user rows start with other content, not a tool response.
+            aliases.clear()
+            continue
+
+        rows = list(batch)
+        calls = [call for index, _ in rows for call in foreign_calls.get(index, [])]
+        if not calls:
+            continue
+        counts = Counter(
+            block["id"]
+            for _, row in rows
+            for block in row["content"]
+            if block.get("type") == "tool_use" and isinstance(block.get("id"), str)
+        )
+        for call in calls:
+            original = call["id"]
+            # Reuse across batches is fine. This batch's duplicates are
+            # ambiguous, so leave their references intact rather than guess.
+            if counts[original] != 1:
+                continue
+            digest = hashlib.sha256(original.encode("utf-8", "surrogatepass")).hexdigest()
+            base = "toolu_lop_" + digest[:32]
+            suffix = next_suffix.get(base, 1)
+            alias = base if suffix == 1 else f"{base}_{suffix}"
+            while alias in reserved:
+                suffix += 1
+                alias = f"{base}_{suffix}"
+            # Don't depend on position or tail length: ordinary appends leave
+            # the provider's cached (and possibly signed) prefix IDs intact.
+            next_suffix[base] = suffix + 1
+            reserved.add(alias)
+            call["id"] = aliases[original] = alias
+
+
 class AnthropicClient:
     """``POST {base}/v1/messages`` streaming.
 
@@ -6067,6 +6134,7 @@ class AnthropicClient:
         doc_text_cap = document_text_cap(request.model.context_window)
         messages: list[dict[str, Any]] = []
         wire_messages = request.wire_messages()
+        foreign_calls: dict[int, list[dict[str, Any]]] = {}
         # Radient Saver (contract §4): the rendered block that ENDS the frozen
         # prefix. The rendered list is not 1:1 with the request (tool rows merge
         # into one user message, empty turns drop), so the block is captured as
@@ -6103,15 +6171,16 @@ class AnthropicClient:
                 messages.append({"role": "assistant", "content": [dict(b) for b in native]})
             elif message.role == "assistant" and message.tool_calls:
                 content = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
-                content.extend(
-                    {
+                for call in message.tool_calls:
+                    block = {
                         "type": "tool_use",
                         "id": call.id,
                         "name": call.name,
                         "input": _replayable_tool_arguments(call),
                     }
-                    for call in message.tool_calls
-                )
+                    content.append(block)
+                    if call.id and not _ANTHROPIC_TOOL_ID.fullmatch(call.id):
+                        foreign_calls.setdefault(len(messages), []).append(block)
                 messages.append({"role": "assistant", "content": content})
             elif message.role == "tool":
                 # Anthropic groups tool results under one user message.
@@ -6165,6 +6234,8 @@ class AnthropicClient:
                     ephemeral_indices.add(len(messages) - 1)
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
+
+        _alias_anthropic_tool_ids(messages, foreign_calls)
 
         # Bind after credentials/replay gates are known, before output sizing.
         # The tracker includes only the appended native suffix over its already

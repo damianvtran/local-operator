@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 import httpx
@@ -23,6 +24,8 @@ from local_operator.harness.types import (
     StreamTextDelta,
     StreamToolCallDelta,
     StreamUsageEvent,
+    TextContent,
+    ToolCall,
 )
 from local_operator.providers.bedrock import client as bclient
 from local_operator.providers.bedrock.client import (
@@ -154,6 +157,32 @@ async def test_request_url_headers_and_body_on_the_wire() -> None:
     # The shared body builder ran: system blocks in Anthropic's block form.
     assert [block["text"] for block in body["system"]] == ["stable system", "volatile tail"]
     assert body["messages"][0]["role"] == "user" and body["max_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_invoke_wire_aliases_foreign_tool_ids() -> None:
+    raw_id = "fixture:1"
+    history = [
+        Message.user("Look up an item."),
+        Message.assistant("", tool_calls=[ToolCall(id=raw_id, name="lookup", arguments={})]),
+        Message(role="tool", tool_call_id=raw_id, content=[TextContent(text="fixture result")]),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/invoke-with-response-stream")
+        body = json.loads(request.content)
+        assert body["anthropic_version"] == "bedrock-2023-05-31"
+        use, result = (row["content"][0] for row in body["messages"][1:])
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", use["id"])
+        assert result["tool_use_id"] == use["id"]
+        return _eventstream(es.anthropic_events(text="done"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = BedrockAnthropicClient(http_client=http)
+        request = ChatRequest(model=ModelSpec(provider="bedrock", model_id=MODEL), messages=history)
+        events = await _collect(client, request)
+    assert "".join(e.delta for e in events if isinstance(e, StreamTextDelta)) == "done"
+    assert history[1].tool_calls[0].id == history[2].tool_call_id == raw_id
 
 
 @pytest.mark.asyncio
