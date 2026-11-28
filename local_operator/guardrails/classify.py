@@ -1585,6 +1585,45 @@ def _shed_tree_safe(top: str, device: int, mounts: frozenset[str]) -> bool:
     return True
 
 
+def _ordinary_boundaries_clear(real: str, dirs: list[str], names: list[str]) -> bool:
+    """Boundary veto over the REST of a remnant that is taking the shed route.
+
+    WHY (#4669 round 3, S2'). The blob proof checks file types and contents but
+    NOT mount or device boundaries: it hashes whatever a nested mount exposes,
+    and those bytes can equal committed blobs. On the plain remnant (no shed
+    entry) that is the long-standing #4599 behaviour and stays untouched. But
+    once a sibling is shed unread, the whole remnant is claimed LOW with no
+    judge call, so a mount hidden in an ordinary subtree (``build/``, a deeper
+    directory) must hold it exactly as one hidden in a shed entry does.
+
+    ``dirs``/``names`` are the top-level entries still left for the ordinary
+    walk (shed entries already vetted by :func:`_shed_tree_safe` are gone).
+    Every directory gets the same full-depth walk (device vs the remnant root,
+    ``os.path.ismount``, Linux mountinfo, special files, Git markers and
+    aliases); a top-level alias of the Git marker holds too. Fail closed: any
+    exception or an unreadable mount table is a hold.
+    """
+    try:
+        device = os.lstat(real).st_dev
+        for name in (*dirs, *names):
+            if name != ".git" and _git_marker_alias(name):
+                return False
+        mounts = _linux_mount_points()
+        if mounts is None:
+            return False
+        for name in dirs:
+            full = os.path.join(real, name)
+            # A symlinked directory is unlink-only for ``rm`` and the ordinary
+            # walk holds on it anyway; do not follow it here.
+            if stat.S_ISLNK(os.lstat(full).st_mode):
+                continue
+            if not _shed_tree_safe(full, device, mounts):
+                return False
+    except Exception:  # noqa: BLE001 - ANY failure of the walk is a hold
+        return False
+    return True
+
+
 #: Bound on one of the git calls that vouch for a shed entry. Local reads over
 #: a repository's refs (``cat-file --batch-check`` of 4,772 refs took 1.1 s,
 #: measured 2026-11-28 on ``~/local-operator-ui``); over it the entry is held.
@@ -1974,6 +2013,10 @@ def _remnant_proof_uncached(path: str) -> str | None:
                         shed = True
                         dirs[:] = [d for d in dirs if d not in shed_now]
                         names[:] = [n for n in names if n not in shed_now]
+                        # S2' (round 3): a shed sibling must not carry an
+                        # ordinary subtree past the boundary veto.
+                        if not _ordinary_boundaries_clear(real, dirs, names):
+                            return None
             for name in dirs:
                 if not stat.S_ISDIR(os.lstat(os.path.join(root, name)).st_mode):
                     return None  # a symlinked directory

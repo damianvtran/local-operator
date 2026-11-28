@@ -288,7 +288,10 @@ session made. Everything CRITICAL is still refused.
   unlinked, never followed) on the remnant's device, with no `.git` (any case or
   spelling), bare repository layout or mount point. A mount, device boundary,
   special file or unsafe walk inside ANY such entry holds the WHOLE remnant at
-  once; it never falls back to hashing the files a mount exposes. That is a LOW
+  once; it never falls back to hashing the files a mount exposes. Once any entry
+  is shed, the same boundary veto also covers the ENTIRE rest of the remnant,
+  ordinary subtrees such as `build/` included (a plain remnant with no shed
+  entry keeps the ordinary blob proof alone). That is a LOW
   with its own reason ("ignored build output, shed unread"): it is not lossless,
   so a timed-out, withdrawn, declined or unverified ask about the path still
   refuses it.

@@ -1059,6 +1059,102 @@ async def test_a_device_boundary_in_one_shed_entry_holds_the_whole_remnant(
     assert len(calls) == 1 and out is not None and out.blocked, (calls, out)
 
 
+# --- S2' (round 3): the boundary veto covers the whole remnant ----------------
+#
+# A mount hidden in an ORDINARY subtree (``build/`` is deliberately off the shed
+# list) was walked only by the blob proof, which hashes whatever the mount
+# exposes. With a clean ``node_modules`` beside it the remnant took the shed
+# route and ranked LOW with zero judge calls, where the stack before #4669 sent
+# it to the judge. The veto now runs over the entire remnant once any entry is
+# shed; a remnant with NO shed entry keeps the #4599 behaviour.
+
+
+def _clean_node_modules(wt: Path) -> None:
+    """The one shed entry: a clean ``node_modules`` with blob-identical bytes only,
+    so the ordinary subtree below is the sole piece of evidence under test."""
+    (wt / "node_modules" / "zod").mkdir(parents=True)
+    (wt / "node_modules" / "zod" / "index.js").write_text("module.exports = 1\n")
+    (wt / "node_modules" / "link").symlink_to("zod")
+
+
+def _ordinary_mount(wt: Path, where: str) -> str:
+    """``<where>/mount/copy.txt`` holding a COMMITTED file's bytes (the blob proof
+    would pass it); returns the realpath of the ``mount`` directory."""
+    mount = wt / where / "mount"
+    mount.mkdir(parents=True)
+    (mount / "copy.txt").write_text((wt / "kept.txt").read_text())
+    return os.path.join(os.path.realpath(wt), where, "mount")
+
+
+def _fake_device(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
+    real_lstat = os.lstat
+
+    def fake(path, *a, **k):
+        st = real_lstat(path, *a, **k)
+        if os.fspath(path) == target:
+            values = list(st)
+            values[2] = st.st_dev + 1
+            return os.stat_result(values)
+        return st
+
+    monkeypatch.setattr(os, "lstat", fake)
+
+
+def _make_boundary(kind: str, mount: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    if kind == "device":
+        _fake_device(monkeypatch, mount)
+    elif kind == "ismount":
+        real_ismount = os.path.ismount
+        monkeypatch.setattr(os.path, "ismount", lambda p: os.fspath(p) == mount or real_ismount(p))
+    elif kind == "mountinfo":
+        monkeypatch.setattr(cl, "_linux_mount_points", lambda: frozenset({mount}))
+    elif kind == "unreadable-mount-table":
+        monkeypatch.setattr(cl, "_linux_mount_points", lambda: None)
+    else:
+        os.mkfifo(os.path.join(mount, "pipe"))
+
+
+@pytest.mark.parametrize(
+    "kind", ["device", "ismount", "mountinfo", "unreadable-mount-table", "fifo"]
+)
+@pytest.mark.parametrize("where", ["build", "build/a/b", "src/deeper/still"])
+@pytest.mark.asyncio
+async def test_a_boundary_in_an_ordinary_subtree_holds_the_shed_remnant(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, where: str, kind: str
+) -> None:
+    wt = _remnant(repo, f"ord-{kind}-{abs(hash(where))}")
+    _clean_node_modules(wt)
+    mount = _ordinary_mount(wt, where)
+    assert cl._remnant_proof(str(wt)) == cl.PROOF_SHED  # control: no boundary yet
+    cl._REMNANT_MEMO.clear()
+    _make_boundary(kind, mount, monkeypatch)
+    assert cl._remnant_proof(str(wt)) is None
+    assert _rank(repo, wt).risk is Risk.HIGH
+    out, calls = await _delete(repo, wt)  # the real gate: the judge is consulted
+    assert len(calls) == 1 and out is not None and out.blocked, (calls, out)
+
+
+def test_a_top_level_git_marker_alias_beside_a_shed_entry_holds(repo: Path) -> None:
+    wt = _remnant(repo, "ord-alias")
+    _clean_node_modules(wt)
+    (wt / "GIT~1").write_text("gitdir: /x\n")
+    assert cl._remnant_proof(str(wt)) is None
+
+
+@pytest.mark.parametrize("kind", ["device", "ismount", "mountinfo"])
+@pytest.mark.parametrize("where", ["build", "build/a/b"])
+def test_an_ordinary_boundary_without_a_shed_entry_is_unchanged_from_4599(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, where: str, kind: str
+) -> None:
+    """No shed entry: the remnant keeps the plain blob proof exactly (no new cost
+    or behaviour), so the committed-identical bytes stay lossless."""
+    wt = _remnant(repo, f"plain-{kind}-{abs(hash(where))}")
+    mount = _ordinary_mount(wt, where)
+    _make_boundary(kind, mount, monkeypatch)
+    assert cl._remnant_proof(str(wt)) == cl.PROOF_LOSSLESS
+    assert _rank(repo, wt).reason == REMNANT_REASON
+
+
 def test_every_unsafe_walk_finding_is_a_hard_hold(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
