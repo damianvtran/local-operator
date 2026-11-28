@@ -418,10 +418,24 @@ async def test_a_peer_message_appended_after_the_arm_still_pings(tmp_path, relau
     cached = _without_cache_control(last_turn["messages"])
     assert _without_cache_control(ping["messages"][:k]) == cached
     assert _without_cache_control(following["messages"][:k]) == cached
-    # The peer message rides after the cached span in both, identically.
-    assert "status: all green" in json.dumps(ping["messages"][k - 1 :])
-    assert _without_cache_control(ping["messages"][: k + 1]) == _without_cache_control(
-        following["messages"][: k + 1]
+    # The peer message IS the uncached tail the ping writes: it sits one past
+    # the last turn's final reply, so the ping's write covers it, and the
+    # following turn's body carries those same bytes — the reason that turn can
+    # read the ping's write back. The comparison has to run through the peer
+    # message's index (k + 1); stopping at the reply (k) proves only the span
+    # below it.
+    peer_index = next(
+        (
+            index
+            for index, message in enumerate(ping["messages"])
+            if "status: all green" in json.dumps(message)
+        ),
+        None,
+    )
+    assert peer_index is not None, "the ping body carries the peer message"
+    assert peer_index == k + 1, "the peer message is the first message after the cached span"
+    assert _without_cache_control(ping["messages"][: peer_index + 1]) == _without_cache_control(
+        following["messages"][: peer_index + 1]
     )
 
 
