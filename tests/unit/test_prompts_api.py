@@ -2409,7 +2409,10 @@ def test_system_md_requires_an_ask_for_a_block_that_waits_on_the_operator() -> N
         "system.md", {**base, "has_todo": True, "has_ask": True, "has_wake_monitor": True}
     )
     assert "A `block` that waits on the operator must be named in your closing" in full
-    assert "covered by an open `ask` (ask now; one per gate, cite it after); a wake is not a substitute." in full
+    assert (
+        "covered by an open `ask` (ask now; one per gate, cite it after); "
+        "a wake is not a substitute." in full
+    )
 
     # Without a wake tool the "wake is not a substitute" clause has nothing to
     # contradict, and without `ask` the prompt must not tell the model to queue
@@ -2436,22 +2439,25 @@ def test_manager_seed_carries_the_operator_gated_rule() -> None:
 
     seed = load_seed("manager")
     assert seed is not None
+    # Wrapped prose: assert wording, not where the seed happens to break lines.
     body = seed.instructions
+    flat = " ".join(body.split())
     assert 'Every end-of-turn status carries an "Operator-gated" section' in body
     # All four classifications, and the one that used to be missing: an
     # operator wait with no ask queues one rather than parking.
     for needle in (
         "(i) operator, OPEN ask <id>",
-        "(ii) operator, NO ask -> `ask` now if you\nhold `ask`",
+        "(ii) operator, NO ask -> `ask` now if you hold `ask`",
         # A manager without an ask hook (server/exec/scheduler/subagent) must be
         # told what to do instead, not handed a tool it does not hold.
         "otherwise state it in your closing as an open question",
         "never park it silently",
-        "Ask once per gate: cite the open ask <id> thereafter, never one ask\nper wake or per status.",
+        "Ask once per gate: cite the open ask <id> thereafter, never one ask "
+        "per wake or per status.",
         "(iii) external: <party/agent>",
         "(iv) deliberately not started",
     ):
-        assert needle in body, needle
+        assert needle in flat, needle
     assert 'Say "nothing needs you" only when (i)\nand (ii) are both empty.' in body
     assert "An operator gate is always a material delta." in body
     assert "(open operator gates always count)" in body
