@@ -38,10 +38,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import mobility, relay, sync
+from local_operator.network import audit, mobility, relay, store, sync
 from local_operator.network.projection import read_tombstones
 from local_operator.session.placement import (
     HANDOFF_PHASE_HANDING_OFF,
+    HANDOFF_PHASE_PREPARED,
     read_handoff_journal,
     read_stamp,
     write_handoff_entry,
@@ -611,6 +612,237 @@ def test_an_engage_recovers_a_stale_entry_when_no_relay_is_running(
 # ---------------------------------------------------------------------------
 
 
+def _replica_admissions(root: Path) -> list[dict[str, Any]]:
+    path = store.audit_path(root)
+    if not path.exists():
+        return []
+    return [
+        row
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (row := json.loads(line)).get("event") == "session.replica.admitted"
+    ]
+
+
+@pytest.mark.parametrize("fault", ("disabled", "write_failure"))
+def test_replica_refresh_reports_owner_audit_over_a_real_link(
+    pair: Devices,  # noqa: F811 — the imported fixture
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    owner, holder, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="read")
+    source = _owned_session(owner) / "transcript.jsonl"
+    replica = sync.replica_dir(holder.root, SESSION) / source.name
+    monkeypatch.setattr(sync, "SYNC_CHUNK_BYTES", 64)
+
+    def append(event: str) -> None:
+        with source.open("a", encoding="utf-8") as handle:
+            row = {"id": event, "type": "assistant", "content": event * 40}
+            handle.write(json.dumps(row) + "\n")
+
+    def refresh(expected: str) -> dict[str, Any]:
+        receipt = sync.request_sync(SESSION, root=holder.root)
+        assert receipt["ok"] is True, receipt
+        assert receipt.get("audit_status") == expected, receipt
+        assert sync.read_replica_cursor(holder.root, SESSION)["audit_status"] == expected
+        assert replica.read_bytes() == source.read_bytes()
+        print(f"refresh={expected} ok={receipt['ok']} bytes={receipt['bytes']}")
+        return receipt
+
+    healthy = refresh("audited")
+    assert healthy["bytes"] > sync.SYNC_CHUNK_BYTES
+    (initial,) = _replica_admissions(owner.root)  # no per-chunk durable writes
+    assert initial["actor"] == holder.identity.device_id
+    assert initial["subject"] == SESSION
+    assert initial["outcome"] == "ok"
+    assert initial["detail"] == {"phase": "plan"}
+    assert not _replica_admissions(holder.root)
+
+    real_required = owner.audit.record_required
+    failed_attempts: list[str] = []
+
+    def fail_replica_write(event: audit.AuditEvent, **context: Any) -> bool:
+        if event.event == "session.replica.admitted":
+            failed_attempts.append(str(event.detail["phase"]))
+            raise OSError("synthetic durability failure")
+        return real_required(event, **context)
+
+    with monkeypatch.context() as outage:
+        if fault == "disabled":
+            outage.setattr(owner.audit, "_enabled", False)
+        else:
+            outage.setattr(owner.audit, "record_required", fail_replica_write)
+        append("outage")
+        assert refresh("degraded")["bytes"] > sync.SYNC_CHUNK_BYTES
+        assert _replica_admissions(owner.root) == [initial]
+        assert failed_attempts == (["plan"] if fault == "write_failure" else [])
+        # The replica's integrity proof, not its audit receipt, governs local recovery.
+        promoted = sync.promote_replica(holder.root, SESSION)
+        assert promoted["session_id"] != SESSION
+        assert source.is_file()
+        assert (holder.root / "sessions" / promoted["session_id"] / source.name).is_file()
+        assert replica.read_bytes() == source.read_bytes()
+
+    append("restored")
+    assert refresh("audited")["bytes"] > sync.SYNC_CHUNK_BYTES
+    old, recovered = _replica_admissions(owner.root)
+    assert recovered["seq"] > old["seq"] == initial["seq"]
+    assert recovered["detail"] == {"phase": "plan"}
+    print(f"durable_replica_rows=2 closed_detail={recovered['detail']} local_promotion=new_id")
+
+
+def test_replica_refresh_denies_out_of_scope_and_revoked_peers_during_audit_outage(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    owner, holder, host, port = pair
+    record, _, _ = _pair_settled(pair, monkeypatch, role="read")
+    source = _owned_session(owner) / "transcript.jsonl"
+    link = holder._ensure_link(owner.identity.device_id)  # noqa: SLF001 — real peer link
+    assert link is not None
+    monkeypatch.setattr(owner.audit, "_enabled", False)
+    valid = {"op": "net_sync", "session_id": SESSION}
+    plan = link.request({**valid, "phase": "plan", "req": 9301})
+    assert plan and plan["detail"]["audit_status"] == "degraded", plan
+    prefix = source.read_bytes()[:8]
+    continuation = {
+        **valid,
+        "name": "transcript.jsonl",
+        "plan_id": plan["detail"]["plan_id"],
+        "prefix_bytes": len(prefix),
+        "prefix_digest": sync.sha256_bytes(prefix),
+    }
+    proof = link.request({**continuation, "phase": "verify", "req": 9300})
+    assert proof and proof["detail"] == {"matches": True, "audit_status": "degraded"}, proof
+    for req, phase in enumerate(("plan", "fetch", "verify"), 9302):
+        reply = link.request(
+            {**continuation, "phase": phase, "req": req, "session_id": "abcdef123456"}
+        )
+        assert reply and reply["op"] == "error", reply
+        assert "does not live on this device" in str(reply), reply
+        assert not {"detail", "data", "matches"}.intersection(reply), reply
+        print(f"scope_denied phase={phase} op={reply['op']} no_content_or_verification")
+
+    # Revoke only the disposable member in the fixture's isolated network. An
+    # already-issued plan must not turn into a capability after the epoch rotates.
+    removed = owner._ctl_member_rm(  # noqa: SLF001 — same op as the CLI
+        {"network": record.network_id, "device_id": holder.identity.device_id}
+    )
+    assert removed["epoch"] == record.epoch + 1, removed
+    for req, phase in enumerate(("fetch", "verify"), 9305):
+        try:
+            reply = link.request({**continuation, "phase": phase, "req": req})
+        except (ConnectionError, OSError):
+            reply = None  # revoked links are closed
+        assert reply is None or reply["op"] == "error", reply
+        assert reply is None or not {"detail", "data", "matches"}.intersection(reply), reply
+        op = reply["op"] if reply else "closed"
+        print(f"revoked phase={phase} op={op} no_content_or_verification")
+    redial, reason = holder.dial(
+        record.network_id,
+        host=f"{host}:{port}",
+        epoch=record.epoch,
+        expected_device=owner.identity.device_id,
+    )
+    assert redial is None and reason == "membership_ended", reason
+    assert not _replica_admissions(owner.root)
+    print(f"revoked_redial={reason}")
+
+
+def test_replica_refresh_does_not_erase_degraded_or_missing_span_evidence(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    owner, holder, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="read")
+    source = _owned_session(owner, rows=20) / "transcript.jsonl"
+    monkeypatch.setattr(sync, "SYNC_CHUNK_BYTES", 64)
+    serve_fetch = sync.serve_fetch
+    real_ask = mobility.LinkTransport.ask
+    seen: list[str] = []
+
+    def serve_with_outage(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        if kwargs["name"] == sync.TRANSCRIPT_NAME:
+            # Disable after the first admitted chunk, restore before the third.
+            owner.audit._enabled = kwargs["offset"] != sync.SYNC_CHUNK_BYTES  # noqa: SLF001
+        return serve_fetch(*args, **kwargs)
+
+    def remember(self: mobility.LinkTransport, frame: dict[str, Any]) -> dict[str, Any]:
+        reply = real_ask(self, frame)
+        if frame.get("phase") == "fetch" and frame.get("name") == sync.TRANSCRIPT_NAME:
+            seen.append(reply["audit_status"])
+        return reply
+
+    with monkeypatch.context() as stream:
+        stream.setattr(owner.audit, "_enabled", True)
+        stream.setattr(sync, "serve_fetch", serve_with_outage)
+        stream.setattr(mobility.LinkTransport, "ask", remember)
+        first = sync.request_sync(SESSION, root=holder.root)
+    assert first["ok"] and first["audit_status"] == "degraded", first
+    assert seen[:3] == ["audited", "degraded", "audited"]
+    assert set(seen[3:]) <= {"audited"}
+    assert [row["detail"] for row in _replica_admissions(owner.root)] == [
+        {"phase": "plan"},
+        {"phase": "fetch"},
+    ]
+    replica = sync.replica_dir(holder.root, SESSION) / source.name
+    assert replica.read_bytes() == source.read_bytes()
+    print(f"midstream={seen[:3]} aggregate={first['audit_status']} durable_rows=2")
+
+    def without_evidence(self: mobility.LinkTransport, frame: dict[str, Any]) -> dict[str, Any]:
+        reply = real_ask(self, frame)
+        if frame.get("phase") != "plan" or erase_plan:
+            reply.pop("audit_status", None)
+        return reply
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", without_evidence)
+    for erase_plan, expected in ((False, "unconfirmed"), (True, "legacy")):
+        with source.open("a", encoding="utf-8") as handle:
+            row = {"id": expected, "type": "assistant", "content": expected}
+            handle.write(json.dumps(row) + "\n")
+        reply = sync.request_sync(SESSION, root=holder.root)
+        assert reply["ok"] and reply["audit_status"] == expected, reply
+        print(f"missing_evidence={expected} ok=True")
+
+
+def test_replica_refresh_does_not_classify_a_prepared_handoff_as_replica(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    owner, holder, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _owned_session(owner)
+    link = holder._ensure_link(owner.identity.device_id)  # noqa: SLF001 — real peer link
+    assert link is not None
+    frame = {"op": "net_sync", "session_id": SESSION, "phase": "plan", "purpose": "replica"}
+    initial = link.request({**frame, "req": 9401})
+    assert initial and initial["detail"]["audit_status"] == "audited", initial
+    plan_id = initial["detail"]["plan_id"]
+
+    # A move's plan ID is identical when the transcript ends on a complete row.
+    # The owner-created handoff, not the claimed purpose or hash, excludes it.
+    write_handoff_entry(
+        owner.root,
+        SESSION,
+        {
+            "role": "source",
+            "phase": HANDOFF_PHASE_PREPARED,
+            "mode": "move",
+            "to_device": holder.identity.device_id,
+            "plan_id": plan_id,
+        },
+    )
+    monkeypatch.setattr(owner.audit, "_enabled", False)
+    fetch = link.request(
+        {**frame, "phase": "fetch", "plan_id": plan_id, "name": sync.TRANSCRIPT_NAME, "req": 9402}
+    )
+    assert fetch and fetch["detail"]["audit_status"] == "unconfirmed", fetch
+    mislabeled = link.request({**frame, "req": 9403})
+    assert mislabeled and mislabeled["detail"]["audit_status"] == "unconfirmed", mislabeled
+    move = link.request({**frame, "purpose": "move", "req": 9404})
+    assert move and move["detail"]["plan_id"] == plan_id, move
+    assert "audit_status" not in move["detail"]
+    assert len(_replica_admissions(owner.root)) == 1
+    print("prepared_handoff=unconfirmed despite replica label; same_digest_move=unchanged")
+
+
 def test_a_push_makes_the_holder_pull_the_last_message_over_a_real_link(
     pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
 ) -> None:
@@ -824,6 +1056,7 @@ def test_the_move_s_plan_does_not_register_a_replica_holder(
         {
             "device_id": server_b.identity.device_id,
             "network_id": server_b.identity.device_id,
+            "link_id": "synthetic-move-plan-link",
             "context": None,
         },
     )()
@@ -915,13 +1148,18 @@ def test_a_move_carries_a_torn_tail_whole(
     before = _transcript(server_a.root, SESSION)
     assert not before.endswith(b"\n"), "the fixture must end mid-row for this to mean anything"
 
+    # Session-core move and ownership transitions retain their existing policy.
+    monkeypatch.setattr(server_a.audit, "_enabled", False)
     moved = _move(server_b, SESSION, monkeypatch=monkeypatch)
 
     assert moved["ok"] is True, moved
+    assert "audit_status" not in moved
+    assert not _replica_admissions(server_a.root)
     assert not source.exists(), "a move retires the source"
     assert (
         _transcript(server_b.root, SESSION) == before
     ), "the torn tail was dropped by the copy while the source was deleted"
+    print(f"move_outage_ok={moved['ok']} whole_transcript_bytes={len(before)} source_retired=True")
 
 
 def test_a_move_carries_a_judged_goal(

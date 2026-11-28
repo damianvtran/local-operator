@@ -192,6 +192,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "session.workset.consent",
         # A moved session's working set (move-working-set.md §8.3; workset_move).
         "session.workset.serve",
+        "session.replica.admitted",
         "session.workset.restore",
         "session.workset.departed",
         # transport scope (§7.6 of mesh-transport-identity.md)
@@ -958,6 +959,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "session.workset.serve": frozenset(
         {"peer", "to_device", "lease_epoch", "artifact", "bytes", "offset", "path", "kind"}
     ),
+    # Session and authenticated requester are the subject and actor. No filenames,
+    # hashes, cursors or transfer data are needed to attribute admission.
+    "session.replica.admitted": frozenset({"phase"}),
     "session.workset.restore": frozenset({"peer", "state", "worktrees"}),
     "session.workset.departed": frozenset({"peer", "marked"}),
 }
@@ -1013,6 +1017,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         # is on disk (``workset_move._audit_workset_serve``, design §8.3): an egress
         # an incident cannot reconstruct is the loss this table exists for.
         "session.workset.serve",
+        # The replica path reports a failed durability acknowledgement instead of
+        # blocking a previously authorized refresh. This does not relax other callers.
+        "session.replica.admitted",
         "panic_raised",
         "panic_received",
         "disconnect_initiated",
